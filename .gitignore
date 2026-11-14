@@ -1,0 +1,34 @@
+# Build output
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Secrets and credentials: never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.p8
+*.mobileprovision
+*.keystore
+*.jks
+**/tauri-signing*.key
+**/*.private
+credentials*.json
+auth.json
+
+# Conversations and local data (they can contain personal content)
+*.jsonl
+transcripts/
+conversations/
+
+# OS and editor clutter
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json

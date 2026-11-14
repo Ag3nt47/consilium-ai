@@ -1,0 +1,27 @@
+name: Self-check
+
+# The weekly, token-free self-check described in self-improvement/README.md.
+# New findings fail the job so they show up on the Actions tab; nothing is changed automatically.
+on:
+  schedule:
+    - cron: "41 6 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - name: Self-check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node self-improvement/check.mjs --dry
