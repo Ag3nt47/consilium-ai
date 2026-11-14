@@ -1,1 +1,12 @@
-[]
+[
+  {
+    "id": "dependabot-glib-VariantStrIter",
+    "status": "open",
+    "severity": "medium",
+    "source": "dependabot",
+    "title": "glib: unsoundness in VariantStrIter iterator impls",
+    "evidence": "glib 0.18.5 (Linux only, via Tauri's GTK3/webkit2gtk stack); fixed in glib 0.20",
+    "found": "2026-11-14",
+    "fix": "Blocked upstream: Tauri 2 pins gtk-rs 0.18. Consilium doesn't use VariantStrIter. Re-check when Tauri moves to GTK4/gtk-rs 0.20+."
+  }
+]
