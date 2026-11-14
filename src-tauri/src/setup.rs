@@ -8,6 +8,7 @@
 use crate::agents::{self, Kind};
 use std::path::Path;
 
+#[derive(Debug)]
 pub struct Step {
     pub title: &'static str,
     pub command: String,
@@ -16,6 +17,37 @@ pub struct Step {
 /// Single-quotes a path for a POSIX shell.
 fn sh_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', r"'\''"))
+}
+
+/// Finds npm (needed to install the Codex and Gemini CLIs) where agents::find looks for tools.
+fn npm() -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let mut dirs_: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    dirs_.extend([".local/node/bin", ".volta/bin", ".npm-global/bin"].iter().map(|d| home.join(d)));
+    dirs_.extend(["/usr/local/bin", "/opt/homebrew/bin"].iter().map(std::path::PathBuf::from));
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        dirs_.push(std::path::PathBuf::from(pf).join("nodejs"));
+    }
+    let names: &[&str] = if cfg!(windows) { &["npm.cmd", "npm"] } else { &["npm"] };
+    dirs_.into_iter().flat_map(|d| names.iter().map(move |n| d.join(n))).find(|p| p.is_file())
+}
+
+/// A command that runs `exe` with its own folder first on PATH, so Node-based tools
+/// (`#!/usr/bin/env node`) find Node even when the person's terminal doesn't have it on PATH.
+fn with_own_path(exe: &Path, args: &str) -> String {
+    let dir = exe.parent().unwrap_or(Path::new("."));
+    if cfg!(windows) {
+        format!("$env:Path = \"{};\" + $env:Path; & \"{}\" {args}", dir.display(), exe.display())
+    } else {
+        format!("PATH={}:\"$PATH\" {} {args}", sh_quote(dir), sh_quote(exe))
+    }
+}
+
+fn npm_install(package: &str) -> Result<String, String> {
+    let npm = npm().ok_or("Node.js is needed first: install the LTS version from nodejs.org, then press Install again")?;
+    Ok(with_own_path(&npm, &format!("install -g {package}")))
 }
 
 pub fn step(agent_id: &str, action: &str) -> Result<Step, String> {
@@ -32,7 +64,7 @@ pub fn step(agent_id: &str, action: &str) -> Result<Step, String> {
         }
         (Kind::Codex, "install") => Step {
             title: "Install Codex (ChatGPT's command-line tool)",
-            command: "npm install -g @openai/codex".into(),
+            command: npm_install("@openai/codex")?,
         },
         (Kind::ClaudeCode, "signin") => {
             let exe = found.ok_or("Claude Code isn't installed yet")?;
@@ -52,6 +84,17 @@ pub fn step(agent_id: &str, action: &str) -> Result<Step, String> {
             } else {
                 "curl -fsSL https://claude.ai/install.sh | bash".into()
             },
+        },
+        (Kind::GeminiCli, "signin") => {
+            let exe = found.ok_or("the Gemini CLI isn't installed yet")?;
+            Step {
+                title: "Sign in to Gemini: choose \"Sign in with Google\", then type /quit",
+                command: with_own_path(&exe, ""),
+            }
+        }
+        (Kind::GeminiCli, "install") => Step {
+            title: "Install the Gemini CLI (Google's command-line tool)",
+            command: npm_install("@google/gemini-cli")?,
         },
         _ => return Err("unknown setup action".into()),
     };
@@ -134,13 +177,25 @@ mod tests {
         } else {
             assert_eq!(s.command, "curl -fsSL https://claude.ai/install.sh | bash");
         }
-        assert_eq!(step("gpt", "install").unwrap().command, "npm install -g @openai/codex");
+        // Codex and Gemini install through npm, run with Node's folder on PATH.
+        if npm().is_some() {
+            assert!(step("gpt", "install").unwrap().command.ends_with("install -g @openai/codex"));
+            assert!(step("gemini", "install").unwrap().command.ends_with("install -g @google/gemini-cli"));
+        } else {
+            assert!(step("gemini", "install").unwrap_err().contains("Node.js is needed"));
+        }
     }
 
     #[test]
     fn unknown_agents_and_actions_are_refused() {
         assert!(step("evil; rm -rf ~", "install").is_err());
         assert!(step("claude", "run-anything").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_tools_run_with_their_own_folder_on_path() {
+        assert_eq!(with_own_path(Path::new("/x y/bin/gemini"), ""), r#"PATH='/x y/bin':"$PATH" '/x y/bin/gemini' "#);
     }
 
     #[cfg(unix)]

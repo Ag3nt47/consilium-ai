@@ -9,6 +9,14 @@
 - Set up AIs button; daily release check (notify only)
 - Privacy gate, CodeQL, Dependabot, secret scanning; CI on macOS, Windows and Linux
 
+## v0.2: Shared Projects, then usage panel
+
+Shared Projects comes first (see v0.3 notes below, moved up). Then a **Usage panel** per AI:
+
+- Tokens used per turn, per conversation and per day, from each CLI's official machine-readable output (Codex `--json` `turn.completed.usage`; Claude Code JSON result `usage`).
+- A budget you set ("warn me at N tokens a day"), with a red `REQUEST:` before a Discuss run would exceed it.
+- Plan quota (% of your ChatGPT or Claude plan left) is shown as *Unavailable*: neither CLI exposes it in a supported output, and Consilium won't estimate it.
+
 ## v0.2: Voice Studio
 
 A toggleable voice mode where you and both AIs talk:
@@ -21,7 +29,6 @@ A toggleable voice mode where you and both AIs talk:
 
 ## v0.3: More agents and API providers
 
-- **Gemini** through Google's official Gemini CLI with a Google account sign-in, as a third local CLI agent (same isolation rules: no shell, empty folder, no tools).
 - OpenAI and Anthropic API connectors as an alternative to the CLIs, keys kept in the OS keychain.
 - Local and OpenAI-compatible models (for example Ollama), behind the same agent interface.
 

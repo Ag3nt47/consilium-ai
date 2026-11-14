@@ -2,12 +2,19 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Permissions for Consilium's main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "https://github.com/Ag3nt47/consilium-ai/*" }]
-    }
+      "allow": [
+        {
+          "url": "https://github.com/Ag3nt47/consilium-ai/*"
+        }
+      ]
+    },
+    "dialog:allow-open"
   ]
 }

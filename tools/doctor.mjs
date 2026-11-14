@@ -10,9 +10,9 @@
 // command for the person to approve and run. It doesn't install anything itself.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, accessSync, constants } from "node:fs";
+import { existsSync, accessSync, constants, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { join, delimiter } from "node:path";
+import { join, delimiter, dirname } from "node:path";
 
 const WIN = platform() === "win32";
 const home = homedir();
@@ -38,8 +38,10 @@ function findExe(name, extra) {
 }
 
 // Some tools print status on stderr, so both streams are read.
+// The tool's own folder goes first on PATH, so Node-based CLIs (`#!/usr/bin/env node`) find Node.
 function run(exe, args) {
-  const r = spawnSync(exe, args, { encoding: "utf8", timeout: 20000, stdio: ["ignore", "pipe", "pipe"] });
+  const env = { ...process.env, PATH: [dirname(exe), process.env.PATH || ""].join(delimiter) };
+  const r = spawnSync(exe, args, { encoding: "utf8", timeout: 20000, stdio: ["ignore", "pipe", "pipe"], env });
   return `${r.stdout || ""}${r.stderr || ""}`.trim();
 }
 
@@ -70,6 +72,27 @@ const agents = [
     },
     install: WIN ? "irm https://claude.ai/install.ps1 | iex" : "curl -fsSL https://claude.ai/install.sh | bash",
     signin: (exe) => `"${exe}" auth login`,
+  },
+  {
+    id: "gemini",
+    name: "Gemini",
+    tool: "Gemini CLI",
+    exe: findExe("gemini", []),
+    // The sign-in method lives in ~/.gemini/settings.json; only the presence of the credentials file
+    // is checked, never its contents.
+    signedIn: () => {
+      try {
+        const s = JSON.parse(readFileSync(join(home, ".gemini", "settings.json"), "utf8"));
+        const method = s?.security?.auth?.selectedType ?? s?.selectedAuthType ?? "";
+        if (method === "oauth-personal") return existsSync(join(home, ".gemini", "oauth_creds.json"));
+        if (method === "gemini-api-key") return !!process.env.GEMINI_API_KEY;
+        return !!method;
+      } catch {
+        return false;
+      }
+    },
+    install: "npm install -g @google/gemini-cli",
+    signin: (exe) => `"${exe}"   (choose "Sign in with Google", then type /quit)`,
   },
 ];
 

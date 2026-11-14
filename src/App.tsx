@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, onEvent, onTurn, senderName, type AgentInfo, type ChatEvent, type Conversation, type TurnState } from "./api";
+import { ACCESS_LEVELS, api, IN_APP, onEvent, onTurn, senderName, type Access, type AgentInfo, type ChatEvent, type Conversation, type TurnState } from "./api";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
+import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const THEMES = [
   { id: "consilium", name: "Consilium", note: "Indigo, ivory and gold" },
@@ -11,11 +12,12 @@ const THEMES = [
   { id: "retro84", name: "Retro '84", note: "Neon grid, scanlines, glow" },
 ] as const;
 
-type Prefs = { theme: string; effects: boolean; autoUpdate: boolean };
+type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; autoAddAi: boolean };
 const PREFS_KEY = "consilium.prefs";
 
 function loadPrefs(): Prefs {
-  const defaults: Prefs = { theme: "consilium", effects: true, autoUpdate: true };
+  const defaults: Prefs = { theme: "consilium", effects: true, autoUpdate: true, autoAddAi: false };
+  if (!IN_APP) return { ...defaults, theme: demoTheme || defaults.theme, autoUpdate: false };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
   } catch {
@@ -31,8 +33,38 @@ function savePrefs(p: Prefs) {
   }
 }
 
+/** Copies text, falling back to a hidden text area where the async clipboard API is refused. */
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    /* fall through to the older method */
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.select();
+  const ok = document.execCommand("copy");
+  area.remove();
+  if (!ok) throw new Error("the clipboard isn't available");
+}
+
 function time(ts: number) {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/** A line of text with `inline code` spans rendered as code. */
+function Inline({ text }: { text: string }) {
+  const parts = text.split(/(`[^`\n]+`)/g);
+  return (
+    <>
+      {parts.map((p, i) => (p.length > 2 && p.startsWith("`") && p.endsWith("`") ? <code key={i}>{p.slice(1, -1)}</code> : p))}
+    </>
+  );
 }
 
 /** Message text with REQUEST: lines shown as red request callouts. */
@@ -41,15 +73,23 @@ function MessageBody({ text }: { text: string }) {
   return (
     <div className="body">
       {lines.map((line, i) => {
+        const add = /^\s*ADD_AI:\s*(.*)$/i.exec(line);
+        if (add && add[1].trim()) {
+          return (
+            <div key={i} className="addai-line">
+              <span className="addai-label">ADD AI:</span> {add[1]}
+            </div>
+          );
+        }
         const m = /^\s*REQUEST:\s*(.*)$/i.exec(line);
         if (m && m[1].trim()) {
           return (
             <div key={i} className="request">
-              <span className="request-label">REQUEST:</span> {m[1]}
+              <span className="request-label">REQUEST:</span> <Inline text={m[1]} />
             </div>
           );
         }
-        return <div key={i} className={line.trim() ? "line" : "gap"}>{line}</div>;
+        return <div key={i} className={line.trim() ? "line" : "gap"}><Inline text={line} /></div>;
       })}
     </div>
   );
@@ -73,9 +113,16 @@ function AgentDot({ agent, onSetup }: { agent: AgentInfo; onSetup: (a: AgentInfo
           {state === "missing" ? "Install" : "Sign in"}
         </button>
       )}
-      <span className="agent-kind">local CLI · {agent.tool}</span>
+      <span className="agent-kind">
+        {agent.tool}
+        {agent.access !== "chat" && <span className="access-tag"> · {ACCESS_LEVELS.find((l) => l.id === agent.access)?.name}</span>}
+      </span>
     </div>
   );
+}
+
+function folderName(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
 export default function App() {
@@ -85,16 +132,21 @@ export default function App() {
   const [current, setCurrent] = useState<string | null>(null);
   const [events, setEvents] = useState<ChatEvent[]>([]);
   const [turn, setTurn] = useState<TurnState | null>(null);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(IN_APP ? "" : demoDraft);
   const [targets, setTargets] = useState<string[]>(["gpt", "claude"]);
-  const [discuss, setDiscuss] = useState(false);
+  const [discuss, setDiscuss] = useState(!IN_APP);
   const [rounds, setRounds] = useState(3);
   const [error, setError] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
+  const [showSettings, setShowSettings] = useState(!IN_APP && demoSettings);
+  const [showAddAi, setShowAddAi] = useState(!IN_APP && demoAddAi);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [updateNote, setUpdateNote] = useState<string>("");
   const [toast, setToast] = useState<string | null>(null);
   const currentRef = useRef<string | null>(null);
+  const agentsRef = useRef<AgentInfo[]>([]);
+  const prefsRef = useRef<Prefs>(prefs);
+  agentsRef.current = agents;
+  prefsRef.current = prefs;
   const endRef = useRef<HTMLDivElement>(null);
 
   currentRef.current = current;
@@ -128,13 +180,31 @@ export default function App() {
         setEvents((prev) => (prev.some((p) => p.id === e.id) ? prev : [...prev, e]));
       }
       refreshList();
+      // An AI asked to bring in another AI. With "Let the AIs add other AIs" on, do it now.
+      if (prefsRef.current.autoAddAi && e.add_ai?.length) {
+        for (const id of e.add_ai) {
+          const a = agentsRef.current.find((x) => x.id === id);
+          if (a && !a.member) bringIn(a, true);
+        }
+      }
     });
     const un2 = onTurn((t) => {
       if (t.conversation === currentRef.current) setTurn(t.state === "running" ? t : null);
     });
+    // Coming back to the window (for example after signing in from the Setup terminal) re-checks
+    // the AIs, at most once every 10 seconds.
+    let lastCheck = Date.now();
+    const onFocus = () => {
+      if (Date.now() - lastCheck > 10_000) {
+        lastCheck = Date.now();
+        refreshAgents();
+      }
+    };
+    window.addEventListener("focus", onFocus);
     return () => {
       un1.then((f) => f());
       un2.then((f) => f());
+      window.removeEventListener("focus", onFocus);
     };
   }, [refreshAgents, refreshList]);
 
@@ -147,7 +217,7 @@ export default function App() {
     setTurn(null);
     api.load(current).then(setEvents).catch((e) => setError(String(e)));
     api.running().then((ids) => {
-      if (ids.includes(current)) setTurn({ conversation: current, state: "running", agent: null, round: 0, rounds: 0 });
+      if (ids.includes(current)) setTurn(IN_APP ? { conversation: current, state: "running", agent: null, round: 0, rounds: 0 } : demoTurn);
     });
   }, [current]);
 
@@ -159,16 +229,28 @@ export default function App() {
   const busy = turn !== null;
   const thinking = turn?.agent ? senderName(turn.agent, agents) : null;
   const readyIds = useMemo(() => new Set(agents.filter((a) => a.available).map((a) => a.id)), [agents]);
+  const members = useMemo(() => agents.filter((a) => a.member), [agents]);
+  const others = useMemo(() => agents.filter((a) => !a.member), [agents]);
 
+  // Sending while an AI is answering interrupts it: the running turn is stopped, then this is sent.
   async function send() {
-    if (!current || !draft.trim() || busy) return;
+    if (!current || !draft.trim()) return;
     setError(null);
+    const text = draft;
+    setDraft("");
     try {
-      await api.send(current, draft, targets, discuss ? rounds : 1);
-      setDraft("");
+      const to = targets.filter((t) => members.some((m) => m.id === t));
+      await api.send(current, text, to, discuss ? rounds : 1, busy);
     } catch (e) {
+      setDraft(text);
       setError(String(e));
     }
+  }
+
+  // Turning Discuss off during a discussion ends it now, not after the current round.
+  function toggleDiscuss(on: boolean) {
+    setDiscuss(on);
+    if (!on && busy && current && (turn?.rounds ?? 0) > 1) api.stop(current);
   }
 
   async function newConversation() {
@@ -179,10 +261,14 @@ export default function App() {
 
   async function exportCurrent() {
     if (!current) return;
-    const md = await api.exportMarkdown(current);
-    await navigator.clipboard.writeText(md);
-    setToast("Conversation copied as Markdown");
-    setTimeout(() => setToast(null), 2500);
+    try {
+      const md = await api.exportMarkdown(current);
+      await copyText(md);
+      setToast("Conversation copied as Markdown");
+      setTimeout(() => setToast(null), 2500);
+    } catch (e) {
+      setError(`Couldn't copy the conversation: ${e}`);
+    }
   }
 
   async function deleteCurrent() {
@@ -214,7 +300,115 @@ export default function App() {
     setUpdateNote(u ? `Version ${u.latest} is available.` : "You're up to date (or offline).");
   }
 
-  const notReady = agents.filter((a) => !a.available);
+  const notReady = members.filter((a) => !a.available);
+
+  // Adding an AI shares the conversations you address to it with that company, so it is the
+  // person's decision, confirmed here; the AIs can only suggest it.
+  async function addMember(a: AgentInfo) {
+    if (!confirm(`Add ${a.name} to the council?\n\nMessages you send to ${a.name}, with the conversation so far, will go to ${a.company} through the ${a.tool} and your own ${a.company} account.`)) return;
+    try {
+      await api.setMember(a.id, true);
+      setTargets((t) => (t.includes(a.id) ? t : [...t, a.id]));
+      refreshAgents();
+      setToast(`${a.name} joined the council`);
+      setTimeout(() => setToast(null), 3000);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  // Bring an AI into the council: install or sign in first if needed, then add it.
+  // `auto` skips the confirmation (the person turned on "Let the AIs add other AIs").
+  async function bringIn(a: AgentInfo, auto = false) {
+    const st = agentState(a);
+    if (st !== "ready") {
+      try {
+        const title = await api.setup(a.id, st === "missing" ? "install" : "signin");
+        setShowAddAi(true);
+        setToast(`${title}: finish in the terminal window; ${a.name} is added when it's ready`);
+        setTimeout(() => setToast(null), 7000);
+      } catch (e) {
+        setError(String(e));
+      }
+      return;
+    }
+    if (auto) {
+      await api.setMember(a.id, true);
+      setTargets((t) => (t.includes(a.id) ? t : [...t, a.id]));
+      refreshAgents();
+      setToast(`${a.name} joined the council (added at an AI's request)`);
+      setTimeout(() => setToast(null), 4000);
+    } else {
+      await addMember(a);
+    }
+  }
+
+  // Everyone in, with the most access each AI's own app allows, discussing by default.
+  async function fullCapacity() {
+    const ok = confirm(
+      "Full capacity: every AI in the council gets Full access (the permissions you already approved in its own app) " +
+        "in conversations with a project folder, all of them are asked by default, and Discuss is on.\n\nContinue?",
+    );
+    if (!ok) return;
+    try {
+      for (const a of members) await api.setAccess(a.id, "own");
+      setTargets(members.map((m) => m.id));
+      setDiscuss(true);
+      setRounds((r) => Math.max(r, 4));
+      refreshAgents();
+      setToast("Full capacity on. Add a project folder to a conversation for the AIs to build in.");
+      setTimeout(() => setToast(null), 5000);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function removeMember(a: AgentInfo) {
+    if (!confirm(`Remove ${a.name} from the council? You can add it back any time.`)) return;
+    try {
+      await api.setMember(a.id, false);
+      setTargets((t) => t.filter((x) => x !== a.id));
+      refreshAgents();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function changeAccess(a: AgentInfo, access: Access) {
+    if (access !== "chat") {
+      const level = ACCESS_LEVELS.find((l) => l.id === access)!;
+      const ok = confirm(
+        `Give ${a.name} "${level.name}" access?\n\n${level.note}\n\nThis applies in conversations that have a project folder. ` +
+          `${a.name} will be able to ${access === "read" ? "read" : "change"} the files there.`,
+      );
+      if (!ok) return;
+    }
+    try {
+      await api.setAccess(a.id, access);
+      refreshAgents();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function chooseFolder() {
+    if (!current) return;
+    try {
+      const folder = await api.pickFolder();
+      if (folder) {
+        await api.setWorkspace(current, folder);
+        refreshList();
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function clearFolder() {
+    if (!current) return;
+    await api.setWorkspace(current, null);
+    refreshList();
+  }
 
   async function setupAgent(a: AgentInfo) {
     try {
@@ -262,17 +456,22 @@ export default function App() {
         <div className="agents">
           <div className="section-label">
             Council
-            <button className="link" onClick={refreshAgents} title="Check again">
+            <button className="link" onClick={refreshAgents} title="Check the AIs' sign-in again">
               refresh
             </button>
           </div>
-          {agents.map((a) => (
+          {members.map((a) => (
             <AgentDot key={a.id} agent={a} onSetup={setupAgent} />
           ))}
         </div>
-        <button className="btn ghost wide" onClick={() => setShowSettings(true)}>
-          Settings
-        </button>
+        <div className="sidebar-actions">
+          <button className="btn ghost" onClick={() => setShowAddAi(true)} title="Add or remove AIs">
+            + Add AI
+          </button>
+          <button className="btn ghost" onClick={() => setShowSettings(true)}>
+            Settings
+          </button>
+        </div>
       </aside>
 
       <main className="main">
@@ -288,9 +487,26 @@ export default function App() {
           </div>
         )}
         <header className="topbar">
-          <h1 onDoubleClick={renameCurrent} title="Double-click to rename">
-            {meta?.title ?? "Consilium"}
-          </h1>
+          <div className="title-block">
+            <h1 onDoubleClick={renameCurrent} title="Double-click to rename">
+              {meta?.title ?? "Consilium"}
+            </h1>
+            <div className="workspace">
+              {meta?.workspace ? (
+                <>
+                  <span className="folder" title={meta.workspace}>
+                    Project: <b>{folderName(meta.workspace)}</b>
+                  </span>
+                  <button className="link" onClick={chooseFolder}>change</button>
+                  <button className="link" onClick={clearFolder}>remove</button>
+                </>
+              ) : (
+                <button className="link" onClick={chooseFolder} title="Let the AIs work in a folder, according to each one's access">
+                  + Add project folder
+                </button>
+              )}
+            </div>
+          </div>
           <div className="topbar-actions">
             <button className="btn ghost" onClick={exportCurrent} disabled={!events.length}>
               Copy as Markdown
@@ -307,9 +523,14 @@ export default function App() {
               <img src="/icon.png" alt="" />
               <h2>Convene the council</h2>
               <p>
-                Ask ChatGPT and Claude together. Pick who answers below, or switch to <b>Discuss</b> to let
-                them work it out between themselves for a few rounds. Address someone directly with{" "}
-                <code>@gpt</code>, <code>@claude</code> or <code>@all</code>.
+                Ask {members.map((m) => m.name).join(" and ") || "the council"} together. Pick who answers below, or switch to{" "}
+                <b>Discuss</b> to let them work it out between themselves for a few rounds. Address someone directly with{" "}
+                {members.map((m) => (
+                  <span key={m.id}>
+                    <code>@{m.id}</code>{" "}
+                  </span>
+                ))}
+                or <code>@all</code>.
               </p>
               {agents.length > 0 && notReady.length > 0 && (
                 <div className="setup-card">
@@ -336,6 +557,17 @@ export default function App() {
                   <span className="when">{time(e.ts)}</span>
                 </div>
                 <MessageBody text={e.text} />
+                {e.add_ai?.filter((id) => agents.some((a) => a.id === id && !a.member)).map((id) => {
+                  const a = agents.find((x) => x.id === id)!;
+                  return (
+                    <div key={id} className="addai-suggest">
+                      {senderName(e.sender, agents)} suggests adding <b>{a.name}</b> to the council.
+                      <button className="btn primary small-btn" onClick={() => bringIn(a)}>
+                        {agentState(a) === "ready" ? `Add ${a.name}` : agentState(a) === "missing" ? `Install ${a.name}` : `Sign in to ${a.name}`}
+                      </button>
+                    </div>
+                  );
+                })}
               </article>
             ) : (
               <div key={e.id} className={`note note-${e.kind}`}>
@@ -361,7 +593,7 @@ export default function App() {
           )}
           <div className="composer-controls">
             <span className="section-label">Ask</span>
-            {agents.map((a) => (
+            {members.map((a) => (
               <label key={a.id} className={`chip chip-${a.id} ${targets.includes(a.id) ? "on" : ""}`}>
                 <input type="checkbox" checked={targets.includes(a.id)} onChange={() => toggleTarget(a.id)} />
                 {a.name}
@@ -370,7 +602,7 @@ export default function App() {
             ))}
             <span className="spacer" />
             <label className={`chip ${discuss ? "on" : ""}`} title="Let the AIs respond to each other for several rounds">
-              <input type="checkbox" checked={discuss} onChange={(e) => setDiscuss(e.target.checked)} />
+              <input type="checkbox" checked={discuss} onChange={(e) => toggleDiscuss(e.target.checked)} />
               Discuss
             </label>
             {discuss && (
@@ -399,15 +631,21 @@ export default function App() {
               }}
               rows={3}
             />
-            {busy ? (
-              <button className="btn stop" onClick={() => current && api.stop(current)}>
-                Stop
+            <div className="send-buttons">
+              {busy && (
+                <button className="btn stop" onClick={() => current && api.stop(current)} title="Stop the AIs now">
+                  Stop
+                </button>
+              )}
+              <button
+                className="btn primary"
+                onClick={send}
+                disabled={!draft.trim()}
+                title={busy ? "Stop the AI that's answering, then send this" : "Send (Enter)"}
+              >
+                {busy ? "Interrupt & send" : "Send"}
               </button>
-            ) : (
-              <button className="btn primary" onClick={send} disabled={!draft.trim()}>
-                Send
-              </button>
-            )}
+            </div>
           </div>
         </footer>
       </main>
@@ -435,6 +673,36 @@ export default function App() {
               <input type="checkbox" checked={prefs.effects} onChange={(e) => setPrefs({ ...prefs, effects: e.target.checked })} />
               Visual effects (scanlines, glow and animation in Retro '84 and CRT)
             </label>
+            <div className="section-label">AI access</div>
+            <p className="muted small">
+              Applies in conversations with a project folder (add one under the conversation title). Without a
+              folder, every AI is chat-only.
+            </p>
+            <div className="access-list">
+              {members.map((a) => (
+                <label key={a.id} className={`access-row agent-${a.id}`}>
+                  <span className="agent-name">{a.name}</span>
+                  <select value={a.access} onChange={(e) => changeAccess(a, e.target.value as Access)}>
+                    {ACCESS_LEVELS.map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.name}
+                      </option>
+                    ))}
+                  </select>
+                  <small className="muted">{ACCESS_LEVELS.find((l) => l.id === a.access)?.note}</small>
+                </label>
+              ))}
+            </div>
+            <label className="toggle">
+              <input type="checkbox" checked={prefs.autoAddAi} onChange={(e) => setPrefs({ ...prefs, autoAddAi: e.target.checked })} />
+              Let the AIs add other AIs without asking me (you still sign in to each new AI's account yourself)
+            </label>
+            <div className="row">
+              <button className="btn ghost" onClick={fullCapacity}>
+                Full capacity
+              </button>
+              <span className="muted small">Every AI gets Full access, everyone is asked, and Discuss is on.</span>
+            </div>
             <div className="section-label">Updates</div>
             <label className="toggle">
               <input
@@ -455,11 +723,82 @@ export default function App() {
             </div>
             <p className="muted small">
               Updates are never installed automatically. Consilium only tells you when a new release exists.
-              Your conversations stay on this computer; ChatGPT and Claude are reached through their own
-              command-line tools with your existing sign-ins, and Consilium never sees a password or key.
+              Your conversations stay on this computer. Each AI is reached through its company's own
+              command-line tool with your existing sign-in, and Consilium never sees a password or key.
             </p>
             <div className="row end">
               <button className="btn primary" onClick={() => setShowSettings(false)}>
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showAddAi && (
+        <div className="modal-backdrop" onClick={() => setShowAddAi(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Add AI</h2>
+            <p className="muted small">
+              Each AI joins through its company's official command-line tool and your own account: no API keys.
+              You decide who joins; an AI in the conversation can suggest one, but only you can add it.
+            </p>
+            {others.length === 0 && <p className="muted">Every available AI is already in the council.</p>}
+            {others.map((a) => {
+              const st = agentState(a);
+              return (
+                <div key={a.id} className={`addai-card agent-${a.id}`}>
+                  <div className="addai-head">
+                    <span className={`dot dot-${st}`} />
+                    <span className="agent-name">{a.name}</span>
+                    <span className="muted small">
+                      {a.company} · {a.tool}
+                      {a.version ? ` · ${a.version}` : ""}
+                    </span>
+                  </div>
+                  <ol className="addai-steps">
+                    <li className={st !== "missing" ? "done" : ""}>
+                      Install the {a.tool}
+                      {st === "missing" && (
+                        <button className="btn ghost small-btn" onClick={() => setupAgent(a)}>
+                          Install
+                        </button>
+                      )}
+                    </li>
+                    <li className={st === "ready" ? "done" : ""}>
+                      Sign in with your {a.company} account
+                      {st === "signin" && (
+                        <button className="btn ghost small-btn" onClick={() => setupAgent(a)}>
+                          Sign in
+                        </button>
+                      )}
+                    </li>
+                    <li>
+                      Add to the council
+                      <button className="btn primary small-btn" disabled={st !== "ready"} onClick={() => addMember(a)}>
+                        Add {a.name}
+                      </button>
+                    </li>
+                  </ol>
+                  {st !== "ready" && <p className="muted small">{a.hint} When you're done, come back here; it checks again automatically.</p>}
+                </div>
+              );
+            })}
+            <div className="section-label">In the council</div>
+            {members.map((a) => (
+              <div key={a.id} className="member-row">
+                <span className={`agent-name agent-${a.id}`}>{a.name}</span>
+                <span className="muted small">{a.company}</span>
+                <span className="spacer" />
+                <button className="link danger-link" disabled={members.length < 2} onClick={() => removeMember(a)}>
+                  remove
+                </button>
+              </div>
+            ))}
+            <div className="row end">
+              <button className="btn ghost" onClick={refreshAgents}>
+                Check again
+              </button>
+              <button className="btn primary" onClick={() => setShowAddAi(false)}>
                 Done
               </button>
             </div>

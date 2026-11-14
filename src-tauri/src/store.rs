@@ -30,6 +30,9 @@ pub struct Event {
     /// Questions or actions for the human, from `REQUEST:` lines.
     #[serde(default)]
     pub requests: Vec<String>,
+    /// AIs this message proposes adding to the council, from `ADD_AI:` lines (agent ids).
+    #[serde(default)]
+    pub add_ai: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -38,6 +41,9 @@ pub struct ConversationMeta {
     pub title: String,
     pub created: u64,
     pub updated: u64,
+    /// Project folder the AIs may work in (subject to each AI's access level), if any.
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 pub fn now_ms() -> u64 {
@@ -69,6 +75,26 @@ pub fn requests_in(text: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Agent ids named on `ADD_AI:` lines (by id or name, case-insensitive), e.g. `ADD_AI: Gemini`.
+pub fn add_ai_in(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.len() < 7 || !t[..7].eq_ignore_ascii_case("ADD_AI:") {
+            continue;
+        }
+        for word in t[7..].split(|c: char| c == ',' || c.is_whitespace()) {
+            let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+            if let Some(a) = crate::agents::AGENTS.iter().find(|a| a.id == w || a.name.to_lowercase() == w) {
+                if !out.iter().any(|x| x == a.id) {
+                    out.push(a.id.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 pub struct Store {
@@ -109,7 +135,7 @@ impl Store {
             .filter_map(|s| serde_json::from_str::<ConversationMeta>(&s).ok())
             .filter(|m| valid_id(&m.id))
             .collect();
-        out.sort_by(|a, b| b.updated.cmp(&a.updated));
+        out.sort_by_key(|m| std::cmp::Reverse(m.updated));
         out
     }
 
@@ -120,6 +146,7 @@ impl Store {
             title: clean_title(title),
             created: t,
             updated: t,
+            workspace: None,
         };
         self.write_meta(&meta)?;
         fs::File::create(self.log_path(&meta.id)).map_err(|e| e.to_string())?;
@@ -142,6 +169,23 @@ impl Store {
     pub fn rename(&self, id: &str, title: &str) -> Result<ConversationMeta, String> {
         let mut meta = self.meta(id)?;
         meta.title = clean_title(title);
+        self.write_meta(&meta)?;
+        Ok(meta)
+    }
+
+    /// Sets or clears the project folder. Only existing folders are accepted.
+    pub fn set_workspace(&self, id: &str, folder: Option<&str>) -> Result<ConversationMeta, String> {
+        let mut meta = self.meta(id)?;
+        meta.workspace = match folder {
+            None => None,
+            Some(f) => {
+                let p = std::fs::canonicalize(f).map_err(|_| format!("{f} doesn't exist"))?;
+                if !p.is_dir() {
+                    return Err(format!("{f} isn't a folder"));
+                }
+                Some(p.display().to_string())
+            }
+        };
         self.write_meta(&meta)?;
         Ok(meta)
     }
@@ -183,6 +227,7 @@ impl Store {
             to,
             text: text.to_string(),
             requests: if kind == "message" { requests_in(text) } else { vec![] },
+            add_ai: if kind == "message" && sender != "human" { add_ai_in(text) } else { vec![] },
         };
         let mut line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
         line.push('\n');
@@ -272,6 +317,12 @@ mod tests {
         assert!(valid_id("123e4567-e89b-12d3-a456-426614174000"));
         assert!(!valid_id("123e4567-e89b-12d3-a456-42661417400/"));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn add_ai_lines_are_parsed_by_id_or_name() {
+        assert_eq!(add_ai_in("Let's bring in help.\nADD_AI: Gemini\nadd_ai: claude, nobody"), vec!["gemini", "claude"]);
+        assert!(add_ai_in("we could ADD_AI: gemini later").is_empty(), "only at the start of a line");
     }
 
     #[test]

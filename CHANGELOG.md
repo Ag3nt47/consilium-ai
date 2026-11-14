@@ -11,3 +11,9 @@ First release.
 - Set up AIs: one-click install or sign-in for a missing AI.
 - Optional daily check for new releases (notify only).
 - Copy a conversation as Markdown; rename and delete conversations.
+- Interrupt: send while an AI is answering to stop it and send your new message; switching Discuss off ends a running discussion.
+- The AIs' status is re-checked when the window regains focus, so a finished sign-in shows up without a restart.
+- Demo mode for screenshots and UI work in a plain browser, with invented data.
+- **+ Add AI**: add Gemini (Google's Gemini CLI, your Google sign-in), remove members, with install and sign-in steps in one place. AIs can propose a member with an `ADD_AI:` line; optionally let them add without asking.
+- Project folders and per-AI access (Chat only, Read, Edit, Full); a **Full capacity** preset; build-mode teamwork instructions for the AIs.
+- Restart resilience: on macOS closing the window keeps the AIs working; a turn cut short by a quit or crash resumes on the next launch.

@@ -1,6 +1,7 @@
 //! What each agent is told: who is in the room, how to address the human, and the transcript.
 
 use crate::agents::AGENTS;
+use crate::config::Access;
 use crate::store::Event;
 
 /// Older turns are dropped first once the transcript passes this many characters.
@@ -13,16 +14,31 @@ pub fn label(sender: &str) -> String {
     }
 }
 
-pub fn system(me: &str, round: u32, rounds: u32) -> String {
-    let others: Vec<String> = AGENTS
+/// What the AI may do this turn, for its instructions.
+pub struct Context<'a> {
+    /// Agent ids in the council (including `me`).
+    pub members: &'a [String],
+    /// The project folder the AI is working in, when its access allows one.
+    pub workspace: Option<&'a str>,
+    pub access: Access,
+}
+
+pub fn system(me: &str, round: u32, rounds: u32, ctx: &Context) -> String {
+    let others: Vec<String> = ctx
+        .members
         .iter()
-        .filter(|a| a.id != me)
+        .filter(|m| m.as_str() != me)
+        .filter_map(|m| AGENTS.iter().find(|a| a.id == m))
         .map(|a| format!("{} (@{})", a.name, a.id))
         .collect();
+    let others = match others.len() {
+        0 => "the Human".to_string(),
+        _ => format!("the Human, and {}", others.join(", ")),
+    };
     let mut s = format!(
         "You are {name}, taking part in Consilium, a shared conversation between a human and several AI \
-assistants. The other participants are: the Human, and {others}. Every message in the transcript starts \
-with a tag naming its author, such as [Human] or [{example}].
+assistants. The other participants are: {others}. Every message in the transcript starts with a tag \
+naming its author, such as [Human].
 
 How to take part:
 - Write only your own next message, as plain text. Never write lines for other participants or \
@@ -30,14 +46,42 @@ put a [Name] tag on your own message.
 - Address someone with @name when it matters who should answer. The human is @human.
 - When you need a decision, an approval, or an action from the human, put it on its own line \
 starting with REQUEST: so it is shown to them in red. Ask only what you actually need.
-- You have no tools, files, or internet access here; you see only this transcript. Say what you \
-would check rather than guessing.
+- To bring another AI into the council (for example Gemini), put a line ADD_AI: <name> in your \
+message. Consilium then installs and connects it; the human signs in to that AI's account. Known \
+AIs: {known}.
 - Be direct and specific. Disagree plainly when you think another participant is wrong, and \
 say why; concede in one line when they are right. No pleasantries and no recaps.",
         name = label(me),
-        others = others.join(" and "),
-        example = label(AGENTS.iter().find(|a| a.id != me).map_or("gpt", |a| a.id)),
+        known = AGENTS.iter().map(|a| format!("{} (@{})", a.name, a.id)).collect::<Vec<_>>().join(", "),
     );
+    s.push_str("\n\n");
+    s.push_str(&match (ctx.workspace, ctx.access) {
+        (Some(ws), Access::Read) => format!(
+            "Workspace: you can read the project folder {ws} (your current directory). You cannot change files. \
+Cite paths and lines from what you actually read."
+        ),
+        (Some(ws), Access::Edit) => format!(
+            "Workspace: you are working in the project folder {ws} (your current directory) and may read and \
+edit its files. Other AI participants may edit the same folder in their turns, so re-read a file before \
+changing it. Make focused changes, and end your message with a short list of the files you changed and why."
+        ),
+        (Some(ws), Access::Own) => format!(
+            "Workspace: you are working in the project folder {ws} (your current directory) with the permissions \
+the human has already approved for you. Other AI participants may change the same folder in their turns, so \
+re-read files before changing them. End your message with a short list of what you changed or ran, and why."
+        ),
+        _ => "You have no tools, files, or internet access here; you see only this transcript. Say what you \
+would check rather than guessing."
+            .to_string(),
+    });
+    if ctx.workspace.is_some() && matches!(ctx.access, Access::Edit | Access::Own) {
+        s.push_str(
+            "\n\nWhen the human asks the council to build or change something, work at full capacity as a team: \
+agree on a short plan, split the work between participants with @mentions so nobody duplicates effort, \
+build your part in the project folder, and review what the others changed. You have creative latitude: \
+make sensible decisions yourself and ask the human (REQUEST:) only for choices that are genuinely theirs.",
+        );
+    }
     if rounds > 1 {
         s.push_str(&format!(
             "\n\nThis is round {round} of {rounds} of a discussion among the AI participants. Build on, \
@@ -124,6 +168,7 @@ mod tests {
             to: vec![],
             text: text.into(),
             requests: vec![],
+            add_ai: vec![],
         }
     }
 
@@ -149,7 +194,7 @@ mod tests {
     fn mentions_resolve_names_ids_and_all() {
         assert_eq!(mentioned_agents("@claude and @GPT"), vec!["claude", "gpt"]);
         assert_eq!(mentioned_agents("@ChatGPT please"), vec!["gpt"]);
-        assert_eq!(mentioned_agents("@all"), vec!["gpt", "claude"]);
+        assert_eq!(mentioned_agents("@all"), vec!["gpt", "claude", "gemini"]);
         assert!(mentioned_agents("ping me at team@claude").is_empty());
         assert!(mentioned_agents("Claude said so").is_empty());
     }
@@ -160,12 +205,34 @@ mod tests {
         assert!(!is_pass("PASS on this, but..."));
     }
 
+    fn members(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
-    fn system_prompt_names_others_and_round_rules() {
-        let s = system("gpt", 2, 3);
+    fn system_prompt_names_members_and_round_rules() {
+        let m = members(&["gpt", "claude", "gemini"]);
+        let ctx = Context { members: &m, workspace: None, access: Access::Chat };
+        let s = system("gpt", 2, 3, &ctx);
         assert!(s.contains("You are ChatGPT"));
-        assert!(s.contains("Claude (@claude)"));
+        assert!(s.contains("Claude (@claude), Gemini (@gemini)"));
         assert!(s.contains("round 2 of 3"));
-        assert!(!system("gpt", 1, 1).contains("round"));
+        assert!(s.contains("no tools"));
+        assert!(!system("gpt", 1, 1, &ctx).contains("round"));
+        let m = members(&["gpt", "claude"]);
+        let two = system("gpt", 1, 1, &Context { members: &m, workspace: None, access: Access::Chat });
+        assert!(two.contains("The other participants are: the Human, and Claude (@claude)."));
+        assert!(two.contains("ADD_AI:") && two.contains("Gemini (@gemini)"), "lists AIs that can be added");
+    }
+
+    #[test]
+    fn system_prompt_describes_workspace_access() {
+        let m = members(&["gpt"]);
+        let edit = system("gpt", 1, 1, &Context { members: &m, workspace: Some("/p"), access: Access::Edit });
+        assert!(edit.contains("may read and edit") && edit.contains("/p"));
+        assert!(edit.contains("full capacity"));
+        assert!(!system("gpt", 1, 1, &Context { members: &m, workspace: None, access: Access::Edit }).contains("full capacity"));
+        let read = system("gpt", 1, 1, &Context { members: &m, workspace: Some("/p"), access: Access::Read });
+        assert!(read.contains("cannot change files"));
     }
 }
