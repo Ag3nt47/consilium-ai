@@ -23,7 +23,9 @@ Runs on macOS, Windows and Linux.
 | ![Conversation in the default Consilium theme](docs/media/conversation.png) | ![The same conversation in the Retro '84 theme](docs/media/retro84.png) |
 | **Consilium** theme | **Retro '84** theme (neon grid, scanlines; effects can be turned off) |
 | ![First run: the Set up AIs card for a missing sign-in](docs/media/first-run-setup.png) | ![Settings: theme picker, effects, update checks](docs/media/settings.png) |
-| First run: **Set up AIs** | Settings |
+| First run: **Set up AIs** | Settings: themes, AI access, Full capacity |
+| ![Add AI: Gemini's install, sign-in and add steps](docs/media/add-ai.png) | ![The Cyber theme](docs/media/cyber.png) |
+| **+ Add AI** | **Cyber** theme |
 
 Screenshots use invented demo data. To see the UI in a browser without the app, run `npm run dev` and open `http://127.0.0.1:1420/?step=5` (`step` 0–5 walks through the demo; add `&theme=retro84`, `&settings=1` or `&setup=1`).
 
