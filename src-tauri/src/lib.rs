@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use store::{ConversationMeta, Event, Store};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tokio_util::sync::CancellationToken;
 
 /// Upper bound on discussion rounds, whatever the UI asks for, so agents can't loop indefinitely.
@@ -378,7 +378,7 @@ pub fn run() {
         .expect("error while starting Consilium")
         .run(|app, event| {
             #[cfg(target_os = "macos")]
-            if let RunEvent::Reopen { .. } = event {
+            if let tauri::RunEvent::Reopen { .. } = event {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.show();
                     let _ = w.set_focus();
