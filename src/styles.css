@@ -1697,3 +1697,27 @@ button.attachment {
   opacity: 0.6;
   cursor: progress;
 }
+
+/* Hover explanations (src/tooltip.ts) */
+.hover-tip {
+  position: fixed;
+  z-index: 10000;
+  max-width: min(320px, calc(100vw - 12px));
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  color: var(--text, #eee);
+  background: var(--panel-raised, rgba(18, 18, 24, 0.92));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.hover-tip.show { opacity: 1; transform: none; }

@@ -28,6 +28,7 @@ import {
 } from "./api";
 import { canListen, canSpeak, Listener, Speaker, voiceOn } from "./voice";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
+import { installHoverTips } from "./tooltip";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const THEMES = [
@@ -196,10 +197,10 @@ function RequestActions({ answer, pending, onDecide }: { answer?: boolean; pendi
   }
   return (
     <span className="request-actions">
-      <button type="button" className="btn small-btn approve" disabled={pending} onClick={() => onDecide(true)} aria-label="Approve this request">
+      <button title="Say yes: posts “Approved: …” to the council so the AI that asked can go ahead" type="button" className="btn small-btn approve" disabled={pending} onClick={() => onDecide(true)} aria-label="Approve this request">
         {pending ? "Sending…" : "Approve"}
       </button>
-      <button type="button" className="btn small-btn deny" disabled={pending} onClick={() => onDecide(false)} aria-label="Deny this request">
+      <button title="Say no: posts “Denied: …” to the council so the AI that asked won't do it" type="button" className="btn small-btn deny" disabled={pending} onClick={() => onDecide(false)} aria-label="Deny this request">
         Deny
       </button>
     </span>
@@ -285,11 +286,11 @@ function ApiKeyField({ agent, onSaved, onError }: { agent: AgentInfo; onSaved: (
         onChange={(e) => setKey(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && key.trim() && save(key)}
       />
-      <button className="btn ghost small-btn" disabled={busy || !key.trim()} onClick={() => save(key)}>
+      <button title="Check this API key with the provider and save it on this Mac only" className="btn ghost small-btn" disabled={busy || !key.trim()} onClick={() => save(key)}>
         {busy ? "Checking…" : "Save"}
       </button>
       {agent.path && (
-        <button className="link danger-link" disabled={busy} onClick={() => save("")}>
+        <button title="Delete the saved API key for this AI" className="link danger-link" disabled={busy} onClick={() => save("")}>
           remove key
         </button>
       )}
@@ -308,7 +309,7 @@ function UsageMeter({ agent, forecast }: { agent: AgentInfo; forecast?: ResetFor
   }
   const { model, overall } = usage;
   return (
-    <div className="usage-meter">
+    <div className="usage-meter" title="How much of this AI's plan allowance is left, and when each limit resets">
       {model && (
         <UsageBar
           label={model.shared ? `${model.label} · shares overall` : model.label}
@@ -329,7 +330,7 @@ function UsageMeter({ agent, forecast }: { agent: AgentInfo; forecast?: ResetFor
             ? `Reset announced: ${forecast.official}`
             : `Global reset: ${forecast.chance_24h ?? "?"}% chance in 24 h`}
           {" · "}
-          <button className="link" onClick={() => openUrl(FORECAST_SITE)}>
+          <button title="Open codex-reset.com, the unofficial source of the reset forecast" className="link" onClick={() => openUrl(FORECAST_SITE)}>
             data: codex-reset.com
           </button>
         </div>
@@ -403,7 +404,7 @@ function AgentDot({
         </span>
       )}
       {isFrozen ? (
-        <span className="agent-state" style={{ color: "var(--danger)" }}>Stalled</span>
+        <span className="agent-state" style={{ color: "var(--danger)" }} title="No output for a while; it may be stuck. Stop and resend if it doesn't recover.">Stalled</span>
       ) : isWorking ? (
         <span className="agent-state" style={{ color: "var(--accent)" }}>{activity?.label ?? "Working…"}</span>
       ) : state === "ready" ? (
@@ -558,6 +559,9 @@ export default function App() {
   const [pressure, setPressure] = useState<SystemPressure | null>(null);
   const [staged, setStaged] = useState<StagedUpdate | null>(null);
   const [updating, setUpdating] = useState(false);
+
+  // Quick hover explanations for every control that has a title.
+  useEffect(() => installHoverTips(), []);
 
   // A staged build is a file check, so polling it is cheap.
   useEffect(() => {
@@ -1235,7 +1239,7 @@ export default function App() {
             <div className="brand-tagline">A council of minds</div>
           </div>
         </div>
-        <button className="btn primary wide" onClick={newConversation}>
+        <button title="Start a new, empty conversation with the council" className="btn primary wide" onClick={newConversation}>
           + New conversation
         </button>
         <nav className="conversations">
@@ -1321,6 +1325,7 @@ export default function App() {
             + Add AI
           </button>
           <button
+            title="Theme, default folder, access level, shared memory, terminal command and updates"
             className="btn ghost"
             onClick={() => {
               setShowSettings(true);
@@ -1340,10 +1345,10 @@ export default function App() {
         {update && (
           <div className="banner">
             Consilium {update.latest} is available (you have {update.current}).
-            <button className="link" onClick={() => openUrl(update.url)}>
+            <button title="Open the release page for the new version on GitHub" className="link" onClick={() => openUrl(update.url)}>
               View release
             </button>
-            <button className="link" onClick={() => setUpdate(null)}>
+            <button title="Hide this notice until the next check" className="link" onClick={() => setUpdate(null)}>
               Later
             </button>
           </div>
@@ -1371,15 +1376,15 @@ export default function App() {
                   <span className="folder" title={meta.workspace}>
                     Project: <b>{folderName(meta.workspace)}</b>
                   </span>
-                  <button className="link" onClick={chooseFolder}>change</button>
-                  <button className="link" onClick={clearFolder}>remove</button>
+                  <button title="Pick a different project folder for this conversation" className="link" onClick={chooseFolder}>change</button>
+                  <button title="Stop using a project folder; the AIs only chat" className="link" onClick={clearFolder}>remove</button>
                 </>
               ) : council?.default_workspace ? (
                 <>
                   <span className="folder" title={council.default_workspace}>
                     Project: <b>{folderName(council.default_workspace)}</b> (default)
                   </span>
-                  <button className="link" onClick={chooseFolder}>use another folder</button>
+                  <button title="Pick a different project folder for this conversation" className="link" onClick={chooseFolder}>use another folder</button>
                 </>
               ) : (
                 <button className="link" onClick={chooseFolder} title="Let the AIs work in a folder, according to each one's access">
@@ -1389,10 +1394,10 @@ export default function App() {
             </div>
           </div>
           <div className="topbar-actions">
-            <button className="btn ghost" onClick={exportCurrent} disabled={!events.length}>
+            <button title="Copy the whole conversation to the clipboard as Markdown" className="btn ghost" onClick={exportCurrent} disabled={!events.length}>
               Copy as Markdown
             </button>
-            <button className="btn ghost danger" onClick={deleteCurrent}>
+            <button title="Delete this conversation permanently" className="btn ghost danger" onClick={deleteCurrent}>
               Delete
             </button>
           </div>
@@ -1420,7 +1425,7 @@ export default function App() {
                     A terminal window opens with the official {notReady.length > 1 ? "commands" : "command"}; press Enter to
                     run, and sign in with your own account in the browser. Consilium never sees your password.
                   </span>
-                  <button className="btn primary" onClick={setupAll}>
+                  <button title="Install and sign in to the AIs that aren't ready yet" className="btn primary" onClick={setupAll}>
                     Set up AIs
                   </button>
                 </div>
@@ -1460,7 +1465,7 @@ export default function App() {
                   return (
                     <div key={id} className="addai-suggest">
                       {senderName(e.sender, agents)} suggests adding <b>{a.name}</b> to the council.
-                      <button className="btn primary small-btn" onClick={() => bringIn(a)}>
+                      <button title="Bring this AI into the council, installing it or opening its sign-in first if needed" className="btn primary small-btn" onClick={() => bringIn(a)}>
                         {agentState(a) === "ready" ? `Add ${a.name}` : agentState(a) === "missing" ? `Install ${a.name}` : `Sign in to ${a.name}`}
                       </button>
                     </div>
@@ -1542,7 +1547,7 @@ export default function App() {
               {speaking ? (
                 <>
                   <span>Reading the replies aloud…</span>
-                  <button className="btn small" onClick={() => speakerRef.current?.stop()}>
+                  <button title="Stop reading this reply aloud and move on to the next" className="btn small" onClick={() => speakerRef.current?.stop()}>
                     Skip
                   </button>
                 </>
@@ -1613,6 +1618,7 @@ export default function App() {
             <div className="themes">
               {THEMES.map((t) => (
                 <button
+                  title={`Use the ${t.name} theme`}
                   key={t.id}
                   className={`theme-card ${prefs.theme === t.id ? "on" : ""}`}
                   data-preview={t.id}
@@ -1647,11 +1653,11 @@ export default function App() {
             <div className="row">
               <span className="muted small">Default project folder:</span>
               <b className="small">{council?.default_workspace ?? "none"}</b>
-              <button className="link" onClick={() => chooseDefaultFolder()}>
+              <button title="Choose the folder new conversations start in" className="link" onClick={() => chooseDefaultFolder()}>
                 choose
               </button>
               {council?.default_workspace && (
-                <button className="link" onClick={() => chooseDefaultFolder(true)}>
+                <button title="New conversations start without a project folder" className="link" onClick={() => chooseDefaultFolder(true)}>
                   clear
                 </button>
               )}
@@ -1672,7 +1678,7 @@ export default function App() {
               ))}
             </div>
             <div className="row">
-              <button className="btn ghost" onClick={fullCapacity}>
+              <button title="Give the AIs full access to the project folder: they can edit files and run commands without asking" className="btn ghost" onClick={fullCapacity}>
                 Full capacity
               </button>
               <span className="muted small">Every AI becomes Unrestricted in the project folder, everyone is asked, and Discuss is on.</span>
@@ -1693,7 +1699,7 @@ export default function App() {
               placeholder="- The human prefers short answers&#10;- Builds use npm run app:build"
             />
             <div className="row">
-              <button className="btn ghost" onClick={saveMemory} disabled={!memoryDirty}>
+              <button title="Save your edits to the shared memory every AI reads" className="btn ghost" onClick={saveMemory} disabled={!memoryDirty}>
                 Save memory
               </button>
             </div>
@@ -1705,7 +1711,7 @@ export default function App() {
             <label className="toggle">
               <input type="checkbox" checked={council?.reset_forecast ?? false} onChange={(e) => toggleForecast(e.target.checked)} />
               Forecast the next global Codex reset (unofficial, from{" "}
-              <button className="link" onClick={() => openUrl(FORECAST_SITE)}>
+              <button title="Open codex-reset.com, the unofficial source of the reset forecast" className="link" onClick={() => openUrl(FORECAST_SITE)}>
                 codex-reset.com
               </button>
               ; asks that site every 15 minutes at most)
@@ -1717,7 +1723,7 @@ export default function App() {
               a message sent in one joins the AIs' turn in the other.
             </p>
             <div className="row">
-              <button className="btn ghost" onClick={installCli}>
+              <button title="Install the consilium command so you can talk to the council from a terminal" className="btn ghost" onClick={installCli}>
                 {cli?.installed ? "Reinstall terminal command" : "Install terminal command"}
               </button>
               <span className="muted small">{cli ? (cli.installed ? `Installed: ${cli.path}` : "Not installed yet") : ""}</span>
@@ -1733,10 +1739,10 @@ export default function App() {
               Check GitHub for a new version once a day
             </label>
             <div className="row">
-              <button className="btn ghost" onClick={checkNow}>
+              <button title="Check GitHub for a newer Consilium release now" className="btn ghost" onClick={checkNow}>
                 Check now
               </button>
-              <button className="link" onClick={() => openUrl(RELEASES_URL)}>
+              <button title="Open the list of all Consilium releases on GitHub" className="link" onClick={() => openUrl(RELEASES_URL)}>
                 All releases
               </button>
               <span className="muted">{updateNote}</span>
@@ -1747,7 +1753,7 @@ export default function App() {
               optional API-agent keys are saved locally and are never added to the conversation or returned to this UI.
             </p>
             <div className="row end">
-              <button className="btn primary" onClick={() => setShowSettings(false)}>
+              <button title="Close Settings" className="btn primary" onClick={() => setShowSettings(false)}>
                 Done
               </button>
             </div>
@@ -1786,12 +1792,12 @@ export default function App() {
                     <li>
                       Create or open your {a.company} account
                       {portal && (
-                        <button className="btn ghost small-btn" onClick={() => openUrl(portal.account).catch((e) => setError(String(e)))}>
+                        <button title="Open this AI's account page in your browser" className="btn ghost small-btn" onClick={() => openUrl(portal.account).catch((e) => setError(String(e)))}>
                           {portal.accountLabel}
                         </button>
                       )}
                       {portal?.plan && portal.plan !== portal.account && (
-                        <button className="link" onClick={() => openUrl(portal.plan!).catch((e) => setError(String(e)))}>
+                        <button title="Open this AI's plans and billing page in your browser; you enter any payment details yourself" className="link" onClick={() => openUrl(portal.plan!).catch((e) => setError(String(e)))}>
                           billing / plans
                         </button>
                       )}
@@ -1802,7 +1808,7 @@ export default function App() {
                     </li>
                     <li>
                       Add to the council
-                      <button className="btn primary small-btn" disabled={st !== "ready"} onClick={() => addMember(a)}>
+                      <button title="Add this AI to the council for this conversation" className="btn primary small-btn" disabled={st !== "ready"} onClick={() => addMember(a)}>
                         Add {a.name}
                       </button>
                     </li>
@@ -1812,7 +1818,7 @@ export default function App() {
                     <li className={st !== "missing" ? "done" : ""}>
                       Install the {a.tool}
                       {st === "missing" && (
-                        <button className="btn ghost small-btn" onClick={() => setupAgent(a)}>
+                        <button title="Install this AI's command-line tool in a terminal window" className="btn ghost small-btn" onClick={() => setupAgent(a)}>
                           Install
                         </button>
                       )}
@@ -1820,21 +1826,21 @@ export default function App() {
                     <li className={st === "ready" ? "done" : ""}>
                       Sign in with your {a.company} account
                       {st === "signin" && (
-                        <button className="btn ghost small-btn" onClick={() => setupAgent(a)}>
+                        <button title="Open this AI's sign-in in a terminal window" className="btn ghost small-btn" onClick={() => setupAgent(a)}>
                           Sign in
                         </button>
                       )}
                     </li>
                     <li>
                       Add to the council
-                      <button className="btn primary small-btn" disabled={st !== "ready"} onClick={() => addMember(a)}>
+                      <button title="Add this AI to the council for this conversation" className="btn primary small-btn" disabled={st !== "ready"} onClick={() => addMember(a)}>
                         Add {a.name}
                       </button>
                     </li>
                     {portal?.plan && (
                       <li className="optional-step">
                         Optional: review higher provider limits
-                        <button className="link" onClick={() => openUrl(portal.plan!).catch((e) => setError(String(e)))}>
+                        <button title="Open this AI's plans page in your browser; you enter any payment details yourself" className="link" onClick={() => openUrl(portal.plan!).catch((e) => setError(String(e)))}>
                           open plans
                         </button>
                       </li>
@@ -1851,16 +1857,16 @@ export default function App() {
                 <span className={`agent-name agent-${a.id}`}>{a.name}</span>
                 <span className="muted small">{a.company}</span>
                 <span className="spacer" />
-                <button className="link danger-link" disabled={members.length < 2} onClick={() => removeMember(a)}>
+                <button title="Take this AI out of the council (at least one must stay)" className="link danger-link" disabled={members.length < 2} onClick={() => removeMember(a)}>
                   remove
                 </button>
               </div>
             ))}
             <div className="row end">
-              <button className="btn ghost" onClick={refreshAgents} disabled={agentsRefreshing}>
+              <button title="Check every AI's install and sign-in status again" className="btn ghost" onClick={refreshAgents} disabled={agentsRefreshing}>
                 {agentsRefreshing ? "Checking…" : "Check again"}
               </button>
-              <button className="btn primary" onClick={() => setShowAddAi(false)}>
+              <button title="Close Add AI" className="btn primary" onClick={() => setShowAddAi(false)}>
                 Done
               </button>
             </div>
@@ -1948,7 +1954,7 @@ export default function App() {
               </div>
             ) : null}
             <div className="row end">
-              <button className="btn primary" onClick={() => setShowUsage(false)}>
+              <button title="Close the Usage panel" className="btn primary" onClick={() => setShowUsage(false)}>
                 Done
               </button>
             </div>
