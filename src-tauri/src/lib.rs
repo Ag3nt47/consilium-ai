@@ -292,9 +292,10 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: Consilium now has a terminal version too. `consilium chat` talks to the \
-council from a terminal, in the same conversations as the app, and either can be used, or both at once: a \
-message sent in one joins the turn running in the other.";
+const WHATS_NEW: &str = "What's new: REQUEST lines have Approve and Deny buttons; a Voice Chat / Text Chat \
+switch; Grok and DeepSeek can join through Add AI with an API key; secrets are masked before anything is saved; \
+stalled CLI prompts become a REQUEST instead of a freeze; a devil's-advocate reviewer from round 3; a glass theme, \
+a Cmd+K command palette and live working/frozen lights on each AI.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
