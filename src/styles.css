@@ -754,6 +754,14 @@ code {
   white-space: nowrap;
 }
 
+.task-ownership .task-pill {
+  font-style: italic;
+}
+
+.task-ownership .task-pill b {
+  font-style: normal;
+}
+
 .task-claim {
   align-items: center;
   gap: 5px;
