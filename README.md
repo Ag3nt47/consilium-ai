@@ -133,9 +133,10 @@ Needs Node.js 20+, Rust, and on Linux the WebKitGTK libraries ([Tauri prerequisi
 npm install
 npm run app:dev      # run with live reload
 npm run app:build    # build installers into src-tauri/target/release/bundle
+npm run clean        # clean temporary staging workspaces, logs, and build artifacts
 ```
 
-Checks: `npm run build`, `npm test`, `node scripts/check-secrets.mjs`, plus `cargo test` and `cargo clippy --all-targets -- -D warnings` in `src-tauri`.
+Checks: `npm run build`, `npm test`, `node scripts/check-secrets.mjs`, plus `cargo test` and `cargo clippy --all-targets -- -D warnings` in `src-tauri`. Use `npm run clean:all` to also reclaim the Rust target cache.
 
 ## Project layout
 

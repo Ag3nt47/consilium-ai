@@ -12,6 +12,8 @@
     "app:dev": "tauri dev",
     "app:build": "tauri build",
     "app:build:mac": "tauri build --bundles app",
+    "clean": "node scripts/clean.mjs",
+    "clean:all": "node scripts/clean.mjs --all",
     "update:stage": "node scripts/stage-update.mjs",
     "update:ui": "node scripts/stage-ui.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
