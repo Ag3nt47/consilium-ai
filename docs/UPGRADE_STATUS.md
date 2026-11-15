@@ -25,7 +25,7 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Global drag-and-drop | ✅ | Drop anywhere in the window |
 | Parsers: images, PDF, docx, pptx, code | ✅ | `attach.rs`; AST analysis 🕓 |
 | /deconstruct and /reassemble commands | 🕓 | |
-| GitHub repo ingest, sandboxed clone, inspection | ⏭ | |
+| GitHub repo ingest, sandboxed clone, inspection | ✅ | 0.3.11. `repo.rs`: https github.com only, shallow clone with hooks/submodules/LFS/symlinks/file transports off, 2-min kill; read-only report. Repos button + Cmd+K |
 | Wrapper generation, local skill vault, public index | 🕓 | After repo ingest |
 | visionOS glass theme | ✅ | |
 | Hover-to-expand controls | 🕓 | Hover explanations ✅; collapsing toolbars not yet |

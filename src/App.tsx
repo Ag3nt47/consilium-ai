@@ -36,6 +36,7 @@ import { installHoverTips } from "./tooltip";
 import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
 import { MessagingIndicator, MessagingSettings } from "./messaging";
 import { ProjectVersions } from "./projects";
+import { RepoDrawer } from "./repo";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const THEMES = [
@@ -732,6 +733,7 @@ export default function App() {
   const [rounds, setRounds] = useState(3);
   const [persona, setPersonaState] = useState(loadPersona);
   const [auditOpen, setAuditOpen] = useState(false);
+  const [repoOpen, setRepoOpen] = useState(false);
   const [wallpaper, setWallpaper] = useState<DailyWallpaper | null>(null);
   const setPersona = (id: string) => {
     setPersonaState(id);
@@ -1550,6 +1552,7 @@ export default function App() {
   const paletteCommands = useMemo(() => [
     { id: "new-conv", name: "New Conversation", hint: "Start a fresh topic", run: () => { newConversation(); } },
     { id: "status", name: "Request Council Status", hint: "Ask every AI for its current work and next step", run: () => { requestStatus(); } },
+    { id: "repo", name: "Inspect a GitHub repo", hint: "Sandboxed clone and report: languages, licence, build files, risks", run: () => setRepoOpen(true) },
     { id: "audit", name: "Open Audit Log", hint: "Approvals, requests, updates and errors, newest first", run: () => setAuditOpen(true) },
     { id: "usage", name: "Show Token Usage", hint: "Conversation & daily totals", run: () => openUsage() },
     { id: "self-check", name: "Run Self-Check", hint: "Probe all active council models", run: () => runSelfCheck() },
@@ -1763,6 +1766,13 @@ export default function App() {
             >
               Audit Log
             </button>
+            <button
+              title="Inspect a GitHub repo: a sandboxed copy that runs none of its code, then a report"
+              className={`btn ghost ${repoOpen ? "on" : ""}`}
+              onClick={() => setRepoOpen((o) => !o)}
+            >
+              Repos
+            </button>
             <button title="Copy the whole conversation to the clipboard as Markdown" className="btn ghost" onClick={exportCurrent} disabled={!events.length}>
               Copy as Markdown
             </button>
@@ -1773,6 +1783,15 @@ export default function App() {
         </header>
 
         {auditOpen && <AuditDrawer events={events} names={agentNames} onClose={() => setAuditOpen(false)} />}
+        {repoOpen && (
+          <RepoDrawer
+            onClose={() => setRepoOpen(false)}
+            onAsk={(text) => {
+              setDraft(text);
+              setRepoOpen(false);
+            }}
+          />
+        )}
         <section className="messages">
           {!events.length && (
             <div className="empty">

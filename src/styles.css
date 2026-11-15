@@ -2641,3 +2641,11 @@ button.attachment {
   color: var(--accent);
   text-shadow: 0 0 8px var(--accent);
 }
+
+/* GitHub repo inspector */
+.repo-form { display: flex; gap: 6px; margin: 8px 0; }
+.repo-form input { flex: 1; min-width: 0; }
+.repo-error { color: #ff5a6e; font-size: 12px; }
+.repo-report h4 { margin: 8px 0 4px; }
+.repo-langs, .repo-risks { margin: 4px 0 8px; padding-left: 16px; font-size: 12px; }
+.repo-risks li { color: #ffb347; }

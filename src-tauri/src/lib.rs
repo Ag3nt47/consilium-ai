@@ -17,6 +17,7 @@ mod pressure;
 mod projects;
 mod prompt;
 mod reaper;
+mod repo;
 mod redact;
 mod resume;
 mod setup;
@@ -303,10 +304,10 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: long conversations are condensed with an offline sliding-window digest; \
-terminal explainability typing runs at half speed; read receipts are fully italicized with live telemetry kept \
-at the bottom bar; red REQUEST cards feature custom text responses; and Respond to request counts and jumps to \
-only unresponded requests.";
+const WHATS_NEW: &str = "What's new: a Repos button (also in Cmd+K) inspects any public GitHub repo: Consilium \
+makes a private shallow copy that runs none of the repo's code, then reports its languages, size, licence, build files \
+and anything risky, and can hand that report to the council; plus the blue Request Update button beside Respond to \
+request.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -461,6 +462,14 @@ fn set_api_key(agent: String, key: String) -> Result<(), String> {
         return Err(format!("{} signs in through its own app, not a key", a.name));
     }
     apiagent::set_key(a.id, &key)
+}
+
+/// Clones a public GitHub repo into a private folder (running none of its code) and inspects it.
+#[tauri::command]
+async fn ingest_repo(url: String) -> Result<repo::RepoReport, String> {
+    tauri::async_runtime::spawn_blocking(move || repo::ingest(&url))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Versions of the projects being worked on in this folder: this PC's against GitHub's.
@@ -633,6 +642,7 @@ pub fn run() {
             messaging_save,
             messaging_setup,
             project_versions,
+            ingest_repo,
             update_available,
             update_now,
             ui_update_available,
