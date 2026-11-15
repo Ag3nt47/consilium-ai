@@ -1309,16 +1309,6 @@ export default function App() {
             );
           })}
           <ResourcePressureGauge pressure={pressure} />
-          {staged && (
-            <button
-              className="btn update-now"
-              disabled={updating}
-              onClick={updateNow}
-              title={`Pause the AIs, install ${staged.version} (now ${staged.current}) and restart. Their work resumes after the restart.`}
-            >
-              {updating ? "Updating…" : `Update Now · ${staged.version}`}
-            </button>
-          )}
         </div>
         <div className="sidebar-actions">
           <button className="btn ghost" onClick={() => setShowAddAi(true)} title="Add or remove AIs">
@@ -1504,6 +1494,16 @@ export default function App() {
               </label>
             ))}
             <span className="spacer" />
+            {staged && (
+              <button
+                className="btn small update-now"
+                disabled={updating}
+                onClick={updateNow}
+                title={`Pause the AIs, install ${staged.version} (now ${staged.current}) and restart. Their work resumes after the restart.`}
+              >
+                {updating ? "Updating…" : `Update Now · ${staged.version}`}
+              </button>
+            )}
             <button
               className={`btn small voice-toggle ${voice ? "on" : ""}`}
               onClick={() => switchVoice(!voice)}

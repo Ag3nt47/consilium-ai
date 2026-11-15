@@ -1704,8 +1704,7 @@ button.attachment {
 
 /* Update Now: shown only when a newer build is staged. */
 .btn.update-now {
-  width: 100%;
-  margin-top: 8px;
+  white-space: nowrap;
   background: var(--accent, #2e7d32);
   color: #fff;
   font-weight: 600;
