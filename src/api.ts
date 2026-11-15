@@ -143,6 +143,10 @@ export interface MessagingSetup {
   can_install: boolean;
   config_path: string;
 }
+  /** The password-free background install is running. */
+  install_running: boolean;
+  /** Why the last background install stopped, if it failed. */
+  install_error: string | null;
 
 export interface MessagingChange {
   enabled: boolean;

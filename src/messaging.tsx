@@ -118,6 +118,15 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
     if (status) setLive(status);
   }, [status]);
 
+  // Follow the background install until it finishes.
+  useEffect(() => {
+    if (!cfg?.install_running) return;
+    const t = window.setInterval(() => {
+      api.messagingConfig().then(setCfg).catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(t);
+  }, [cfg?.install_running]);
+
   const save = async (nextEnabled = enabled) => {
     setBusy(true);
     try {
@@ -142,7 +151,12 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
   const step = async (action: "install" | "link" | "start") => {
     try {
       const title = await api.messagingSetup(action);
-      setNote({ ok: true, text: `${title}: a Terminal window opened. Press Enter there to run it.` });
+      if (action === "install" && !title.startsWith("Install signal-cli and qrencode")) {
+        setNote({ ok: true, text: `${title}.` });
+        setCfg(await api.messagingConfig());
+      } else {
+        setNote({ ok: true, text: `${title}: a Terminal window opened. Press Enter there to run it.` });
+      }
     } catch (e) {
       setNote({ ok: false, text: String(e) });
     }
@@ -173,12 +187,25 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
         <li className={installed ? "done" : ""}>
           <span>
             <b>Install signal-cli</b>
-            <small>{installed ? `Installed at ${cfg?.signal_cli}` : "The program that connects Consilium to Signal."}</small>
+            <small>
+              {installed
+                ? `Installed at ${cfg?.signal_cli}`
+                : cfg?.install_running
+                  ? "Installing Java and signal-cli… this takes a few minutes."
+                  : cfg?.install_error
+                    ? `The last install stopped: ${cfg.install_error}`
+                    : "The program that connects Consilium to Signal. One click, no password needed."}
+            </small>
           </span>
           {!installed &&
             (cfg?.can_install ? (
-              <button title="Open Terminal with the Homebrew install command; press Enter there to run it" className="btn small-btn" onClick={() => step("install")}>
-                Install
+              <button
+                title="Download and install Java and signal-cli for this user, checked against fixed checksums. No password needed. If Homebrew is installed, it opens Terminal and uses Homebrew instead"
+                className="btn small-btn"
+                disabled={!cfg || cfg.install_running}
+                onClick={() => step("install")}
+              >
+                {cfg?.install_running ? "Installing…" : cfg?.install_error ? "Try again" : "Install"}
               </button>
             ) : (
               <button title="Open signal-cli's install guide in your browser" className="link" onClick={() => openUrl(SIGNAL_CLI_GUIDE)}>
@@ -227,11 +254,11 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
       </ol>
 
       <label className="toggle">
-        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+        <input type="checkbox" disabled={!cfg} checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
         Use Signal for notifications and approvals
       </label>
       <label className="toggle">
-        <input type="checkbox" checked={forward} onChange={(e) => setForward(e.target.checked)} />
+        <input type="checkbox" disabled={!cfg} checked={forward} onChange={(e) => setForward(e.target.checked)} />
         Let Approve and Deny from my phone answer pending REQUESTs
       </label>
 
@@ -250,7 +277,7 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
 
       <div className="msg-save-row">
         {note && <span className={note.ok ? "msg-note ok" : "msg-note err"}>{note.text}</span>}
-        <button title="Save these messaging settings on this computer" className="btn primary small-btn" disabled={busy} onClick={() => save()}>
+        <button title="Save these messaging settings on this computer" className="btn primary small-btn" disabled={busy || !cfg} onClick={() => save()}>
           Save
         </button>
       </div>

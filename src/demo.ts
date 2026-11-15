@@ -174,6 +174,8 @@ export const demoApi = {
     signal_cli: null,
     can_install: true,
     config_path: "~/.config/consilium/messaging.json",
+    install_running: false,
+    install_error: null,
   }),
   messagingSave: async () => {
     throw new Error("Not available in the browser preview");

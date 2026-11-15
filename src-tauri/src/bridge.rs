@@ -380,8 +380,12 @@ pub struct SetupView {
     pub auto_forward_decisions: bool,
     /// Where signal-cli was found, if it's installed.
     pub signal_cli: Option<String>,
-    /// Whether Homebrew is available for the one-click install.
+    /// Whether the one-click install is offered (macOS).
     pub can_install: bool,
+    /// True while the background install (no Homebrew) is running.
+    pub install_running: bool,
+    /// Why the last background install stopped, if it failed.
+    pub install_error: Option<String>,
     pub config_path: String,
 }
 
@@ -405,7 +409,9 @@ pub fn view(cfg: &BridgeConfig, path: &Path) -> SetupView {
         allowed_acis: cfg.allowed_acis.clone(),
         auto_forward_decisions: cfg.auto_forward_decisions,
         signal_cli: find_tool("signal-cli").map(|p| p.display().to_string()),
-        can_install: cfg!(target_os = "macos") && find_tool("brew").is_some(),
+        can_install: cfg!(target_os = "macos"),
+        install_running: install_root().join("installing").exists(),
+        install_error: std::fs::read_to_string(install_root().join("failed")).ok().map(|e| e.trim().to_string()),
         config_path: path.display().to_string(),
     }
 }
@@ -459,9 +465,10 @@ pub fn setup_command(action: &str, cfg: &BridgeConfig) -> Result<(&'static str, 
     let quote = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', r"'\''"));
     match action {
         "install" => {
-            let brew = find_tool("brew").filter(|_| cfg!(target_os = "macos")).ok_or(
-                "One-click install needs Homebrew on a Mac. Otherwise install signal-cli from its GitHub releases page",
-            )?;
+            if !cfg!(target_os = "macos") {
+                return Err("One-click install is for macOS. Otherwise install signal-cli from its GitHub releases page".into());
+            }
+            let brew = find_tool("brew").ok_or("Homebrew isn't installed; use the background install")?;
             Ok(("Install signal-cli and qrencode", format!("{} install signal-cli qrencode", quote(&brew))))
         }
         "link" => {
@@ -497,6 +504,36 @@ pub fn setup_command(action: &str, cfg: &BridgeConfig) -> Result<(&'static str, 
         }
         _ => Err("unknown messaging setup step".into()),
     }
+}
+
+/// Installs pinned, checksum-verified Java and signal-cli into the user's folder: no Homebrew,
+/// no admin password, no Terminal. See `signal_install.sh`.
+const SIGNAL_INSTALL_SCRIPT: &str = include_str!("signal_install.sh");
+
+fn install_root() -> PathBuf {
+    dirs::home_dir().unwrap_or_default().join(".local/share/consilium-signal")
+}
+
+/// One-click install. With Homebrew it opens Terminal as before; without it, it runs the
+/// password-free install in the background and the panel follows `install_running`.
+pub fn start_install() -> Result<Option<&'static str>, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("One-click install is for macOS. Otherwise install signal-cli from its GitHub releases page".into());
+    }
+    if find_tool("brew").is_some() {
+        return Ok(None); // caller opens Terminal with `setup_command("install")`
+    }
+    if install_root().join("installing").exists() {
+        return Ok(Some("signal-cli is already installing"));
+    }
+    std::process::Command::new("/bin/sh")
+        .args(["-c", SIGNAL_INSTALL_SCRIPT])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("couldn't start the install: {e}"))?;
+    Ok(Some("Installing Java and signal-cli in the background (about 250 MB, a few minutes)"))
 }
 
 const PROBE_ID: &str = "consilium-probe";
@@ -815,4 +852,14 @@ mod setup_tests {
         }
         assert!(setup_command("rm", &cfg).is_err());
     }
+
+    #[test]
+    fn background_install_is_pinned_and_checksummed() {
+        let s = SIGNAL_INSTALL_SCRIPT;
+        assert!(s.starts_with("#!/bin/sh") && s.contains("set -eu"));
+        assert!(s.contains("shasum -a 256") && s.contains("didn't match its expected checksum"));
+        assert!(!s.contains("sudo") && !s.contains("| sh") && !s.contains("| bash"));
+        assert!(s.contains("SIGNAL_SHA=") && s.matches("JRE_SHA=").count() == 2);
+    }
+
 }

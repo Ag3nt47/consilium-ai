@@ -509,6 +509,11 @@ fn messaging_save(change: bridge::SetupChange) -> Result<bridge::SetupView, Stri
 #[tauri::command]
 fn messaging_setup(action: String) -> Result<String, String> {
     let cfg = bridge::BridgeConfig::load(&bridge::config_path(None))?;
+    if action == "install" {
+        if let Some(note) = bridge::start_install()? {
+            return Ok(note.to_string());
+        }
+    }
     let (title, command) = bridge::setup_command(&action, &cfg)?;
     setup::open_in_terminal(&setup::Step { title, command })?;
     Ok(title.to_string())
