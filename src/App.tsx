@@ -27,6 +27,7 @@ import {
   type UsageWindow,
 } from "./api";
 import { canListen, canSpeak, Listener, Speaker, voiceOn } from "./voice";
+import { VoiceVisualizer } from "./visualizer";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { installHoverTips } from "./tooltip";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
@@ -1571,7 +1572,7 @@ export default function App() {
           )}
           {voice && (
             <div className={`voice-bar ${speaking ? "voice-speaking" : "voice-listening"}`}>
-              <span className="voice-dot" />
+              <VoiceVisualizer speaker={speaking ? "ai" : "user"} active={voice} />
               {speaking ? (
                 <>
                   <span>Reading the replies aloud…</span>

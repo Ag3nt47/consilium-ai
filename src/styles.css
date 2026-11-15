@@ -1647,6 +1647,30 @@ button.attachment {
 @media (prefers-reduced-motion: reduce) {
   .voice-dot { animation: none; }
 }
+.voice-viz {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 104px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(15, 23, 42, 0.35);
+  cursor: pointer;
+}
+.voice-viz canvas {
+  width: 96px;
+  height: 22px;
+}
+.voice-viz.orb .voice-orb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  transition: transform 0.08s linear;
+}
+.voice-viz.user .voice-orb { background: radial-gradient(circle at 35% 35%, #a5f3fc, #06b6d4); }
+.voice-viz.ai .voice-orb { background: radial-gradient(circle at 35% 35%, #ddd6fe, #8b5cf6); }
 
 /* API key entry in Add AI (Grok, DeepSeek) */
 .apikey-field {
