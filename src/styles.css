@@ -2478,3 +2478,42 @@ button.attachment {
 .typed {
   white-space: pre-wrap;
 }
+
+[data-effects="on"][data-theme="netrunner"] .thinking {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+[data-effects="on"][data-theme="netrunner"] .thinking .typed {
+  color: var(--text);
+  text-shadow: 0 0 4px rgba(0, 255, 102, 0.45);
+}
+[data-effects="on"][data-theme="netrunner"] .thinking .cursor {
+  color: var(--accent);
+  text-shadow: 0 0 6px var(--accent);
+}
+
+[data-effects="on"][data-theme="crt"] .thinking .typed {
+  color: var(--text);
+  text-shadow: 0 0 5px rgba(44, 252, 103, 0.5);
+}
+[data-effects="on"][data-theme="crt"] .thinking .cursor {
+  color: var(--accent);
+  text-shadow: 0 0 8px var(--accent);
+}
+
+[data-effects="on"][data-theme="retro84"] .thinking .typed {
+  color: var(--text);
+  text-shadow: 0 0 6px rgba(255, 51, 153, 0.5);
+}
+[data-effects="on"][data-theme="retro84"] .thinking .cursor {
+  color: var(--accent);
+  text-shadow: 0 0 8px var(--accent);
+}
+
+[data-effects="on"][data-theme="cyber"] .thinking .typed {
+  color: var(--text);
+  text-shadow: 0 0 5px rgba(0, 212, 255, 0.5);
+}
+[data-effects="on"][data-theme="cyber"] .thinking .cursor {
+  color: var(--accent);
+  text-shadow: 0 0 8px var(--accent);
+}

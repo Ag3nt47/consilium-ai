@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 /** Themes that show the AIs' live activity as if a terminal were typing it out. */
-export const TYPED_THEMES = new Set(["retro84", "netrunner"]);
+export const TYPED_THEMES = new Set(["retro84", "netrunner", "crt", "cyber"]);
 
 function reduceMotion(): boolean {
   return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) || document.documentElement.dataset.performance === "eco";
@@ -14,8 +14,8 @@ function reduceMotion(): boolean {
  * reduced motion or eco mode, the text simply changes.
  */
 export function TypedText({ text, enabled }: { text: string; enabled: boolean }) {
-  const [shown, setShown] = useState(text);
-  const shownRef = useRef(text);
+  const [shown, setShown] = useState(enabled ? "" : text);
+  const shownRef = useRef(enabled ? "" : text);
   useEffect(() => {
     if (!enabled || reduceMotion()) {
       shownRef.current = text;
