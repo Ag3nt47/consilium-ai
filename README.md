@@ -38,20 +38,22 @@ Download Consilium if you want more than several disconnected chatbot tabs: one 
 - **One shared transcript**, color-coded by speaker. Anything an AI needs from you appears as a red **REQUEST:** callout with **Approve** and **Deny** actions.
 - **Turn control.** *Ask* gets one answer from each AI you pick. *Discuss* lets them respond to each other for up to 8 rounds, and stops early when they're done or when one of them needs you. **Stop** ends it immediately.
 - **Private by default.** Conversations stay on your computer and Consilium has no telemetry. Turns go only to the providers you add; optional network calls are the daily GitHub release check and, when enabled, codex-reset.com's unofficial reset forecast.
-- **Themes:** Consilium (indigo, ivory and gold), visionOS Glass, Cyber, Slate, CRT, and *Retro '84* with neon grid and scanlines.
+- **Themes:** Consilium (indigo, ivory and gold), visionOS Glass, Cyber, Slate, CRT, *Retro '84* with neon grid and scanlines, and *Netrunner* cyberpunk black & neon green.
 
 Runs on macOS, Windows and Linux.
 
 | | |
 | --- | --- |
-| ![Conversation in the default Consilium theme](docs/media/conversation.png) | ![The same conversation in the Retro '84 theme](docs/media/retro84.png) |
-| **Consilium** theme | **Retro '84** theme (neon grid, scanlines; effects can be turned off) |
+| ![Conversation in the default Consilium theme](docs/media/conversation.png) | ![The Netrunner cyberpunk theme](docs/media/netrunner.png) |
+| **Consilium** theme (version tab, messaging indicator, Seen receipts) | **Netrunner** cyberpunk theme (crisp REQUEST callouts, typewriter effects) |
+| ![Voice Chat and per-AI audio visualizers](docs/media/voice.png) | ![The Retro '84 theme](docs/media/retro84.png) |
+| **Voice Chat** & dual audio visualizers | **Retro '84** theme (neon grid, scanlines; effects can be turned off) |
 | ![First run: the Set up AIs card for a missing sign-in](docs/media/first-run-setup.png) | ![Settings: theme picker, effects, update checks](docs/media/settings.png) |
-| First run: **Set up AIs** | Settings: themes, AI access, Full capacity |
+| First run: **Set up AIs** | Settings: themes, Signal messaging, Bing wallpaper |
 | ![Add AI: Gemini's install, sign-in and add steps](docs/media/add-ai.png) | ![The Cyber theme](docs/media/cyber.png) |
 | **+ Add AI** | **Cyber** theme |
 
-Screenshots use invented demo data. To see the UI in a browser without the app, run `npm run dev` and open `http://127.0.0.1:1420/?step=5` (`step` 0–5 walks through the demo; add `&theme=glass`, `&theme=retro84`, `&settings=1` or `&setup=1`).
+Screenshots use invented demo data. To see the UI in a browser without the app, run `npm run dev` and open `http://127.0.0.1:1420/?step=5` (`step` 0–5 walks through the demo; add `&theme=netrunner`, `&theme=retro84`, `&voice=1`, `&settings=1` or `&setup=1`).
 
 ## Install
 

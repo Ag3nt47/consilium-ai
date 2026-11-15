@@ -11,6 +11,9 @@ const params = new URLSearchParams(location.search);
 export const demoStep = Math.max(0, Math.min(5, Number(params.get("step") ?? 5)));
 export const demoSettings = params.get("settings") === "1";
 export const demoTheme = params.get("theme");
+export const demoVoice = params.get("voice") === "1";
+export const demoWallpaper = params.get("wallpaper") === "1";
+export const demoAddAi = params.get("addai") === "1";
 const needsSetup = params.get("setup") === "1";
 
 const T0 = Date.UTC(2026, 10, 14, 15, 2);
@@ -37,16 +40,16 @@ const agents: AgentInfo[] = [
     id: "gemini",
     name: "Gemini",
     company: "Google",
-    member: false,
-    access: "chat",
+    member: !demoAddAi,
+    access: "edit",
     transport: "local-cli",
-    tool: "Gemini CLI",
-    available: false,
-    signed_in: false,
-    version: "Gemini CLI",
-    path: "gemini",
-    usage: null,
-    hint: "Run `gemini` in a terminal, choose Sign in with Google, then type /quit.",
+    tool: demoAddAi ? "Gemini CLI" : "Antigravity CLI",
+    available: !demoAddAi,
+    signed_in: !demoAddAi,
+    version: demoAddAi ? "Gemini CLI" : "agy",
+    path: demoAddAi ? "gemini" : "agy",
+    usage: demoAddAi ? null : { remaining_percent: 72, windows: [{ label: "5-hour limit", remaining_percent: 72 }, { label: "Weekly limit", remaining_percent: 82 }] },
+    hint: demoAddAi ? "Run `gemini` in a terminal, choose Sign in with Google, then type /quit." : "",
   },
 ];
 
@@ -64,6 +67,7 @@ const ev = (
   kind: ChatEvent["kind"] = "message",
   to: string[] = [],
   usage?: ChatEvent["usage"],
+  seen?: string[],
 ): ChatEvent => ({
   id: `demo-${++seq}`,
   seq,
@@ -75,18 +79,23 @@ const ev = (
   text,
   requests: [...text.matchAll(/^\s*REQUEST:\s*(.+)$/gim)].map((m) => m[1]),
   add_ai: [],
-  seen: [],
+  seen: seen ?? [],
   usage: usage ?? null,
 });
 
 const script: ChatEvent[] = [
+  ...(demoVoice
+    ? [ev("consilium", "Voice chat is on: the human hears your replies read aloud and speaks their messages.", 0.05, "system")]
+    : []),
   ev(
     "human",
     "Our image service re-renders thumbnails on every request and p95 latency is 900 ms. Should we cache at the CDN, in Redis, or both? Discuss.",
-    0,
+    0.1,
     "message",
     ["gpt", "claude"],
   ),
+  ev("gpt", "", 0.2, "seen", [], null, ["demo-1"]),
+  ev("claude", "", 0.3, "seen", [], null, ["demo-1"]),
   ev(
     "gpt",
     "Start at the CDN. Thumbnails are immutable per (image id, size), so put both in the URL and serve with `Cache-Control: public, max-age=31536000, immutable`. Hit rates above 95% are typical, and that removes most renders outright.\n\nRedis only helps with the misses, and it adds a second invalidation path to keep correct.",
@@ -95,14 +104,16 @@ const script: ChatEvent[] = [
     [],
     { input_tokens: 1420, output_tokens: 310, cache_read_tokens: 0, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 1730 },
   ),
+  ev("claude", "", 1.2, "seen", [], null, ["demo-4"]),
   ev(
     "claude",
-    "Agree on the CDN first, with one correction: the misses are exactly the 900 ms requests users notice, and a cold CDN after a deploy or purge will send all of them to the renderer at once. I'd add request coalescing in the service (one render per key in flight) rather than Redis. It's about 30 lines and has no new infrastructure.\n\n@gpt: do you see a case where Redis still earns its keep here?",
+    "Agree on the CDN first, with one correction: the misses are exactly the 900 ms requests users notice, and a cold CDN after a deploy or purge will send all of them to the renderer at once. I will implement request coalescing in the service (one render per key in flight) rather than Redis. It's about 30 lines and has no new infrastructure.\n\n@gpt: do you see a case where Redis still earns its keep here?",
     3,
     "message",
     [],
     { input_tokens: 1850, output_tokens: 420, cache_read_tokens: 1200, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 2270 },
   ),
+  ev("gpt", "", 3.2, "seen", [], null, ["demo-6"]),
   ev(
     "gpt",
     "Only if renders are shared across many service instances and the CDN miss rate stays high, and neither is true from what we've seen. Coalescing covers the thundering-herd case. I withdraw the Redis suggestion.\n\nREQUEST: Confirm thumbnails never change for a given image id, or tell us how edits are versioned.",
@@ -111,20 +122,24 @@ const script: ChatEvent[] = [
     [],
     { input_tokens: 2100, output_tokens: 380, cache_read_tokens: 0, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 2480 },
   ),
-  ev("human", "Discussion paused: a question for you is waiting.", 5.2, "system"),
+  ev("claude", "", 5.2, "seen", [], null, ["demo-8"]),
+  ev("human", "Discussion paused: a question for you is waiting.", 5.3, "system"),
 ];
 
 /** Events visible at each demo step, plus whether an agent is "thinking". */
 function stepState(step: number): { events: ChatEvent[]; thinking: string | null } {
+  const off = demoVoice ? 1 : 0;
   switch (step) {
     case 0:
-      return { events: [], thinking: null };
+      return { events: demoVoice ? script.slice(0, 1) : [], thinking: null };
     case 1:
-      return { events: script.slice(0, 1), thinking: "gpt" };
+      return { events: script.slice(0, off + 3), thinking: "gpt" };
     case 2:
-      return { events: script.slice(0, 2), thinking: "claude" };
+      return { events: script.slice(0, off + 5), thinking: "claude" };
     case 3:
-      return { events: script.slice(0, 3), thinking: "gpt" };
+      return { events: script.slice(0, off + 7), thinking: "gpt" };
+    case 4:
+      return { events: script.slice(0, off + 9), thinking: null };
     default:
       return { events: script, thinking: null };
   }
@@ -215,9 +230,16 @@ export const demoApi = {
     { id: "gpt", name: "ChatGPT", ok: true, ms: 9400, detail: "OK" },
     { id: "claude", name: "Claude", ok: true, ms: 6100, detail: "OK" },
   ],
-  getDailyWallpaper: async () => null,
+  getDailyWallpaper: async () =>
+    demoWallpaper
+      ? {
+          title: "Pacific Coast Sunset",
+          copyright: "Bing Daily Wallpaper",
+          url: "https://www.bing.com",
+          data_url: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%' stop-color='%230f172a'/><stop offset='50%' stop-color='%231e1b4b'/><stop offset='100%' stop-color='%23020617'/></linearGradient></defs><rect width='100%' height='100%' fill='url(%23g)'/><circle cx='60%' cy='40%' r='300' fill='%23312e81' opacity='0.4'/></svg>",
+        }
+      : null,
 };
-export const demoAddAi = params.get("addai") === "1";
 
 export const demoTurn: TurnState | null = state.thinking
   ? { conversation: CONV, state: "running", agent: state.thinking, round: demoStep >= 3 ? 2 : 1, rounds: 3 }

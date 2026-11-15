@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
+import { IN_APP } from "./api";
 
 export interface ProjectVersion {
   name: string;
@@ -40,6 +41,25 @@ export function ProjectVersions({ workspace }: { workspace: string | null }) {
     let live = true;
     const check = async () => {
       if (!workspace) return setList([]);
+      if (!IN_APP) {
+        if (live) {
+          setList([
+            {
+              name: "image-service",
+              path: "/projects/image-service",
+              local_version: "1.4.2",
+              remote_version: "1.4.2",
+              local_commit: "9a2f1b0",
+              remote_commit: "9a2f1b0",
+              ahead: 0,
+              behind: 0,
+              dirty: 0,
+              remote_error: null,
+            },
+          ]);
+        }
+        return;
+      }
       try {
         const found = await invoke<ProjectVersion[]>("project_versions", { workspace });
         if (live) setList(found);
