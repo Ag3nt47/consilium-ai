@@ -5,6 +5,12 @@
 
 Consilium is a desktop app where several AI assistants and you work in one conversation. Ask ChatGPT, Claude, Gemini, Grok or DeepSeek the same question side by side, or let them **discuss** it between themselves for a few rounds while you watch, step in, or press Stop.
 
+## Why use the hive mind?
+
+A single AI can give a fast answer; a council can expose blind spots. Consilium brings independent models into one shared workspace so they can compare approaches, challenge weak assumptions, divide project work and review one another before you act. You stay in control through explicit approvals, access levels and Stop controls, while the shared transcript remains on your computer.
+
+Download Consilium if you want more than several disconnected chatbot tabs: one place to ask for competing opinions, reach a better-supported decision, or have a supervised AI team help research, code and troubleshoot with a visible record of who did what.
+
 <p align="center"><img src="docs/media/demo.png" width="860" alt="Animated demo: a question goes to ChatGPT and Claude in Discuss mode; they answer in turn, Claude corrects ChatGPT, ChatGPT concedes and asks the human a question shown as a red REQUEST callout"></p>
 <p align="center"><sub>Demo with invented data.</sub></p>
 
