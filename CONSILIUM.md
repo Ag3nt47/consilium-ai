@@ -10,7 +10,7 @@ Consilium: a Tauri 2 desktop app (Rust back end in `src-tauri/`, React + TypeScr
 
 - Front end: `npm run build` (type-check and bundle).
 - Rust: `cargo test` and `cargo clippy --all-targets -- -D warnings` in `src-tauri/`. CI runs both on macOS, Windows and Linux, so avoid platform-only imports outside `cfg` blocks.
-- App: `npm run app:build` produces `src-tauri/target/release/bundle/macos/Consilium.app`.
+- App: `npm run app:build:mac` produces `src-tauri/target/release/bundle/macos/Consilium.app` without packing a `.dmg` (that step opens a Finder window that looks like an installer). `npm run app:build` builds every installer type.
 - Privacy gate: `node scripts/check-secrets.mjs` (also the pre-commit hook). Never commit keys, tokens, personal paths or conversation logs.
 
 ## How to work

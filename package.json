@@ -11,6 +11,7 @@
     "tauri": "tauri",
     "app:dev": "tauri dev",
     "app:build": "tauri build",
+    "app:build:mac": "tauri build --bundles app",
     "check:secrets": "node scripts/check-secrets.mjs",
     "test": "node --test tests/"
   },
