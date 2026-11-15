@@ -108,6 +108,100 @@ function time(ts: number) {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+type SeenReceipt = { agent: string; ts: number };
+
+/** Read receipts are compact log events that can cover several messages at the same timestamp. */
+function receiptsByMessage(events: ChatEvent[]): Map<string, SeenReceipt[]> {
+  const out = new Map<string, SeenReceipt[]>();
+  for (const event of events) {
+    if (event.kind !== "seen") continue;
+    for (const message of event.seen ?? []) {
+      const readers = out.get(message) ?? [];
+      if (!readers.some((reader) => reader.agent === event.sender)) {
+        readers.push({ agent: event.sender, ts: event.ts });
+        out.set(message, readers);
+      }
+    }
+  }
+  return out;
+}
+
+function SeenLine({ receipts, agents }: { receipts: SeenReceipt[]; agents: AgentInfo[] }) {
+  if (!receipts.length) return null;
+  return (
+    <div className="seen-line" aria-label={`Seen by ${receipts.length} AI${receipts.length === 1 ? "" : "s"}`}>
+      <em>Seen:</em>{" "}
+      {receipts
+        .slice()
+        .sort((a, b) => a.ts - b.ts)
+        .map((receipt) => `${senderName(receipt.agent, agents)} ${time(receipt.ts)}`)
+        .join(" · ")}
+    </div>
+  );
+}
+
+/** A task badge is shown only when an AI explicitly says it is taking ownership. */
+function claimedTask(text: string): string | null {
+  const explicit = /^\s*(?:TAKING|OWNING|WORKING ON):\s*(.+)$/im.exec(text)?.[1];
+  if (explicit) return explicit.trim().slice(0, 160);
+  const natural = /\bI(?:'ll|’ll| will| am|'m|’m)\s+(?:take|handle|own|implement|build|fix|review|work on)\s+([^.!?\n]{3,160})/i.exec(text)?.[1];
+  return natural?.trim() ?? null;
+}
+
+function taskColor(agent: string): string {
+  return `var(--c-${agent}, var(--accent))`;
+}
+
+function ClaimedTask({ event, agents }: { event: ChatEvent; agents: AgentInfo[] }) {
+  const task = claimedTask(event.text);
+  if (!task || event.sender === "human") return null;
+  return (
+    <div className="task-claim" style={{ borderColor: taskColor(event.sender) }}>
+      <span className="task-dot" style={{ backgroundColor: taskColor(event.sender) }} />
+      <b>{senderName(event.sender, agents)}</b> is taking: {task}
+    </div>
+  );
+}
+
+function taskObjective(text: string): string {
+  const first = text
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line && !/^\[(?:Persona|Role):/i.test(line));
+  if (!first) return "this request";
+  return first.length > 90 ? `${first.slice(0, 87)}…` : first;
+}
+
+function ActiveTasks({
+  ids,
+  objective,
+  agents,
+  activities,
+}: {
+  ids: string[];
+  objective: string;
+  agents: AgentInfo[];
+  activities: Record<string, AgentActivity>;
+}) {
+  if (!ids.length) return null;
+  return (
+    <div className="active-tasks" aria-label="AIs working on this message">
+      {ids.map((id) => {
+        const activity = activities[id];
+        const detail = activity ? `${activity.label}${activity.detail ? ` · ${activity.detail}` : ""}` : "Initializing";
+        return (
+          <div key={id} className="task-pill" style={{ borderColor: taskColor(id) }} title={`${senderName(id, agents)}: ${detail}\nTask: ${objective}`}>
+            <span className="task-dot" style={{ backgroundColor: taskColor(id) }} />
+            <b>{senderName(id, agents)}</b>
+            <span>{detail}</span>
+            <small>{objective}</small>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "k";
@@ -811,6 +905,11 @@ export default function App() {
       ? `${thinkingNames[0]} is thinking`
       : `${thinkingNames.slice(0, -1).join(", ")} and ${thinkingNames[thinkingNames.length - 1]} are thinking`
     : null;
+  const seenByMessage = useMemo(() => receiptsByMessage(events), [events]);
+  const latestHumanMessage = useMemo(
+    () => events.slice().reverse().find((event) => event.kind === "message" && event.sender === "human") ?? null,
+    [events],
+  );
   const readyIds = useMemo(() => new Set(agents.filter((a) => a.available).map((a) => a.id)), [agents]);
   const members = useMemo(() => agents.filter((a) => a.member), [agents]);
 
@@ -1523,6 +1622,11 @@ export default function App() {
                   </div>
                 )}
                 <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={e.sender === "human" ? undefined : decide} />
+                {e.sender === "human" && e.id === latestHumanMessage?.id && busy && (
+                  <ActiveTasks ids={thinkingIds} objective={taskObjective(e.text)} agents={agents} activities={activities} />
+                )}
+                <ClaimedTask event={e} agents={agents} />
+                <SeenLine receipts={seenByMessage.get(e.id) ?? []} agents={agents} />
                 {e.add_ai?.filter((id) => agents.some((a) => a.id === id && !a.member)).map((id) => {
                   const a = agents.find((x) => x.id === id)!;
                   return (
@@ -1535,7 +1639,7 @@ export default function App() {
                   );
                 })}
               </article>
-            ) : (
+            ) : e.kind === "seen" ? null : (
               <div key={e.id} className={`note note-${e.kind}`}>
                 {e.text}
               </div>

@@ -75,6 +75,7 @@ const ev = (
   text,
   requests: [...text.matchAll(/^\s*REQUEST:\s*(.+)$/gim)].map((m) => m[1]),
   add_ai: [],
+  seen: [],
   usage: usage ?? null,
 });
 
@@ -173,9 +174,9 @@ export const demoApi = {
     auto_forward_decisions: true,
     signal_cli: null,
     can_install: true,
-    config_path: "~/.config/consilium/messaging.json",
     install_running: false,
     install_error: null,
+    config_path: "~/.config/consilium/messaging.json",
   }),
   messagingSave: async () => {
     throw new Error("Not available in the browser preview");

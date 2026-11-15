@@ -15,7 +15,7 @@ export interface ChatEvent {
   ts: number;
   conversation: string;
   sender: Sender;
-  kind: "message" | "system" | "error";
+  kind: "message" | "system" | "error" | "seen";
   to: string[];
   text: string;
   requests: string[];
@@ -25,6 +25,8 @@ export interface ChatEvent {
   usage?: TokenUsage | null;
   /** Files the human attached. */
   attachments?: Attachment[];
+  /** Message ids handed to this event's sender. Present only on persisted read receipts. */
+  seen?: string[];
 }
 
 /** A file attached to a message; Consilium keeps its own copy in the conversation's folder. */
@@ -141,12 +143,12 @@ export interface MessagingSetup {
   auto_forward_decisions: boolean;
   signal_cli: string | null;
   can_install: boolean;
-  config_path: string;
-}
   /** The password-free background install is running. */
   install_running: boolean;
   /** Why the last background install stopped, if it failed. */
   install_error: string | null;
+  config_path: string;
+}
 
 export interface MessagingChange {
   enabled: boolean;
