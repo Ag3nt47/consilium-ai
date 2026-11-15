@@ -21,6 +21,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub const RUN_TIMEOUT: Duration = Duration::from_secs(900);
@@ -197,7 +198,18 @@ fn is_executable(p: &Path) -> bool {
 
 fn command(path: &Path) -> Command {
     let mut cmd = Command::new(path);
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // Keep programs launched by an agent from holding output in a language-runtime buffer. The
+    // provider CLIs already use their machine-readable streaming modes; these variables cover
+    // Python and common color-aware tools they start without changing the JSON protocol with a
+    // pseudo-terminal.
+    cmd.env("PYTHONUNBUFFERED", "1")
+        .env("NO_COLOR", "1")
+        .env("FORCE_COLOR", "0")
+        .env("CLICOLOR", "0");
     // Node-based CLIs (Gemini, npm installs) start with `#!/usr/bin/env node`, and apps launched from
     // the Dock have a minimal PATH; putting the tool's own folder first lets it find its runtime.
     if let Some(dir) = path.parent() {
@@ -952,13 +964,38 @@ async fn execute(
         let _ = stdin.write_all(input.as_bytes()).await;
         let _ = stdin.shutdown().await;
     });
-    let (out_buf, out_task) = drain(stdout);
-    let (err_buf, err_task) = drain(stderr);
-
-    let outcome = tokio::select! {
-        status = child.wait() => Ok(status),
-        _ = cancel.cancelled() => Err("stopped".to_string()),
-        _ = tokio::time::sleep(timeout) => Err(format!("no answer within {} seconds", timeout.as_secs())),
+    // Both readers report chunks to the watchdog as soon as they arrive. Structured provider
+    // output remains on ordinary pipes (a PTY would corrupt JSON framing), while a surprise
+    // interactive prompt is caught before it can leave a turn apparently frozen for 15 minutes.
+    let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
+    let (out_buf, out_task) = drain(stdout, chunk_tx.clone());
+    let (err_buf, err_task) = drain(stderr, chunk_tx.clone());
+    drop(chunk_tx);
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    let mut recent_output = String::new();
+    let mut watch_output = true;
+    let outcome = loop {
+        tokio::select! {
+            status = child.wait() => break Ok(status),
+            chunk = chunk_rx.recv(), if watch_output => {
+                let Some(chunk) = chunk else {
+                    watch_output = false;
+                    continue;
+                };
+                recent_output.push_str(&String::from_utf8_lossy(&chunk));
+                keep_tail(&mut recent_output, 8_192);
+                if let Some(line) = interactive_prompt(&recent_output) {
+                    break Err(format!(
+                        "{} is waiting for interactive input: {line}\nREQUEST: Open {} in a terminal, complete the prompt, then press Retry in Consilium.",
+                        tool_name(kind),
+                        path.display(),
+                    ));
+                }
+            }
+            _ = cancel.cancelled() => break Err("stopped".to_string()),
+            _ = &mut deadline => break Err(format!("no answer within {} seconds", timeout.as_secs())),
+        }
     };
     let status = match outcome {
         Ok(s) => s.map_err(|e| e.to_string())?,
@@ -1127,7 +1164,11 @@ const PIPE_GRACE: Duration = Duration::from_secs(3);
 /// the pipe never closes.
 fn drain<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     mut r: R,
-) -> (std::sync::Arc<std::sync::Mutex<Vec<u8>>>, tokio::task::JoinHandle<()>) {
+    chunks: mpsc::UnboundedSender<Vec<u8>>,
+) -> (
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    tokio::task::JoinHandle<()>,
+) {
     let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let b = buf.clone();
     let task = tokio::spawn(async move {
@@ -1135,11 +1176,70 @@ fn drain<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
         loop {
             match r.read(&mut chunk).await {
                 Ok(0) | Err(_) => break,
-                Ok(n) => b.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    b.lock().unwrap().extend_from_slice(&chunk[..n]);
+                    let _ = chunks.send(chunk[..n].to_vec());
+                }
             }
         }
     });
     (buf, task)
+}
+
+fn tool_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Codex => "Codex CLI",
+        Kind::ClaudeCode => "Claude Code CLI",
+        Kind::GeminiCli => "Gemini CLI",
+        Kind::Antigravity => "Antigravity CLI",
+    }
+}
+
+/// Bounds the prompt watchdog's memory without cutting in the middle of a UTF-8 code point.
+fn keep_tail(text: &mut String, max_bytes: usize) {
+    if text.len() <= max_bytes {
+        return;
+    }
+    let mut start = text.len() - max_bytes;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text.drain(..start);
+}
+
+/// Recognises prompts that a supposedly non-interactive provider unexpectedly surfaced. We do
+/// not auto-answer credential, trust, or destructive confirmations: the human gets a REQUEST
+/// instead. Restricting matches to the last visible lines avoids treating quoted prompt examples
+/// inside a model's JSON reply as a live prompt.
+fn interactive_prompt(output: &str) -> Option<String> {
+    output
+        .replace('\r', "\n")
+        .lines()
+        .rev()
+        .take(4)
+        .map(str::trim)
+        .find_map(|line| {
+            if line.is_empty() || line.len() > 500 || line.starts_with('{') || line.starts_with('[')
+            {
+                return None;
+            }
+            let lower = line.to_ascii_lowercase();
+            let yes_no = ["(y/n)", "[y/n]", "(yes/no)", "[yes/no]"]
+                .iter()
+                .any(|marker| lower.contains(marker));
+            let trust = lower.contains("trust this directory")
+                || lower.contains("trust this folder")
+                || lower.contains("do you trust");
+            let credential = lower.ends_with("password:")
+                || lower.ends_with("passphrase:")
+                || lower.ends_with("verification code:")
+                || lower.ends_with("one-time code:");
+            let continue_prompt = lower.contains("press enter to continue")
+                || lower.contains("press return to continue");
+            let confirmation =
+                yes_no && (line.contains('?') || trust || lower.contains("continue"));
+            (trust || credential || continue_prompt || confirmation).then(|| line.to_string())
+        })
 }
 
 /// The reply from Antigravity's stream-json output: the final `result` event's response, or the
@@ -1422,6 +1522,28 @@ mod plan_tests {
         let p = plan(Kind::GeminiCli, Access::Chat, Path::new("/ws"), Path::new("/r"), "SYS", "P");
         assert!(p.input.starts_with("SYS") && p.input.ends_with("P"));
     }
+
+    #[test]
+    fn interactive_prompts_are_narrowly_detected() {
+        assert_eq!(
+            interactive_prompt("Welcome\nDo you trust this directory? (y/n) "),
+            Some("Do you trust this directory? (y/n)".into())
+        );
+        assert_eq!(interactive_prompt("Password:"), Some("Password:".into()));
+        assert_eq!(
+            interactive_prompt("Press Enter to continue"),
+            Some("Press Enter to continue".into())
+        );
+        assert!(interactive_prompt(r#"{"result":"Example: Continue? (y/n)"}"#).is_none());
+        assert!(interactive_prompt("The tests discuss password: handling in prose.").is_none());
+    }
+
+    #[test]
+    fn watchdog_tail_stays_bounded_on_utf8_boundaries() {
+        let mut text = format!("{}end", "🟢".repeat(3_000));
+        keep_tail(&mut text, 8_192);
+        assert!(text.len() <= 8_192 && text.ends_with("end"));
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1556,5 +1678,36 @@ exit 1"#,
         let p = fake("cat >/dev/null; echo 'Error: not logged in' >&2; exit 3");
         let e = go(&p, Kind::Codex, Access::Chat, None, "s").await.unwrap_err();
         assert!(e.contains("exit 3") && e.contains("not logged in"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_interactive_prompt_fails_fast_with_a_request() {
+        let p = fake("cat >/dev/null; printf 'Do you trust this directory? (y/n) ' >&2; sleep 30");
+        // Without interception the fake CLI sleeps for 30 seconds. Leave ample headroom for
+        // loaded CI hosts and process-group teardown while proving it cannot wait that long.
+        let e = tokio::time::timeout(
+            Duration::from_secs(20),
+            go(&p, Kind::ClaudeCode, Access::Chat, None, "s"),
+        )
+        .await
+        .expect("the prompt watchdog ends the run")
+        .unwrap_err();
+        assert!(
+            e.contains("waiting for interactive input") && e.contains("REQUEST:"),
+            "{e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_processes_receive_unbuffered_output_environment() {
+        let p = fake(
+            r#"cat >/dev/null; printf '{"response":"%s/%s/%s"}' "$PYTHONUNBUFFERED" "$NO_COLOR" "$FORCE_COLOR""#,
+        );
+        assert_eq!(
+            go(&p, Kind::GeminiCli, Access::Chat, None, "s")
+                .await
+                .unwrap(),
+            "1/1/0"
+        );
     }
 }

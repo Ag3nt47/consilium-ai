@@ -113,6 +113,26 @@ make sensible decisions yourself and ask the human (REQUEST:) only for choices t
 challenge, or correct the latest messages instead of repeating them. If you have nothing useful \
 to add, reply with exactly PASS."
         ));
+        if rounds >= 3 && round >= 3 && !ctx.members.is_empty() {
+            // Rotate the critical-review role deterministically. Random assignment would make a
+            // resumed turn behave differently after a restart; rotation still prevents every
+            // model from falling into polite agreement while keeping the conversation replayable.
+            let reviewer = &ctx.members[(round as usize - 3) % ctx.members.len()];
+            if reviewer == me {
+                s.push_str(
+                    "\n\nADVERSARIAL REVIEW ROLE: You are the designated devil's advocate for this round. \
+Identify the strongest concrete failure mode, unsafe assumption, or missing test in the current \
+proposal. Cite transcript or workspace evidence, propose a way to falsify the claim, and do not \
+agree merely to reach consensus.",
+                );
+            } else if let Some(agent) = AGENTS.iter().find(|a| a.id == reviewer) {
+                s.push_str(&format!(
+                    "\n\n{} is the designated adversarial reviewer this round. Address its evidence directly; \
+do not smooth over a substantive objection just to reach consensus.",
+                    agent.name
+                ));
+            }
+        }
     }
     s
 }
@@ -290,6 +310,24 @@ mod tests {
         assert!(with.contains("COUNCIL MEMORY") && with.contains("Use Tauri 2"));
         assert!(with.contains("PROJECT NOTES") && with.contains("Run cargo test"));
         assert!(with.contains("REMEMBER:"));
+    }
+
+    #[test]
+    fn round_three_rotates_an_explicit_adversarial_reviewer() {
+        let m = members(&["gpt", "claude", "gemini"]);
+        let ctx = Context {
+            members: &m,
+            workspace: None,
+            access: Access::Chat,
+            memory: None,
+            project_notes: None,
+        };
+        assert!(system("gpt", 3, 4, &ctx).contains("ADVERSARIAL REVIEW ROLE"));
+        assert!(
+            system("claude", 3, 4, &ctx).contains("ChatGPT is the designated adversarial reviewer")
+        );
+        assert!(system("claude", 4, 4, &ctx).contains("ADVERSARIAL REVIEW ROLE"));
+        assert!(!system("gpt", 2, 4, &ctx).contains("ADVERSARIAL REVIEW ROLE"));
     }
 
     #[test]
