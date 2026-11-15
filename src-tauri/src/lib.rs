@@ -297,10 +297,9 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: REQUEST lines have Approve and Deny buttons; a Voice Chat / Text Chat \
-switch; Grok and DeepSeek can join through Add AI with an API key; secrets are masked before anything is saved; \
-stalled CLI prompts become a REQUEST instead of a freeze; a devil's-advocate reviewer from round 3; a glass theme, \
-a Cmd+K command palette and live working/frozen lights on each AI.";
+const WHATS_NEW: &str = "What's new: each AI shows what it is doing live (reading, editing, running \
+commands, searching) on its card and above its reply; a PC usage meter plus each AI's share of the PC next to its \
+name; Add AI walks through installing and signing in, and opens a provider's own page for any payment.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
