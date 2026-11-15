@@ -181,12 +181,14 @@ function extractTaskClaims(text: string, defaultAgent: string, agents: AgentInfo
     if (multiMatch) {
       const targetId = multiMatch[1].toLowerCase();
       const targetAgent = agents.find((a) => a.id.toLowerCase() === targetId || a.name.toLowerCase() === targetId);
-      if (targetAgent) {
-        const desc = multiMatch[2].trim().slice(0, 160);
-        const key = `${targetAgent.id}:${desc}`;
+      const desc = multiMatch[2].trim();
+      const assignsWork = /^(?:please\s+)?(?:take|taking|handle|own|implement|build|fix|review|work|proceed|connect|add|create|prepare|continue|finish|stage|commit|inspect|audit|monitor|capture|update|test)\b/i.test(desc);
+      if (targetAgent && assignsWork) {
+        const short = desc.slice(0, 160);
+        const key = `${targetAgent.id}:${short}`;
         if (!seen.has(key)) {
           seen.add(key);
-          claims.push({ agent: targetAgent.id, action: "is taking", task: desc });
+          claims.push({ agent: targetAgent.id, action: targetAgent.id === defaultAgent ? "is taking" : "was assigned", task: short });
         }
       }
     }
