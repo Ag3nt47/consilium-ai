@@ -217,6 +217,8 @@ const appApi = {
   },
   /** Opens a terminal with the official install or sign-in command; the person presses Enter to run it. */
   setup: (agent: string, action: "install" | "signin") => invoke<string>("setup_agent", { agent, action }),
+  /** Saves an API-key AI's key on this computer (empty removes it). The key is never returned. */
+  setApiKey: (agent: string, key: string) => invoke<void>("set_api_key", { agent, key }),
 };
 
 export const api: typeof appApi = IN_APP ? appApi : (demoApi as unknown as typeof appApi);

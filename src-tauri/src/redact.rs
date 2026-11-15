@@ -21,6 +21,7 @@ fn rules() -> &'static [Rule] {
         r("private key", r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z]+ )*PRIVATE KEY-----|\z)"),
         r("Anthropic key", r"\bsk-ant-[A-Za-z0-9_-]{20,}"),
         r("OpenAI key", r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}"),
+        r("xAI key", r"\bxai-[A-Za-z0-9_-]{20,}"),
         r("GitHub token", r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})"),
         r("AWS key", r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
         r("Google key", r"\bAIza[0-9A-Za-z_-]{35}"),

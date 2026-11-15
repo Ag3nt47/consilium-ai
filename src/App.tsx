@@ -237,6 +237,45 @@ function UsageBar({ label, percent, windows, aria, note }: { label: string; perc
 }
 
 /** The model in use, with the AI's whole plan underneath; for ChatGPT, the reset forecast if on. */
+/** Password field for an API-key AI. The key goes straight to the backend and is never shown again. */
+function ApiKeyField({ agent, onSaved, onError }: { agent: AgentInfo; onSaved: () => void; onError: (e: string) => void }) {
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function save(value: string) {
+    setBusy(true);
+    try {
+      await api.setApiKey(agent.id, value);
+      setKey("");
+      onSaved();
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <span className="apikey-field">
+      <input
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={agent.path ? "Replace key…" : "API key"}
+        value={key}
+        onChange={(e) => setKey(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && key.trim() && save(key)}
+      />
+      <button className="btn ghost small-btn" disabled={busy || !key.trim()} onClick={() => save(key)}>
+        {busy ? "Checking…" : "Save"}
+      </button>
+      {agent.path && (
+        <button className="link danger-link" disabled={busy} onClick={() => save("")}>
+          remove key
+        </button>
+      )}
+    </span>
+  );
+}
+
 function UsageMeter({ agent, forecast }: { agent: AgentInfo; forecast?: ResetForecast | null }) {
   const usage = agent.usage;
   if (!usage) {
@@ -1526,7 +1565,8 @@ export default function App() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2>Add AI</h2>
             <p className="muted small">
-              Each AI joins through its company's official command-line tool and your own account: no API keys.
+              Most AIs join through their company's official command-line tool and your own account. Grok and DeepSeek
+              have no such tool, so they use an API key you paste here: it is saved only on this computer, never in the chat.
               You decide who joins; an AI in the conversation can suggest one, but only you can add it.
             </p>
             {others.length === 0 && <p className="muted">Every available AI is already in the council.</p>}
@@ -1542,6 +1582,20 @@ export default function App() {
                       {a.version ? ` · ${a.version}` : ""}
                     </span>
                   </div>
+                  {a.transport === "api" ? (
+                  <ol className="addai-steps">
+                    <li className={st === "ready" ? "done" : ""}>
+                      {st === "ready" ? `API key saved (model ${a.version ?? "?"})` : `Paste your ${a.company} API key`}
+                      <ApiKeyField agent={a} onSaved={refreshAgents} onError={(e) => setError(e)} />
+                    </li>
+                    <li>
+                      Add to the council
+                      <button className="btn primary small-btn" disabled={st !== "ready"} onClick={() => addMember(a)}>
+                        Add {a.name}
+                      </button>
+                    </li>
+                  </ol>
+                  ) : (
                   <ol className="addai-steps">
                     <li className={st !== "missing" ? "done" : ""}>
                       Install the {a.tool}
@@ -1566,7 +1620,8 @@ export default function App() {
                       </button>
                     </li>
                   </ol>
-                  {st !== "ready" && <p className="muted small">{a.hint} When you're done, come back here; it checks again automatically.</p>}
+                  )}
+                  {st !== "ready" && <p className="muted small">{a.hint}{a.transport === "api" ? "" : " When you're done, come back here; it checks again automatically."}</p>}
                 </div>
               );
             })}

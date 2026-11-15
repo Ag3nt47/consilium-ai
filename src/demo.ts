@@ -156,6 +156,7 @@ export const demoApi = {
   stop: async () => true,
   running: async () => (state.thinking ? [CONV] : []),
   setup: async () => "Demo",
+  setApiKey: async () => undefined,
   setMember: async () => undefined,
   setAccess: async () => undefined,
   setWorkspace: async () => conversations[0],

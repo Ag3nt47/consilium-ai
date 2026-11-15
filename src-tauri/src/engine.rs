@@ -107,6 +107,7 @@ pub struct Engine {
 impl Engine {
     /// An engine on the data folder `data` (the same for the app and the terminal command).
     pub fn open(data: &std::path::Path, ui: Arc<dyn Ui>, spawn: Box<Spawn>) -> std::io::Result<Self> {
+        crate::apiagent::init(data.join("api-keys.json"));
         Ok(Engine {
             data: data.to_path_buf(),
             store: Arc::new(Store::new(data.join("conversations"))?),
@@ -648,7 +649,7 @@ impl council::Host for RealHost {
     }
 
     fn installed(&self, agent: &'static Agent) -> bool {
-        agents::find(agents::effective_kind(agent)).is_some()
+        agents::installed(agent)
     }
 
     fn remember(&self, agent: &'static Agent, reply: &str) -> Option<String> {

@@ -274,7 +274,7 @@ mod tests {
     fn mentions_resolve_names_ids_and_all() {
         assert_eq!(mentioned_agents("@claude and @GPT"), vec!["claude", "gpt"]);
         assert_eq!(mentioned_agents("@ChatGPT please"), vec!["gpt"]);
-        assert_eq!(mentioned_agents("@all"), vec!["gpt", "claude", "gemini"]);
+        assert_eq!(mentioned_agents("@all"), vec!["gpt", "claude", "gemini", "grok", "deepseek"]);
         assert!(mentioned_agents("ping me at team@claude").is_empty());
         assert!(mentioned_agents("Claude said so").is_empty());
     }
@@ -304,7 +304,7 @@ mod tests {
         assert!(two.contains("The other participants are: the Human, and Claude (@claude)."));
         assert!(two.contains("ADD_AI:") && two.contains("Gemini (@gemini)"), "lists AIs that can be added");
         assert!(two.contains("human, who must approve"), "participant additions require human approval");
-        let all = members(&["gpt", "claude", "gemini"]);
+        let all = members(&["gpt", "claude", "gemini", "grok", "deepseek"]);
         let full = system("gpt", 1, 1, &Context { members: &all, workspace: None, access: Access::Chat, memory: None, project_notes: None });
         assert!(!full.contains("ADD_AI"), "no ADD_AI hint once every AI is a participant");
         assert!(full.contains("@mention them: they see it and answer"));

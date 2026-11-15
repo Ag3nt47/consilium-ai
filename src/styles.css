@@ -1543,3 +1543,21 @@ button.attachment {
 @media (prefers-reduced-motion: reduce) {
   .voice-dot { animation: none; }
 }
+
+/* API key entry in Add AI (Grok, DeepSeek) */
+.apikey-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+}
+
+.apikey-field input {
+  width: 14em;
+  font: inherit;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
+  background: transparent;
+  color: inherit;
+}

@@ -112,6 +112,9 @@ pub fn step(agent_id: &str, action: &str) -> Result<Step, String> {
                 "curl -fsSL https://antigravity.google/cli/install.sh | bash".into()
             },
         },
+        (Kind::XaiApi | Kind::DeepSeekApi, _) => {
+            return Err(format!("{} uses an API key: paste it in the Add AI window", agent.name))
+        }
         _ => return Err("unknown setup action".into()),
     };
     Ok(step)

@@ -3,6 +3,7 @@
 //! `engine`, on one shared data folder.
 
 mod agents;
+mod apiagent;
 mod attach;
 mod bench;
 pub mod cli;
@@ -367,6 +368,17 @@ fn setup_agent(agent: String, action: String) -> Result<String, String> {
     Ok(step.title.to_string())
 }
 
+/// Saves an API-key agent's key (empty removes it). The key arrives from the Add AI window, is
+/// stored only on this computer and is never sent back to the frontend.
+#[tauri::command]
+fn set_api_key(agent: String, key: String) -> Result<(), String> {
+    let a = agents::by_id(&agent).ok_or("unknown agent")?;
+    if agents::api_provider(a.kind).is_none() {
+        return Err(format!("{} signs in through its own app, not a key", a.name));
+    }
+    apiagent::set_key(a.id, &key)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -423,6 +435,7 @@ pub fn run() {
             stop,
             running,
             setup_agent,
+            set_api_key,
             self_check,
             unbench,
             cli_status,
