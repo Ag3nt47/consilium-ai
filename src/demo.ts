@@ -157,6 +157,8 @@ export const demoApi = {
   running: async () => (state.thinking ? [CONV] : []),
   setup: async () => "Demo",
   setApiKey: async () => undefined,
+  updateAvailable: async () => null,
+  updateNow: async () => undefined,
   systemPressure: async () => ({
     percent: 24,
     cpu_percent: 18,

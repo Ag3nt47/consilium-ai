@@ -21,6 +21,7 @@ import {
   type Conversation,
   type ResetForecast,
   type SystemPressure,
+  type StagedUpdate,
   type TokenUsageReport,
   type TurnState,
   type UsageWindow,
@@ -555,6 +556,26 @@ export default function App() {
   const usageRefreshRef = useRef(false);
   const [forecast, setForecast] = useState<ResetForecast | null>(null);
   const [pressure, setPressure] = useState<SystemPressure | null>(null);
+  const [staged, setStaged] = useState<StagedUpdate | null>(null);
+  const [updating, setUpdating] = useState(false);
+
+  // A staged build is a file check, so polling it is cheap.
+  useEffect(() => {
+    const poll = () => api.updateAvailable().then(setStaged).catch(() => undefined);
+    poll();
+    const t = setInterval(poll, 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  const updateNow = async () => {
+    setUpdating(true);
+    try {
+      await api.updateNow();
+    } catch (e) {
+      setUpdating(false);
+      alert(`Update failed: ${e}`);
+    }
+  };
   const [cli, setCli] = useState<CliInstall | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -1284,6 +1305,16 @@ export default function App() {
             );
           })}
           <ResourcePressureGauge pressure={pressure} />
+          {staged && (
+            <button
+              className="btn update-now"
+              disabled={updating}
+              onClick={updateNow}
+              title={`Pause the AIs, install ${staged.version} (now ${staged.current}) and restart. Their work resumes after the restart.`}
+            >
+              {updating ? "Updating…" : `Update Now · ${staged.version}`}
+            </button>
+          )}
         </div>
         <div className="sidebar-actions">
           <button className="btn ghost" onClick={() => setShowAddAi(true)} title="Add or remove AIs">

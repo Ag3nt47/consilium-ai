@@ -17,6 +17,7 @@ mod redact;
 mod resume;
 mod setup;
 mod store;
+mod update;
 mod usage;
 
 use config::Access;
@@ -299,7 +300,8 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 /// Shown to the human and the AIs after an update to this version.
 const WHATS_NEW: &str = "What's new: each AI shows what it is doing live (reading, editing, running \
 commands, searching) on its card and above its reply; a PC usage meter plus each AI's share of the PC next to its \
-name; Add AI walks through installing and signing in, and opens a provider's own page for any payment.";
+name; Add AI walks through installing and signing in, and opens a provider's own page for any payment; an Update \
+Now button installs a staged build in seconds, pausing the AIs and resuming their work after the restart.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -330,6 +332,36 @@ fn announce_update(engine: &Engine, data: &std::path::Path) {
     for id in ids {
         let _ = engine.note(&id, &note);
     }
+}
+
+/// A newer build staged by `scripts/stage-update.sh`, if any; the window offers Update Now for it.
+#[tauri::command]
+fn update_available() -> Option<update::Staged> {
+    data_dir().and_then(|d| update::staged(&d))
+}
+
+/// Update Now: tells every conversation with AIs at work that the app is updating, starts the
+/// installer and quits. The cut-off turns resume after the relaunch, like after any restart.
+#[tauri::command]
+fn update_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let data = data_dir().ok_or("can't find Consilium's data folder")?;
+    let staged = update::staged(&data).ok_or("no newer build is staged")?;
+    let note = format!(
+        "Update Now: Consilium is installing {} and restarting in a few seconds. Hold here: work in \
+         progress is paused and resumes automatically after the restart, so stop at this point and \
+         continue from `git status` and `git diff` when you come back.",
+        staged.version
+    );
+    for id in state.engine.running_ids() {
+        let _ = state.engine.note(&id, &note);
+    }
+    update::start_install(&data)?;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        app.exit(0);
+    });
+    Ok(())
 }
 
 /// Self-check: asks every council member, at the same time, for a one-word reply, with chat-only
@@ -448,6 +480,8 @@ pub fn run() {
             setup_agent,
             set_api_key,
             system_pressure,
+            update_available,
+            update_now,
             self_check,
             unbench,
             cli_status,

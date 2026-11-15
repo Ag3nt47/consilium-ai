@@ -1684,3 +1684,16 @@ button.attachment {
   margin-left: 4px;
   transition: color 0.4s ease;
 }
+
+/* Update Now: shown only when a newer build is staged. */
+.btn.update-now {
+  width: 100%;
+  margin-top: 8px;
+  background: var(--accent, #2e7d32);
+  color: #fff;
+  font-weight: 600;
+}
+.btn.update-now:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
