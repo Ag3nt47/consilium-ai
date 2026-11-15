@@ -237,33 +237,6 @@ function UsageBar({ label, percent, windows, aria, note }: { label: string; perc
   );
 }
 
-function ResourcePressure({ pressure }: { pressure: SystemPressure | null }) {
-  if (!pressure) return null;
-  const percent = Math.max(0, Math.min(100, Math.round(pressure.percent)));
-  // Resource pressure is the inverse of allowance: low is green and saturation is red.
-  const color = `hsl(${(100 - percent) * 1.2} 72% 46%)`;
-  return (
-    <div
-      className="resource-pressure hover-faint"
-      title={`PC pressure: ${percent}% (${pressure.label})\nCPU: ${pressure.cpu_percent}%\nMemory: ${pressure.memory_percent}%\n${pressure.cores} logical CPU cores\nUpdates every 2 seconds`}
-    >
-      <span className="resource-pressure-label">PC</span>
-      <span
-        className="resource-pressure-track"
-        role="meter"
-        aria-label="Computer resource pressure"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={percent}
-        aria-valuetext={`${percent}% pressure; CPU ${pressure.cpu_percent}%, memory ${pressure.memory_percent}%`}
-      >
-        <span style={{ width: `${percent}%`, backgroundColor: color }} />
-      </span>
-      <b style={{ color }}>{percent}%</b>
-    </div>
-  );
-}
-
 /** The model in use, with the AI's whole plan underneath; for ChatGPT, the reset forecast if on. */
 /** Password field for an API-key AI. The key goes straight to the backend and is never shown again. */
 function ApiKeyField({ agent, onSaved, onError }: { agent: AgentInfo; onSaved: () => void; onError: (e: string) => void }) {
@@ -508,7 +481,6 @@ export default function App() {
   const [forecast, setForecast] = useState<ResetForecast | null>(null);
   const [pressure, setPressure] = useState<SystemPressure | null>(null);
   const [cli, setCli] = useState<CliInstall | null>(null);
-  const [pressure, setPressure] = useState<SystemPressure | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   currentRef.current = current;
@@ -656,17 +628,6 @@ export default function App() {
   useEffect(() => {
     if (prefs.autoUpdate) checkForUpdate(false).then(setUpdate).catch(() => undefined);
   }, [prefs.autoUpdate]);
-
-  useEffect(() => {
-    let alive = true;
-    const refresh = () => api.systemPressure().then((next) => alive && setPressure(next)).catch(() => undefined);
-    refresh();
-    const timer = window.setInterval(refresh, 2_000);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-    };
-  }, []);
 
   useEffect(() => {
     if (!current) return;
@@ -1288,7 +1249,6 @@ export default function App() {
             </div>
           </div>
           <div className="topbar-actions">
-            <ResourcePressure pressure={pressure} />
             <button className="btn ghost" onClick={exportCurrent} disabled={!events.length}>
               Copy as Markdown
             </button>

@@ -562,40 +562,6 @@ code {
   flex-shrink: 0;
 }
 
-.resource-pressure {
-  min-width: 118px;
-  display: grid;
-  grid-template-columns: auto minmax(48px, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  padding: 6px 9px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
-  font-size: 11px;
-  cursor: default;
-}
-
-.resource-pressure-label {
-  color: var(--muted);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-
-.resource-pressure-track {
-  height: 5px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 18%, transparent);
-}
-
-.resource-pressure-track > span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  transition: width 0.4s ease, background-color 0.4s ease;
-}
-
 .messages {
   flex: 1;
   overflow-y: auto;
