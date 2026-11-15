@@ -176,6 +176,12 @@ impl Store {
         &self.dir
     }
 
+    /// Locked while a process appends to the conversation. A file of its own, not the log itself:
+    /// Windows locks are mandatory, so a locked log couldn't be read meanwhile.
+    fn append_lock_path(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("{id}.append.lock"))
+    }
+
     fn turn_lock_path(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.turn.lock"))
     }
@@ -306,6 +312,7 @@ impl Store {
         let _ = fs::remove_file(self.log_path(id));
         fs::remove_file(self.meta_path(id)).map_err(|e| e.to_string())?;
         let _ = fs::remove_file(self.turn_lock_path(id));
+        let _ = fs::remove_file(self.append_lock_path(id));
         let _ = fs::remove_file(self.stop_path(id));
         Ok(())
     }
@@ -351,6 +358,13 @@ impl Store {
     ) -> Result<Event, String> {
         Self::check(id)?;
         let appending = self.appending.lock().unwrap();
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.append_lock_path(id))
+            .map_err(|e| e.to_string())?;
+        lock.lock().map_err(|e| e.to_string())?;
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
@@ -358,7 +372,6 @@ impl Store {
             .map_err(|e| e.to_string())?;
         // Another process may have appended since this one last looked, so the last sequence
         // number is read under the lock, from the file itself.
-        f.lock().map_err(|e| e.to_string())?;
         let last = read_events(&self.log_path(id)).last().map_or(0, |e| e.seq);
         let event = Event {
             id: uuid::Uuid::new_v4().to_string(),
@@ -378,6 +391,7 @@ impl Store {
         f.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
         f.sync_data().map_err(|e| e.to_string())?;
         drop(f);
+        drop(lock);
         drop(appending);
         if let Ok(mut meta) = self.meta(id) {
             meta.updated = event.ts;

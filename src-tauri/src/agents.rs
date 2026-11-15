@@ -836,8 +836,9 @@ pub async fn run_with_usage(
     run_at_with_usage(&path, kind, access, workspace, system, prompt, cancel, RUN_TIMEOUT).await
 }
 
-/// Text-only `run_at_with_usage` at a given CLI path and time limit; the tests drive fake CLIs with it.
-#[cfg(test)]
+/// Text-only `run_at_with_usage` at a given CLI path and time limit; the tests drive fake CLIs
+/// (shell scripts, so Unix only) with it.
+#[cfg(all(test, unix))]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_at(
     path: &Path,
