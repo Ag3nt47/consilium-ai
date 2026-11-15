@@ -52,6 +52,7 @@ A toggleable voice mode where you and both AIs talk:
 
 ## Later
 
+- **Signal & cross-workstation mobile messaging:** Mobile communication bridge (Signal CLI daemon, encrypted relay, offline Bluetooth Low Energy mesh) allowing the human to message conversations from their phone over the internet or offline Bluetooth; syncs across owned Windows and Mac workstations while ensuring phone numbers and contact metadata are scrubbed and never pushed to GitHub (see `docs/MESSAGING_BRIDGE.md`).
 - Signed and notarized installers (needs Apple Developer and Windows code-signing certificates).
 - Auto-update with signature verification.
 - iOS and Android through Tauri's mobile targets, including phone-width navigation and touch-first controls.

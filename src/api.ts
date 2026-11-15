@@ -132,6 +132,14 @@ export interface CliInstall {
   note: string;
 }
 
+export interface SystemPressure {
+  percent: number;
+  cpu_percent: number;
+  memory_percent: number;
+  cores: number;
+  label: string;
+}
+
 export interface TokenUsage {
   input_tokens: number;
   output_tokens: number;
@@ -219,6 +227,8 @@ const appApi = {
   setup: (agent: string, action: "install" | "signin") => invoke<string>("setup_agent", { agent, action }),
   /** Saves an API-key AI's key on this computer (empty removes it). The key is never returned. */
   setApiKey: (agent: string, key: string) => invoke<void>("set_api_key", { agent, key }),
+  /** Samples host PC CPU and memory pressure (0-100%). */
+  systemPressure: () => invoke<SystemPressure>("system_pressure"),
 };
 
 export const api: typeof appApi = IN_APP ? appApi : (demoApi as unknown as typeof appApi);

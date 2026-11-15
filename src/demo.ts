@@ -157,6 +157,13 @@ export const demoApi = {
   running: async () => (state.thinking ? [CONV] : []),
   setup: async () => "Demo",
   setApiKey: async () => undefined,
+  systemPressure: async () => ({
+    percent: 24,
+    cpu_percent: 18,
+    memory_percent: 32,
+    cores: 8,
+    label: "Optimal",
+  }),
   setMember: async () => undefined,
   setAccess: async () => undefined,
   setWorkspace: async () => conversations[0],

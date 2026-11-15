@@ -558,7 +558,42 @@ code {
 .topbar-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
   flex-shrink: 0;
+}
+
+.resource-pressure {
+  min-width: 118px;
+  display: grid;
+  grid-template-columns: auto minmax(48px, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 11px;
+  cursor: default;
+}
+
+.resource-pressure-label {
+  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.resource-pressure-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 18%, transparent);
+}
+
+.resource-pressure-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  transition: width 0.4s ease, background-color 0.4s ease;
 }
 
 .messages {
@@ -1560,4 +1595,60 @@ button.attachment {
   border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
   background: transparent;
   color: inherit;
+}
+
+/* ---------- PC Resource Pressure Meter (0-100%, Green to Red) ---------- */
+.pc-pressure {
+  margin: 10px 0 6px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.2));
+  backdrop-filter: blur(8px);
+}
+
+.pc-pressure-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.pc-pressure-title {
+  color: var(--muted, #8e8ea0);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.pc-pressure-val {
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+}
+
+.pc-pressure-track {
+  width: 100%;
+  height: 4px;
+  background: rgba(127, 127, 127, 0.2);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+.pc-pressure-bar {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease, background-color 0.4s ease, box-shadow 0.4s ease;
+}
+
+.pc-pressure-sub {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+}
+
+.pc-pressure-status {
+  font-weight: 500;
 }

@@ -11,6 +11,7 @@ mod config;
 mod council;
 mod engine;
 mod memory;
+mod pressure;
 mod prompt;
 mod redact;
 mod resume;
@@ -380,6 +381,12 @@ fn set_api_key(agent: String, key: String) -> Result<(), String> {
     apiagent::set_key(a.id, &key)
 }
 
+/// Samples host PC CPU and memory pressure (0-100%, green to red).
+#[tauri::command]
+fn system_pressure() -> pressure::SystemPressure {
+    pressure::sample()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -437,6 +444,7 @@ pub fn run() {
             running,
             setup_agent,
             set_api_key,
+            system_pressure,
             self_check,
             unbench,
             cli_status,
