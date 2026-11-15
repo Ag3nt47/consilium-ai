@@ -51,3 +51,26 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+      # Fixed-name copies, so the README's one-click links
+      # (releases/latest/download/<name>) always fetch the newest installer.
+      - name: Attach one-click download names
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p oneclick
+          B=src-tauri/target
+          copy() { # copy <find pattern> <new name>
+            f="$(find "$B" -path "*/bundle/*" -name "$1" -type f | head -1)"
+            if [ -z "$f" ]; then echo "::error::no bundle matching $1"; exit 1; fi
+            cp "$f" "oneclick/$2"
+          }
+          case "$RUNNER_OS" in
+            macOS)   copy '*.dmg' Consilium-macOS.dmg ;;
+            Windows) copy '*-setup.exe' Consilium-Windows-Setup.exe ;;
+            Linux)   copy '*.AppImage' Consilium-Linux-x86_64.AppImage
+                     copy '*.deb' Consilium-Linux-amd64.deb ;;
+          esac
+          gh release upload "$TAG" oneclick/* --clobber --repo "$GITHUB_REPOSITORY"

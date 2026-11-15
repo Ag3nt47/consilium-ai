@@ -57,7 +57,16 @@ Screenshots use invented demo data. To see the UI in a browser without the app, 
 
 ## Install
 
-Download the installer for your system from [Releases](https://github.com/Ag3nt47/consilium-ai/releases), or use the one-line installer:
+**One-click download** of the newest version:
+
+| System | Download | Then |
+| --- | --- | --- |
+| macOS (Apple silicon and Intel) | [**Consilium-macOS.dmg**](https://github.com/Ag3nt47/consilium-ai/releases/latest/download/Consilium-macOS.dmg) | Open it and drag Consilium to Applications |
+| Windows 10/11 | [**Consilium-Windows-Setup.exe**](https://github.com/Ag3nt47/consilium-ai/releases/latest/download/Consilium-Windows-Setup.exe) | Run it; no admin rights needed |
+| Linux (Ubuntu/Debian) | [**Consilium-Linux-amd64.deb**](https://github.com/Ag3nt47/consilium-ai/releases/latest/download/Consilium-Linux-amd64.deb) | Double-click to install |
+| Linux (any) | [**Consilium-Linux-x86_64.AppImage**](https://github.com/Ag3nt47/consilium-ai/releases/latest/download/Consilium-Linux-x86_64.AppImage) | Mark it executable and run it |
+
+Every version is also on [Releases](https://github.com/Ag3nt47/consilium-ai/releases). Or use the one-line installer, which also sets up the `consilium` terminal command:
 
 ```bash
 # macOS / Linux
