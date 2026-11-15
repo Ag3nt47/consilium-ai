@@ -38,7 +38,7 @@ fn rules() -> &'static [Rule] {
 fn assignment() -> &'static Regex {
     static ASSIGNMENT: OnceLock<Regex> = OnceLock::new();
     ASSIGNMENT.get_or_init(|| { Regex::new(
-        r#"(?i)\b([A-Z0-9_.-]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key|client[_-]?secret)[A-Z0-9_.-]*["']?\s*[:=]\s*)(["']?)([^\s"'`,;]{8,})"#,
+        r#"(?i)\b([A-Z0-9_.-]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key|client[_-]?secret|phone[_-]?number|signal[_-]?account)[A-Z0-9_.-]*["']?\s*[:=]\s*)(["']?)([^\s"'`,;]{8,})"#,
     )
     .expect("valid assignment pattern") })
 }
@@ -151,6 +151,8 @@ mod tests {
         );
         let json = format!("{{\"api_key\": \"{}\"}}", "0123456789abcdef");
         assert_eq!(scrub(&json), "{\"api_key\": \"[REDACTED value]\"}");
+        let phone = format!("phone_number = \"{}\"", "+15551234567");
+        assert_eq!(scrub(&phone), "phone_number = \"[REDACTED value]\"");
     }
 
     #[test]

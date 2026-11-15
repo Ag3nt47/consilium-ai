@@ -6,6 +6,7 @@ mod agents;
 mod apiagent;
 mod attach;
 mod bench;
+pub mod bridge;
 pub mod cli;
 mod config;
 mod council;

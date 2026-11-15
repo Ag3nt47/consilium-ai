@@ -39,7 +39,7 @@ const RULES = [
 const FORBIDDEN_FILES = [
   /(^|\/)\.env(\..+)?$/,
   /\.(pem|key|p12|p8|pfx|keystore|jks|mobileprovision)$/i,
-  /(^|\/)(auth|credentials?)[^/]*\.json$/i,
+  /(^|\/)(auth|credentials?|messaging|signal|keys|api-keys)[^/]*\.json$/i,
   /(^|\/)id_(rsa|ed25519|ecdsa)(\.pub)?$/,
   /\.jsonl$/, // conversation logs
 ];
