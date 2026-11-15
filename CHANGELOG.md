@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Attachments**: attach documents, Word files, pictures, PDFs, code or anything else to a message:
+  📎 in the message box, drag and drop onto the window, or paste a screenshot; `--attach FILE` and
+  `/attach` in the terminal. Consilium keeps its own copy with the conversation. Text files, and the
+  text read out of Word (.docx), OpenDocument (.odt) and PowerPoint (.pptx) files, go to every AI;
+  ChatGPT gets pictures directly, and Claude opens pictures and PDFs. Gemini (Antigravity) has no
+  supported way to take a picture in, so it is told so and leaves pictures to the others.
+- Fixed: the "data: codex-reset.com" link couldn't open (the app only allowed GitHub links).
 - **Terminal version**: `consilium chat`, `ask`, `say`, `log`, `list`, `new`, `stop`, `status` and `check`,
   in the same conversations, council, memory and settings as the app. Use either, or both at once:
   a conversation's AIs run in one process at a time, a message sent from the other joins that turn,

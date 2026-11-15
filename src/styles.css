@@ -1188,3 +1188,45 @@ code {
   padding: 8px 10px;
   font: 12.5px/1.5 var(--mono);
 }
+
+/* Attached files: on a message, and waiting under the message box. */
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 6px;
+}
+
+.attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 3px 8px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--muted) 35%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+button.attachment {
+  cursor: pointer;
+}
+
+.attachment small {
+  color: var(--muted);
+}
+
+.attachments.pending {
+  margin: 0 0 6px;
+}
+
+.composer.dropping {
+  outline: 2px dashed var(--accent, currentColor);
+  outline-offset: -4px;
+}

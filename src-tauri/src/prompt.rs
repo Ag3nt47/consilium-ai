@@ -143,7 +143,7 @@ pub fn transcript(events: &[Event], me: &str) -> String {
         .filter(|e| e.kind == "message" || (e.kind == "system" && e.sender == crate::council::CONSILIUM))
         .map(|e| {
             let who = if e.sender == me { format!("{} (you)", label(me)) } else { label(&e.sender) };
-            format!("[{who}] {}", e.text)
+            format!("[{who}] {}{}", e.text, crate::attach::for_transcript(&e.attachments, me))
         })
         .collect();
     let mut total: usize = parts.iter().map(|p| p.len() + 2).sum();
@@ -214,6 +214,7 @@ mod tests {
             requests: vec![],
             add_ai: vec![],
             usage: None,
+            attachments: vec![],
         }
     }
 

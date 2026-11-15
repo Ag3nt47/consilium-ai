@@ -23,6 +23,18 @@ export interface ChatEvent {
   add_ai: string[];
   /** Provider-reported counts for the AI turn that produced this event. */
   usage?: TokenUsage | null;
+  /** Files the human attached. */
+  attachments?: Attachment[];
+}
+
+/** A file attached to a message; Consilium keeps its own copy in the conversation's folder. */
+export interface Attachment {
+  name: string;
+  path: string;
+  /** "image", "pdf", "text" (including text read out of Word and other documents), or "file". */
+  kind: string;
+  size: number;
+  text_path?: string | null;
 }
 
 export interface Conversation {
@@ -165,8 +177,18 @@ const appApi = {
   remove: (id: string) => invoke<void>("delete_conversation", { id }),
   exportMarkdown: (id: string) => invoke<string>("export_markdown", { id }),
   /** Sent while the AIs are answering, the message joins the running turn; it never stops it. */
-  send: (id: string, text: string, targets: string[], rounds: number, interrupt = false) =>
-    invoke<ChatEvent>("send_message", { id, text, targets, rounds, interrupt }),
+  send: (id: string, text: string, targets: string[], rounds: number, interrupt = false, attachments: Attachment[] = []) =>
+    invoke<ChatEvent>("send_message", { id, text, targets, rounds, interrupt, attachments }),
+  /** Saves files (by path) for the next message; Consilium keeps its own copies. */
+  attachFiles: (id: string, paths: string[]) => invoke<Attachment[]>("attach_files", { id, paths }),
+  /** Saves pasted file contents (a screenshot, say) for the next message. */
+  attachData: (id: string, name: string, data: number[]) => invoke<Attachment>("attach_data", { id, name, data }),
+  openAttachment: (id: string, attachment: Attachment) => invoke<void>("open_attachment", { id, attachment }),
+  /** Shows the system file picker; returns the chosen files. */
+  pickFiles: async (): Promise<string[]> => {
+    const r = await openDialog({ multiple: true, directory: false, title: "Attach files" });
+    return Array.isArray(r) ? r : typeof r === "string" ? [r] : [];
+  },
   stop: (id: string) => invoke<boolean>("stop", { id }),
   /** Lets an AI that ran out of usage be asked again now. */
   unbench: (agent: string) => invoke<void>("unbench", { agent }),

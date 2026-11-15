@@ -43,6 +43,8 @@ Options:
       --to NAMES         who is asked: gpt, claude, gemini, comma-separated, or all (default: all)
       --discuss N        let them discuss, up to N answers each (default: one answer each)
       --folder PATH      the conversation's project folder (\".\" for this one)
+  -a, --attach FILE      attach a file to the message (ask, say; repeat for more): documents,
+                         Word files, pictures, PDFs, code
   -n N                   how many recent messages to show (0 for all)
   -f, --follow           keep showing new messages (log)
 
@@ -53,6 +55,8 @@ const CHAT_HELP: &str = "  /to NAMES       who is asked: gpt, claude, gemini, co
   /discuss N      let them discuss, up to N answers each; /ask for one answer each
   /stop           stop the AIs (Ctrl-C does too)
   /say TEXT       add a message without asking any AI
+  /attach FILE…   attach files to your next message (drag them in); /attach lists them,
+                  /detach clears them
   /list           conversations; /open N to switch; /new to start one
   /folder [PATH]  show or set the project folder (\"none\" to clear)
   /history [N]    show recent messages again
@@ -69,6 +73,7 @@ struct Opts {
     folder: Option<String>,
     lines: Option<usize>,
     follow: bool,
+    attach: Vec<String>,
     words: Vec<String>,
 }
 
@@ -95,6 +100,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
                 o.lines = Some(n.parse().map_err(|_| format!("-n takes a number, not {n}"))?);
             }
             "-f" | "--follow" => o.follow = true,
+            "-a" | "--attach" => o.attach.push(value(&mut i, a)?),
             "--" => {
                 o.words.extend(args[i + 1..].iter().cloned());
                 break;
@@ -197,6 +203,9 @@ fn render(p: Paint, e: &Event) -> String {
                 head.push_str(&p.c("2", &format!(" → {}", to.join(", "))));
             }
             let mut out = format!("{head}\n");
+            for a in &e.attachments {
+                out.push_str(&format!("  {}\n", p.c("2", &format!("📎 {} ({}, {})", a.name, a.kind, human_size(a.size)))));
+            }
             for line in e.text.lines() {
                 let t = line.trim_start();
                 if t.len() >= 8 && t[..8].eq_ignore_ascii_case("REQUEST:") {
@@ -210,6 +219,54 @@ fn render(p: Paint, e: &Event) -> String {
         }
         "error" => format!("{}\n\n", p.c("31", &format!("! {}", e.text))),
         _ => format!("{}\n", p.c("2", &format!("· {}", e.text))),
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1024 * 1024 => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+        b if b >= 1024 => format!("{} KB", b / 1024),
+        b => format!("{b} bytes"),
+    }
+}
+
+/// Splits `/attach` arguments: quotes group words, and a backslash keeps the next character (as a
+/// terminal writes a dragged-in path with spaces).
+fn split_paths(s: &str) -> Vec<String> {
+    let (mut out, mut cur, mut quote, mut escaped, mut any) = (Vec::new(), String::new(), None::<char>, false, false);
+    for c in s.chars() {
+        if escaped {
+            cur.push(c);
+            escaped = false;
+            any = true;
+        } else if c == '\\' && quote != Some('\'') && !cfg!(windows) {
+            escaped = true;
+        } else if Some(c) == quote {
+            quote = None;
+        } else if quote.is_none() && (c == '"' || c == '\'') {
+            quote = Some(c);
+            any = true;
+        } else if quote.is_none() && c.is_whitespace() {
+            if any {
+                out.push(std::mem::take(&mut cur));
+                any = false;
+            }
+        } else {
+            cur.push(c);
+            any = true;
+        }
+    }
+    if any {
+        out.push(cur);
+    }
+    out
+}
+
+/// Expands a leading ~ to the home folder.
+fn expand(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir().map(|h| h.join(rest)).unwrap_or_else(|| PathBuf::from(path)),
+        None => PathBuf::from(path),
     }
 }
 
@@ -453,22 +510,24 @@ async fn follow_turn(engine: &Arc<Engine>, feed: &mut Feed, p: Paint) {
 }
 
 async fn ask(engine: &Arc<Engine>, term: &Term, o: Opts, p: Paint) -> Result<i32, String> {
-    let text = message(&o)?;
+    let text = if o.attach.is_empty() { message(&o)? } else { o.words.join(" ") };
     let meta = conversation(engine, &o)?;
     *term.conversation.lock().unwrap() = meta.id.clone();
     let to = targets(engine, &o.to);
+    let files = engine.attach(&meta.id, &o.attach.iter().map(|f| expand(f)).collect::<Vec<_>>())?;
     let mut feed = Feed::new(engine, &meta.id, None, p);
     tokio::spawn(engine.clone().watch(false));
-    let sent = engine.send(&meta.id, &text, to, o.rounds.unwrap_or(1))?;
+    let sent = engine.send_with(&meta.id, &text, files, to, o.rounds.unwrap_or(1))?;
     feed.skip.insert(sent.id);
     follow_turn(engine, &mut feed, p).await;
     Ok(if feed.errors > 0 { 1 } else { 0 })
 }
 
 fn say(engine: &Arc<Engine>, o: Opts) -> Result<i32, String> {
-    let text = message(&o)?;
+    let text = if o.attach.is_empty() { message(&o)? } else { o.words.join(" ") };
     let meta = conversation(engine, &o)?;
-    engine.say(&meta.id, &text)?;
+    let files = engine.attach(&meta.id, &o.attach.iter().map(|f| expand(f)).collect::<Vec<_>>())?;
+    engine.say_with(&meta.id, &text, files)?;
     print(&format!("Added to \"{}\".\n", meta.title));
     Ok(0)
 }
@@ -646,6 +705,8 @@ async fn chat(engine: &Arc<Engine>, term: &Arc<Term>, o: Opts, p: Paint) -> Resu
     });
 
     let mut last_interrupt: Option<std::time::Instant> = None;
+    // Files waiting to go with the next message.
+    let mut pending: Vec<crate::attach::Attachment> = Vec::new();
     loop {
         tokio::select! {
             line = rx.recv() => {
@@ -679,12 +740,33 @@ async fn chat(engine: &Arc<Engine>, term: &Arc<Term>, o: Opts, p: Paint) -> Resu
                                 print(&p.c("2", "· Nobody is answering\n"));
                             }
                         }
-                        "say" => match engine.say(&meta.id, rest) {
+                        "say" => match engine.say_with(&meta.id, rest, std::mem::take(&mut pending)) {
                             Ok(e) => {
                                 feed.skip.insert(e.id);
                             }
                             Err(e) => print(&p.c("31", &format!("! {e}\n"))),
                         },
+                        "attach" => {
+                            let paths: Vec<PathBuf> = split_paths(rest).iter().map(|f| expand(f)).collect();
+                            if paths.is_empty() {
+                                let list: Vec<String> = pending.iter().map(|a| a.name.clone()).collect();
+                                print(&p.c("2", &format!("· {}\n", if list.is_empty() { "Nothing attached. /attach FILE…".into() } else { format!("Attached: {}", list.join(", ")) })));
+                            } else {
+                                match engine.attach(&meta.id, &paths) {
+                                    Ok(files) => {
+                                        for a in &files {
+                                            print(&p.c("2", &format!("· 📎 {} ({}, {}) goes with your next message\n", a.name, a.kind, human_size(a.size))));
+                                        }
+                                        pending.extend(files);
+                                    }
+                                    Err(e) => print(&p.c("31", &format!("! {e}\n"))),
+                                }
+                            }
+                        }
+                        "detach" => {
+                            pending.clear();
+                            print(&p.c("2", "· No files attached\n"));
+                        }
                         "list" => list(engine, p),
                         "open" | "new" => {
                             let next = if name == "new" {
@@ -695,6 +777,8 @@ async fn chat(engine: &Arc<Engine>, term: &Arc<Term>, o: Opts, p: Paint) -> Resu
                             match next {
                                 Ok(m) => {
                                     meta = m;
+                                    // Attachments belong to the conversation they were made in.
+                                    pending.clear();
                                     *term.conversation.lock().unwrap() = meta.id.clone();
                                     print("\n");
                                     header(&meta, &to, rounds);
@@ -730,8 +814,12 @@ async fn chat(engine: &Arc<Engine>, term: &Arc<Term>, o: Opts, p: Paint) -> Resu
                     }
                     continue;
                 }
-                match engine.send(&meta.id, &line, targets(engine, &to), rounds) {
+                match engine.send_with(&meta.id, &line, std::mem::take(&mut pending), targets(engine, &to), rounds) {
                     Ok(e) => {
+                        if !e.attachments.is_empty() {
+                            let names: Vec<&str> = e.attachments.iter().map(|a| a.name.as_str()).collect();
+                            print(&p.c("2", &format!("· Sent with {}\n", names.join(", "))));
+                        }
                         feed.skip.insert(e.id);
                     }
                     Err(e) => print(&p.c("31", &format!("! {e}\n"))),
@@ -956,6 +1044,16 @@ mod tests {
     }
 
     #[test]
+    fn dragged_in_and_quoted_paths_are_split_right() {
+        assert_eq!(split_paths(r#"a.png "My Doc.docx" 'b c.pdf'"#), ["a.png", "My Doc.docx", "b c.pdf"]);
+        if !cfg!(windows) {
+            assert_eq!(split_paths(r"/Users/me/Screen\ Shot\ 1.png  ~/x.txt"), ["/Users/me/Screen Shot 1.png", "~/x.txt"]);
+        }
+        assert!(split_paths("   ").is_empty());
+        assert!(parse(&args("--attach a.png -a b.txt hi")).unwrap().attach == ["a.png", "b.txt"]);
+    }
+
+    #[test]
     fn the_launcher_starts_this_program_with_the_arguments() {
         let l = launcher(std::path::Path::new("/Applications/Consilium.app/Contents/MacOS/consilium"));
         if cfg!(windows) {
@@ -983,6 +1081,7 @@ mod tests {
             requests: vec![],
             add_ai: vec![],
             usage: None,
+            attachments: vec![],
         };
         assert_eq!(render(p, &e), "Claude\n  Done.\n  REQUEST: pick a name\n\n");
         let to_both = Event { sender: "human".into(), to: vec!["gpt".into(), "claude".into()], text: "hi".into(), ..e };

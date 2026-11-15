@@ -12,6 +12,12 @@
       "allow": [
         {
           "url": "https://github.com/Ag3nt47/consilium-ai/*"
+        },
+        {
+          "url": "https://codex-reset.com/"
+        },
+        {
+          "url": "https://codex-reset.com/*"
         }
       ]
     },

@@ -20,6 +20,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["process", "io-util", "time", "sync", "fs", "macros", "rt-multi-thread", "signal"] }
 tokio-util = "0.7"
+flate2 = "1"
 uuid = { version = "1", features = ["v4"] }
 dirs = "7"
 tauri-plugin-dialog = "2"

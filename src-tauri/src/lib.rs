@@ -3,6 +3,7 @@
 //! `engine`, on one shared data folder.
 
 mod agents;
+mod attach;
 mod bench;
 pub mod cli;
 mod config;
@@ -208,6 +209,7 @@ fn export_markdown(state: State<AppState>, id: String) -> Result<String, String>
 /// Records the human's message, then asks the addressed council members (see `Engine::send`).
 /// Sending while the AIs are answering doesn't interrupt them; Stop is what interrupts.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn send_message(
     state: State<'_, AppState>,
     id: String,
@@ -215,10 +217,34 @@ async fn send_message(
     targets: Vec<String>,
     rounds: u32,
     interrupt: Option<bool>,
+    attachments: Option<Vec<attach::Attachment>>,
 ) -> Result<Event, String> {
     // `interrupt` is accepted from older UIs and ignored: sending never interrupts.
     let _ = interrupt;
-    state.engine.send(&id, &text, targets, rounds)
+    state.engine.send_with(&id, &text, attachments.unwrap_or_default(), targets, rounds)
+}
+
+/// Saves files (chosen, or dropped on the window) for the next message in `id`.
+#[tauri::command]
+async fn attach_files(state: State<'_, AppState>, id: String, paths: Vec<String>) -> Result<Vec<attach::Attachment>, String> {
+    let paths: Vec<std::path::PathBuf> = paths.into_iter().map(std::path::PathBuf::from).collect();
+    state.engine.attach(&id, &paths)
+}
+
+/// Saves pasted file contents (a screenshot, say) for the next message in `id`.
+#[tauri::command]
+async fn attach_data(state: State<'_, AppState>, id: String, name: String, data: Vec<u8>) -> Result<attach::Attachment, String> {
+    state.engine.attach_bytes(&id, &name, &data)
+}
+
+/// Opens an attachment of conversation `id` in its usual app.
+#[tauri::command]
+fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachment: attach::Attachment) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    if !attach::belongs(&state.engine.store.files_dir(&id), &attachment) {
+        return Err("that isn't one of this conversation's attachments".into());
+    }
+    app.opener().open_path(&attachment.path, None::<&str>).map_err(|e| e.to_string())
 }
 
 /// Shown to the human and the AIs after an update to this version.
@@ -358,7 +384,10 @@ pub fn run() {
             cli_status,
             install_cli,
             reset_forecast,
-            set_reset_forecast
+            set_reset_forecast,
+            attach_files,
+            attach_data,
+            open_attachment
         ])
         .build(tauri::generate_context!())
         .expect("error while starting Consilium")

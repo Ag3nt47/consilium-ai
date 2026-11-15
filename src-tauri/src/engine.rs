@@ -137,15 +137,35 @@ impl Engine {
     ///
     /// Sending while the AIs are answering doesn't interrupt them: the message joins the running
     /// turn, here or in the other process, and those it addresses who weren't taking part join in.
+    #[cfg(test)]
     pub fn send(self: &Arc<Self>, id: &str, text: &str, targets: Vec<String>, rounds: u32) -> Result<Event, String> {
-        let text = text.trim();
-        if text.is_empty() {
-            return Err("the message is empty".into());
+        self.send_with(id, text, vec![], targets, rounds)
+    }
+
+    /// `send`, with files attached (saved first with `attach`).
+    pub fn send_with(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        attachments: Vec<crate::attach::Attachment>,
+        targets: Vec<String>,
+        rounds: u32,
+    ) -> Result<Event, String> {
+        let dir = self.store.files_dir(id);
+        if let Some(a) = attachments.iter().find(|a| !crate::attach::belongs(&dir, a)) {
+            return Err(format!("{} isn't one of this conversation's attachments", a.name));
         }
+        let names: Vec<&str> = attachments.iter().map(|a| a.name.as_str()).collect();
+        let text = match text.trim() {
+            "" if !names.is_empty() => format!("(Attached: {})", names.join(", ")),
+            "" => return Err("the message is empty".into()),
+            t => t.to_string(),
+        };
+        let text = text.as_str();
         let targets = self.addressed(targets, text);
         let rounds = rounds.clamp(1, MAX_ROUNDS);
         let mut running = self.running.lock().unwrap();
-        let event = self.store.append(id, "human", "message", targets.clone(), text)?;
+        let event = self.store.append_with_attachments(id, targets.clone(), text, attachments)?;
         self.mine.lock().unwrap().insert(event.id.clone());
         self.ui.event(&event);
         let lock = match running.get(id) {
@@ -185,13 +205,34 @@ impl Engine {
         read_models(&self.data)
     }
 
-    /// Records a message without asking any AI to answer.
-    pub fn say(&self, id: &str, text: &str) -> Result<Event, String> {
-        let text = text.trim();
-        if text.is_empty() {
-            return Err("the message is empty".into());
+    /// Saves files for attaching to the next message in `id`: each is copied into the conversation's
+    /// files folder. `files` are paths on this computer.
+    pub fn attach(&self, id: &str, files: &[PathBuf]) -> Result<Vec<crate::attach::Attachment>, String> {
+        self.store.meta(id)?;
+        let dir = self.store.files_dir(id);
+        files.iter().map(|f| crate::attach::save_file(&dir, f)).collect()
+    }
+
+    /// Saves file contents (a pasted picture, say) for attaching to the next message in `id`.
+    pub fn attach_bytes(&self, id: &str, name: &str, bytes: &[u8]) -> Result<crate::attach::Attachment, String> {
+        self.store.meta(id)?;
+        crate::attach::save(&self.store.files_dir(id), name, bytes)
+    }
+
+    /// Records a message, with any files attached (saved first with `attach`), without asking any
+    /// AI to answer.
+    pub fn say_with(&self, id: &str, text: &str, attachments: Vec<crate::attach::Attachment>) -> Result<Event, String> {
+        let dir = self.store.files_dir(id);
+        if let Some(a) = attachments.iter().find(|a| !crate::attach::belongs(&dir, a)) {
+            return Err(format!("{} isn't one of this conversation's attachments", a.name));
         }
-        let event = self.store.append(id, "human", "message", vec![], text)?;
+        let names: Vec<&str> = attachments.iter().map(|a| a.name.as_str()).collect();
+        let text = match text.trim() {
+            "" if !names.is_empty() => format!("(Attached: {})", names.join(", ")),
+            "" => return Err("the message is empty".into()),
+            t => t.to_string(),
+        };
+        let event = self.store.append_with_attachments(id, vec![], &text, attachments)?;
         self.mine.lock().unwrap().insert(event.id.clone());
         self.ui.event(&event);
         Ok(event)
@@ -570,10 +611,11 @@ impl council::Host for RealHost {
             system.push_str(&usage);
         }
         let transcript = prompt::transcript(&events, agent.id);
+        let files = crate::attach::files_for(&events, &self.store.files_dir(conv));
         let ws_path = workspace.map(PathBuf::from);
         let data = self.data.clone();
         Box::pin(async move {
-            let reply = agents::run_with_usage(agent, access, ws_path.as_deref(), &system, &transcript, &cancel).await;
+            let reply = agents::run_with_files(agent, access, ws_path.as_deref(), &system, &transcript, &files, &cancel).await;
             if let Some(model) = reply.as_ref().ok().and_then(|r| r.model.as_deref()) {
                 record_model(&data, agent.id, model);
             }

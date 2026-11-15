@@ -696,8 +696,25 @@ pub struct AgentReply {
 
 /// The exact command-line arguments for one turn. `workdir` is the project folder when the AI has
 /// access to one, otherwise an empty temporary folder; `access` is already "chat" in that case.
+#[cfg(test)]
 pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, system: &str, prompt: &str) -> Plan {
+    plan_with_files(kind, access, workdir, reply_file, system, prompt, &crate::attach::Files::default())
+}
+
+/// `plan`, letting the AI open the conversation's attached files: Codex gets the pictures on its
+/// command line; Claude Code, Antigravity and the Gemini CLI may read the files folder. (Claude
+/// Code, otherwise without tools in "chat", gets its Read tool for that folder alone.)
+pub fn plan_with_files(
+    kind: Kind,
+    access: Access,
+    workdir: &Path,
+    reply_file: &Path,
+    system: &str,
+    prompt: &str,
+    files: &crate::attach::Files,
+) -> Plan {
     let mut args: Vec<OsString> = Vec::new();
+    let dir = files.dir.as_ref();
     let mut push = |a: &str| args.push(a.into());
     let input = match kind {
         Kind::Codex => {
@@ -719,6 +736,13 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
             }
             push("--color");
             push("never");
+            for image in &files.images {
+                // The `=` form: `--image` takes several values and would swallow the prompt's "-".
+                let mut a = OsString::from("--image=");
+                a.push(image);
+                args.push(a);
+            }
+            let mut push = |a: &str| args.push(a.into());
             push("-C");
             args.push(workdir.into());
             args.push("-o".into());
@@ -733,7 +757,7 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
             match access {
                 Access::Chat => {
                     push("--tools");
-                    push("");
+                    push(if dir.is_some() { "Read" } else { "" });
                     push("--strict-mcp-config");
                 }
                 Access::Read => {
@@ -751,7 +775,11 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
                 Access::Own => {} // the person's own Claude Code settings and allow-lists decide
                 Access::Unrestricted => push("--dangerously-skip-permissions"),
             }
-            push("--append-system-prompt");
+            if let Some(d) = dir {
+                push("--add-dir");
+                args.push(d.into());
+            }
+            args.push("--append-system-prompt".into());
             args.push(system.into());
             prompt.to_string()
         }
@@ -776,6 +804,10 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
                     push("yolo");
                 }
             }
+            if let Some(d) = dir {
+                push("--include-directories");
+                args.push(d.into());
+            }
             format!("{system}\n\n{prompt}")
         }
         Kind::Antigravity => {
@@ -796,6 +828,11 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
                 Access::Own => {} // Antigravity's own permission settings decide
                 Access::Unrestricted => push("--dangerously-skip-permissions"),
             }
+            if let Some(d) = dir {
+                push("--add-dir");
+                args.push(d.into());
+            }
+            let mut push = |a: &str| args.push(a.into());
             push("-p");
             push("");
             let message = serde_json::json!({
@@ -831,9 +868,22 @@ pub async fn run_with_usage(
     prompt: &str,
     cancel: &CancellationToken,
 ) -> Result<AgentReply, String> {
+    run_with_files(agent, access, workspace, system, prompt, &crate::attach::Files::default(), cancel).await
+}
+
+/// `run_with_usage`, with the conversation's attached files open to the AI (see `plan_with_files`).
+pub async fn run_with_files(
+    agent: &Agent,
+    access: Access,
+    workspace: Option<&Path>,
+    system: &str,
+    prompt: &str,
+    files: &crate::attach::Files,
+    cancel: &CancellationToken,
+) -> Result<AgentReply, String> {
     let kind = effective_kind(agent);
     let path = find(kind).ok_or_else(|| format!("{} isn't installed", agent.name))?;
-    run_at_with_usage(&path, kind, access, workspace, system, prompt, cancel, RUN_TIMEOUT).await
+    run_at_with_usage(&path, kind, access, workspace, system, prompt, files, cancel, RUN_TIMEOUT).await
 }
 
 /// Text-only `run_at_with_usage` at a given CLI path and time limit; the tests drive fake CLIs
@@ -850,11 +900,9 @@ pub async fn run_at(
     cancel: &CancellationToken,
     timeout: Duration,
 ) -> Result<String, String> {
-    run_at_with_usage(
-        path, kind, access, workspace, system, prompt, cancel, timeout,
-    )
-    .await
-    .map(|reply| reply.text)
+    run_at_with_usage(path, kind, access, workspace, system, prompt, &crate::attach::Files::default(), cancel, timeout)
+        .await
+        .map(|reply| reply.text)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -865,6 +913,7 @@ async fn run_at_with_usage(
     workspace: Option<&Path>,
     system: &str,
     prompt: &str,
+    files: &crate::attach::Files,
     cancel: &CancellationToken,
     timeout: Duration,
 ) -> Result<AgentReply, String> {
@@ -876,7 +925,7 @@ async fn run_at_with_usage(
         _ => (empty.clone(), Access::Chat),
     };
     let reply_file = work.join("reply.txt");
-    let plan = plan(kind, access, &dir, &reply_file, system, prompt);
+    let plan = plan_with_files(kind, access, &dir, &reply_file, system, prompt, files);
     let result = execute(path, kind, &dir, &reply_file, plan, cancel, timeout).await;
     let _ = std::fs::remove_dir_all(&work);
     result

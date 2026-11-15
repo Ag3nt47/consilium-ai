@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ACCESS_LEVELS, api, FORECAST_SITE, IN_APP, onEvent, onTurn, senderName, type Access, type AgentInfo, type CheckResult, type CliInstall, type Council, type ChatEvent, type Conversation, type ResetForecast, type TurnState, type UsageWindow } from "./api";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { ACCESS_LEVELS, api, FORECAST_SITE, IN_APP, onEvent, onTurn, senderName, type Access, type AgentInfo, type CheckResult, type CliInstall, type Council, type ChatEvent, type Conversation, type ResetForecast, type TurnState, type UsageWindow, type Attachment } from "./api";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
@@ -98,6 +99,14 @@ function MessageBody({ text }: { text: string }) {
 function agentState(a: AgentInfo): "ready" | "signin" | "missing" | "benched" {
   if (a.available && a.benched_until && a.benched_until > Date.now()) return "benched";
   return a.available ? "ready" : a.path ? "signin" : "missing";
+}
+
+function attachmentIcon(kind: string): string {
+  return kind === "image" ? "🖼" : kind === "pdf" ? "📕" : kind === "text" ? "📄" : "📎";
+}
+
+function fileSize(bytes: number): string {
+  return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : bytes >= 1024 ? `${Math.round(bytes / 1024)} KB` : `${bytes} B`;
 }
 
 /** The soonest reset among `windows` that is still ahead. */
@@ -238,6 +247,9 @@ export default function App() {
   const [events, setEvents] = useState<ChatEvent[]>([]);
   const [turn, setTurn] = useState<TurnState | null>(null);
   const [draft, setDraft] = useState(IN_APP ? "" : demoDraft);
+  /** Files waiting to go with the next message. */
+  const [pending, setPending] = useState<Attachment[]>([]);
+  const [dropping, setDropping] = useState(false);
   const [targets, setTargets] = useState<string[]>(["gpt", "claude"]);
   const [discuss, setDiscuss] = useState(!IN_APP);
   const [rounds, setRounds] = useState(3);
@@ -393,18 +405,74 @@ export default function App() {
 
   // Sending while the AIs are answering doesn't interrupt them: they read it and carry on. Stop interrupts.
   async function send() {
-    if (!current || !draft.trim()) return;
+    if (!current || (!draft.trim() && !pending.length)) return;
     setError(null);
     const text = draft;
+    const files = pending;
     setDraft("");
+    setPending([]);
     try {
       const to = targets.filter((t) => members.some((m) => m.id === t));
-      await api.send(current, text, to, discuss ? rounds : 1);
+      await api.send(current, text, to, discuss ? rounds : 1, false, files);
     } catch (e) {
       setDraft(text);
+      setPending(files);
       setError(String(e));
     }
   }
+
+  async function attachPaths(paths: string[]) {
+    if (!current || !paths.length) return;
+    try {
+      const added = await api.attachFiles(current, paths);
+      setPending((p) => [...p, ...added]);
+    } catch (e) {
+      setError(`Couldn't attach: ${e}`);
+    }
+  }
+
+  async function attachPicked() {
+    attachPaths(await api.pickFiles());
+  }
+
+  // Pasted files (a screenshot, say) are attached; pasted text goes into the message as usual.
+  async function attachPasted(files: File[]) {
+    if (!current) return;
+    for (const f of files) {
+      try {
+        const data = Array.from(new Uint8Array(await f.arrayBuffer()));
+        const name = f.name && f.name !== "image.png" ? f.name : `pasted-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.${f.type.split("/")[1] || "png"}`;
+        const a = await api.attachData(current, name, data);
+        setPending((p) => [...p, a]);
+      } catch (e) {
+        setError(`Couldn't attach ${f.name || "the pasted file"}: ${e}`);
+      }
+    }
+  }
+
+  // Files dragged onto the window are attached to the next message.
+  const attachRef = useRef(attachPaths);
+  attachRef.current = attachPaths;
+  useEffect(() => {
+    if (!IN_APP) return;
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === "over" || p.type === "enter") setDropping(true);
+        else if (p.type === "leave") setDropping(false);
+        else if (p.type === "drop") {
+          setDropping(false);
+          attachRef.current(p.paths);
+        }
+      })
+      .then((u) => (unlisten = u))
+      .catch(() => undefined);
+    return () => unlisten?.();
+  }, []);
+
+  // Attachments belong to the conversation they were made in.
+  useEffect(() => setPending([]), [current]);
 
   async function retryAgent(a: AgentInfo) {
     await api.unbench(a.id).catch(() => undefined);
@@ -819,6 +887,15 @@ export default function App() {
                   )}
                   <span className="when">{time(e.ts)}</span>
                 </div>
+                {e.attachments && e.attachments.length > 0 && (
+                  <div className="attachments">
+                    {e.attachments.map((a) => (
+                      <button key={a.path} className="attachment" title={`Open ${a.name}`} onClick={() => current && api.openAttachment(current, a).catch((err) => setError(String(err)))}>
+                        {attachmentIcon(a.kind)} {a.name} <small>{fileSize(a.size)}</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <MessageBody text={e.text} />
                 {e.add_ai?.filter((id) => agents.some((a) => a.id === id && !a.member)).map((id) => {
                   const a = agents.find((x) => x.id === id)!;
@@ -848,7 +925,7 @@ export default function App() {
           <div ref={endRef} />
         </section>
 
-        <footer className="composer">
+        <footer className={`composer ${dropping ? "dropping" : ""}`}>
           {error && (
             <div className="error" onClick={() => setError(null)}>
               {error}
@@ -881,10 +958,29 @@ export default function App() {
               </label>
             )}
           </div>
+          {pending.length > 0 && (
+            <div className="attachments pending">
+              {pending.map((a) => (
+                <span key={a.path} className="attachment" title={a.kind === "text" ? "The AIs read its text" : a.kind === "image" || a.kind === "pdf" ? "AIs that can open it look at it" : "AIs with access can open it"}>
+                  {attachmentIcon(a.kind)} {a.name} <small>{fileSize(a.size)}</small>
+                  <button className="link" onClick={() => setPending((p) => p.filter((x) => x.path !== a.path))} title="Remove" aria-label={`Remove ${a.name}`}>
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           <div className="composer-row">
             <textarea
               value={draft}
-              placeholder="Message the council…  (Enter to send, Shift+Enter for a new line)"
+              onPaste={(e) => {
+                const files = Array.from(e.clipboardData.files);
+                if (files.length) {
+                  if (!e.clipboardData.getData("text")) e.preventDefault();
+                  attachPasted(files);
+                }
+              }}
+              placeholder="Message the council…  (Enter to send, Shift+Enter for a new line; drop or paste files to attach)"
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -895,6 +991,9 @@ export default function App() {
               rows={3}
             />
             <div className="send-buttons">
+              <button className="btn ghost" onClick={attachPicked} title="Attach files: documents, Word files, pictures, PDFs, code" aria-label="Attach files">
+                📎
+              </button>
               {busy && (
                 <button className="btn stop" onClick={() => current && api.stop(current)} title="Stop the AIs now">
                   Stop
@@ -903,7 +1002,7 @@ export default function App() {
               <button
                 className="btn primary"
                 onClick={send}
-                disabled={!draft.trim()}
+                disabled={!draft.trim() && !pending.length}
                 title={busy ? "Add this to the discussion; the AIs read it without being interrupted (Enter)" : "Send (Enter)"}
               >
                 Send

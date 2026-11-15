@@ -90,6 +90,9 @@ pub struct Event {
     /// Token counts reported by the provider for the turn that produced this event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
+    /// Files the human attached to this message (see `attach`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::attach::Attachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -184,6 +187,11 @@ impl Store {
 
     fn turn_lock_path(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.turn.lock"))
+    }
+
+    /// Where this conversation's attached files are kept.
+    pub fn files_dir(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("{id}.files"))
     }
 
     fn stop_path(&self, id: &str) -> PathBuf {
@@ -314,6 +322,7 @@ impl Store {
         let _ = fs::remove_file(self.turn_lock_path(id));
         let _ = fs::remove_file(self.append_lock_path(id));
         let _ = fs::remove_file(self.stop_path(id));
+        let _ = fs::remove_dir_all(self.files_dir(id));
         Ok(())
     }
 
@@ -347,6 +356,17 @@ impl Store {
         self.append_with_usage(id, sender, kind, to, text, None)
     }
 
+    /// A message from the human with attached files (already saved in `files_dir`).
+    pub fn append_with_attachments(
+        &self,
+        id: &str,
+        to: Vec<String>,
+        text: &str,
+        attachments: Vec<crate::attach::Attachment>,
+    ) -> Result<Event, String> {
+        self.append_full(id, "human", "message", to, text, None, attachments)
+    }
+
     pub fn append_with_usage(
         &self,
         id: &str,
@@ -355,6 +375,20 @@ impl Store {
         to: Vec<String>,
         text: &str,
         usage: Option<TokenUsage>,
+    ) -> Result<Event, String> {
+        self.append_full(id, sender, kind, to, text, usage, vec![])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_full(
+        &self,
+        id: &str,
+        sender: &str,
+        kind: &str,
+        to: Vec<String>,
+        text: &str,
+        usage: Option<TokenUsage>,
+        attachments: Vec<crate::attach::Attachment>,
     ) -> Result<Event, String> {
         Self::check(id)?;
         let appending = self.appending.lock().unwrap();
@@ -385,6 +419,7 @@ impl Store {
             requests: if kind == "message" { requests_in(text) } else { vec![] },
             add_ai: if kind == "message" && sender != "human" { add_ai_in(text) } else { vec![] },
             usage,
+            attachments,
         };
         let mut line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
         line.push('\n');
