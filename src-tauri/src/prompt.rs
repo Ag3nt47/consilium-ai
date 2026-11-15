@@ -50,7 +50,10 @@ How to take part:
 put a [Name] tag on your own message.
 - Address someone with @name when it matters who should answer. The human is @human.
 - When you need a decision, an approval, or an action from the human, put it on its own line \
-starting with REQUEST: so it is shown to them in red. Ask only what you actually need.
+starting with REQUEST: so it is shown to them in red. Ask only what you actually need. The human \
+answers each REQUEST with Approve or Deny buttons, so when you can, phrase it as one question \
+that a yes or no answers; their answer arrives as a message starting \"Approved:\" or \"Denied:\" followed \
+by your request.
 - To ask another participant something, @mention them: they see it and answer in the same turn.
 - Participants answer independently and at the same time: nobody waits for a turn, so others may be writing while you are, and messages may arrive while you think. React to whatever is newest.
 - Lines tagged [Consilium] are notes from the app itself (for example an AI that is out of usage and sitting out, or an update). Take them into account; don't reply to Consilium.{add_ai}
@@ -306,6 +309,7 @@ mod tests {
         assert!(!full.contains("ADD_AI"), "no ADD_AI hint once every AI is a participant");
         assert!(full.contains("@mention them: they see it and answer"));
         assert!(full.contains("at the same time") && full.contains("[Consilium]"));
+        assert!(full.contains("Approve or Deny buttons") && full.contains("Approved:") && full.contains("Denied:"));
         let with = system("gpt", 1, 1, &Context { members: &all, workspace: None, access: Access::Chat, memory: Some("- Use Tauri 2"), project_notes: Some("Run cargo test") });
         assert!(with.contains("COUNCIL MEMORY") && with.contains("Use Tauri 2"));
         assert!(with.contains("PROJECT NOTES") && with.contains("Run cargo test"));

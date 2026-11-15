@@ -225,6 +225,20 @@ fn delete_conversation(state: State<AppState>, id: String) -> Result<(), String>
     state.engine.store.delete(&id)
 }
 
+/// Voice chat changes how every AI should answer, so switching it posts a Consilium note that all
+/// of them read. The UI works out whether voice is on from the latest of these notes.
+const VOICE_ON: &str = "Voice chat is on: the human hears your replies read aloud and speaks their messages, \
+which arrive transcribed and may contain recognition mistakes. Answer in short, natural spoken sentences, \
+under about 80 words unless asked for more. Don't use markdown, code blocks, tables, lists or URLs; \
+describe code and file changes in words. Keep REQUEST: lines short yes/no questions.";
+const VOICE_OFF: &str = "Voice chat is off: the human is reading and typing again. Write normally.";
+
+#[tauri::command]
+fn set_voice(state: State<AppState>, id: String, on: bool) -> Result<Event, String> {
+    let text = if on { VOICE_ON } else { VOICE_OFF };
+    state.engine.note(&id, text)
+}
+
 #[tauri::command]
 fn export_markdown(state: State<AppState>, id: String) -> Result<String, String> {
     let meta = state.engine.store.meta(&id)?;
@@ -404,6 +418,7 @@ pub fn run() {
             rename_conversation,
             delete_conversation,
             export_markdown,
+            set_voice,
             send_message,
             stop,
             running,

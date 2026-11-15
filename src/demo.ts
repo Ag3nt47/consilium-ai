@@ -150,6 +150,8 @@ export const demoApi = {
   rename: async () => conversations[0],
   remove: async () => undefined,
   exportMarkdown: async () => "",
+  setVoice: async (_id: string, on: boolean) =>
+    ev("consilium", on ? "Voice chat is on." : "Voice chat is off.", 6, "system"),
   send: async () => state.events[0],
   stop: async () => true,
   running: async () => (state.thinking ? [CONV] : []),

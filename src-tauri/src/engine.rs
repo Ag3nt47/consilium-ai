@@ -449,7 +449,13 @@ impl Engine {
                 self.journal.finish(&p.conversation, "");
                 p.turn = uuid::Uuid::new_v4().to_string();
             }
-            let _ = self.note(&p.conversation, "Consilium restarted; the council is carrying on where it left off.");
+            let _ = self.note(
+                &p.conversation,
+                "Consilium restarted; the council is carrying on where it left off. If you were cut off \
+before posting your reply, your earlier work may already be partly on disk: check `git status` and \
+`git diff` in the folders you were working in, continue from there instead of starting over, and \
+don't repeat changes that are already made.",
+            );
             let cursor = self.store.load(&p.conversation).unwrap_or_default().last().map_or(0, |e| e.seq);
             let mut running = self.running.lock().unwrap();
             if running.contains_key(&p.conversation) {

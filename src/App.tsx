@@ -22,11 +22,13 @@ import {
   type TurnState,
   type UsageWindow,
 } from "./api";
+import { canListen, canSpeak, Listener, Speaker, voiceOn } from "./voice";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const THEMES = [
   { id: "consilium", name: "Consilium", note: "Indigo, ivory and gold" },
+  { id: "glass", name: "visionOS Glass", note: "Frosted translucent glass, ambient glow" },
   { id: "cyber", name: "Cyber", note: "From the UI Design Bundle" },
   { id: "slate", name: "Slate", note: "From the UI Design Bundle" },
   { id: "crt", name: "CRT", note: "Green phosphor terminal" },
@@ -94,8 +96,45 @@ function Inline({ text }: { text: string }) {
   );
 }
 
-/** Message text with REQUEST: lines shown as red request callouts. */
-function MessageBody({ text }: { text: string }) {
+/** The human's answer to a request, as sent by the Approve and Deny buttons. */
+function decisionText(request: string, approved: boolean): string {
+  return `${approved ? "Approved" : "Denied"}: ${request.trim()}`;
+}
+
+function requestKey(eventId: string, line: number): string {
+  return `${eventId}:${line}`;
+}
+
+/**
+ * Match each human button answer to the request cards that existed when it was sent.
+ * Keeping event-specific keys means a later request with the same wording still gets fresh buttons.
+ */
+function answeredRequests(events: ChatEvent[]): Map<string, boolean> {
+  const out = new Map<string, boolean>();
+  const waiting = new Map<string, string[]>();
+  for (const e of events) {
+    if (e.kind !== "message") continue;
+    if (e.sender !== "human") {
+      for (const [line, text] of e.text.split("\n").entries()) {
+        const request = /^\s*REQUEST:\s*(.+)$/i.exec(text)?.[1].trim();
+        if (!request) continue;
+        waiting.set(request, [...(waiting.get(request) ?? []), requestKey(e.id, line)]);
+      }
+      continue;
+    }
+    const answer = /^(Approved|Denied):\s*([\s\S]+)$/.exec(e.text.trim());
+    if (!answer) continue;
+    for (const key of waiting.get(answer[2].trim()) ?? []) out.set(key, answer[1] === "Approved");
+    waiting.delete(answer[2].trim());
+  }
+  return out;
+}
+
+type Decide = (key: string, request: string, requester: string, approved: boolean) => void;
+
+/** Message text with REQUEST: lines shown as red request callouts, with Approve/Deny buttons when `decide` is given. */
+function MessageBody({ event, answered, deciding, decide }: { event: ChatEvent; answered?: Map<string, boolean>; deciding?: Set<string>; decide?: Decide }) {
+  const text = event.text;
   const lines = text.split("\n");
   return (
     <div className="body">
@@ -110,15 +149,39 @@ function MessageBody({ text }: { text: string }) {
         }
         const m = /^\s*REQUEST:\s*(.*)$/i.exec(line);
         if (m && m[1].trim()) {
+          const key = requestKey(event.id, i);
           return (
             <div key={i} className="request">
               <span className="request-label">REQUEST:</span> <Inline text={m[1]} />
+              {decide && (
+                <RequestActions
+                  answer={answered?.get(key)}
+                  pending={deciding?.has(key)}
+                  onDecide={(ok) => decide(key, m[1], event.sender, ok)}
+                />
+              )}
             </div>
           );
         }
         return <div key={i} className={line.trim() ? "line" : "gap"}><Inline text={line} /></div>;
       })}
     </div>
+  );
+}
+
+function RequestActions({ answer, pending, onDecide }: { answer?: boolean; pending?: boolean; onDecide: (approved: boolean) => void }) {
+  if (answer !== undefined) {
+    return <span className={`request-answer ${answer ? "approved" : "denied"}`} aria-live="polite">{answer ? "✓ Approved" : "✕ Denied"}</span>;
+  }
+  return (
+    <span className="request-actions">
+      <button type="button" className="btn small-btn approve" disabled={pending} onClick={() => onDecide(true)} aria-label="Approve this request">
+        {pending ? "Sending…" : "Approve"}
+      </button>
+      <button type="button" className="btn small-btn deny" disabled={pending} onClick={() => onDecide(false)} aria-label="Deny this request">
+        Deny
+      </button>
+    </span>
   );
 }
 
@@ -222,14 +285,46 @@ function resetTime(ts: number): string {
   return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
 }
 
-function AgentDot({ agent, onSetup, onRetry, check, forecast }: { agent: AgentInfo; onSetup: (a: AgentInfo) => void; onRetry: (a: AgentInfo) => void; check?: CheckResult | "running"; forecast?: ResetForecast | null }) {
+function AgentDot({
+  agent,
+  onSetup,
+  onRetry,
+  check,
+  forecast,
+  isWorking,
+  isFrozen,
+}: {
+  agent: AgentInfo;
+  onSetup: (a: AgentInfo) => void;
+  onRetry: (a: AgentInfo) => void;
+  check?: CheckResult | "running";
+  forecast?: ResetForecast | null;
+  isWorking?: boolean;
+  isFrozen?: boolean;
+}) {
   const state = agentState(agent);
-  const label = { ready: "Ready", signin: "Not signed in", missing: "Not installed", benched: "Out of usage" }[state];
+  const dotClass = isFrozen
+    ? "dot-frozen"
+    : isWorking
+    ? "dot-working"
+    : `dot-${state}`;
+  const label = isFrozen
+    ? "Stalled / frozen"
+    : isWorking
+    ? "Working…"
+    : { ready: "Ready", signin: "Not signed in", missing: "Not installed", benched: "Out of usage" }[state];
   return (
-    <div className={`agent agent-${agent.id}`} title={agent.hint || `${agent.tool} ${agent.version ?? ""}`}>
-      <span className={`dot dot-${state}`} />
+    <div
+      className={`agent agent-${agent.id}`}
+      title={isFrozen ? "Stalled / waiting on input" : isWorking ? "Generating response…" : agent.hint || `${agent.tool} ${agent.version ?? ""}`}
+    >
+      <span className={`dot ${dotClass}`} />
       <span className="agent-name">{agent.name}</span>
-      {state === "ready" ? (
+      {isFrozen ? (
+        <span className="agent-state" style={{ color: "var(--danger)" }}>Stalled</span>
+      ) : isWorking ? (
+        <span className="agent-state" style={{ color: "var(--accent)" }}>Working…</span>
+      ) : state === "ready" ? (
         <span className="agent-state">{label}</span>
       ) : state === "benched" ? (
         <span className="agent-state benched" title="It ran out of usage. The council carries on without it until its limit resets.">
@@ -283,6 +378,18 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(!IN_APP && demoSettings);
   const [showAddAi, setShowAddAi] = useState(!IN_APP && demoAddAi);
   const [showUsage, setShowUsage] = useState(false);
+  const [showPalette, setShowPalette] = useState(false);
+  // Voice chat: whether replies are being read aloud right now, and what the recogniser is hearing.
+  const [speaking, setSpeaking] = useState(false);
+  const [heard, setHeard] = useState("");
+  const voiceRef = useRef(false);
+  const agentsRef = useRef<AgentInfo[]>([]);
+  const speakerRef = useRef<Speaker | null>(null);
+  if (!speakerRef.current) speakerRef.current = new Speaker(setSpeaking);
+  const sendTextRef = useRef<(text: string) => void>(() => undefined);
+  const [paletteQuery, setPaletteQuery] = useState("");
+  const [paletteIndex, setPaletteIndex] = useState(0);
+  const [turnStartTime, setTurnStartTime] = useState<number | null>(null);
   const [tokenReport, setTokenReport] = useState<TokenUsageReport | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
   const [checks, setChecks] = useState<Record<string, CheckResult | "running">>({});
@@ -294,6 +401,7 @@ export default function App() {
   const [updateNote, setUpdateNote] = useState<string>("");
   const [toast, setToast] = useState<string | null>(null);
   const [agentsRefreshing, setAgentsRefreshing] = useState(false);
+  const [decidingRequests, setDecidingRequests] = useState<Set<string>>(() => new Set());
   const currentRef = useRef<string | null>(null);
   const agentRefreshRef = useRef<Promise<void> | null>(null);
   const usageRefreshRef = useRef(false);
@@ -385,13 +493,24 @@ export default function App() {
     const un1 = onEvent((e) => {
       if (e.conversation === currentRef.current) {
         setEvents((prev) => (prev.some((p) => p.id === e.id) ? prev : [...prev, e]));
+        // In voice chat, AI replies are read aloud as they arrive.
+        if (voiceRef.current && e.kind === "message" && e.sender !== "human") {
+          speakerRef.current?.say(e.sender, senderName(e.sender, agentsRef.current), e.text);
+        }
       }
       refreshList();
       // A note from Consilium (an AI ran out of usage, or is back) changes the AIs' status.
       if (e.sender === "consilium") refreshAgents();
     });
     const un2 = onTurn((t) => {
-      if (t.conversation === currentRef.current) setTurn(t.state === "running" ? t : null);
+      if (t.conversation === currentRef.current) {
+        setTurn(t.state === "running" ? t : null);
+        if (t.state === "running") {
+          setTurnStartTime((prev) => prev ?? Date.now());
+        } else {
+          setTurnStartTime(null);
+        }
+      }
       if (t.state === "idle") {
         refreshAgents();
         loadTokenUsage();
@@ -430,6 +549,23 @@ export default function App() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: prefs.effects ? "smooth" : "auto" });
   }, [events, turn, prefs.effects]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setShowPalette((prev) => {
+          if (!prev) {
+            setPaletteQuery("");
+            setPaletteIndex(0);
+          }
+          return !prev;
+        });
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   useEffect(() => {
     if (showUsage) loadTokenUsage(current);
@@ -532,6 +668,67 @@ export default function App() {
 
   // Attachments belong to the conversation they were made in.
   useEffect(() => setPending([]), [current]);
+
+  // A spoken message is sent as soon as the human pauses.
+  sendTextRef.current = (text: string) => {
+    if (!current) return;
+    setHeard("");
+    const to = targets.filter((t) => members.some((m) => m.id === t));
+    api.send(current, text, to, discuss ? rounds : 1).catch((e) => setError(String(e)));
+  };
+
+  const voice = useMemo(() => voiceOn(events), [events]);
+  voiceRef.current = voice;
+  agentsRef.current = agents;
+
+  async function switchVoice(on: boolean) {
+    if (!current) return;
+    setError(null);
+    if (!on) speakerRef.current?.stop();
+    try {
+      await api.setVoice(current, on);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  // Listen while voice chat is on, except while a reply is being read aloud (so the AIs don't hear themselves).
+  useEffect(() => {
+    if (!voice || speaking || !canListen) return;
+    const l = new Listener(setHeard, (t) => sendTextRef.current(t), (m) => setError(m));
+    l.start();
+    return () => {
+      l.stop();
+      setHeard("");
+    };
+  }, [voice, speaking, current]);
+
+  // Leaving voice chat or the conversation stops any speech.
+  useEffect(() => {
+    if (!voice) speakerRef.current?.stop();
+  }, [voice]);
+  useEffect(() => () => speakerRef.current?.stop(), [current]);
+
+  // Approve/Deny on a REQUEST callout sends the decision as the human's message, quoting the request.
+  async function decide(key: string, request: string, requester: string, approved: boolean) {
+    if (!current) return;
+    setError(null);
+    setDecidingRequests((pending) => new Set(pending).add(key));
+    try {
+      const selected = targets.filter((t) => members.some((m) => m.id === t));
+      const to = members.some((m) => m.id === requester) ? [requester] : selected;
+      await api.send(current, decisionText(request, approved), to, discuss ? rounds : 1);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDecidingRequests((pending) => {
+        const next = new Set(pending);
+        next.delete(key);
+        return next;
+      });
+    }
+  }
+  const answered = useMemo(() => answeredRequests(events), [events]);
 
   async function retryAgent(a: AgentInfo) {
     await api.unbench(a.id).catch(() => undefined);
@@ -785,6 +982,35 @@ export default function App() {
   const toggleTarget = (id: string) =>
     setTargets((t) => (t.includes(id) ? t.filter((x) => x !== id) : [...t, id]));
 
+  const paletteCommands = useMemo(() => [
+    { id: "new-conv", name: "New Conversation", hint: "Start a fresh topic", run: () => { newConversation(); } },
+    { id: "usage", name: "Show Token Usage", hint: "Conversation & daily totals", run: () => openUsage() },
+    { id: "self-check", name: "Run Self-Check", hint: "Probe all active council models", run: () => runSelfCheck() },
+    { id: "manage-ais", name: "Add / Remove AIs", hint: "Council membership", run: () => setShowAddAi(true) },
+    { id: "settings", name: "Open Settings", hint: "Theme & access preferences", run: () => {
+        setShowSettings(true);
+        api.getMemory().then((m) => {
+          setMemoryText(m);
+          setMemoryDirty(false);
+        });
+      }
+    },
+    { id: "full-capacity", name: "Full Capacity Mode", hint: "Enable unrestricted file & shell access", run: () => fullCapacity() },
+    { id: "discuss", name: discuss ? "Disable Discuss Mode" : "Enable Discuss Mode", hint: "Multi-round debate", run: () => toggleDiscuss(!discuss) },
+    { id: "theme-glass", name: "Theme: visionOS Glass", hint: "Frosted translucent glass", run: () => setPrefs((p) => ({ ...p, theme: "glass" })) },
+    { id: "theme-consilium", name: "Theme: Consilium", hint: "Default indigo and ivory", run: () => setPrefs((p) => ({ ...p, theme: "consilium" })) },
+    { id: "theme-cyber", name: "Theme: Cyber", hint: "Cyberpunk blue-teal", run: () => setPrefs((p) => ({ ...p, theme: "cyber" })) },
+    { id: "theme-slate", name: "Theme: Slate", hint: "Clean slate dark", run: () => setPrefs((p) => ({ ...p, theme: "slate" })) },
+    { id: "theme-crt", name: "Theme: CRT", hint: "Green phosphor terminal", run: () => setPrefs((p) => ({ ...p, theme: "crt" })) },
+    { id: "theme-retro84", name: "Theme: Retro '84", hint: "Neon grid, scanlines, glow", run: () => setPrefs((p) => ({ ...p, theme: "retro84" })) },
+  ], [discuss, openUsage]);
+
+  const filteredCommands = useMemo(() => {
+    const q = paletteQuery.trim().toLowerCase();
+    if (!q) return paletteCommands;
+    return paletteCommands.filter((c) => c.name.toLowerCase().includes(q) || (c.hint && c.hint.toLowerCase().includes(q)));
+  }, [paletteCommands, paletteQuery]);
+
   return (
     <div className="app">
       <div className="fx-scanlines" aria-hidden />
@@ -840,9 +1066,22 @@ export default function App() {
               </button>
             </span>
           </div>
-          {members.map((a) => (
-            <AgentDot key={a.id} agent={a} onSetup={setupAgent} onRetry={retryAgent} check={checks[a.id]} forecast={forecast} />
-          ))}
+          {members.map((a) => {
+            const isWorking = busy && (turn?.agents?.includes(a.id) ?? (turn?.agent === a.id));
+            const isFrozen = Boolean(isWorking && turnStartTime && Date.now() - turnStartTime > 25_000);
+            return (
+              <AgentDot
+                key={a.id}
+                agent={a}
+                onSetup={setupAgent}
+                onRetry={retryAgent}
+                check={checks[a.id]}
+                forecast={forecast}
+                isWorking={isWorking}
+                isFrozen={isFrozen}
+              />
+            );
+          })}
         </div>
         <div className="sidebar-actions">
           <button className="btn ghost" onClick={() => setShowAddAi(true)} title="Add or remove AIs">
@@ -881,6 +1120,18 @@ export default function App() {
             <h1 onDoubleClick={renameCurrent} title="Double-click to rename">
               {meta?.title ?? "Consilium"}
             </h1>
+            <button
+              className="link hover-faint"
+              onClick={() => {
+                setPaletteQuery("");
+                setPaletteIndex(0);
+                setShowPalette(true);
+              }}
+              title="Open command palette (Cmd+K)"
+              style={{ fontSize: "11px", padding: "2px 7px", border: "1px solid var(--border)", borderRadius: "4px" }}
+            >
+              ⌘K
+            </button>
             <div className="workspace">
               {meta?.workspace ? (
                 <>
@@ -970,7 +1221,7 @@ export default function App() {
                     ))}
                   </div>
                 )}
-                <MessageBody text={e.text} />
+                <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={e.sender === "human" ? undefined : decide} />
                 {e.add_ai?.filter((id) => agents.some((a) => a.id === id && !a.member)).map((id) => {
                   const a = agents.find((x) => x.id === id)!;
                   return (
@@ -1015,6 +1266,14 @@ export default function App() {
               </label>
             ))}
             <span className="spacer" />
+            <button
+              className={`btn small voice-toggle ${voice ? "on" : ""}`}
+              onClick={() => switchVoice(!voice)}
+              disabled={!current}
+              title={voice ? "Back to reading and typing; the AIs write normally again" : "Speak to the council and hear the AIs' replies read aloud; the AIs switch to short spoken answers"}
+            >
+              {voice ? "Switch to Text Chat" : "Switch to Voice Chat"}
+            </button>
             <label className={`chip ${discuss ? "on" : ""}`} title="Let the AIs respond to each other for several rounds">
               <input type="checkbox" checked={discuss} onChange={(e) => toggleDiscuss(e.target.checked)} />
               Discuss
@@ -1044,6 +1303,26 @@ export default function App() {
               ))}
             </div>
           )}
+          {voice && (
+            <div className={`voice-bar ${speaking ? "voice-speaking" : "voice-listening"}`}>
+              <span className="voice-dot" />
+              {speaking ? (
+                <>
+                  <span>Reading the replies aloud…</span>
+                  <button className="btn small" onClick={() => speakerRef.current?.stop()}>
+                    Skip
+                  </button>
+                </>
+              ) : canListen ? (
+                <span className="voice-heard">{heard || "Listening… speak, and your message is sent when you pause."}</span>
+              ) : (
+                <span>
+                  Speech recognition isn't available in this window. Press the Fn key twice (macOS Dictation) in the message box to speak, then Enter to send.
+                </span>
+              )}
+              {!canSpeak && <span className="voice-warn">Read-aloud isn't available on this system.</span>}
+            </div>
+          )}
           <div className="composer-row">
             <textarea
               value={draft}
@@ -1069,7 +1348,14 @@ export default function App() {
                 📎
               </button>
               {busy && (
-                <button className="btn stop" onClick={() => current && api.stop(current)} title="Stop the AIs now">
+                <button
+                  className="btn stop"
+                  onClick={() => {
+                    speakerRef.current?.stop();
+                    if (current) api.stop(current);
+                  }}
+                  title="Stop the AIs now"
+                >
                   Stop
                 </button>
               )}
@@ -1390,6 +1676,62 @@ export default function App() {
               <button className="btn primary" onClick={() => setShowUsage(false)}>
                 Done
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showPalette && (
+        <div className="palette-backdrop" onClick={() => setShowPalette(false)}>
+          <div className="palette-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="palette-input-wrap">
+              <input
+                ref={(el) => el?.focus()}
+                className="palette-input"
+                placeholder="Type a command or search actions… (Esc to exit)"
+                value={paletteQuery}
+                onChange={(e) => {
+                  setPaletteQuery(e.target.value);
+                  setPaletteIndex(0);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setShowPalette(false);
+                  } else if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setPaletteIndex((i) => Math.min(filteredCommands.length - 1, i + 1));
+                  } else if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setPaletteIndex((i) => Math.max(0, i - 1));
+                  } else if (e.key === "Enter") {
+                    e.preventDefault();
+                    if (filteredCommands[paletteIndex]) {
+                      filteredCommands[paletteIndex].run();
+                      setShowPalette(false);
+                    }
+                  }
+                }}
+              />
+              <span className="palette-shortcut-badge">Esc</span>
+            </div>
+            <div className="palette-list">
+              {filteredCommands.length === 0 ? (
+                <div className="palette-empty">No matching actions found</div>
+              ) : (
+                filteredCommands.map((cmd, idx) => (
+                  <button
+                    key={cmd.id}
+                    className={`palette-item ${idx === paletteIndex ? "active" : ""}`}
+                    onClick={() => {
+                      cmd.run();
+                      setShowPalette(false);
+                    }}
+                    onMouseEnter={() => setPaletteIndex(idx)}
+                  >
+                    <span>{cmd.name}</span>
+                    {cmd.hint && <small>{cmd.hint}</small>}
+                  </button>
+                ))
+              )}
             </div>
           </div>
         </div>

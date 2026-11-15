@@ -176,6 +176,7 @@ const appApi = {
   rename: (id: string, title: string) => invoke<Conversation>("rename_conversation", { id, title }),
   remove: (id: string) => invoke<void>("delete_conversation", { id }),
   exportMarkdown: (id: string) => invoke<string>("export_markdown", { id }),
+  setVoice: (id: string, on: boolean) => invoke<ChatEvent>("set_voice", { id, on }),
   /** Sent while the AIs are answering, the message joins the running turn; it never stops it. */
   send: (id: string, text: string, targets: string[], rounds: number, interrupt = false, attachments: Attachment[] = []) =>
     invoke<ChatEvent>("send_message", { id, text, targets, rounds, interrupt, attachments }),
