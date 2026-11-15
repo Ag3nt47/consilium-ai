@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, type ConnectorStatus, type MessagingSetup } from "./api";
 
@@ -57,7 +58,10 @@ export function MessagingIndicator() {
         <span className="msg-mark">{mark}</span>
         <span className="msg-label">{label}</span>
       </button>
-      {open && (
+      {open &&
+        // Rendered on <body>: the top bar uses backdrop-filter in some themes, which would
+        // otherwise trap this fixed-position window inside the header and squash the layout.
+        createPortal(
         <div className="modal-backdrop" onClick={() => setOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2>Messaging</h2>
@@ -68,8 +72,9 @@ export function MessagingIndicator() {
               </button>
             </div>
           </div>
-        </div>
-      )}
+        </div>,
+          document.body,
+        )}
     </>
   );
 }
