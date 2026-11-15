@@ -7,7 +7,8 @@
 //! another engine is never offered: that change needs Update Now's restart.
 //!
 //! A newly applied page has to call `ui_loaded` within `CONFIRM`; if it doesn't (a blank or broken
-//! page), it is removed and the built-in page reloaded, so a bad update can't strand the human.
+//! page), the previous live page is restored (or the built-in page is used when there wasn't one),
+//! so a bad update can't strand the human.
 
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -68,11 +69,17 @@ impl Live {
         let _ = std::fs::create_dir_all(&ui);
         let _ = std::fs::write(ui.join("backend.txt"), BACKEND);
         let live = ui.join("live");
+        let old = ui.join("live.old");
         let active = match compatible(&live) {
             Some(_) => Some(live),
             None => {
                 let _ = std::fs::remove_dir_all(&live);
-                None
+                if compatible(&old).is_some() && std::fs::rename(&old, &live).is_ok() {
+                    Some(live)
+                } else {
+                    let _ = std::fs::remove_dir_all(&old);
+                    None
+                }
             }
         };
         let pending = active.as_ref().map(|_| Instant::now());
@@ -119,27 +126,43 @@ impl Live {
             let _ = std::fs::rename(&old, &live);
             return Err(format!("couldn't put the new page in place: {e}"));
         }
-        let _ = std::fs::remove_dir_all(&old);
         *active = Some(live);
         *self.pending.lock().unwrap() = Some(Instant::now());
         Ok(m.version)
     }
 
     pub fn confirm(&self) {
-        *self.pending.lock().unwrap() = None;
+        let Ok(active) = self.active.read() else { return };
+        let Ok(mut pending) = self.pending.lock() else { return };
+        *pending = None;
+        if let Some(live) = active.as_ref() {
+            if let Some(ui) = live.parent() {
+                let _ = std::fs::remove_dir_all(ui.join("live.old"));
+            }
+        }
     }
 
-    /// Falls back to the built-in page if the live one hasn't confirmed in time. True if it did.
+    /// Restores the previous live page, or falls back to the built-in page, if the new one hasn't
+    /// confirmed in time. True if it did.
     pub fn check(&self, data: &Path) -> bool {
-        let expired = matches!(*self.pending.lock().unwrap(), Some(t) if t.elapsed() > CONFIRM);
+        // `apply` takes these locks in the same order. Holding both prevents a late confirmation
+        // from racing with rollback and deleting the page we're about to restore.
+        let Ok(mut active) = self.active.write() else { return false };
+        let Ok(mut pending) = self.pending.lock() else { return false };
+        let expired = matches!(*pending, Some(t) if t.elapsed() > CONFIRM);
         if !expired {
             return false;
         }
-        if let Ok(mut active) = self.active.write() {
-            *active = None;
+        let ui = ui_dir(data);
+        let live = ui.join("live");
+        let old = ui.join("live.old");
+        let _ = std::fs::remove_dir_all(&live);
+        let restored = compatible(&old).is_some() && std::fs::rename(&old, &live).is_ok();
+        if !restored {
+            let _ = std::fs::remove_dir_all(&old);
         }
-        *self.pending.lock().unwrap() = None;
-        let _ = std::fs::remove_dir_all(ui_dir(data).join("live"));
+        *active = restored.then_some(live);
+        *pending = None;
         true
     }
 }
@@ -148,6 +171,14 @@ impl Live {
 fn safe(key: &str) -> Option<PathBuf> {
     let p = Path::new(key.trim_start_matches('/'));
     p.components().all(|c| matches!(c, Component::Normal(_))).then(|| p.to_path_buf())
+}
+
+/// Reads a live asset only when its resolved path remains inside the live page. This blocks both
+/// lexical traversal (`..`) and a symlink planted anywhere in the requested path.
+fn read_live_asset(dir: &Path, key: &str) -> Option<Vec<u8>> {
+    let root = std::fs::canonicalize(dir).ok()?;
+    let asset = std::fs::canonicalize(root.join(safe(key)?)).ok()?;
+    asset.starts_with(&root).then(|| std::fs::read(asset).ok()).flatten()
 }
 
 /// Serves the live page when there is one, the built-in page otherwise.
@@ -161,7 +192,7 @@ impl<R: Runtime> Assets<R> for LiveAssets<R> {
         let dir = self.live.active.read().ok().and_then(|a| a.clone());
         match dir {
             // A live page is served alone: mixing in built-in files would mix two versions.
-            Some(dir) => std::fs::read(dir.join(safe(key.as_ref())?)).ok().map(Cow::Owned),
+            Some(dir) => read_live_asset(&dir, key.as_ref()).map(Cow::Owned),
             None => self.built_in.get(key),
         }
     }
@@ -209,6 +240,23 @@ mod tests {
         assert_eq!(safe("assets/../../x"), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinks_that_leave_the_live_page() {
+        use std::os::unix::fs::symlink;
+
+        let data = temp("symlink");
+        let live = data.join("ui/live");
+        std::fs::create_dir_all(live.join("assets")).unwrap();
+        std::fs::write(live.join("inside.txt"), "inside").unwrap();
+        std::fs::write(data.join("outside.txt"), "outside").unwrap();
+        symlink(data.join("outside.txt"), live.join("assets/escape.txt")).unwrap();
+
+        assert_eq!(read_live_asset(&live, "inside.txt"), Some(b"inside".to_vec()));
+        assert_eq!(read_live_asset(&live, "assets/escape.txt"), None);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
     #[test]
     fn offers_and_applies_only_pages_built_for_this_engine() {
         let data = temp("apply");
@@ -242,16 +290,24 @@ mod tests {
     }
 
     #[test]
-    fn an_unconfirmed_page_falls_back_and_a_stale_one_is_dropped() {
+    fn an_unconfirmed_page_restores_the_previous_page_and_a_stale_one_is_dropped() {
         let data = temp("fallback");
+        page(&data.join("ui/live"), "previous", BACKEND);
         page(&data.join("ui/staged"), "c", BACKEND);
         let live = Live::open(&data);
         live.apply(&data).unwrap();
         assert!(!live.check(&data));
         *live.pending.lock().unwrap() = Some(Instant::now() - CONFIRM - Duration::from_secs(1));
         assert!(live.check(&data));
-        assert_eq!(live.version(), None);
-        assert!(!data.join("ui/live").exists());
+        assert_eq!(live.version().as_deref(), Some("previous"));
+        assert_eq!(std::fs::read_to_string(data.join("ui/live/index.html")).unwrap(), "previous");
+        assert!(!data.join("ui/live.old").exists());
+
+        page(&data.join("ui/staged"), "confirmed", BACKEND);
+        live.apply(&data).unwrap();
+        assert!(data.join("ui/live.old").exists());
+        live.confirm();
+        assert!(!data.join("ui/live.old").exists());
 
         page(&data.join("ui/live"), "d", "older-engine");
         assert_eq!(Live::open(&data).version(), None);

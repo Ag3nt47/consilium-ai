@@ -300,9 +300,9 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: screen-only updates (layout, buttons, text) now apply instantly \
-with an Apply Now button, without a restart or pausing the AIs; if a new screen fails to start, the previous one \
-comes back by itself. Changes to the engine still use Update Now.";
+const WHATS_NEW: &str = "What's new: a voice visualizer in voice chat (spectrum bars or a pulsing orb, cyan \
+while you speak, violet while an AI speaks; click it to switch); the groundwork for the Signal phone bridge; and \
+safer instant updates that bring back the previous screen if a new one fails and refuse files that point outside it.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
