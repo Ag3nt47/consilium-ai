@@ -45,6 +45,31 @@
   --request: #ff5c5c;
 }
 
+[data-theme="cybergreen"] {
+  --bg: #000302;
+  --bg-2: #010906;
+  --panel: #03130b;
+  --panel-raised: #062316;
+  --border: #146b3a;
+  --text: #86ffad;
+  --muted: #45a96a;
+  --accent: #39ff88;
+  --accent-text: #001b0c;
+  --accent-soft: #39ff8819;
+  --c-human: #b8ffcc;
+  --c-gpt: #4dffd2;
+  --c-claude: #d8ff62;
+  --c-gemini: #8cff73;
+  --danger: #ff4d6d;
+  --request: #ff335c;
+  --radius: 4px;
+  --radius-sm: 3px;
+  --font: var(--mono);
+  --brand-font: var(--mono);
+  --glow: 0 0 7px #39ff8870, 0 0 20px #39ff8825;
+  color-scheme: dark;
+}
+
 [data-theme="slate"] {
   --bg: #070e1c;
   --bg-2: #0a1324;
@@ -1026,6 +1051,12 @@ pre {
   background: linear-gradient(120deg, #0a0e14 0 45%, #36aaff 45% 70%, #69d4aa 70%);
 }
 
+[data-preview="cybergreen"] .swatch {
+  background:
+    repeating-linear-gradient(90deg, #0000 0 12px, #39ff8830 12px 13px),
+    linear-gradient(120deg, #000302 0 50%, #0b542d 50% 72%, #39ff88 72%);
+}
+
 [data-preview="slate"] .swatch {
   background: linear-gradient(120deg, #070e1c 0 45%, #62bef7 45% 70%, #fb923c 70%);
 }
@@ -1082,6 +1113,7 @@ pre {
 }
 
 [data-effects="on"][data-theme="retro84"] .fx-scanlines,
+[data-effects="on"][data-theme="cybergreen"] .fx-scanlines,
 [data-effects="on"][data-theme="crt"] .fx-scanlines {
   display: block;
   position: fixed;
@@ -1090,6 +1122,32 @@ pre {
   z-index: 40;
   background: repeating-linear-gradient(to bottom, #0000 0 2px, #0000002e 2px 3px);
   mix-blend-mode: multiply;
+}
+
+[data-effects="on"][data-theme="cybergreen"] .main {
+  background:
+    radial-gradient(circle at 78% 12%, #39ff8810, transparent 29%),
+    linear-gradient(130deg, #0000 0 72%, #39ff8808 72% 73%, #0000 73%),
+    var(--bg);
+}
+
+[data-effects="on"][data-theme="cybergreen"] .messages {
+  background:
+    linear-gradient(to top, #39ff880d, transparent 34%),
+    repeating-linear-gradient(to right, #39ff880b 0 1px, transparent 1px 48px),
+    repeating-linear-gradient(to top, #39ff8808 0 1px, transparent 1px 48px);
+}
+
+[data-effects="on"][data-theme="cybergreen"] .brand-name,
+[data-effects="on"][data-theme="cybergreen"] .who,
+[data-effects="on"][data-theme="cybergreen"] .topbar h1 {
+  text-shadow: 0 0 8px currentColor;
+}
+
+[data-effects="on"][data-theme="cybergreen"] .msg,
+[data-effects="on"][data-theme="cybergreen"] .composer,
+[data-effects="on"][data-theme="cybergreen"] .agent {
+  box-shadow: inset 0 0 18px #39ff8808, 0 0 12px #39ff880a;
 }
 
 [data-effects="on"][data-theme="retro84"] .main {
