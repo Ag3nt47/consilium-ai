@@ -52,7 +52,7 @@ human's transcribed speech after a pause. macOS Dictation is the local fallback.
 
 ## Later
 
-- **Signal & cross-workstation mobile messaging:** Mobile communication bridge (Signal CLI daemon, encrypted relay, offline Bluetooth Low Energy mesh) allowing the human to message conversations from their phone over the internet or offline Bluetooth; syncs across owned Windows and Mac workstations while ensuring phone numbers and contact metadata are scrubbed and never pushed to GitHub (see `docs/MESSAGING_BRIDGE.md`).
+- **Signal & cross-workstation mobile messaging:** A Signal CLI bridge carries messages over Signal's normal network path and syncs across owned Windows and Mac workstations. Offline Bluetooth is a separate companion-app transport because the Signal phone app does not expose a custom BLE channel. Phone numbers and contact metadata stay in local configuration and are never pushed to GitHub (see `docs/MESSAGING_BRIDGE.md`).
 - Signed and notarized installers (needs Apple Developer and Windows code-signing certificates).
 - Auto-update with signature verification.
 - iOS and Android through Tauri's mobile targets, including phone-width navigation and touch-first controls.
@@ -63,8 +63,8 @@ The blueprint's sample code targets Python, PySide6 and FastAPI. Consilium is Ta
 
 **Next, in order**
 1. Instant screen-only updates (approved; in progress).
-2. Signal phone bridge (approved). Phone buttons reuse the in-chat Approve/Deny decisions. A "launch" action may only open apps from a fixed list in local config, run without a shell, and only from the linked number.
-3. Voice visualizer: spectrum bars and a pulsing orb, a setting to pick one, cyan while the human speaks and violet while an AI speaks. The mic is never routed to the speakers.
+2. Signal phone bridge (approved). Phone buttons reuse the in-chat Approve/Deny decisions. Incoming messages are allowlisted by Signal ACI/UUID, deduplicated, and accepted only through a local-only daemon connection. A "launch" action may only open apps from a fixed list in local config and runs without a shell.
+3. Voice visualizer: spectrum bars and a pulsing orb, a setting to pick one, cyan while the human speaks and violet while an AI speaks. Microphone input can use real analyser data and is never routed to the speakers. The current browser system TTS does not expose audio samples, so AI speech uses a clearly documented speaking-state animation unless the TTS path is later changed to playable audio.
 4. Daily Bing wallpaper behind the chat, cached in the app data folder, with a dark frosted layer for readability and an off switch.
 5. Audit log drawer: every approval, update, launch and phone message, newest first, with secrets masked.
 6. Persona chips above the prompt box (Security Auditor, Code Refactor, General) that change the instructions for the next messages.
