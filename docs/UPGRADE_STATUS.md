@@ -48,8 +48,8 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Signal phone bridge, phone Approve/Deny | 🔨 | Adapter in `bridge.rs` (Gemini); not yet connected to the app |
 | Voice visualizer, bars + orb, cyan/violet | ✅ | 0.3.6. AI side is an animation: system speech has no audio samples |
 | Daily Bing wallpaper with frosted layer, off switch | ⏭ | Gemini, after Signal |
-| Audit log drawer | 🔨 | UI committed; awaiting a compatible Apply Now or full app update |
-| Persona chips above the prompt | 🔨 | UI committed; awaiting a compatible Apply Now or full app update |
+| Audit log drawer | ✅ | Applied instantly on 0.3.6 without restarting |
+| Persona chips above the prompt | ✅ | Applied instantly on 0.3.6 without restarting |
 | Phone "launch" actions | ⏭ | Fixed app list in local config, no shell |
 | Telegram / Discord | 🕓 | After Signal |
 | Quick-summon hotkey, clipboard/screenshot capture, Whisper, Ollama + HUD | 🕓 | |
