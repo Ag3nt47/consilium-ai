@@ -12,6 +12,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Puts the finished temporary file `tmp` in place of `path`. Some Windows setups (an app container
+/// or a virtualised AppData folder) refuse to rename over an existing file; then the contents are
+/// copied over instead, so the save still lands.
+pub fn replace_file(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    if fs::rename(tmp, path).is_ok() {
+        return Ok(());
+    }
+    fs::copy(tmp, path)?;
+    let _ = fs::remove_file(tmp);
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Event {
     pub id: String,
@@ -157,7 +169,7 @@ impl Store {
         let tmp = self.dir.join(format!("{}.json.tmp", meta.id));
         fs::write(&tmp, serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-        fs::rename(&tmp, self.meta_path(&meta.id)).map_err(|e| e.to_string())
+        replace_file(&tmp, &self.meta_path(&meta.id)).map_err(|e| e.to_string())
     }
 
     pub fn meta(&self, id: &str) -> Result<ConversationMeta, String> {
@@ -277,6 +289,19 @@ fn read_events(path: &Path) -> Vec<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_file_overwrites_and_removes_the_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("consilium-replace-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let (tmp, path) = (dir.join("a.json.tmp"), dir.join("a.json"));
+        fs::write(&path, "old").unwrap();
+        fs::write(&tmp, "new").unwrap();
+        replace_file(&tmp, &path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert!(!tmp.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
 
     fn temp_store() -> (Store, PathBuf) {
         let dir = std::env::temp_dir().join(format!("consilium-test-{}", uuid::Uuid::new_v4()));

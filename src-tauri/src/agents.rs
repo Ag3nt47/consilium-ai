@@ -50,6 +50,8 @@ pub struct AgentInfo {
     pub path: Option<String>,
     /// What to do if it isn't usable yet.
     pub hint: String,
+    /// When it ran out of usage, the time (ms since the epoch) its limit resets.
+    pub benched_until: Option<u64>,
 }
 
 pub struct Agent {
@@ -268,6 +270,7 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
         version: None,
         path: None,
         hint: install_hint.into(),
+        benched_until: None,
     };
     let Some(path) = find(kind) else { return info };
     info.path = Some(path.display().to_string());
@@ -460,23 +463,15 @@ async fn execute(
     let mut child = cmd.spawn().map_err(|e| format!("couldn't start {}: {e}", path.display()))?;
     let pid = child.id();
     let mut stdin = child.stdin.take().expect("stdin is piped");
-    let mut stdout = child.stdout.take().expect("stdout is piped");
-    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
     let input = plan.input;
     let writer = tokio::spawn(async move {
         let _ = stdin.write_all(input.as_bytes()).await;
         let _ = stdin.shutdown().await;
     });
-    let out_task = tokio::spawn(async move {
-        let mut b = Vec::new();
-        let _ = stdout.read_to_end(&mut b).await;
-        b
-    });
-    let err_task = tokio::spawn(async move {
-        let mut b = Vec::new();
-        let _ = stderr.read_to_end(&mut b).await;
-        b
-    });
+    let (out_buf, out_task) = drain(stdout);
+    let (err_buf, err_task) = drain(stderr);
 
     let outcome = tokio::select! {
         status = child.wait() => Ok(status),
@@ -488,12 +483,26 @@ async fn execute(
         Err(why) => {
             kill_tree(pid, &mut child).await;
             writer.abort();
+            out_task.abort();
+            err_task.abort();
             return Err(why);
         }
     };
-    let _ = writer.await;
-    let stdout = String::from_utf8_lossy(&out_task.await.unwrap_or_default()).to_string();
-    let stderr = String::from_utf8_lossy(&err_task.await.unwrap_or_default()).to_string();
+    writer.abort();
+    // A program the AI started in the background (a dev server, a watcher) can keep the output
+    // pipes open after the CLI itself has exited. Waiting for them to close would hang the turn,
+    // and Stop with it, so whatever has arrived shortly after the exit is the output.
+    let pipes_closed = async {
+        let _ = out_task.await;
+        let _ = err_task.await;
+    };
+    tokio::select! {
+        _ = pipes_closed => {}
+        _ = tokio::time::sleep(PIPE_GRACE) => {}
+        _ = cancel.cancelled() => return Err("stopped".to_string()),
+    }
+    let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap()).to_string();
+    let stderr = String::from_utf8_lossy(&err_buf.lock().unwrap()).to_string();
 
     let reply = match kind {
         Kind::Codex => std::fs::read_to_string(reply_file).unwrap_or_default(),
@@ -523,6 +532,28 @@ async fn execute(
         return Err(format!("exit {}: {}", status.code().unwrap_or(-1), tail(&detail)));
     }
     Ok(reply.trim().to_string())
+}
+
+/// How long to keep reading output after the CLI exits (see `execute`).
+const PIPE_GRACE: Duration = Duration::from_secs(3);
+
+/// Reads a pipe into a shared buffer in the background, so what has arrived can be used even if
+/// the pipe never closes.
+fn drain<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    mut r: R,
+) -> (std::sync::Arc<std::sync::Mutex<Vec<u8>>>, tokio::task::JoinHandle<()>) {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let b = buf.clone();
+    let task = tokio::spawn(async move {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match r.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => b.lock().unwrap().extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+    (buf, task)
 }
 
 /// The reply from Antigravity's stream-json output: the final `result` event's response, or the
@@ -585,13 +616,16 @@ async fn kill_tree(pid: Option<u32>, child: &mut tokio::process::Child) {
     }
     #[cfg(windows)]
     if let Some(pid) = pid {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // Async, and time-limited, so a slow taskkill can't hold up Stop.
+        let mut tk = Command::new("taskkill");
+        tk.args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null());
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            tk.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(5), tk.status()).await;
     }
-    let _ = child.kill().await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.kill()).await;
 }
 
 #[cfg(test)]
@@ -792,6 +826,15 @@ exit 1"#,
         assert!(started.elapsed() < Duration::from_secs(3));
         tokio::time::sleep(Duration::from_millis(2500)).await;
         assert!(!marker.exists(), "the grandchild survived Stop");
+    }
+
+    #[tokio::test]
+    async fn a_background_program_holding_the_output_open_does_not_hang_the_turn() {
+        // The CLI exits, but a program it started keeps stdout open for 30 seconds.
+        let p = fake(r#"cat >/dev/null; (sleep 30) & printf '{"result":"done"}'"#);
+        let started = std::time::Instant::now();
+        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap(), "done");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[tokio::test]

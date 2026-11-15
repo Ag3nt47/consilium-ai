@@ -97,7 +97,7 @@ impl Config {
     fn save(&self, c: &Council) -> Result<(), String> {
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| e.to_string())
+        crate::store::replace_file(&tmp, &self.path).map_err(|e| e.to_string())
     }
 
     pub fn set_member(&self, agent: &str, member: bool) -> Result<Council, String> {

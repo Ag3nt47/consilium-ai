@@ -63,6 +63,8 @@ export interface AgentInfo {
   version: string | null;
   path: string | null;
   hint: string;
+  /** When it ran out of usage: the time (ms since the epoch) its limit resets. */
+  benched_until?: number | null;
 }
 
 export interface CheckResult {
@@ -77,6 +79,8 @@ export interface TurnState {
   conversation: string;
   state: "running" | "idle";
   agent: string | null;
+  /** Every AI working on an answer right now; they answer at the same time. */
+  agents?: string[];
   round: number;
   rounds: number;
 }
@@ -93,6 +97,8 @@ const appApi = {
   send: (id: string, text: string, targets: string[], rounds: number, interrupt = false) =>
     invoke<ChatEvent>("send_message", { id, text, targets, rounds, interrupt }),
   stop: (id: string) => invoke<boolean>("stop", { id }),
+  /** Lets an AI that ran out of usage be asked again now. */
+  unbench: (agent: string) => invoke<void>("unbench", { agent }),
   running: () => invoke<string[]>("running"),
   /** Asks every council member for a one-word reply, in parallel. Uses a little of each AI's allowance. */
   selfCheck: () => invoke<CheckResult[]>("self_check"),

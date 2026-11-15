@@ -33,7 +33,7 @@ impl Memory {
         let _g = self.lock.lock().unwrap();
         let tmp = self.path.with_extension("md.tmp");
         std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| e.to_string())
+        crate::store::replace_file(&tmp, &self.path).map_err(|e| e.to_string())
     }
 
     /// Adds facts an AI asked to remember, one bullet each, skipping exact duplicates.

@@ -10,6 +10,7 @@ pub const MAX_TRANSCRIPT_CHARS: usize = 120_000;
 pub fn label(sender: &str) -> String {
     match sender {
         "human" => "Human".into(),
+        crate::council::CONSILIUM => "Consilium".into(),
         s => AGENTS.iter().find(|a| a.id == s).map(|a| a.name.to_string()).unwrap_or_else(|| s.to_string()),
     }
 }
@@ -50,7 +51,9 @@ put a [Name] tag on your own message.
 - Address someone with @name when it matters who should answer. The human is @human.
 - When you need a decision, an approval, or an action from the human, put it on its own line \
 starting with REQUEST: so it is shown to them in red. Ask only what you actually need.
-- To ask another participant something, @mention them: they answer next in the same turn.{add_ai}
+- To ask another participant something, @mention them: they see it and answer in the same turn.
+- Participants answer independently and at the same time: nobody waits for a turn, so others may be writing while you are, and messages may arrive while you think. React to whatever is newest.
+- Lines tagged [Consilium] are notes from the app itself (for example an AI that is out of usage and sitting out, or an update). Take them into account; don't reply to Consilium.{add_ai}
 - To save something every participant should know in future conversations (a decision, a preference \
 of the human's, a fact about this setup), put it on its own line starting REMEMBER:. Keep it to one \
 short sentence, and never save passwords, keys or other secrets.
@@ -136,7 +139,7 @@ in the council: {}. Never use ADD_AI for a current participant; @mention them in
 pub fn transcript(events: &[Event], me: &str) -> String {
     let mut parts: Vec<String> = events
         .iter()
-        .filter(|e| e.kind == "message")
+        .filter(|e| e.kind == "message" || (e.kind == "system" && e.sender == crate::council::CONSILIUM))
         .map(|e| {
             let who = if e.sender == me { format!("{} (you)", label(me)) } else { label(&e.sender) };
             format!("[{who}] {}", e.text)
@@ -231,6 +234,17 @@ mod tests {
     }
 
     #[test]
+    fn consilium_notes_reach_the_ais_but_other_status_notes_dont() {
+        let mut note = ev("consilium", "Claude ran out of usage");
+        note.kind = "system".into();
+        let mut status = ev("gpt", "ChatGPT had nothing to add.");
+        status.kind = "system".into();
+        let t = transcript(&[ev("human", "hi"), note, status], "gpt");
+        assert!(t.contains("[Consilium] Claude ran out of usage"));
+        assert!(!t.contains("nothing to add"));
+    }
+
+    #[test]
     fn mentions_resolve_names_ids_and_all() {
         assert_eq!(mentioned_agents("@claude and @GPT"), vec!["claude", "gpt"]);
         assert_eq!(mentioned_agents("@ChatGPT please"), vec!["gpt"]);
@@ -266,7 +280,8 @@ mod tests {
         let all = members(&["gpt", "claude", "gemini"]);
         let full = system("gpt", 1, 1, &Context { members: &all, workspace: None, access: Access::Chat, memory: None, project_notes: None });
         assert!(!full.contains("ADD_AI"), "no ADD_AI hint once every AI is a participant");
-        assert!(full.contains("@mention them: they answer next"));
+        assert!(full.contains("@mention them: they see it and answer"));
+        assert!(full.contains("at the same time") && full.contains("[Consilium]"));
         let with = system("gpt", 1, 1, &Context { members: &all, workspace: None, access: Access::Chat, memory: Some("- Use Tauri 2"), project_notes: Some("Run cargo test") });
         assert!(with.contains("COUNCIL MEMORY") && with.contains("Use Tauri 2"));
         assert!(with.contains("PROJECT NOTES") && with.contains("Run cargo test"));

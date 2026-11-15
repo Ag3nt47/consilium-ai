@@ -1,7 +1,9 @@
 //! Consilium's back end: conversations, agents, and turn-taking, exposed to the UI as Tauri commands.
 
 mod agents;
+mod bench;
 mod config;
+mod council;
 mod memory;
 mod prompt;
 mod resume;
@@ -22,9 +24,9 @@ use tokio_util::sync::CancellationToken;
 /// Upper bound on discussion rounds, whatever the UI asks for, so agents can't loop indefinitely.
 pub const MAX_ROUNDS: u32 = 8;
 
-/// An answer that @mentions another council member brings it into the same round, at most this
-/// many times per round, so AIs can ask each other things without looping.
-pub const MAX_PULLED_IN: usize = 2;
+/// How long Stop or an interrupt waits for a turn's AIs to shut down before letting it go anyway,
+/// so the conversation is never stuck as "still answering".
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(test)]
 mod tests {
@@ -43,8 +45,10 @@ struct AppState {
     journal: Arc<Journal>,
     /// Council memory shared by every AI across conversations.
     memory: Arc<Memory>,
-    /// Conversations with a turn in progress, and how to stop it.
-    running: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// AIs that ran out of usage, and until when.
+    bench: Arc<bench::Bench>,
+    /// Conversations with a turn in progress: the turn's id and how to stop it.
+    running: Arc<Mutex<HashMap<String, (String, CancellationToken)>>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -52,8 +56,10 @@ struct TurnState {
     conversation: String,
     /// "running" or "idle".
     state: String,
-    /// The agent currently being asked, if any.
+    /// The first AI working on an answer, if any.
     agent: Option<String>,
+    /// Every AI working on an answer right now; they answer at the same time.
+    agents: Vec<String>,
     round: u32,
     rounds: u32,
 }
@@ -66,8 +72,11 @@ const TURN: &str = "consilium://turn";
 async fn agents_status(state: State<'_, AppState>) -> Result<Vec<agents::AgentInfo>, String> {
     let config = state.config.clone();
     let mut out = Vec::new();
+    let now = store::now_ms();
     for a in agents::AGENTS.iter() {
-        out.push(agents::status(a, config.is_member(a.id), config.access(a.id)).await);
+        let mut info = agents::status(a, config.is_member(a.id), config.access(a.id)).await;
+        info.benched_until = state.bench.until(a.id, now);
+        out.push(info);
     }
     // Members first, in council order.
     let order = config.get().members;
@@ -80,6 +89,12 @@ async fn agents_status(state: State<'_, AppState>) -> Result<Vec<agents::AgentIn
 #[tauri::command]
 fn set_member(state: State<AppState>, agent: String, member: bool) -> Result<(), String> {
     state.config.set_member(&agent, member).map(|_| ())
+}
+
+/// Lets an AI that ran out of usage be asked again now, without waiting for its reset time.
+#[tauri::command]
+fn unbench(state: State<AppState>, agent: String) {
+    state.bench.clear(&agent);
 }
 
 #[tauri::command]
@@ -160,14 +175,16 @@ fn export_markdown(state: State<AppState>, id: String) -> Result<String, String>
     Ok(md)
 }
 
-/// Records the human's message, then asks the addressed council members in turn.
+/// Records the human's message, then asks the addressed council members, who all answer at the
+/// same time and react to each other's messages as they arrive (see `council`).
 ///
-/// `targets` are agent ids in the order they should answer. `rounds` is 1 for a single answer from
-/// each; more makes the agents discuss among themselves, up to MAX_ROUNDS. A discussion ends early
-/// when every agent passes, or when any agent asks the human something (a REQUEST: line).
+/// `targets` are agent ids. `rounds` is 1 for a single answer from each; more lets each AI answer
+/// up to that many times as the discussion goes on, up to MAX_ROUNDS. A discussion ends when
+/// nobody has anything new to react to, when every AI passes, or when any AI asks the human
+/// something (a REQUEST: line).
 ///
-/// With `interrupt`, a turn already running in this conversation is stopped first (its CLI and
-/// everything it started are killed) and the new message is sent once that has finished.
+/// A turn already running in this conversation is stopped first (its CLIs and everything they
+/// started are killed), and the new message is sent once that has finished.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn send_message(
@@ -183,19 +200,11 @@ async fn send_message(
     if text.is_empty() {
         return Err("the message is empty".into());
     }
-    if interrupt.unwrap_or(false) {
-        let token = state.running.lock().unwrap().get(&id).cloned();
-        if let Some(token) = token {
-            token.cancel();
-            // The cancelled turn removes itself once its CLI is gone; wait up to 5 seconds for that.
-            for _ in 0..100 {
-                if !state.running.lock().unwrap().contains_key(&id) {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        }
-    }
+    // Sending while the AIs are answering always interrupts them: the running turn is stopped, and
+    // this message goes out once it has shut down (STOP_GRACE at most). `interrupt` is accepted for
+    // older UIs; the message is never refused because a turn is running.
+    let _ = interrupt;
+    stop_and_wait(&app, &state, &id).await;
     let config = state.config.clone();
     let mut targets: Vec<String> = targets.into_iter().filter(|t| config.is_member(t)).collect();
     for m in prompt::mentioned_agents(&text) {
@@ -207,203 +216,252 @@ async fn send_message(
 
     let (event, token) = {
         let mut running = state.running.lock().unwrap();
-        if running.contains_key(&id) {
-            return Err("the agents are still answering; press Stop, or send again to interrupt".into());
+        // Another message started a turn in the meantime: stop that one too and take over.
+        if let Some((_, old)) = running.remove(&id) {
+            old.cancel();
         }
         let event = state.store.append(&id, "human", "message", targets.clone(), &text)?;
         let _ = app.emit(EVENT, &event);
         if targets.is_empty() {
             return Ok(event);
         }
+        let pending = Pending::new(&id, targets, rounds);
         let token = CancellationToken::new();
-        running.insert(id.clone(), token.clone());
-        (event, token)
+        running.insert(id.clone(), (pending.turn.clone(), token.clone()));
+        (event, (pending, token))
     };
-    start_turns(&app, &state, Pending::new(&id, targets, rounds), token);
+    let (pending, token) = token;
+    start_turns(&app, &state, pending, token);
     Ok(event)
 }
 
-/// Runs a turn in the background, recording its position in the journal as it goes. The journal
-/// entry is removed when the turn ends or is stopped; if the app quits first, it stays, and the
-/// turn continues on the next launch.
-fn start_turns(app: &AppHandle, state: &AppState, pending: Pending, token: CancellationToken) {
-    state.journal.begin(pending.clone());
-    let (app, store, config, journal, memory, running) = (
-        app.clone(),
-        state.store.clone(),
-        state.config.clone(),
-        state.journal.clone(),
-        state.memory.clone(),
-        state.running.clone(),
-    );
-    tauri::async_runtime::spawn(async move {
-        let conv = pending.conversation.clone();
-        run_turns(&app, &store, &config, &journal, &memory, &pending, &token).await;
-        journal.finish(&conv);
-        running.lock().unwrap().remove(&conv);
+/// Stops the turn running in `conversation`, if any, and waits for its AIs to shut down. One that
+/// hasn't finished after STOP_GRACE is let go: the conversation is free again either way, and the
+/// old turn can no longer change what is recorded for it.
+async fn stop_and_wait(app: &AppHandle, state: &AppState, conversation: &str) -> bool {
+    let entry = state.running.lock().unwrap().get(conversation).cloned();
+    let Some((turn, token)) = entry else { return false };
+    token.cancel();
+    let started = std::time::Instant::now();
+    while started.elapsed() < STOP_GRACE {
+        let still = state.running.lock().unwrap().get(conversation).is_some_and(|(t, _)| *t == turn);
+        if !still {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    release(app, &state.running, &state.journal, conversation, &turn);
+    true
+}
+
+/// Marks the turn `turn` as over: the conversation can take new messages, and it won't resume.
+/// Does nothing to a newer turn that has replaced it.
+fn release(
+    app: &AppHandle,
+    running: &Mutex<HashMap<String, (String, CancellationToken)>>,
+    journal: &Journal,
+    conversation: &str,
+    turn: &str,
+) {
+    journal.finish(conversation, turn);
+    let mut r = running.lock().unwrap();
+    if r.get(conversation).is_some_and(|(t, _)| t == turn) {
+        r.remove(conversation);
+        drop(r);
         let _ = app.emit(
             TURN,
-            TurnState { conversation: conv, state: "idle".into(), agent: None, round: 0, rounds: pending.rounds },
+            TurnState { conversation: conversation.into(), state: "idle".into(), agent: None, agents: vec![], round: 0, rounds: 0 },
         );
+    }
+}
+
+/// Runs a turn in the background. Its journal entry is removed when it ends or is stopped; if the
+/// app quits first, the entry stays and the turn continues on the next launch.
+fn start_turns(app: &AppHandle, state: &AppState, pending: Pending, token: CancellationToken) {
+    state.journal.begin(pending.clone());
+    let host = Arc::new(AppHost {
+        app: app.clone(),
+        store: state.store.clone(),
+        config: state.config.clone(),
+        memory: state.memory.clone(),
+        journal: state.journal.clone(),
+        conversation: pending.conversation.clone(),
+        turn: pending.turn.clone(),
+        rounds: pending.rounds,
+    });
+    let turn = council::Turn {
+        conversation: pending.conversation.clone(),
+        targets: pending.targets.clone(),
+        rounds: pending.rounds,
+        members: state.config.get().members,
+    };
+    let (app, store, bench, journal, running) =
+        (app.clone(), state.store.clone(), state.bench.clone(), state.journal.clone(), state.running.clone());
+    tauri::async_runtime::spawn(async move {
+        council::run(turn, store, bench, host, token).await;
+        release(&app, &running, &journal, &pending.conversation, &pending.turn);
     });
 }
 
-/// Continues turns that a quit or crash cut short.
+/// Continues turns that a quit, crash, restart or update cut short. This always runs at launch.
 fn resume_interrupted(app: &AppHandle, state: &AppState) {
     let (resume, give_up) = state.journal.interrupted();
     for p in give_up {
-        let _ = state.store.append(
+        if let Ok(e) = state.store.append(
             &p.conversation,
-            "human",
+            council::CONSILIUM,
             "system",
             vec![],
             "Couldn't resume the AIs' turn after two tries. Send your message again to continue.",
-        );
+        ) {
+            let _ = app.emit(EVENT, &e);
+        }
     }
-    for p in resume {
+    for mut p in resume {
         if state.store.meta(&p.conversation).is_err() {
-            state.journal.finish(&p.conversation);
+            state.journal.finish(&p.conversation, &p.turn);
             continue;
         }
-        let _ = state.store.append(&p.conversation, "human", "system", vec![], "Consilium restarted; the council is carrying on where it left off.");
+        if p.turn.is_empty() {
+            // Recorded by a version without turn ids.
+            state.journal.finish(&p.conversation, "");
+            p.turn = uuid::Uuid::new_v4().to_string();
+        }
+        if let Ok(e) = state.store.append(
+            &p.conversation,
+            council::CONSILIUM,
+            "system",
+            vec![],
+            "Consilium restarted; the council is carrying on where it left off.",
+        ) {
+            let _ = app.emit(EVENT, &e);
+        }
         let token = CancellationToken::new();
-        state.running.lock().unwrap().insert(p.conversation.clone(), token.clone());
+        state.running.lock().unwrap().insert(p.conversation.clone(), (p.turn.clone(), token.clone()));
         start_turns(app, state, p, token);
     }
 }
 
-async fn run_turns(
-    app: &AppHandle,
-    store: &Store,
-    config: &Config,
-    journal: &Journal,
-    memory: &Memory,
-    pending: &Pending,
-    cancel: &CancellationToken,
-) {
-    let (conv, targets, rounds) = (pending.conversation.as_str(), &pending.targets, pending.rounds);
-    let members = config.get().members;
-    for round in pending.round..=rounds {
-        let mut passes = 0;
-        let mut answered = 0;
-        let mut asked_human = false;
-        let skip = if round == pending.round { pending.index } else { 0 };
-        // Who answers this round: the addressed AIs, plus any a reply @mentions (see MAX_PULLED_IN).
-        let mut queue: Vec<String> = targets.clone();
-        let mut pulled_in = 0;
-        let mut index = skip;
-        while index < queue.len() {
-            if cancel.is_cancelled() {
-                return;
-            }
-            let addressed = index < targets.len();
-            if addressed {
-                journal.at(conv, round, index);
-            }
-            let Some(agent) = agents::by_id(&queue[index]) else {
-                index += 1;
-                continue;
-            };
-            let _ = app.emit(
-                TURN,
-                TurnState {
-                    conversation: conv.into(),
-                    state: "running".into(),
-                    agent: Some(agent.id.into()),
-                    round,
-                    rounds,
-                },
-            );
-            let events = store.load(conv).unwrap_or_default();
-            // Read the folder fresh each turn, so a change in the UI applies from the next answer.
-            // A conversation without its own folder uses the council's default one, if set.
-            let workspace = store
-                .meta(conv)
-                .ok()
-                .and_then(|m| m.workspace)
-                .or_else(|| config.get().default_workspace)
-                .filter(|w| std::path::Path::new(w).is_dir());
-            let access = if workspace.is_some() { config.access(agent.id) } else { Access::Chat };
-            let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w)));
-            let shared = memory.for_prompt();
-            let ctx = prompt::Context {
-                members: &members,
-                workspace: workspace.as_deref(),
-                access,
-                memory: shared.as_deref(),
-                project_notes: notes.as_deref(),
-            };
-            let system = prompt::system(agent.id, round, rounds, &ctx);
-            let transcript = prompt::transcript(&events, agent.id);
-            let ws_path = workspace.as_ref().map(PathBuf::from);
-            let event = match agents::run(agent, access, ws_path.as_deref(), &system, &transcript, cancel).await {
-                Ok(reply) if rounds > 1 && prompt::is_pass(&reply) => {
-                    passes += 1;
-                    store.append(conv, agent.id, "system", vec![], &format!("{} had nothing to add.", agent.name))
-                }
-                Ok(reply) => {
-                    let to = prompt::mentioned_agents(&reply);
-                    for m in &to {
-                        if pulled_in < MAX_PULLED_IN
-                            && m != agent.id
-                            && members.contains(m)
-                            && !queue[index + 1..].contains(m)
-                        {
-                            queue.push(m.clone());
-                            pulled_in += 1;
-                        }
-                    }
-                    let ev = store.append(conv, agent.id, "message", to, &reply);
-                    if ev.as_ref().is_ok_and(|e| !e.requests.is_empty()) {
-                        asked_human = true;
-                    }
-                    let facts = memory::remember_lines(&reply);
-                    if !facts.is_empty() {
-                        let date = today();
-                        if let Ok(added) = memory.remember(agent.name, &date, &facts) {
-                            if !added.is_empty() {
-                                if let Ok(e) = ev.as_ref() {
-                                    let _ = app.emit(EVENT, e);
-                                }
-                                let note = format!("{} saved to council memory: {}", agent.name, added.join("; "));
-                                if let Ok(n) = store.append(conv, agent.id, "system", vec![], &note) {
-                                    let _ = app.emit(EVENT, &n);
-                                }
-                            }
-                        }
-                    }
-                    ev
-                }
-                Err(why) if why == "stopped" => {
-                    let ev = store.append(conv, agent.id, "system", vec![], &format!("Stopped {}.", agent.name));
-                    if let Ok(e) = ev {
-                        let _ = app.emit(EVENT, &e);
-                    }
-                    return;
-                }
-                Err(why) => store.append(conv, agent.id, "error", vec![], &format!("{} couldn't answer: {why}", agent.name)),
-            };
-            if let Ok(e) = event {
-                let _ = app.emit(EVENT, &e);
-            }
-            answered += 1;
-            if addressed {
-                let (next_round, next_index) = pending.after(round, index);
-                journal.at(conv, next_round, next_index);
-            }
-            index += 1;
+/// Shown to the human and the AIs after an update to this version.
+const WHATS_NEW: &str = "What's new: every AI now answers as soon as it's ready and reacts to new messages on \
+its own time, instead of waiting for a turn. An AI that runs out of usage sits out until its limit resets \
+while the others carry on, and another member takes its turn if nobody else is answering. Stop and \
+interrupting now always work within a few seconds, even if an AI left a program running. Conversations \
+cut short by a restart resume automatically.";
+
+/// The version that last ran is kept in the app's data folder; after an update, a note in the
+/// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
+/// what changed.
+fn announce_update(app: &AppHandle, state: &AppState, data: &std::path::Path) {
+    let file = data.join("last-version.txt");
+    let now = env!("CARGO_PKG_VERSION");
+    let before = std::fs::read_to_string(&file).unwrap_or_default();
+    let _ = std::fs::write(&file, now);
+    let before = before.trim();
+    if before == now {
+        return;
+    }
+    // The first run of a version that records this: an existing install is being updated if it
+    // already has conversations.
+    let before = if before.is_empty() { "the previous version" } else { before };
+    let mut ids: Vec<String> = state.journal.pending_conversations();
+    let list = state.store.list();
+    if list.is_empty() {
+        return;
+    }
+    if let Some(latest) = list.first() {
+        if !ids.contains(&latest.id) {
+            ids.push(latest.id.clone());
         }
-        if rounds > 1 && (asked_human || passes == answered) {
-            let note = if asked_human {
-                "Discussion paused: a question for you is waiting."
-            } else {
-                "Discussion ended: nobody had more to add."
-            };
-            if let Ok(e) = store.append(conv, "human", "system", vec![], note) {
-                let _ = app.emit(EVENT, &e);
-            }
-            return;
+    }
+    let note = format!("Consilium was updated from {before} to {now} and restarted. {WHATS_NEW}");
+    for id in ids {
+        if let Ok(e) = state.store.append(&id, council::CONSILIUM, "system", vec![], &note) {
+            let _ = app.emit(EVENT, &e);
         }
+    }
+}
+
+/// How a turn reaches the real AIs and the UI.
+struct AppHost {
+    app: AppHandle,
+    store: Arc<Store>,
+    config: Arc<Config>,
+    memory: Arc<Memory>,
+    journal: Arc<Journal>,
+    conversation: String,
+    turn: String,
+    rounds: u32,
+}
+
+impl council::Host for AppHost {
+    fn ask(
+        &self,
+        agent: &'static agents::Agent,
+        answer: u32,
+        rounds: u32,
+        events: Vec<Event>,
+        cancel: CancellationToken,
+    ) -> council::Reply {
+        let conv = self.conversation.as_str();
+        // Read the folder fresh each time, so a change in the UI applies from the next answer.
+        // A conversation without its own folder uses the council's default one, if set.
+        let workspace = self
+            .store
+            .meta(conv)
+            .ok()
+            .and_then(|m| m.workspace)
+            .or_else(|| self.config.get().default_workspace)
+            .filter(|w| std::path::Path::new(w).is_dir());
+        let access = if workspace.is_some() { self.config.access(agent.id) } else { Access::Chat };
+        let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w)));
+        let shared = self.memory.for_prompt();
+        let members = self.config.get().members;
+        let ctx = prompt::Context {
+            members: &members,
+            workspace: workspace.as_deref(),
+            access,
+            memory: shared.as_deref(),
+            project_notes: notes.as_deref(),
+        };
+        let system = prompt::system(agent.id, answer, rounds, &ctx);
+        let transcript = prompt::transcript(&events, agent.id);
+        let ws_path = workspace.map(PathBuf::from);
+        Box::pin(async move { agents::run(agent, access, ws_path.as_deref(), &system, &transcript, &cancel).await })
+    }
+
+    fn event(&self, e: &Event) {
+        if e.kind == "message" && e.sender != "human" {
+            self.journal.progressed(&self.conversation, &self.turn);
+        }
+        let _ = self.app.emit(EVENT, e);
+    }
+
+    fn thinking(&self, agents: Vec<String>, round: u32) {
+        let _ = self.app.emit(
+            TURN,
+            TurnState {
+                conversation: self.conversation.clone(),
+                state: "running".into(),
+                agent: agents.first().cloned(),
+                agents,
+                round,
+                rounds: self.rounds,
+            },
+        );
+    }
+
+    fn installed(&self, agent: &'static agents::Agent) -> bool {
+        agents::find(agents::effective_kind(agent)).is_some()
+    }
+
+    fn remember(&self, agent: &'static agents::Agent, reply: &str) -> Option<String> {
+        let facts = memory::remember_lines(reply);
+        if facts.is_empty() {
+            return None;
+        }
+        let added = self.memory.remember(agent.name, &today(), &facts).ok()?;
+        (!added.is_empty()).then(|| format!("{} saved to council memory: {}", agent.name, added.join("; ")))
     }
 }
 
@@ -442,6 +500,7 @@ async fn self_check(state: State<'_, AppState>) -> Result<Vec<CheckResult>, Stri
     let mut tasks = Vec::new();
     for id in members {
         let Some(agent) = agents::by_id(&id) else { continue };
+        let bench = state.bench.clone();
         tasks.push(tauri::async_runtime::spawn(async move {
             let system = "This is an automatic health check from Consilium, not a conversation. Don't use tools \
 or run commands. Reply with exactly the word OK and nothing else.";
@@ -454,8 +513,16 @@ or run commands. Reply with exactly the word OK and nothing else.";
             .await;
             let ms = started.elapsed().as_millis() as u64;
             let (ok, detail) = match r {
-                Ok(Ok(reply)) => (true, reply.chars().take(80).collect()),
-                Ok(Err(e)) => (false, e),
+                Ok(Ok(reply)) => {
+                    bench.clear(agent.id);
+                    (true, reply.chars().take(80).collect())
+                }
+                Ok(Err(e)) => {
+                    if let Some(until) = bench::usage_limit(&e, store::now_ms()) {
+                        bench.bench(agent.id, until);
+                    }
+                    (false, e)
+                }
                 Err(_) => {
                     token.cancel();
                     (false, "no answer within 3 minutes".into())
@@ -473,15 +540,19 @@ or run commands. Reply with exactly the word OK and nothing else.";
     Ok(out)
 }
 
+/// Stops the AIs in a conversation. Returns at once; the conversation is free again as soon as
+/// they have shut down, and after STOP_GRACE at the latest.
 #[tauri::command]
-fn stop(state: State<AppState>, id: String) -> bool {
-    match state.running.lock().unwrap().get(&id) {
-        Some(token) => {
-            token.cancel();
-            true
-        }
-        None => false,
+fn stop(app: AppHandle, state: State<AppState>, id: String) -> bool {
+    let running = state.running.lock().unwrap().contains_key(&id);
+    if running {
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app2.state::<AppState>();
+            stop_and_wait(&app2, &state, &id).await;
+        });
     }
+    running
 }
 
 #[tauri::command]
@@ -514,9 +585,11 @@ pub fn run() {
                 config: Arc::new(config),
                 journal: Arc::new(journal),
                 memory: Arc::new(memory),
+                bench: Arc::new(bench::Bench::new()),
                 running: Arc::new(Mutex::new(HashMap::new())),
             });
             let state = app.state::<AppState>();
+            announce_update(app.handle(), &state, &data);
             resume_interrupted(app.handle(), &state);
             Ok(())
         })
@@ -551,7 +624,8 @@ pub fn run() {
             stop,
             running,
             setup_agent,
-            self_check
+            self_check,
+            unbench
         ])
         .build(tauri::generate_context!())
         .expect("error while starting Consilium")
