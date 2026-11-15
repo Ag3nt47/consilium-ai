@@ -70,8 +70,8 @@ changing it. Make focused changes, and end your message with a short list of the
 the human has already approved for you. Other AI participants may change the same folder in their turns, so \
 re-read files before changing them. End your message with a short list of what you changed or ran, and why."
         ),
-        _ => "You have no tools, files, or internet access here; you see only this transcript. Say what you \
-would check rather than guessing."
+        _ => "You have no tools, files, or internet access here; you see only this transcript. Don't try to run \
+commands or use tools: answer in text, and say what you would check rather than guessing."
             .to_string(),
     });
     if ctx.workspace.is_some() && matches!(ctx.access, Access::Edit | Access::Own) {

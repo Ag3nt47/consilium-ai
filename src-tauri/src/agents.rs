@@ -1,5 +1,7 @@
 //! Local CLI agents: ChatGPT through OpenAI's Codex CLI, Claude through Anthropic's Claude Code CLI,
-//! and Gemini through Google's Gemini CLI.
+//! and Gemini through Google's Antigravity CLI (`agy`). Google stopped serving the Gemini CLI to
+//! personal accounts in June 2026; it is still used for Gemini when `agy` isn't installed, for
+//! company plans and API keys that keep access.
 //!
 //! All use the person's own sign-in to those tools, so Consilium never handles an API key or a
 //! credential. Rules every run follows:
@@ -29,6 +31,7 @@ pub enum Kind {
     Codex,
     ClaudeCode,
     GeminiCli,
+    Antigravity,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,7 +62,7 @@ pub struct Agent {
 pub const AGENTS: [Agent; 3] = [
     Agent { id: "gpt", name: "ChatGPT", company: "OpenAI", kind: Kind::Codex },
     Agent { id: "claude", name: "Claude", company: "Anthropic", kind: Kind::ClaudeCode },
-    Agent { id: "gemini", name: "Gemini", company: "Google", kind: Kind::GeminiCli },
+    Agent { id: "gemini", name: "Gemini", company: "Google", kind: Kind::Antigravity },
 ];
 
 pub fn by_id(id: &str) -> Option<&'static Agent> {
@@ -71,6 +74,7 @@ fn base_name(kind: Kind) -> &'static str {
         Kind::Codex => "codex",
         Kind::ClaudeCode => "claude",
         Kind::GeminiCli => "gemini",
+        Kind::Antigravity => "agy",
     }
 }
 
@@ -110,6 +114,12 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
         }
         Kind::ClaudeCode => out.push(home.join(".claude/local/claude")),
         Kind::GeminiCli => {}
+        Kind::Antigravity => {
+            out.push(home.join(".local/bin/agy"));
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                out.push(PathBuf::from(local).join("agy").join("bin").join("agy.exe"));
+            }
+        }
     }
     for d in dirs_ {
         for n in exe_names(base_name(kind)) {
@@ -121,6 +131,16 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
 
 pub fn find(kind: Kind) -> Option<PathBuf> {
     candidates(kind).into_iter().find(|p| is_executable(p))
+}
+
+/// The tool an agent actually uses: Gemini runs through Antigravity when it's installed, and
+/// falls back to the Gemini CLI (still served to company plans and API keys) when it isn't.
+pub fn effective_kind(agent: &Agent) -> Kind {
+    if agent.kind == Kind::Antigravity && find(Kind::Antigravity).is_none() && find(Kind::GeminiCli).is_some() {
+        Kind::GeminiCli
+    } else {
+        agent.kind
+    }
 }
 
 fn is_executable(p: &Path) -> bool {
@@ -200,8 +220,20 @@ fn gemini_signed_in() -> bool {
     }
 }
 
+/// Antigravity has no "am I signed in?" command, and starting it while signed out opens a browser
+/// sign-in page, so it is never launched just to check. Signing in creates a small marker file
+/// (`antigravity/credential-user-scope` in the user config folder) next to the token it keeps in the
+/// OS keyring; its presence, never its contents, is the check. Signing out (`/logout`) removes it.
+fn antigravity_signed_in() -> bool {
+    [dirs::config_dir(), dirs::data_dir()]
+        .into_iter()
+        .flatten()
+        .any(|d| d.join("antigravity").join("credential-user-scope").is_file())
+}
+
 pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
-    let (tool, install_hint, login_hint) = match agent.kind {
+    let kind = effective_kind(agent);
+    let (tool, install_hint, login_hint) = match kind {
         Kind::Codex => (
             "Codex CLI",
             "Install the ChatGPT desktop app (it includes Codex), or Codex from developers.openai.com/codex.",
@@ -215,7 +247,12 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
         Kind::GeminiCli => (
             "Gemini CLI",
             "Install the Gemini CLI from github.com/google-gemini/gemini-cli (needs Node.js).",
-            "Run `gemini` in a terminal, choose Sign in with Google, then type /quit.",
+            "Run `gemini` in a terminal, choose Sign in with Google, then type /quit. (Personal Google accounts now need the Antigravity CLI instead.)",
+        ),
+        Kind::Antigravity => (
+            "Antigravity CLI",
+            "Install Google's Antigravity CLI from antigravity.google.",
+            "Run `agy` in a terminal, choose Google OAuth and sign in in your browser, then type /quit.",
         ),
     };
     let mut info = AgentInfo {
@@ -232,15 +269,16 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
         path: None,
         hint: install_hint.into(),
     };
-    let Some(path) = find(agent.kind) else { return info };
+    let Some(path) = find(kind) else { return info };
     info.path = Some(path.display().to_string());
     info.version = probe(&path, &["--version"]).await.and_then(|v| v.lines().next().map(str::to_string));
-    let signed_in = match agent.kind {
+    let signed_in = match kind {
         Kind::Codex => probe(&path, &["login", "status"]).await.map(|s| s.contains("Logged in")),
         Kind::ClaudeCode => probe(&path, &["auth", "status"]).await.and_then(|s| {
             serde_json::from_str::<serde_json::Value>(&s).ok().and_then(|v| v["loggedIn"].as_bool())
         }),
         Kind::GeminiCli => Some(gemini_signed_in()),
+        Kind::Antigravity => Some(antigravity_signed_in()),
     };
     info.signed_in = signed_in;
     info.available = signed_in == Some(true);
@@ -332,6 +370,31 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
             }
             format!("{system}\n\n{prompt}")
         }
+        Kind::Antigravity => {
+            // The conversation goes over stdin as one stream-json message, not as an argument:
+            // transcripts can exceed Linux's 128 KB argument and Windows' 32 K command-line limits.
+            for a in ["--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", "0s"] {
+                push(a);
+            }
+            match access {
+                Access::Chat | Access::Read => {
+                    push("--mode");
+                    push("plan");
+                }
+                Access::Edit => {
+                    push("--mode");
+                    push("accept-edits");
+                }
+                Access::Own => {} // Antigravity's own permission settings decide
+            }
+            push("-p");
+            push("");
+            let message = serde_json::json!({
+                "event": "user",
+                "message": { "content": format!("{system}\n\n{prompt}") }
+            });
+            format!("{message}\n")
+        }
     };
     Plan { args, input }
 }
@@ -346,8 +409,9 @@ pub async fn run(
     prompt: &str,
     cancel: &CancellationToken,
 ) -> Result<String, String> {
-    let path = find(agent.kind).ok_or_else(|| format!("{} isn't installed", agent.name))?;
-    run_at(&path, agent.kind, access, workspace, system, prompt, cancel, RUN_TIMEOUT).await
+    let kind = effective_kind(agent);
+    let path = find(kind).ok_or_else(|| format!("{} isn't installed", agent.name))?;
+    run_at(&path, kind, access, workspace, system, prompt, cancel, RUN_TIMEOUT).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -445,12 +509,47 @@ async fn execute(
             }
             Err(_) => String::new(),
         },
+        Kind::Antigravity => antigravity_reply(&stdout)?,
     };
     if !status.success() || reply.trim().is_empty() {
         let detail = if stderr.trim().is_empty() { stdout } else { stderr };
         return Err(format!("exit {}: {}", status.code().unwrap_or(-1), tail(&detail)));
     }
     Ok(reply.trim().to_string())
+}
+
+/// The reply from Antigravity's stream-json output: the final `result` event's response, or the
+/// streamed text if that is empty. A run that ended without text because a tool it reached for was
+/// blocked is reported as such, rather than as an empty answer.
+fn antigravity_reply(stdout: &str) -> Result<String, String> {
+    let mut streamed = String::new();
+    let mut result = None;
+    for line in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if v["event"] == "step_update" {
+            if let Some(t) = v["step_update"]["text_delta"].as_str() {
+                streamed.push_str(t);
+            }
+        } else if v["event"] == "result" {
+            result = Some(v["result"].clone());
+        }
+    }
+    let Some(r) = result else { return Ok(streamed) };
+    if r["status"] != "SUCCESS" {
+        let why = r["error"].as_str().filter(|e| !e.is_empty()).unwrap_or("no response");
+        return Err(tail(&format!("{} ({})", why, r["status"].as_str().unwrap_or("ERROR"))));
+    }
+    let text = r["response"].as_str().filter(|t| !t.trim().is_empty()).map(str::to_string).unwrap_or(streamed);
+    if text.trim().is_empty() {
+        if let Some(denied) = r["denied_actions"].as_array().filter(|d| !d.is_empty()) {
+            let names: Vec<&str> = denied.iter().filter_map(|d| d["display_name"].as_str()).collect();
+            return Err(format!(
+                "Gemini tried to use a tool its access doesn't allow ({}) and wrote no reply. Ask again, or raise its access in Settings.",
+                names.join(", ")
+            ));
+        }
+    }
+    Ok(text)
 }
 
 /// The last few lines of a tool's output, for error messages.
@@ -532,6 +631,32 @@ mod plan_tests {
     }
 
     #[test]
+    fn antigravity_sends_the_conversation_on_stdin_with_matching_modes() {
+        let p = plan(Kind::Antigravity, Access::Chat, Path::new("/ws"), Path::new("/r"), "SYS", "P");
+        let a: Vec<String> = p.args.iter().map(|x| x.to_string_lossy().to_string()).collect();
+        assert!(has(&a, &["--input-format", "stream-json"]) && has(&a, &["--output-format", "stream-json"]));
+        assert!(has(&a, &["--mode", "plan"]) && has(&a, &["-p", ""]));
+        let line: serde_json::Value = serde_json::from_str(p.input.trim()).unwrap();
+        assert_eq!(line["event"], "user");
+        assert_eq!(line["message"]["content"], "SYS\n\nP");
+        assert!(has(&args(Kind::Antigravity, Access::Edit), &["--mode", "accept-edits"]));
+        assert!(!args(Kind::Antigravity, Access::Own).iter().any(|x| x == "--mode"));
+    }
+
+    #[test]
+    fn antigravity_reply_falls_back_to_streamed_text_and_explains_blocked_tools() {
+        let streamed = r#"{"event":"step_update","step_update":{"text_delta":"Hello "}}
+{"event":"step_update","step_update":{"text_delta":"council"}}
+{"event":"result","result":{"status":"SUCCESS","response":""}}"#;
+        assert_eq!(antigravity_reply(streamed).unwrap(), "Hello council");
+        let blocked = r#"{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}}"#;
+        let e = antigravity_reply(blocked).unwrap_err();
+        assert!(e.contains("Bash") && e.contains("access"), "{e}");
+        let failed = r#"{"event":"result","result":{"status":"ERROR","response":"","error":"authentication failed or timed out"}}"#;
+        assert_eq!(antigravity_reply(failed).unwrap_err(), "authentication failed or timed out (ERROR)");
+    }
+
+    #[test]
     fn instructions_reach_every_tool() {
         let p = plan(Kind::ClaudeCode, Access::Chat, Path::new("/ws"), Path::new("/r"), "SYS", "P");
         assert!(p.args.iter().any(|a| a == "SYS") && p.input == "P");
@@ -595,6 +720,25 @@ printf 'cwd=%s files=%s first=%s' "$(basename "$PWD")" "$(ls -A | wc -l | tr -d 
         assert_eq!(go(&p, Kind::GeminiCli, Access::Chat, None, "s").await.unwrap(), "hello from gemini");
         let p = fake(r#"cat >/dev/null; printf '{"session_id":"x","error":{"type":"Error","message":"Please set an Auth method","code":41}}'; exit 41"#);
         assert_eq!(go(&p, Kind::GeminiCli, Access::Chat, None, "s").await.unwrap_err(), "Please set an Auth method");
+    }
+
+    #[tokio::test]
+    async fn antigravity_result_event_is_parsed_and_errors_reported() {
+        let p = fake(
+            r#"cat >/dev/null
+echo '{"event":"init","init":{"cwd":"x"}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"hello from gemini","error":""}}'"#,
+        );
+        assert_eq!(go(&p, Kind::Antigravity, Access::Chat, None, "s").await.unwrap(), "hello from gemini");
+        let p = fake(
+            r#"cat >/dev/null
+echo '{"event":"result","result":{"status":"ERROR","response":"","error":"authentication failed or timed out"}}'
+exit 1"#,
+        );
+        assert_eq!(
+            go(&p, Kind::Antigravity, Access::Chat, None, "s").await.unwrap_err(),
+            "authentication failed or timed out (ERROR)"
+        );
     }
 
     #[tokio::test]

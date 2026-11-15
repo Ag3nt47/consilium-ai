@@ -1035,3 +1035,25 @@ code {
   border-top: 1px solid var(--border);
   padding-top: 8px;
 }
+
+.check {
+  grid-column: 2 / 4;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.check-ok {
+  color: #4cdd8a;
+}
+
+.check-bad {
+  color: var(--danger);
+  white-space: normal;
+}
+
+.check-running {
+  color: var(--muted);
+  animation: pulse 1.1s ease-in-out infinite;
+}

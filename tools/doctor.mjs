@@ -76,23 +76,16 @@ const agents = [
   {
     id: "gemini",
     name: "Gemini",
-    tool: "Gemini CLI",
-    exe: findExe("gemini", []),
-    // The sign-in method lives in ~/.gemini/settings.json; only the presence of the credentials file
-    // is checked, never its contents.
-    signedIn: () => {
-      try {
-        const s = JSON.parse(readFileSync(join(home, ".gemini", "settings.json"), "utf8"));
-        const method = s?.security?.auth?.selectedType ?? s?.selectedAuthType ?? "";
-        if (method === "oauth-personal") return existsSync(join(home, ".gemini", "oauth_creds.json"));
-        if (method === "gemini-api-key") return !!process.env.GEMINI_API_KEY;
-        return !!method;
-      } catch {
-        return false;
-      }
-    },
-    install: "npm install -g @google/gemini-cli",
-    signin: (exe) => `"${exe}"   (choose "Sign in with Google", then type /quit)`,
+    tool: "Antigravity CLI",
+    exe: findExe("agy", [join(home, ".local/bin/agy")]),
+    // Signing in leaves a small marker file next to the token kept in the OS keyring; only its
+    // presence is checked. Starting agy while signed out would open a browser, so it isn't run.
+    signedIn: () =>
+      [join(home, "Library/Application Support"), join(home, ".config"), process.env.APPDATA || ""]
+        .filter(Boolean)
+        .some((d) => existsSync(join(d, "antigravity", "credential-user-scope"))),
+    install: WIN ? "irm https://antigravity.google/cli/install.ps1 | iex" : "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    signin: (exe) => `"${exe}"   (choose Google OAuth and sign in in the browser, then type /quit)`,
   },
 ];
 

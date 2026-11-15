@@ -16,4 +16,6 @@ First release.
 - Demo mode for screenshots and UI work in a plain browser, with invented data.
 - **+ Add AI**: add Gemini (Google's Gemini CLI, your Google sign-in), remove members, with install and sign-in steps in one place. AIs can propose a member with an `ADD_AI:` line; optionally let them add without asking.
 - Project folders and per-AI access (Chat only, Read, Edit, Full); a **Full capacity** preset; build-mode teamwork instructions for the AIs.
+- Gemini runs through Google's Antigravity CLI (Google ended Gemini CLI access for personal accounts in June 2026); the Gemini CLI remains the fallback for company plans and API keys.
+- **self-check** in the Council panel: one tiny test message to every AI at once, with the result and time on each card.
 - Restart resilience: on macOS closing the window keeps the AIs working; a turn cut short by a quit or crash resumes on the next launch.

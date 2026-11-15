@@ -57,6 +57,14 @@ export interface AgentInfo {
   hint: string;
 }
 
+export interface CheckResult {
+  id: string;
+  name: string;
+  ok: boolean;
+  ms: number;
+  detail: string;
+}
+
 export interface TurnState {
   conversation: string;
   state: "running" | "idle";
@@ -78,6 +86,8 @@ const appApi = {
     invoke<ChatEvent>("send_message", { id, text, targets, rounds, interrupt }),
   stop: (id: string) => invoke<boolean>("stop", { id }),
   running: () => invoke<string[]>("running"),
+  /** Asks every council member for a one-word reply, in parallel. Uses a little of each AI's allowance. */
+  selfCheck: () => invoke<CheckResult[]>("self_check"),
   setMember: (agent: string, member: boolean) => invoke<void>("set_member", { agent, member }),
   setAccess: (agent: string, access: Access) => invoke<void>("set_access", { agent, access }),
   setWorkspace: (id: string, folder: string | null) => invoke<Conversation>("set_workspace", { id, folder }),

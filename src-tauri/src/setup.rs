@@ -52,9 +52,10 @@ fn npm_install(package: &str) -> Result<String, String> {
 
 pub fn step(agent_id: &str, action: &str) -> Result<Step, String> {
     let agent = agents::by_id(agent_id).ok_or("unknown agent")?;
-    let found = agents::find(agent.kind);
+    let kind = agents::effective_kind(agent);
+    let found = agents::find(kind);
     let windows = cfg!(windows);
-    let step = match (agent.kind, action) {
+    let step = match (kind, action) {
         (Kind::Codex, "signin") => {
             let exe = found.ok_or("Codex isn't installed yet")?;
             Step {
@@ -95,6 +96,21 @@ pub fn step(agent_id: &str, action: &str) -> Result<Step, String> {
         (Kind::GeminiCli, "install") => Step {
             title: "Install the Gemini CLI (Google's command-line tool)",
             command: npm_install("@google/gemini-cli")?,
+        },
+        (Kind::Antigravity, "signin") => {
+            let exe = found.ok_or("the Antigravity CLI isn't installed yet")?;
+            Step {
+                title: "Sign in to Gemini (Antigravity): choose Google OAuth, sign in in the browser, then type /quit",
+                command: if windows { format!("& \"{}\"", exe.display()) } else { sh_quote(&exe) },
+            }
+        }
+        (Kind::Antigravity, "install") => Step {
+            title: "Install Google's Antigravity CLI (for Gemini)",
+            command: if windows {
+                "irm https://antigravity.google/cli/install.ps1 | iex".into()
+            } else {
+                "curl -fsSL https://antigravity.google/cli/install.sh | bash".into()
+            },
         },
         _ => return Err("unknown setup action".into()),
     };
@@ -177,12 +193,13 @@ mod tests {
         } else {
             assert_eq!(s.command, "curl -fsSL https://claude.ai/install.sh | bash");
         }
-        // Codex and Gemini install through npm, run with Node's folder on PATH.
+        // Codex installs through npm, run with Node's folder on PATH.
         if npm().is_some() {
             assert!(step("gpt", "install").unwrap().command.ends_with("install -g @openai/codex"));
-            assert!(step("gemini", "install").unwrap().command.ends_with("install -g @google/gemini-cli"));
-        } else {
-            assert!(step("gemini", "install").unwrap_err().contains("Node.js is needed"));
+        }
+        // Gemini installs through Google's Antigravity installer (unless only the Gemini CLI is present).
+        if agents::find(Kind::GeminiCli).is_none() || agents::find(Kind::Antigravity).is_some() {
+            assert!(step("gemini", "install").unwrap().command.contains("antigravity.google/cli/install"));
         }
     }
 

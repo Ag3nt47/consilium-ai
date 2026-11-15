@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ACCESS_LEVELS, api, IN_APP, onEvent, onTurn, senderName, type Access, type AgentInfo, type ChatEvent, type Conversation, type TurnState } from "./api";
+import { ACCESS_LEVELS, api, IN_APP, onEvent, onTurn, senderName, type Access, type AgentInfo, type CheckResult, type ChatEvent, type Conversation, type TurnState } from "./api";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
@@ -99,7 +99,7 @@ function agentState(a: AgentInfo): "ready" | "signin" | "missing" {
   return a.available ? "ready" : a.path ? "signin" : "missing";
 }
 
-function AgentDot({ agent, onSetup }: { agent: AgentInfo; onSetup: (a: AgentInfo) => void }) {
+function AgentDot({ agent, onSetup, check }: { agent: AgentInfo; onSetup: (a: AgentInfo) => void; check?: CheckResult | "running" }) {
   const state = agentState(agent);
   const label = { ready: "Ready", signin: "Not signed in", missing: "Not installed" }[state];
   return (
@@ -112,6 +112,15 @@ function AgentDot({ agent, onSetup }: { agent: AgentInfo; onSetup: (a: AgentInfo
         <button className="link setup-link" onClick={() => onSetup(agent)} title={agent.hint}>
           {state === "missing" ? "Install" : "Sign in"}
         </button>
+      )}
+      {check && (
+        <span className={`check ${check === "running" ? "check-running" : check.ok ? "check-ok" : "check-bad"}`} title={check === "running" ? "" : check.detail}>
+          {check === "running"
+            ? "testing…"
+            : check.ok
+              ? `✓ answered in ${(check.ms / 1000).toFixed(1)}s`
+              : `✗ ${check.detail.split("\n")[0].slice(0, 90)}`}
+        </span>
       )}
       <span className="agent-kind">
         {agent.tool}
@@ -139,6 +148,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(!IN_APP && demoSettings);
   const [showAddAi, setShowAddAi] = useState(!IN_APP && demoAddAi);
+  const [checks, setChecks] = useState<Record<string, CheckResult | "running">>({});
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [updateNote, setUpdateNote] = useState<string>("");
   const [toast, setToast] = useState<string | null>(null);
@@ -363,6 +373,21 @@ export default function App() {
     }
   }
 
+  // Self-check: one tiny real message to every council member at once.
+  async function runSelfCheck() {
+    setChecks(Object.fromEntries(members.map((m) => [m.id, "running" as const])));
+    try {
+      const results = await api.selfCheck();
+      setChecks(Object.fromEntries(results.map((r) => [r.id, r])));
+      const bad = results.filter((r) => !r.ok);
+      setToast(bad.length ? `Self-check: ${bad.map((b) => b.name).join(", ")} didn't answer` : `Self-check: all ${results.length} AIs answered`);
+      setTimeout(() => setToast(null), 5000);
+    } catch (e) {
+      setChecks({});
+      setError(String(e));
+    }
+  }
+
   async function removeMember(a: AgentInfo) {
     if (!confirm(`Remove ${a.name} from the council? You can add it back any time.`)) return;
     try {
@@ -456,12 +481,22 @@ export default function App() {
         <div className="agents">
           <div className="section-label">
             Council
-            <button className="link" onClick={refreshAgents} title="Check the AIs' sign-in again">
-              refresh
-            </button>
+            <span>
+              <button className="link" onClick={refreshAgents} title="Check the AIs' sign-in again">
+                refresh
+              </button>
+              <button
+                className="link"
+                onClick={runSelfCheck}
+                disabled={Object.values(checks).includes("running")}
+                title="Send every AI a one-word test message and show who answers (uses a little of each AI's allowance)"
+              >
+                self-check
+              </button>
+            </span>
           </div>
           {members.map((a) => (
-            <AgentDot key={a.id} agent={a} onSetup={setupAgent} />
+            <AgentDot key={a.id} agent={a} onSetup={setupAgent} check={checks[a.id]} />
           ))}
         </div>
         <div className="sidebar-actions">

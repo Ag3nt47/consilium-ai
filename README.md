@@ -8,7 +8,7 @@ Consilium is a desktop app where several AI assistants and you work in one conve
 <p align="center"><img src="docs/media/demo.png" width="860" alt="Animated demo: a question goes to ChatGPT and Claude in Discuss mode; they answer in turn, Claude corrects ChatGPT, ChatGPT concedes and asks the human a question shown as a red REQUEST callout"></p>
 <p align="center"><sub>Demo with invented data.</sub></p>
 
-- **No API keys.** ChatGPT takes part through OpenAI's Codex CLI, Claude through Anthropic's Claude Code CLI, and Gemini (optional, via **+ Add AI**) through Google's Gemini CLI, each using your own existing sign-in. Consilium never sees a password, token or key.
+- **No API keys.** ChatGPT takes part through OpenAI's Codex CLI, Claude through Anthropic's Claude Code CLI, and Gemini (optional, via **+ Add AI**) through Google's Antigravity CLI, each using your own existing sign-in. Consilium never sees a password, token or key.
 - **The council can build.** Give a conversation a project folder and choose each AI's access: Chat only (default), Read, Edit, or Full (the permissions you already approved in its own app). With **Full capacity** on, every AI works on what you ask, splits the work and reviews each other. AIs can bring in another AI with an `ADD_AI:` line.
 - **Picks up where it left off.** On macOS, closing the window keeps the AIs working in the background. If the app quits mid-turn, it resumes that turn on the next launch.
 - **One shared transcript**, color-coded by speaker. Anything an AI needs from you appears as a red **REQUEST:** callout.
@@ -53,7 +53,7 @@ Consilium checks for both AI tools and shows a **Set up AIs** button for anythin
 | --- | --- | --- |
 | ChatGPT | [Codex CLI](https://developers.openai.com/codex) (included in the ChatGPT desktop app on macOS) | ChatGPT plan |
 | Claude | [Claude Code](https://claude.com/claude-code) | Claude plan |
-| Gemini (optional) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | Google account |
+| Gemini (optional) | [Antigravity CLI](https://antigravity.google/docs/getting-started/) (`agy`). Google stopped serving the Gemini CLI to personal accounts in June 2026; Consilium still uses it if `agy` isn't installed, for company plans and API keys. | Google account |
 
 Each AI's usage counts against your own plan with that provider.
 

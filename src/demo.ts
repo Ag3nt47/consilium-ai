@@ -128,6 +128,10 @@ export const demoApi = {
   setAccess: async () => undefined,
   setWorkspace: async () => conversations[0],
   pickFolder: async () => null,
+  selfCheck: async () => [
+    { id: "gpt", name: "ChatGPT", ok: true, ms: 9400, detail: "OK" },
+    { id: "claude", name: "Claude", ok: true, ms: 6100, detail: "OK" },
+  ],
 };
 export const demoAddAi = params.get("addai") === "1";
 

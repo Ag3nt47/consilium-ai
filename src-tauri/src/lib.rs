@@ -303,6 +303,56 @@ async fn run_turns(
     }
 }
 
+#[derive(Clone, Serialize)]
+struct CheckResult {
+    id: String,
+    name: String,
+    ok: bool,
+    /// How long the answer took, in milliseconds.
+    ms: u64,
+    /// The reply (trimmed) or the error.
+    detail: String,
+}
+
+/// Self-check: asks every council member, at the same time, for a one-word reply, with chat-only
+/// access in an empty folder. Each check costs about one short message of that AI's allowance.
+#[tauri::command]
+async fn self_check(state: State<'_, AppState>) -> Result<Vec<CheckResult>, String> {
+    let members = state.config.get().members;
+    let mut tasks = Vec::new();
+    for id in members {
+        let Some(agent) = agents::by_id(&id) else { continue };
+        tasks.push(tauri::async_runtime::spawn(async move {
+            let system = "This is an automatic health check from Consilium, not a conversation. Don't use tools \
+or run commands. Reply with exactly the word OK and nothing else.";
+            let started = std::time::Instant::now();
+            let token = CancellationToken::new();
+            let r = tokio::time::timeout(
+                std::time::Duration::from_secs(180),
+                agents::run(agent, Access::Chat, None, system, "Health check: reply with OK.", &token),
+            )
+            .await;
+            let ms = started.elapsed().as_millis() as u64;
+            let (ok, detail) = match r {
+                Ok(Ok(reply)) => (true, reply.chars().take(80).collect()),
+                Ok(Err(e)) => (false, e),
+                Err(_) => {
+                    token.cancel();
+                    (false, "no answer within 3 minutes".into())
+                }
+            };
+            CheckResult { id: agent.id.into(), name: agent.name.into(), ok, ms, detail }
+        }));
+    }
+    let mut out = Vec::new();
+    for t in tasks {
+        if let Ok(r) = t.await {
+            out.push(r);
+        }
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 fn stop(state: State<AppState>, id: String) -> bool {
     match state.running.lock().unwrap().get(&id) {
@@ -372,7 +422,8 @@ pub fn run() {
             send_message,
             stop,
             running,
-            setup_agent
+            setup_agent,
+            self_check
         ])
         .build(tauri::generate_context!())
         .expect("error while starting Consilium")
