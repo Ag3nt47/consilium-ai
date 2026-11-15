@@ -15,7 +15,7 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Pre-flight auth check | ✅ | Add AI / setup checks each CLI's sign-in before use |
 | Devil's advocate in round 3+ | ✅ | Rotating reviewer |
 | Context sliding window (summarise long sessions) | ⏭ | Summarise old turns once a token threshold is crossed |
-| File-state hashing / git diff in each turn | ⏭ | Give every AI the current `git status` + short diff per turn |
+| File-state hashing / git diff in each turn | 🔨 | Implementation is in progress; bounded, redacted snapshots still need a hard subprocess timeout |
 | Destructive command sanitizer for Full capacity | ⏭ | Can only gate what Consilium itself runs; the CLIs execute their own commands, so the real guard is their own permission modes plus worktrees |
 | Secret redaction | ✅ | `redact.rs`, plus `check-secrets.mjs` before pushes |
 | Git worktree per agent in Full capacity | ⏭ | `consilium/agent-<id>` branches, merged on approval |
@@ -48,8 +48,8 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Signal phone bridge, phone Approve/Deny | 🔨 | Adapter in `bridge.rs` (Gemini); not yet connected to the app |
 | Voice visualizer, bars + orb, cyan/violet | ✅ | 0.3.6. AI side is an animation: system speech has no audio samples |
 | Daily Bing wallpaper with frosted layer, off switch | ⏭ | Gemini, after Signal |
-| Audit log drawer | ⏭ | |
-| Persona chips above the prompt | ⏭ | |
+| Audit log drawer | 🔨 | UI committed; awaiting a compatible Apply Now or full app update |
+| Persona chips above the prompt | 🔨 | UI committed; awaiting a compatible Apply Now or full app update |
 | Phone "launch" actions | ⏭ | Fixed app list in local config, no shell |
 | Telegram / Discord | 🕓 | After Signal |
 | Quick-summon hotkey, clipboard/screenshot capture, Whisper, Ollama + HUD | 🕓 | |
