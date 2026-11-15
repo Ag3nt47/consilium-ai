@@ -11,6 +11,7 @@ mod council;
 mod engine;
 mod memory;
 mod prompt;
+mod redact;
 mod resume;
 mod setup;
 mod store;

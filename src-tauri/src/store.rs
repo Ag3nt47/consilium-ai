@@ -391,6 +391,8 @@ impl Store {
         attachments: Vec<crate::attach::Attachment>,
     ) -> Result<Event, String> {
         Self::check(id)?;
+        // Everything in a conversation is sent to every AI's provider, so secrets are masked first.
+        let text = &crate::redact::scrub(text);
         let appending = self.appending.lock().unwrap();
         let lock = OpenOptions::new()
             .create(true)
@@ -541,6 +543,26 @@ mod tests {
         assert!(!s.take_stop_request(&c.id, 0), "and used up");
         s.request_stop(&c.id).unwrap();
         assert!(s.take_stop_request(&c.id, 0));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn secrets_are_masked_before_they_are_saved_or_shared() {
+        let (s, dir) = temp_store();
+        let c = s.create("Keys").unwrap();
+        let key = format!("ghp_{}", "A1b2".repeat(10));
+        let e = s
+            .append(
+                &c.id,
+                "gpt",
+                "message",
+                vec![],
+                &format!("Found {key} in .env"),
+            )
+            .unwrap();
+        assert_eq!(e.text, "Found [REDACTED GitHub token] in .env");
+        let raw = fs::read_to_string(s.log_path(&c.id)).unwrap();
+        assert!(!raw.contains(&key));
         fs::remove_dir_all(dir).unwrap();
     }
 

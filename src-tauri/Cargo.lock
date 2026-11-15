@@ -507,6 +507,7 @@ dependencies = [
  "dirs",
  "flate2",
  "libc",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

@@ -42,6 +42,7 @@ impl Memory {
         let mut text = std::fs::read_to_string(&self.path).unwrap_or_default();
         let mut added = Vec::new();
         for f in facts {
+            let f = &crate::redact::scrub(f);
             if text.contains(f.as_str()) {
                 continue;
             }
@@ -52,7 +53,10 @@ impl Memory {
             added.push(f.clone());
         }
         if !added.is_empty() {
-            std::fs::write(&self.path, &text).map_err(|e| e.to_string())?;
+            // Written to a temporary file and swapped in, so a crash can't leave half a memory file.
+            let tmp = self.path.with_extension("md.tmp");
+            std::fs::write(&tmp, &text).map_err(|e| e.to_string())?;
+            crate::store::replace_file(&tmp, &self.path).map_err(|e| e.to_string())?;
         }
         Ok(added)
     }
