@@ -300,9 +300,9 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: a voice visualizer in voice chat (spectrum bars or a pulsing orb, cyan \
-while you speak, violet while an AI speaks; click it to switch); the groundwork for the Signal phone bridge; and \
-safer instant updates that bring back the previous screen if a new one fails and refuse files that point outside it.";
+const WHATS_NEW: &str = "What's new: a messaging indicator at the top left shows a green check when \
+Signal is connected and answering, a red cross when it is set up but not answering; persona chips above the prompt \
+box ask every AI to answer in a role; and an Audit Log button lists approvals, requests, updates and errors.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
