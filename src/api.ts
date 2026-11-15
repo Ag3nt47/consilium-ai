@@ -246,6 +246,12 @@ const appApi = {
   updateAvailable: () => invoke<StagedUpdate | null>("update_available"),
   /** Pauses the AIs, installs the staged build and relaunches; their turns resume afterwards. */
   updateNow: () => invoke<void>("update_now"),
+  /** A screen-only update that applies without a restart, or null. */
+  uiUpdateAvailable: () => invoke<{ version: string } | null>("ui_update_available"),
+  /** Makes the staged screen live; reload the page afterwards. */
+  uiUpdateApply: () => invoke<string>("ui_update_apply"),
+  /** Tells the app this page started, so it isn't rolled back. */
+  uiLoaded: () => invoke<string | null>("ui_loaded"),
 };
 
 export interface StagedUpdate {

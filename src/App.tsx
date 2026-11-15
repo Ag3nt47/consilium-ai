@@ -527,18 +527,39 @@ export default function App() {
   const [pressure, setPressure] = useState<SystemPressure | null>(null);
   const [staged, setStaged] = useState<StagedUpdate | null>(null);
   const [updating, setUpdating] = useState(false);
+  const [stagedUi, setStagedUi] = useState<{ version: string } | null>(null);
   const [requestingStatus, setRequestingStatus] = useState(false);
 
   // Quick hover explanations for every control that has a title.
   useEffect(() => installHoverTips(), []);
 
+  // Confirms this page started, so an instantly applied screen update isn't rolled back.
+  useEffect(() => {
+    api.uiLoaded().catch(() => undefined);
+  }, []);
+
   // A staged build is a file check, so polling it is cheap.
   useEffect(() => {
-    const poll = () => api.updateAvailable().then(setStaged).catch(() => undefined);
+    const poll = () => {
+      api.updateAvailable().then(setStaged).catch(() => undefined);
+      api.uiUpdateAvailable().then(setStagedUi).catch(() => undefined);
+    };
     poll();
     const t = setInterval(poll, 15000);
     return () => clearInterval(t);
   }, []);
+
+  // Screen-only update: swap the page in place; the AIs' work carries on untouched.
+  const applyUi = async () => {
+    setUpdating(true);
+    try {
+      await api.uiUpdateApply();
+      window.location.reload();
+    } catch (e) {
+      setUpdating(false);
+      alert(`Screen update failed: ${e}`);
+    }
+  };
 
   const updateNow = async () => {
     setUpdating(true);
@@ -1491,6 +1512,16 @@ export default function App() {
               </label>
             ))}
             <span className="spacer" />
+            {stagedUi && !staged && (
+              <button
+                className="btn small update-now"
+                disabled={updating}
+                onClick={applyUi}
+                title="Load the new screen in place, with no restart. The AIs keep working; if the new screen doesn't start, the previous one comes back by itself."
+              >
+                {updating ? "Applying…" : "Apply Now · instant"}
+              </button>
+            )}
             {staged && (
               <button
                 className="btn small update-now"

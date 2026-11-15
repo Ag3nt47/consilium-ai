@@ -159,6 +159,9 @@ export const demoApi = {
   setApiKey: async () => undefined,
   updateAvailable: async () => null,
   updateNow: async () => undefined,
+  uiUpdateAvailable: async () => null,
+  uiUpdateApply: async () => "",
+  uiLoaded: async () => null,
   systemPressure: async () => ({
     percent: 24,
     cpu_percent: 18,

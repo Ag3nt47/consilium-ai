@@ -10,6 +10,7 @@ pub mod cli;
 mod config;
 mod council;
 mod engine;
+mod liveui;
 mod memory;
 mod pressure;
 mod prompt;
@@ -298,10 +299,9 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: what each AI is doing now shows only above its reply in the chat, \
-not on its council card; hover over any control for a short explanation; a Status Request button asks every AI \
-for a status report; the council cards no longer overlap and the window scales down cleanly; Update Now sits \
-beside the prompt box.";
+const WHATS_NEW: &str = "What's new: screen-only updates (layout, buttons, text) now apply instantly \
+with an Apply Now button, without a restart or pausing the AIs; if a new screen fails to start, the previous one \
+comes back by itself. Changes to the engine still use Update Now.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -364,6 +364,47 @@ fn update_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// A screen-only update staged by `scripts/stage-ui.mjs` for this engine; applies without a restart.
+#[tauri::command]
+fn ui_update_available() -> Option<liveui::StagedUi> {
+    let data = data_dir()?;
+    LIVE.get()?.staged(&data)
+}
+
+/// Makes the staged page live; the window then reloads itself and calls `ui_loaded`.
+#[tauri::command]
+fn ui_update_apply() -> Result<String, String> {
+    let data = data_dir().ok_or("can't find Consilium's data folder")?;
+    LIVE.get().ok_or("instant updates aren't available in this build")?.apply(&data)
+}
+
+/// The page confirms it started; an unconfirmed new page is replaced by the built-in one.
+#[tauri::command]
+fn ui_loaded() -> Option<String> {
+    let live = LIVE.get()?;
+    live.confirm();
+    live.version()
+}
+
+static LIVE: std::sync::OnceLock<Arc<liveui::Live>> = std::sync::OnceLock::new();
+
+/// Stands in for the built-in assets for a moment while they are wrapped.
+struct NoAssets;
+impl<R: tauri::Runtime> tauri::Assets<R> for NoAssets {
+    fn get(&self, _: &tauri::utils::assets::AssetKey) -> Option<std::borrow::Cow<'_, [u8]>> {
+        None
+    }
+    fn iter(&self) -> Box<tauri::utils::assets::AssetsIter<'_>> {
+        Box::new(std::iter::empty())
+    }
+    fn csp_hashes(
+        &self,
+        _: &tauri::utils::assets::AssetKey,
+    ) -> Box<dyn Iterator<Item = tauri::utils::assets::CspHash<'_>> + '_> {
+        Box::new(std::iter::empty())
+    }
+}
+
 /// Self-check: asks every council member, at the same time, for a one-word reply, with chat-only
 /// access in an empty folder. Each check costs about one short message of that AI's allowance.
 #[tauri::command]
@@ -424,6 +465,13 @@ fn system_pressure() -> pressure::SystemPressure {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let mut context = tauri::generate_context!();
+    if let Some(data) = data_dir() {
+        let live = liveui::Live::open(&data);
+        let built_in = context.set_assets(Box::new(NoAssets));
+        context.set_assets(Box::new(liveui::LiveAssets { built_in, live: live.clone() }));
+        let _ = LIVE.set(live);
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -442,6 +490,17 @@ pub fn run() {
             // Keeps the window in step with the terminal command.
             tauri::async_runtime::spawn(engine.clone().watch(true));
             app.manage(AppState { engine });
+            // Falls back to the built-in page if an instantly applied one never starts.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let (Some(live), Some(data)) = (LIVE.get(), data_dir()) else { return };
+                if live.check(&data) {
+                    if let Some(w) = handle.get_webview_window("main") {
+                        let _ = w.eval("location.reload()");
+                    }
+                }
+            });
             Ok(())
         })
         // On macOS, closing the window hides it and the AIs keep working; the Dock icon brings it
@@ -482,6 +541,9 @@ pub fn run() {
             system_pressure,
             update_available,
             update_now,
+            ui_update_available,
+            ui_update_apply,
+            ui_loaded,
             self_check,
             unbench,
             cli_status,
@@ -492,7 +554,7 @@ pub fn run() {
             attach_data,
             open_attachment
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while starting Consilium")
         .run(|app, event| {
             #[cfg(target_os = "macos")]

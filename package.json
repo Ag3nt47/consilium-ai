@@ -1,7 +1,7 @@
 {
   "name": "consilium",
   "private": true,
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "A council of minds: a desktop app where several AIs and a human work in one conversation.",
   "license": "MIT",
   "type": "module",
@@ -13,6 +13,7 @@
     "app:build": "tauri build",
     "app:build:mac": "tauri build --bundles app",
     "update:stage": "bash scripts/stage-update.sh",
+    "update:ui": "node scripts/stage-ui.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
     "test": "node --test tests/"
   },
