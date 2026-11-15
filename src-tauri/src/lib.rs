@@ -74,12 +74,40 @@ async fn agents_status(state: State<'_, AppState>) -> Result<Vec<agents::AgentIn
         info.benched_until = state.engine.bench.until(&info.id, now);
         out.push(info);
     }
-    // Members first, in council order; then everyone else in the fixed catalogue order, since the
-    // parallel checks above finish in whatever order they happen to.
-    let order = config.get().members;
-    let catalogue = |id: &str| agents::AGENTS.iter().position(|a| a.id == id).unwrap_or(usize::MAX);
-    out.sort_by_key(|a| (order.iter().position(|m| *m == a.id).unwrap_or(usize::MAX), catalogue(&a.id)));
+    sort_agents(&mut out, &config.get().members, |a| a.id.as_str());
     Ok(out)
+}
+
+/// Members first, in council order; then everyone else in the fixed catalogue order, since the
+/// parallel status checks finish in whatever order they happen to.
+fn sort_agents<T>(items: &mut [T], members: &[String], id: impl Fn(&T) -> &str) {
+    let catalogue = |id: &str| agents::AGENTS.iter().position(|a| a.id == id).unwrap_or(usize::MAX);
+    items.sort_by_key(|a| {
+        let id = id(a);
+        (members.iter().position(|m| m == id).unwrap_or(usize::MAX), catalogue(id))
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn agents_sort_members_first_then_catalogue_order() {
+        let members = vec!["claude".to_string(), "gpt".to_string()];
+        // Arrival order of the parallel checks varies; the result must not.
+        for start in [
+            ["gemini", "gpt", "claude"],
+            ["gpt", "claude", "gemini"],
+            ["claude", "gemini", "gpt"],
+        ] {
+            let mut ids: Vec<&str> = start.to_vec();
+            super::sort_agents(&mut ids, &members, |s| *s);
+            assert_eq!(ids, ["claude", "gpt", "gemini"]);
+        }
+        // With no members, the catalogue order (gpt, claude, gemini) applies.
+        let mut ids = vec!["gemini", "claude", "gpt"];
+        super::sort_agents(&mut ids, &[], |s| *s);
+        assert_eq!(ids, ["gpt", "claude", "gemini"]);
+    }
 }
 
 /// Remaining plan usage for each council member that reports it, keyed by AI id. Separate from

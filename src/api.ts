@@ -230,12 +230,6 @@ export function onTurn(fn: (t: TurnState) => void): Promise<UnlistenFn> {
   return listen<TurnState>("consilium://turn", (msg) => fn(msg.payload));
 }
 
-export const AGENT_COLORS: Record<string, string> = {
-  human: "var(--c-human)",
-  gpt: "var(--c-gpt)",
-  claude: "var(--c-claude)",
-};
-
 export function senderName(sender: Sender, agents: AgentInfo[]): string {
   if (sender === "human") return "You";
   return agents.find((a) => a.id === sender)?.name ?? sender;
