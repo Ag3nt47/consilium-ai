@@ -56,3 +56,28 @@ human's transcribed speech after a pause. macOS Dictation is the local fallback.
 - Signed and notarized installers (needs Apple Developer and Windows code-signing certificates).
 - Auto-update with signature verification.
 - iOS and Android through Tauri's mobile targets, including phone-width navigation and touch-first controls.
+
+## Second update blueprint (triaged 2026-11-15)
+
+The blueprint's sample code targets Python, PySide6 and FastAPI. Consilium is Tauri (Rust) with a React screen, so each item is rebuilt in that stack rather than pasted in.
+
+**Next, in order**
+1. Instant screen-only updates (approved; in progress).
+2. Signal phone bridge (approved). Phone buttons reuse the in-chat Approve/Deny decisions. A "launch" action may only open apps from a fixed list in local config, run without a shell, and only from the linked number.
+3. Voice visualizer: spectrum bars and a pulsing orb, a setting to pick one, cyan while the human speaks and violet while an AI speaks. The mic is never routed to the speakers.
+4. Daily Bing wallpaper behind the chat, cached in the app data folder, with a dark frosted layer for readability and an off switch.
+5. Audit log drawer: every approval, update, launch and phone message, newest first, with secrets masked.
+6. Persona chips above the prompt box (Security Auditor, Code Refactor, General) that change the instructions for the next messages.
+
+**Later**
+- Global quick-summon hotkey with a floating prompt window.
+- Clipboard and window-screenshot capture into the prompt (screenshot needs macOS screen-recording permission).
+- Local Whisper speech-to-text, replacing the WebKit recogniser that the app window may not provide.
+- Ollama as a local AI, then a token-speed and context HUD for it.
+- Telegram and Discord bridges, after Signal works.
+- Local search over an Obsidian vault (nothing leaves the machine).
+- Encrypted local secrets vault, released per action by an approval.
+- Background watchdog that drafts fixes for failing tests and leaves a branch to review, never merging.
+- Desktop widget dock.
+
+**Already built:** multi-AI Discuss mode with cross-review and a rotating devil's advocate covers the "consensus tribunal" item.
