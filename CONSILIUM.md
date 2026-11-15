@@ -19,5 +19,6 @@ Consilium: a Tauri 2 desktop app (Rust back end in `src-tauri/`, React + TypeScr
 
 - Small, focused commits with a clear message; tests with every behavior change.
 - Before changing a file another participant may have touched this turn, re-read it.
+- Treat `docs/UPGRADE_STATUS.md` as the canonical backlog for every requirement in the human's two uploaded Word blueprints, `Consilium Upgrade Overhaul.docx` and `2nd consilium update.docx`. For **Request App Update**, prefer its in-progress and next items before later roadmap work or unsolicited improvements, and update the ledger in the same commit as completed work.
 - New AI connectors follow `docs/CONNECTORS.md`; record known issues in `self-improvement/ledger.json`.
 - Ask the human (REQUEST:) before publishing a release, changing repository settings, or anything that can't be undone.

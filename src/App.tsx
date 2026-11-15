@@ -1128,7 +1128,7 @@ export default function App() {
     try {
       await api.send(
         current,
-        "Update request: nothing is staged to install. If a build is already running, say so and when it should be ready; don't start a second one. Otherwise agree in one message who takes what, then find the next improvements (unfinished items in docs/UPGRADE_STATUS.md and docs/ROADMAP.md, open bugs, or anything you've noticed), build and test them, commit, and stage them: npm run update:ui for screen-only changes, or a version bump and npm run update:stage for engine changes. Only one build at a time on this machine.",
+        "Update request: nothing is staged to install. If a build is already running, say so and when it should be ready; don't start a second one. Otherwise agree in one message who takes what, then work from docs/UPGRADE_STATUS.md, the canonical backlog for every requirement in the uploaded Word documents 'Consilium Upgrade Overhaul.docx' and '2nd consilium update.docx'. Prioritize unfinished document items marked in progress or next before later items, docs/ROADMAP.md, open bugs, or newly noticed improvements. Build and test the selected work, update the backlog in the same commit, and stage it: npm run update:ui for screen-only changes, or a version bump and npm run update:stage for engine changes. Do not mark a document item complete until it is implemented and verified. Only one build at a time on this machine.",
         members.map((member) => member.id),
         1,
       );

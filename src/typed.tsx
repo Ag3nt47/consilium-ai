@@ -47,7 +47,7 @@ export function TypedText({ text, enabled }: { text: string; enabled: boolean })
       shownRef.current = text.slice(0, at);
       setShown(shownRef.current);
       if (at >= text.length) window.clearInterval(timer);
-    }, 32); // 32 ms a frame: half the speed of the first version, as asked.
+    }, 35); // 35 ms a frame: slowed by another 10%, as requested.
     return () => {
       window.clearInterval(timer);
     };

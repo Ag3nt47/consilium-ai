@@ -1,8 +1,11 @@
 # Upgrade documents: status
 
-Tracks every item from the two upgrade documents the human attached on 2026-11-15
-("Consilium Upgrade Overhaul" and "2nd consilium update"). The council works down **Next** in order.
-Update this file in the same commit that finishes an item.
+This is the canonical backlog for every requirement in the two Word documents the human attached
+on 2026-11-15: **Consilium Upgrade Overhaul.docx** and **2nd consilium update.docx**. These documents
+are requested product scope, not optional inspiration. The council must prefer unfinished items
+marked **in progress** or **next** when **Request App Update** starts new work, then later document
+items, the roadmap, open bugs, and newly noticed improvements. Update this file in the same commit
+that finishes an item, and mark an item complete only after implementation and verification.
 
 Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasible as written (reason given)
 
