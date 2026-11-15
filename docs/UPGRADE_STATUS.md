@@ -43,6 +43,34 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Latent-space / KV-cache sharing between frontier models | ⛔ | The providers' CLIs and APIs only exchange text; no access to model internals |
 | OS-level patching beyond the OS's own protections | ⛔ | macOS/Windows sandboxing can't be bypassed, by design |
 
+### Master blueprint advanced phase coverage
+
+The master document continues through Phase 27. The phase-level rows below keep that later scope
+visible even when an earlier row above already tracks a shipped foundation. A phase remains open
+until every feasible capability in it is implemented and verified; completing one sub-feature does
+not complete the phase.
+
+| Source phase | Status | Remaining scope retained from the document |
+|---|---|---|
+| Phase 10: Fault-tolerant rate limits | ✅ | Error sniffing, benching, cooldowns, rerouting and graceful participant reduction are built |
+| Phase 11: Enterprise security and integrations | 🕓 | Continuous multi-agent review, secure enclaves, P2P/CRDT memory, policy compliance, cross-app RPC, generated API clients, stateful multi-file routing, formal guardrails and feedback-based routing |
+| Phase 12: User and AI quality of life | 🕓 | Side-by-side diff approval, live autonomy controls, incremental AST caching, deterministic replay and zero-shot wrapper synthesis; Stop, recovery states and Cmd/Ctrl+K are partial foundations |
+| Phase 13: Frontier-model intelligence | 🕓 | Multimodal UI-to-code, digital-twin sandboxes and theorem-prover integration; provider-internal speculative decoding and latent/KV sharing remain unavailable through public CLIs/APIs |
+| Phase 14: Enterprise architectures | 🕓 | Air-gapped compliance evidence, local GPU cache pooling where supported, accessibility-driven cross-app automation, defensive threat simulation and fleet consensus |
+| Phase 15: Ultra-cutting-edge capabilities | 🕓 | Ephemeral micro-VM isolation, local model adaptation/pruning, post-quantum agent-mesh security and explicitly opt-in ambient context |
+| Phase 16: Cost and explainability | 🕓 | User-set token/spend limits, complexity-aware local/cloud routing and inspectable decision/debate traces; usage reporting and live activity are foundations |
+| Phase 17: P2P local compute mesh | 🕓 | Private-LAN discovery, distributed offline inference, task sharding and disconnect-aware load balancing |
+| Phase 18: Evolutionary code optimization | 🕓 | Sandboxed candidate mutation/crossover, benchmark fitness selection and approval-gated promotion of winners |
+| Phase 19: Universal deconstruction | 🕓 | Deconstruct/reassemble commands, command-intent analysis and dependency/architecture mapping; attachment parsing and repo inspection are foundations |
+| Phase 20: Autonomous AI onboarding | 🕓 | Capability handshake, dynamic tool/skill provisioning and bounded memory/project synchronization for newly added models |
+| Phase 21: Synthetic data and evaluation | 🕓 | Edge-case data generation, continuous performance/security benchmarks and privacy-safe human/AI feedback loops |
+| Phase 22: Cross-device telemetry and routing | 🕓 | Thermal, battery and power-aware telemetry across user-owned devices plus consented workload routing; single-machine adaptive limits are built |
+| Phase 23: Spatial computing | 🕓 | Optional AR/VR architecture graphs, git topology and debate visualization |
+| Phase 24: Agent generation and Agent Shed | 🕓 | Specialized agent synthesis, persistent local/hybrid registry, approval-gated update/deprecation/purge and dynamic council onboarding |
+| Phase 25: Browser and cross-app automation | 🕓 | Permission-gated browser agents, API/DOM inspection and end-to-end multimodal web testing |
+| Phase 26: Consilium self-improvement | 🕓 | Low-overhead profiling, bounded code/prompt experiments, isolated regression/security harnesses and rollback-safe closed-loop deployment; pre-commit and update foundations are built |
+| Phase 27: Deployment roadmap | 🕓 | Finish Stages 2–3 safety/skill work, then evaluate the Stage 4 multi-node mesh only with explicit security and hardware gates |
+
 ## Document 2: Second update blueprint
 
 | Item | Status | Notes |
@@ -51,6 +79,7 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Signal phone bridge, phone Approve/Deny | 🔨 | Adapter in `bridge.rs` (Gemini); not yet connected to the app |
 | Voice visualizer, bars + orb, cyan/violet | ✅ | 0.3.6. AI side is an animation: system speech has no audio samples |
 | Daily Bing wallpaper with frosted layer, off switch | ✅ | 0.3.7. Cached in ~/.config/consilium/wallpapers, base64 data-URL, off switch in Settings |
+| Wallpaper refresh across midnight or system wake | 🕓 | Preserve the current cached image on failure; refresh asynchronously without blocking startup |
 | Audit log drawer | ✅ | Applied instantly on 0.3.6 without restarting |
 | Persona chips above the prompt | ✅ | Applied instantly on 0.3.6 without restarting |
 | Phone "launch" actions | ✅ | 0.3.7. Allowlisted targets (terminal, vscode, dashboard) executed without shell |
