@@ -634,6 +634,7 @@ impl council::Host for RealHost {
         let transcript = prompt::transcript(&events, agent.id);
         let files = crate::attach::files_for(&events, &self.store.files_dir(conv));
         let ws_path = workspace.map(PathBuf::from);
+        let state_path = (access != Access::Chat).then(|| ws_path.clone()).flatten();
         let data = self.data.clone();
         let ui = self.ui.clone();
         let conversation = self.conversation.clone();
@@ -660,6 +661,19 @@ impl council::Host for RealHost {
             });
         });
         Box::pin(async move {
+            // Git can briefly touch many files in a large repository, so keep it off the async
+            // executor and bound the wait. A slow/non-git folder must never delay the AI turn.
+            if let Some(path) = state_path {
+                if let Ok(Ok(Some(state))) = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    tokio::task::spawn_blocking(move || prompt::workspace_state(&path)),
+                )
+                .await
+                {
+                    system.push_str("\n\n");
+                    system.push_str(&state);
+                }
+            }
             let reply = agents::run_with_files_observed(
                 agent,
                 access,

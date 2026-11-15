@@ -3,9 +3,131 @@
 use crate::agents::AGENTS;
 use crate::config::Access;
 use crate::store::Event;
+use std::hash::{DefaultHasher, Hasher};
+use std::io::Read;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Older turns are dropped first once the transcript passes this many characters.
 pub const MAX_TRANSCRIPT_CHARS: usize = 120_000;
+/// Enough patch context to identify concurrent edits without spending the whole prompt on a diff.
+const MAX_WORKSPACE_DIFF_BYTES: usize = 12_000;
+const MAX_WORKSPACE_STATUS_BYTES: usize = 8_000;
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+struct GitOutput {
+    shown: String,
+    digest: u64,
+    truncated: bool,
+}
+
+/// Runs a read-only git command without a shell, hashes its complete output, and retains only the
+/// bounded prefix needed for the prompt. A reader thread keeps the pipe drained; the parent polls
+/// the child and kills it at the deadline so a stuck Git process cannot survive an async timeout.
+fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut hasher = DefaultHasher::new();
+        let mut shown = Vec::with_capacity(keep.min(16 * 1024));
+        let mut total = 0usize;
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = stdout.read(&mut buf).ok()?;
+            if n == 0 {
+                break;
+            }
+            hasher.write(&buf[..n]);
+            total = total.saturating_add(n);
+            if shown.len() < keep {
+                let take = n.min(keep - shown.len());
+                shown.extend_from_slice(&buf[..take]);
+            }
+        }
+        Some(GitOutput {
+            shown: String::from_utf8_lossy(&shown).into_owned(),
+            digest: hasher.finish(),
+            truncated: total > shown.len(),
+        })
+    });
+    let started = Instant::now();
+    let success = loop {
+        if let Some(status) = child.try_wait().ok()? {
+            break status.success();
+        }
+        if started.elapsed() >= GIT_COMMAND_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let output = reader.join().ok().flatten()?;
+    success.then_some(output)
+}
+
+/// A fresh, redacted snapshot of the repository immediately before an agent starts. It gives each
+/// council member the same change id and a bounded diff excerpt while still requiring the agent to
+/// re-read files before editing. Non-git folders simply have no snapshot.
+pub fn workspace_state(workspace: &Path) -> Option<String> {
+    let status = git_output(
+        workspace,
+        &["status", "--short", "--branch", "--untracked-files=normal"],
+        MAX_WORKSPACE_STATUS_BYTES,
+    )?;
+    let diff = git_output(
+        workspace,
+        &[
+            "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".",
+        ],
+        MAX_WORKSPACE_DIFF_BYTES,
+    )
+    .or_else(|| {
+        // An unborn repository has no HEAD yet, but its index can still be described.
+        git_output(
+            workspace,
+            &["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", "."],
+            MAX_WORKSPACE_DIFF_BYTES,
+        )
+    })?;
+    let mut state = DefaultHasher::new();
+    state.write_u64(status.digest);
+    state.write_u64(diff.digest);
+    let id = state.finish();
+    let status_text = crate::redact::scrub(status.shown.trim());
+    let diff_text = crate::redact::scrub(diff.shown.trim());
+    let mut out = format!("PROJECT STATE (read-only snapshot refreshed immediately before this answer; id {id:016x}):\n");
+    if status_text.is_empty() {
+        out.push_str("Git status: clean");
+    } else {
+        out.push_str("Git status:\n");
+        out.push_str(&status_text);
+        if status.truncated {
+            out.push_str("\n… status truncated");
+        }
+    }
+    if !diff_text.is_empty() {
+        out.push_str("\n\nCurrent diff excerpt:\n");
+        out.push_str(&diff_text);
+        if diff.truncated {
+            out.push_str("\n… diff truncated; inspect the workspace for the complete change");
+        }
+    }
+    out.push_str("\nRe-read any file immediately before changing it; another participant may edit after this snapshot.");
+    Some(out)
+}
 
 pub fn label(sender: &str) -> String {
     match sender {
@@ -257,6 +379,34 @@ mod tests {
         assert!(t.contains("latest"));
         assert!(t.contains("earlier messages omitted"));
         assert!(t.len() <= MAX_TRANSCRIPT_CHARS + 500);
+    }
+
+    #[test]
+    fn workspace_state_is_fresh_bounded_and_secret_scrubbed() {
+        let repo = std::env::temp_dir().join(format!("consilium-prompt-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Consilium Test"]);
+        git(&["config", "user.email", "test@invalid.example"]); // consilium-allow-secret-scan (non-routable test identity)
+        std::fs::write(repo.join("note.txt"), "base\n").unwrap();
+        git(&["add", "note.txt"]);
+        git(&["commit", "-qm", "base", "--no-gpg-sign"]);
+
+        let secret = format!("sk-{}", "Ab3_".repeat(8));
+        std::fs::write(repo.join("note.txt"), format!("base\nAPI_KEY={secret}\n")).unwrap();
+        let state = workspace_state(&repo).unwrap();
+        assert!(state.contains("PROJECT STATE") && state.contains("note.txt"));
+        assert!(state.contains("Current diff excerpt"));
+        assert!(state.contains("[REDACTED OpenAI key]"));
+        assert!(!state.contains(&secret));
+
+        std::fs::remove_dir_all(&repo).unwrap();
+        let plain = std::env::temp_dir();
+        assert!(workspace_state(&plain).is_none());
     }
 
     #[test]
