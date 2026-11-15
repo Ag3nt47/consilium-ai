@@ -43,6 +43,7 @@ const THEMES = [
   { id: "slate", name: "Slate", note: "From the UI Design Bundle" },
   { id: "crt", name: "CRT", note: "Green phosphor terminal" },
   { id: "retro84", name: "Retro '84", note: "Neon grid, scanlines, glow" },
+  { id: "netrunner", name: "Netrunner", note: "Black, neon green, cyberpunk" },
 ] as const;
 
 /** Official account/key and plan portals used by the approval-gated Add AI wizard. */
@@ -1262,6 +1263,7 @@ export default function App() {
     { id: "theme-slate", name: "Theme: Slate", hint: "Clean slate dark", run: () => setPrefs((p) => ({ ...p, theme: "slate" })) },
     { id: "theme-crt", name: "Theme: CRT", hint: "Green phosphor terminal", run: () => setPrefs((p) => ({ ...p, theme: "crt" })) },
     { id: "theme-retro84", name: "Theme: Retro '84", hint: "Neon grid, scanlines, glow", run: () => setPrefs((p) => ({ ...p, theme: "retro84" })) },
+    { id: "theme-netrunner", name: "Theme: Netrunner", hint: "Black, neon green, cyberpunk", run: () => setPrefs((p) => ({ ...p, theme: "netrunner" })) },
   ], [current, discuss, members, openUsage, requestingStatus]);
 
   const filteredCommands = useMemo(() => {

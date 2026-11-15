@@ -2229,3 +2229,80 @@ button.attachment {
 .msg-note { flex: 1; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
 .msg-note.ok { color: #16a34a; }
 .msg-note.err { color: #dc2626; }
+
+/* ---------- Netrunner: pure black, neon green text, cyberpunk magenta/cyan highlights ---------- */
+[data-theme="netrunner"] {
+  --bg: #000000;
+  --bg-2: #030805;
+  --panel: #050d07;
+  --panel-raised: #0a1a0e;
+  --border: #13532a;
+  --text: #39ff88;
+  --muted: #1fae5c;
+  --accent: #00ff66;
+  --accent-text: #000000;
+  --accent-soft: #00ff6618;
+  --c-human: #b6ffcf;
+  --c-gpt: #00e5ff;
+  --c-claude: #ff2bd6;
+  --c-gemini: #f3ff3a;
+  --danger: #ff3b5c;
+  --request: #ff2050;
+  --radius: 2px;
+  --radius-sm: 1px;
+  --font: var(--mono);
+  --brand-font: var(--mono);
+  --glow: 0 0 6px #00ff6666, 0 0 16px #ff2bd622;
+}
+
+[data-preview="netrunner"] .swatch {
+  background: linear-gradient(120deg, #000 0 45%, #39ff88 45% 70%, #ff2bd6 70% 85%, #00e5ff 85%);
+}
+
+[data-theme="netrunner"] a {
+  color: #00e5ff;
+  text-decoration-color: #ff2bd6;
+}
+
+[data-theme="netrunner"] ::selection {
+  background: #ff2bd6;
+  color: #000;
+}
+
+[data-theme="netrunner"] .msg,
+[data-theme="netrunner"] .modal,
+[data-theme="netrunner"] .composer {
+  border-color: var(--border);
+  box-shadow: inset 0 0 0 1px #00ff6610;
+}
+
+[data-theme="netrunner"] .brand-name {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+[data-effects="on"][data-theme="netrunner"] .fx-scanlines {
+  display: block;
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 40;
+  background: repeating-linear-gradient(to bottom, #0000 0 2px, #00ff660a 2px 3px);
+}
+
+[data-effects="on"][data-theme="netrunner"] .main {
+  background:
+    repeating-linear-gradient(to right, #00ff6608 0 1px, #0000 1px 48px),
+    repeating-linear-gradient(to bottom, #00ff6606 0 1px, #0000 1px 48px),
+    #000;
+}
+
+[data-effects="on"][data-theme="netrunner"] .body,
+[data-effects="on"][data-theme="netrunner"] .who,
+[data-effects="on"][data-theme="netrunner"] .brand-name {
+  text-shadow: 0 0 5px currentColor;
+}
+
+[data-effects="on"][data-theme="netrunner"] .msg {
+  box-shadow: 0 0 0 1px #00ff6622, 0 0 14px #ff2bd614;
+}
