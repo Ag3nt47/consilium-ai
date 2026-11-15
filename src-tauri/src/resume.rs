@@ -76,6 +76,20 @@ impl Journal {
         }
     }
 
+    /// The human sent another message into the running turn, addressing `targets`: they are part of
+    /// the turn if it has to resume.
+    pub fn join(&self, conversation: &str, turn: &str, targets: &[String]) {
+        let mut items = self.items.lock().unwrap();
+        if let Some(p) = items.get_mut(conversation).filter(|p| p.turn == turn) {
+            for t in targets {
+                if !p.targets.contains(t) {
+                    p.targets.push(t.clone());
+                }
+            }
+            self.save(&items);
+        }
+    }
+
     /// Forgets the turn `turn` in `conversation`, if it is still the one recorded there.
     pub fn finish(&self, conversation: &str, turn: &str) {
         let mut items = self.items.lock().unwrap();

@@ -47,9 +47,19 @@ struct AppState {
     memory: Arc<Memory>,
     /// AIs that ran out of usage, and until when.
     bench: Arc<bench::Bench>,
-    /// Conversations with a turn in progress: the turn's id and how to stop it.
-    running: Arc<Mutex<HashMap<String, (String, CancellationToken)>>>,
-}
+        /// Conversations with a turn in progress.
+        running: Arc<Mutex<HashMap<String, Running>>>,
+    }
+
+    /// A turn in progress in a conversation.
+    #[derive(Clone)]
+    struct Running {
+        /// The turn's id (see `resume::Pending::turn`).
+        turn: String,
+        token: CancellationToken,
+        /// Takes the human's further messages while the turn runs.
+        council: Arc<council::Council>,
+    }
 
 #[derive(Clone, Serialize)]
 struct TurnState {
@@ -183,8 +193,9 @@ fn export_markdown(state: State<AppState>, id: String) -> Result<String, String>
 /// nobody has anything new to react to, when every AI passes, or when any AI asks the human
 /// something (a REQUEST: line).
 ///
-/// A turn already running in this conversation is stopped first (its CLIs and everything they
-/// started are killed), and the new message is sent once that has finished.
+/// Sending while the AIs are answering doesn't interrupt them: the message joins the running turn,
+/// every AI reads it (one in the middle of an answer, as soon as it has finished), and those it
+/// addresses who weren't taking part join in. Stop is what interrupts.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn send_message(
@@ -200,11 +211,8 @@ async fn send_message(
     if text.is_empty() {
         return Err("the message is empty".into());
     }
-    // Sending while the AIs are answering always interrupts them: the running turn is stopped, and
-    // this message goes out once it has shut down (STOP_GRACE at most). `interrupt` is accepted for
-    // older UIs; the message is never refused because a turn is running.
+    // `interrupt` is accepted from older UIs and ignored: sending never interrupts.
     let _ = interrupt;
-    stop_and_wait(&app, &state, &id).await;
     let config = state.config.clone();
     let mut targets: Vec<String> = targets.into_iter().filter(|t| config.is_member(t)).collect();
     for m in prompt::mentioned_agents(&text) {
@@ -214,24 +222,26 @@ async fn send_message(
     }
     let rounds = rounds.clamp(1, MAX_ROUNDS);
 
-    let (event, token) = {
+    let (event, pending, live) = {
         let mut running = state.running.lock().unwrap();
-        // Another message started a turn in the meantime: stop that one too and take over.
-        if let Some((_, old)) = running.remove(&id) {
-            old.cancel();
-        }
         let event = state.store.append(&id, "human", "message", targets.clone(), &text)?;
         let _ = app.emit(EVENT, &event);
+        if let Some(r) = running.get(&id) {
+            if r.council.join(&event, &targets) {
+                state.journal.join(&id, &r.turn, &targets);
+                return Ok(event);
+            }
+            // That turn has just ended; this message starts a new one.
+        }
         if targets.is_empty() {
             return Ok(event);
         }
         let pending = Pending::new(&id, targets, rounds);
-        let token = CancellationToken::new();
-        running.insert(id.clone(), (pending.turn.clone(), token.clone()));
-        (event, (pending, token))
+        let live = prepare(&app, &state, &pending);
+        running.insert(id.clone(), live.clone());
+        (event, pending, live)
     };
-    let (pending, token) = token;
-    start_turns(&app, &state, pending, token);
+    start_turns(&app, &state, pending, live);
     Ok(event)
 }
 
@@ -240,11 +250,11 @@ async fn send_message(
 /// old turn can no longer change what is recorded for it.
 async fn stop_and_wait(app: &AppHandle, state: &AppState, conversation: &str) -> bool {
     let entry = state.running.lock().unwrap().get(conversation).cloned();
-    let Some((turn, token)) = entry else { return false };
+    let Some(Running { turn, token, .. }) = entry else { return false };
     token.cancel();
     let started = std::time::Instant::now();
     while started.elapsed() < STOP_GRACE {
-        let still = state.running.lock().unwrap().get(conversation).is_some_and(|(t, _)| *t == turn);
+        let still = state.running.lock().unwrap().get(conversation).is_some_and(|r| r.turn == turn);
         if !still {
             return true;
         }
@@ -258,14 +268,14 @@ async fn stop_and_wait(app: &AppHandle, state: &AppState, conversation: &str) ->
 /// Does nothing to a newer turn that has replaced it.
 fn release(
     app: &AppHandle,
-    running: &Mutex<HashMap<String, (String, CancellationToken)>>,
+    running: &Mutex<HashMap<String, Running>>,
     journal: &Journal,
     conversation: &str,
     turn: &str,
 ) {
     journal.finish(conversation, turn);
     let mut r = running.lock().unwrap();
-    if r.get(conversation).is_some_and(|(t, _)| t == turn) {
+    if r.get(conversation).is_some_and(|r| r.turn == turn) {
         r.remove(conversation);
         drop(r);
         let _ = app.emit(
@@ -275,10 +285,9 @@ fn release(
     }
 }
 
-/// Runs a turn in the background. Its journal entry is removed when it ends or is stopped; if the
-/// app quits first, the entry stays and the turn continues on the next launch.
-fn start_turns(app: &AppHandle, state: &AppState, pending: Pending, token: CancellationToken) {
-    state.journal.begin(pending.clone());
+/// Sets up a turn; `start_turns` runs it. The caller records it in `running` first, so a turn
+/// that ends at once can't leave the conversation marked as running.
+fn prepare(app: &AppHandle, state: &AppState, pending: &Pending) -> Running {
     let host = Arc::new(AppHost {
         app: app.clone(),
         store: state.store.clone(),
@@ -295,10 +304,18 @@ fn start_turns(app: &AppHandle, state: &AppState, pending: Pending, token: Cance
         rounds: pending.rounds,
         members: state.config.get().members,
     };
-    let (app, store, bench, journal, running) =
-        (app.clone(), state.store.clone(), state.bench.clone(), state.journal.clone(), state.running.clone());
+    let token = CancellationToken::new();
+    let council = council::Council::new(turn, state.store.clone(), state.bench.clone(), host, token.clone());
+    Running { turn: pending.turn.clone(), token, council: Arc::new(council) }
+}
+
+/// Runs a turn in the background. Its journal entry is removed when it ends or is stopped; if the
+/// app quits first, the entry stays and the turn continues on the next launch.
+fn start_turns(app: &AppHandle, state: &AppState, pending: Pending, live: Running) {
+    state.journal.begin(pending.clone());
+    let (app, journal, running) = (app.clone(), state.journal.clone(), state.running.clone());
     tauri::async_runtime::spawn(async move {
-        council::run(turn, store, bench, host, token).await;
+        live.council.run().await;
         release(&app, &running, &journal, &pending.conversation, &pending.turn);
     });
 }
@@ -336,14 +353,16 @@ fn resume_interrupted(app: &AppHandle, state: &AppState) {
         ) {
             let _ = app.emit(EVENT, &e);
         }
-        let token = CancellationToken::new();
-        state.running.lock().unwrap().insert(p.conversation.clone(), (p.turn.clone(), token.clone()));
-        start_turns(app, state, p, token);
+        let live = prepare(app, state, &p);
+        state.running.lock().unwrap().insert(p.conversation.clone(), live.clone());
+        start_turns(app, state, p, live);
     }
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: every AI now answers as soon as it's ready and reacts to new messages on \
+const WHATS_NEW: &str = "What's new: the human can now send messages while you are answering without \
+interrupting anyone; each new message joins the discussion and you all read it and respond. Every AI answers \
+as soon as it's ready and reacts to new messages on \
 its own time, instead of waiting for a turn. An AI that runs out of usage sits out until its limit resets \
 while the others carry on, and another member takes its turn if nobody else is answering. Stop and \
 interrupting now always work within a few seconds, even if an AI left a program running. Conversations \

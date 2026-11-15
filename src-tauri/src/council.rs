@@ -71,6 +71,11 @@ struct State {
     latest: HashMap<String, u64>,
     /// An AI asked the human something: nobody starts a new answer until they reply.
     paused: bool,
+    /// Raised each time the human sends a message into the running turn, so an AI that was about
+    /// to leave stays to read it.
+    generation: u64,
+    /// The turn has ended; a new message needs a new turn.
+    closed: bool,
 }
 
 struct Shared {
@@ -111,61 +116,114 @@ pub fn progress(events: &[Event]) -> Progress {
     p
 }
 
-/// Runs the turn to its end.
+/// Runs the turn to its end (the app uses `Council` directly, to take messages while it runs).
+#[cfg(test)]
 pub async fn run(turn: Turn, store: Arc<Store>, bench: Arc<Bench>, host: Arc<dyn Host>, cancel: CancellationToken) {
-    let events = store.load(&turn.conversation).unwrap_or_default();
-    let done = progress(&events);
-    let mut state = State::default();
-    for e in events.iter().filter(|e| e.kind == "message") {
-        state.latest.insert(e.sender.clone(), e.seq);
-    }
-    state.answered = done.answered.clone();
-    state.passed = done.passed.clone();
-    // Everyone addressed, plus anyone who joined in before a restart cut the turn short.
-    let mut who: Vec<(String, Option<u64>)> = turn.targets.iter().map(|t| (t.clone(), done.last.get(t).copied())).collect();
-    for (a, seq) in &done.last {
-        if !turn.targets.contains(a) && turn.members.contains(a) {
-            who.push((a.clone(), Some(*seq)));
+    Council::new(turn, store, bench, host, cancel).run().await
+}
+
+/// A turn in progress. The human can keep talking while it runs (see `join`).
+pub struct Council {
+    shared: Arc<Shared>,
+    /// The AIs to start when the turn runs, with the newest message each has already answered.
+    first: Mutex<Vec<(String, Option<u64>)>>,
+}
+
+impl Council {
+    pub fn new(turn: Turn, store: Arc<Store>, bench: Arc<Bench>, host: Arc<dyn Host>, cancel: CancellationToken) -> Self {
+        let events = store.load(&turn.conversation).unwrap_or_default();
+        let done = progress(&events);
+        let mut state = State::default();
+        for e in events.iter().filter(|e| e.kind == "message") {
+            state.latest.insert(e.sender.clone(), e.seq);
         }
-    }
-    who.retain(|(a, _)| !done.passed.contains(a) && agents::by_id(a).is_some());
-    let shared = Arc::new(Shared { turn, store, bench, host, cancel, state: Mutex::new(state), wake: Notify::new() });
-    let mut tasks = Vec::new();
-    {
-        let mut st = shared.state.lock().unwrap();
+        state.answered = done.answered.clone();
+        state.passed = done.passed.clone();
+        // Everyone addressed, plus anyone who joined in before a restart cut the turn short.
+        let mut who: Vec<(String, Option<u64>)> = turn.targets.iter().map(|t| (t.clone(), done.last.get(t).copied())).collect();
+        for (a, seq) in &done.last {
+            if !turn.targets.contains(a) && turn.members.contains(a) {
+                who.push((a.clone(), Some(*seq)));
+            }
+        }
+        who.retain(|(a, _)| !done.passed.contains(a) && agents::by_id(a).is_some());
         for (a, _) in &who {
-            st.live.insert(a.clone());
-            st.joined.insert(a.clone());
+            state.live.insert(a.clone());
+            state.joined.insert(a.clone());
         }
+        let shared = Arc::new(Shared { turn, store, bench, host, cancel, state: Mutex::new(state), wake: Notify::new() });
+        Council { shared, first: Mutex::new(who) }
     }
-    for (a, last_seen) in who {
-        tasks.push(tokio::spawn(worker(shared.clone(), a, last_seen)));
-    }
-    // Workers can start others (stand-ins, @mentioned AIs); wait until nobody is taking part.
-    for t in tasks {
-        let _ = t.await;
-    }
-    loop {
-        let n = shared.wake.notified();
-        tokio::pin!(n);
-        n.as_mut().enable();
-        if shared.state.lock().unwrap().live.is_empty() {
-            break;
+
+    /// The human said `message` while the turn is running. Nobody is interrupted: every AI gets a
+    /// fresh set of answers, those waiting read it at once, one in the middle of an answer reads it
+    /// as soon as it has finished, and anyone in `targets` who isn't taking part joins in.
+    /// Returns false if the turn has already ended, so the message needs a turn of its own.
+    pub fn join(&self, message: &Event, targets: &[String]) -> bool {
+        let s = &self.shared;
+        let mut start = Vec::new();
+        {
+            let mut st = s.state.lock().unwrap();
+            if st.closed || s.cancel.is_cancelled() {
+                return false;
+            }
+            st.answered.clear();
+            st.extra.clear();
+            st.passed.clear();
+            st.pulled_in = 0;
+            st.paused = false;
+            st.generation += 1;
+            st.latest.insert(message.sender.clone(), message.seq);
+            for t in targets {
+                if agents::by_id(t).is_some() && s.bench.until(t, now_ms()).is_none() && !st.live.contains(t) {
+                    st.live.insert(t.clone());
+                    st.joined.insert(t.clone());
+                    start.push(t.clone());
+                }
+            }
         }
-        n.await;
+        for t in start {
+            tokio::spawn(worker(s.clone(), t, Some(message.seq.saturating_sub(1))));
+        }
+        s.wake.notify_waiters();
+        true
     }
-    let st = shared.state.lock().unwrap();
-    if shared.turn.rounds > 1 && !shared.cancel.is_cancelled() {
-        let note = if st.paused {
-            Some("Discussion paused: a question for you is waiting.")
-        } else if !st.passed.is_empty() {
-            Some("Discussion ended: nobody had more to add.")
-        } else {
-            None
-        };
-        drop(st);
-        if let Some(note) = note {
-            note_as(&shared, "human", note);
+
+    /// Runs the turn to its end.
+    pub async fn run(&self) {
+        let shared = self.shared.clone();
+        let who = std::mem::take(&mut *self.first.lock().unwrap());
+        for (a, last_seen) in who {
+            tokio::spawn(worker(shared.clone(), a, last_seen));
+        }
+        // Workers can start others (stand-ins, @mentioned AIs, AIs the human adds); wait until
+        // nobody is taking part.
+        loop {
+            let n = shared.wake.notified();
+            tokio::pin!(n);
+            n.as_mut().enable();
+            {
+                let mut st = shared.state.lock().unwrap();
+                if st.live.is_empty() {
+                    st.closed = true;
+                    break;
+                }
+            }
+            n.await;
+        }
+        let st = shared.state.lock().unwrap();
+        if shared.turn.rounds > 1 && !shared.cancel.is_cancelled() {
+            let note = if st.paused {
+                Some("Discussion paused: a question for you is waiting.")
+            } else if !st.passed.is_empty() {
+                Some("Discussion ended: nobody had more to add.")
+            } else {
+                None
+            };
+            drop(st);
+            if let Some(note) = note {
+                note_as(&shared, "human", note);
+            }
         }
     }
 }
@@ -197,7 +255,9 @@ fn worker(s: Arc<Shared>, id: String, last_seen: Option<u64>) -> Pin<Box<dyn Fut
     Box::pin(work(s, id, last_seen))
 }
 
-async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
+/// Answers until there is nothing new to react to; returns whether it couldn't answer (an error or
+/// out of usage), and the newest message it has read.
+async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool, Option<u64>) {
     let agent = agents::by_id(&id).expect("known agent");
     let rounds = s.turn.rounds;
     let mut failed = false;
@@ -251,7 +311,7 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
                 break;
             }
         }
-        let n = {
+        let (n, asked_in) = {
             let mut st = s.state.lock().unwrap();
             let n = st.answered.get(&id).copied().unwrap_or(0) + 1;
             if n > rounds + st.extra.get(&id).copied().unwrap_or(0) {
@@ -259,7 +319,7 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
             }
             st.thinking.push((id.clone(), n));
             emit_thinking(&s, &st);
-            n
+            (n, st.generation)
         };
         let events = s.store.load(&s.turn.conversation).unwrap_or_default();
         last_seen = Some(events.last().map_or(0, |e| e.seq));
@@ -274,8 +334,11 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
                 s.bench.clear(&id);
                 note_as(&s, &id, &format!("{} had nothing to add.", agent.name));
                 let mut st = s.state.lock().unwrap();
-                *st.answered.entry(id.clone()).or_default() += 1;
-                st.passed.insert(id.clone());
+                // A pass on what came before the human's newest message doesn't count.
+                if st.generation == asked_in {
+                    *st.answered.entry(id.clone()).or_default() += 1;
+                    st.passed.insert(id.clone());
+                }
                 drop(st);
                 break;
             }
@@ -290,7 +353,11 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
                 let mut start = Vec::new();
                 {
                     let mut st = s.state.lock().unwrap();
-                    *st.answered.entry(id.clone()).or_default() += 1;
+                    // An answer begun before the human's newest message doesn't use up the
+                    // answers that message gave.
+                    if st.generation == asked_in {
+                        *st.answered.entry(id.clone()).or_default() += 1;
+                    }
                     st.latest.insert(id.clone(), ev.seq);
                     if !ev.requests.is_empty() {
                         st.paused = true;
@@ -350,39 +417,55 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
             }
         }
     }
-    let stand_in = {
-        let mut st = s.state.lock().unwrap();
-        st.live.remove(&id);
-        st.waiting.remove(&id);
-        if failed && st.live.is_empty() && !st.paused && !s.cancel.is_cancelled() {
-            let now = now_ms();
-            let pick = s
-                .turn
-                .members
-                .iter()
-                .filter(|m| !st.joined.contains(*m))
-                .filter_map(|m| agents::by_id(m))
-                .find(|a| s.bench.until(a.id, now).is_none() && s.host.installed(a));
-            if let Some(a) = pick {
-                st.live.insert(a.id.to_string());
-                st.joined.insert(a.id.to_string());
+    (failed, last_seen)
+}
+
+async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
+    let agent = agents::by_id(&id).expect("known agent");
+    let mut generation = s.state.lock().unwrap().generation;
+    loop {
+        let (failed, seen) = answer(s.clone(), id.clone(), last_seen).await;
+        last_seen = seen;
+        let stand_in = {
+            let mut st = s.state.lock().unwrap();
+            // The human said something new while this AI was finishing: stay and read it.
+            if !failed && !s.cancel.is_cancelled() && st.generation != generation {
+                generation = st.generation;
+                continue;
             }
-            Some(pick)
-        } else {
-            None
+            st.live.remove(&id);
+            st.waiting.remove(&id);
+            if failed && st.live.is_empty() && !st.paused && !s.cancel.is_cancelled() {
+                let now = now_ms();
+                let pick = s
+                    .turn
+                    .members
+                    .iter()
+                    .filter(|m| !st.joined.contains(*m))
+                    .filter_map(|m| agents::by_id(m))
+                    .find(|a| s.bench.until(a.id, now).is_none() && s.host.installed(a));
+                if let Some(a) = pick {
+                    st.live.insert(a.id.to_string());
+                    st.joined.insert(a.id.to_string());
+                }
+                Some(pick)
+            } else {
+                None
+            }
+        };
+        match stand_in {
+            Some(Some(a)) => {
+                note_as(&s, CONSILIUM, &format!("{} is taking {}'s turn.", a.name, agent.name));
+                tokio::spawn(worker(s.clone(), a.id.to_string(), None));
+            }
+            Some(None) => {
+                note_as(&s, CONSILIUM, "No other AI in the council can answer right now, so this turn ends here. Send your message again once one is back.");
+            }
+            None => {}
         }
-    };
-    match stand_in {
-        Some(Some(a)) => {
-            note_as(&s, CONSILIUM, &format!("{} is taking {}'s turn.", a.name, agent.name));
-            tokio::spawn(worker(s.clone(), a.id.to_string(), None));
-        }
-        Some(None) => {
-            note_as(&s, CONSILIUM, "No other AI in the council can answer right now, so this turn ends here. Send your message again once one is back.");
-        }
-        None => {}
+        s.wake.notify_waiters();
+        break;
     }
-    s.wake.notify_waiters();
 }
 
 #[cfg(test)]
@@ -460,12 +543,12 @@ mod tests {
         let (store, c) = setup();
         let mut f = fake(|id, _, _| Ok(format!("hi from {id}")));
         // Claude is asked first but is slower; ChatGPT answers without waiting for it. One after
-        // the other would take 2.5 s; side by side, about 1.5 s.
-        f.delay.insert("claude", 1500);
-        f.delay.insert("gpt", 1000);
+        // the other would take 5 s; side by side, about 3 s.
+        f.delay.insert("claude", 3000);
+        f.delay.insert("gpt", 2000);
         let started = std::time::Instant::now();
         let ev = go(&store, &c, Arc::new(f), &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
-        assert!(started.elapsed() < Duration::from_millis(2400), "answers ran in parallel: {:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_millis(4500), "answers ran in parallel: {:?}", started.elapsed());
         assert_eq!(said(&ev), vec![("gpt".into(), "hi from gpt".into()), ("claude".into(), "hi from claude".into())]);
     }
 
@@ -578,6 +661,71 @@ mod tests {
         assert!(asked.contains(&("claude".into(), 1)), "claude answers for the first time");
         assert!(!asked.contains(&("gpt".into(), 1)), "gpt's first answer isn't repeated");
         assert_eq!(said(&ev).iter().filter(|(_, t)| t == "gpt #1").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_message_sent_mid_turn_is_read_without_interrupting_anyone() {
+        let (store, c) = setup();
+        // Each AI answers whatever the human said last.
+        let mut f = fake(|id, _, ev| {
+            let last = ev
+                .iter()
+                .rev()
+                .find(|e| e.sender == "human")
+                .map(|e| e.text.clone())
+                .unwrap_or_default();
+            Ok(format!("{id} read: {last}"))
+        });
+        f.delay.insert("claude", 600);
+        let host = Arc::new(f);
+        let turn = Turn {
+            conversation: c.clone(),
+            targets: ids(&["gpt", "claude"]),
+            rounds: 1,
+            members: ids(&["gpt", "claude", "gemini"]),
+        };
+        let council = Arc::new(Council::new(
+            turn,
+            store.clone(),
+            Arc::new(Bench::new()),
+            host.clone(),
+            CancellationToken::new(),
+        ));
+        let runner = council.clone();
+        let done = tokio::spawn(async move { runner.run().await });
+        // GPT has answered and Claude is still busy when the human adds something and brings Gemini in.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let msg = store
+            .append(&c, "human", "message", ids(&["gemini"]), "also this")
+            .unwrap();
+        assert!(council.join(&msg, &ids(&["gpt", "claude", "gemini"])));
+        tokio::time::timeout(Duration::from_secs(10), done)
+            .await
+            .expect("the turn ends")
+            .unwrap();
+        let s = said(&store.load(&c).unwrap());
+        assert!(
+            s.contains(&("claude".into(), "claude read: hello".into())),
+            "claude wasn't interrupted: {s:?}"
+        );
+        for a in ["gpt", "claude", "gemini"] {
+            assert!(
+                s.contains(&(a.into(), format!("{a} read: also this"))),
+                "{a} read the new message: {s:?}"
+            );
+        }
+        assert!(!store
+            .load(&c)
+            .unwrap()
+            .iter()
+            .any(|e| e.text.starts_with("Stopped")));
+        let late = store
+            .append(&c, "human", "message", vec![], "after")
+            .unwrap();
+        assert!(
+            !council.join(&late, &ids(&["gpt"])),
+            "an ended turn takes no more messages"
+        );
     }
 
     #[test]

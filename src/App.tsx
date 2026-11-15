@@ -284,7 +284,7 @@ export default function App() {
   }, [agents, members]);
   const others = useMemo(() => agents.filter((a) => !a.member), [agents]);
 
-  // Sending while an AI is answering interrupts it: the running turn is stopped, then this is sent.
+  // Sending while the AIs are answering doesn't interrupt them: they read it and carry on. Stop interrupts.
   async function send() {
     if (!current || !draft.trim()) return;
     setError(null);
@@ -292,7 +292,7 @@ export default function App() {
     setDraft("");
     try {
       const to = targets.filter((t) => members.some((m) => m.id === t));
-      await api.send(current, text, to, discuss ? rounds : 1, busy);
+      await api.send(current, text, to, discuss ? rounds : 1);
     } catch (e) {
       setDraft(text);
       setError(String(e));
@@ -782,9 +782,9 @@ export default function App() {
                 className="btn primary"
                 onClick={send}
                 disabled={!draft.trim()}
-                title={busy ? "Stop the AI that's answering, then send this" : "Send (Enter)"}
+                title={busy ? "Add this to the discussion; the AIs read it without being interrupted (Enter)" : "Send (Enter)"}
               >
-                {busy ? "Interrupt & send" : "Send"}
+                Send
               </button>
             </div>
           </div>
