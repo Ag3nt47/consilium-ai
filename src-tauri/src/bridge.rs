@@ -194,22 +194,27 @@ pub fn resolve_incoming_message(
 ) -> ResolvedSignalAction {
     let trimmed = incoming_text.trim();
 
-    // Direct explicit answers: "Approved: <text>" or "Denied: <text>"
+    // Direct explicit answers must still quote a pending request; a phone message cannot invent
+    // or resolve a stale request.
     if let Some(rest) = trimmed.strip_prefix("Approved:") {
         let req = rest.trim();
-        return ResolvedSignalAction::Decision {
-            approved: true,
-            request: req.to_string(),
-            formatted_message: format!("Approved: {req}"),
-        };
+        if let Some(pending) = pending_requests.iter().find(|pending| pending.trim() == req) {
+            return ResolvedSignalAction::Decision {
+                approved: true,
+                request: pending.clone(),
+                formatted_message: format!("Approved: {pending}"),
+            };
+        }
     }
     if let Some(rest) = trimmed.strip_prefix("Denied:") {
         let req = rest.trim();
-        return ResolvedSignalAction::Decision {
-            approved: false,
-            request: req.to_string(),
-            formatted_message: format!("Denied: {req}"),
-        };
+        if let Some(pending) = pending_requests.iter().find(|pending| pending.trim() == req) {
+            return ResolvedSignalAction::Decision {
+                approved: false,
+                request: pending.clone(),
+                formatted_message: format!("Denied: {pending}"),
+            };
+        }
     }
 
     // Case-insensitive short response keywords
@@ -224,16 +229,18 @@ pub fn resolve_incoming_message(
     );
 
     if auto_forward && (is_approve || is_deny) {
-        if let Some(latest) = pending_requests.last() {
+        // A short response is safe only when it is unambiguous. With several pending requests it
+        // remains a normal prompt, allowing the council to ask which request the human meant.
+        if let [only] = pending_requests {
             let approved = is_approve;
             let formatted_message = if approved {
-                format!("Approved: {latest}")
+                format!("Approved: {only}")
             } else {
-                format!("Denied: {latest}")
+                format!("Denied: {only}")
             };
             return ResolvedSignalAction::Decision {
                 approved,
-                request: latest.clone(),
+                request: only.clone(),
                 formatted_message,
             };
         }
@@ -548,6 +555,36 @@ mod tests {
                 approved: false,
                 request: "Should we enable the live voice visualizer?".into(),
                 formatted_message: "Denied: Should we enable the live voice visualizer?".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn short_decisions_require_exactly_one_pending_request() {
+        let several = vec!["First request?".into(), "Second request?".into()];
+        assert_eq!(
+            resolve_incoming_message("Approve", &several, true),
+            ResolvedSignalAction::Prompt { text: "Approve".into() }
+        );
+        assert_eq!(
+            resolve_incoming_message("Deny", &[], true),
+            ResolvedSignalAction::Prompt { text: "Deny".into() }
+        );
+    }
+
+    #[test]
+    fn explicit_decisions_must_quote_a_request_that_is_still_pending() {
+        let pending = vec!["Current request?".into()];
+        assert_eq!(
+            resolve_incoming_message("Approved: Old request?", &pending, true),
+            ResolvedSignalAction::Prompt { text: "Approved: Old request?".into() }
+        );
+        assert_eq!(
+            resolve_incoming_message("Denied: Current request?", &pending, true),
+            ResolvedSignalAction::Decision {
+                approved: false,
+                request: "Current request?".into(),
+                formatted_message: "Denied: Current request?".into(),
             }
         );
     }
