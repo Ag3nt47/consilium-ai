@@ -46,7 +46,7 @@ const THEMES = [
   { id: "slate", name: "Slate", note: "From the UI Design Bundle" },
   { id: "crt", name: "CRT", note: "Green phosphor terminal" },
   { id: "retro84", name: "Retro '84", note: "Neon grid, scanlines, glow" },
-  { id: "netrunner", name: "Netrunner", note: "Black, neon green, cyberpunk" },
+  { id: "netrunner", name: "Netrunner", note: "Black, neon green, cyberpunk (default)" },
 ] as const;
 
 /** Official account/key and plan portals used by the approval-gated Add AI wizard. */
@@ -71,8 +71,10 @@ const PREFS_KEY = "consilium.prefs";
 const REQUEST_FLOOR_KEY = "consilium.request-floor.v2";
 
 function loadPrefs(): Prefs {
-  const defaults: Prefs = { theme: "consilium", effects: true, autoUpdate: true, bingWallpaper: true };
-  if (!IN_APP) return { ...defaults, theme: demoTheme || defaults.theme, autoUpdate: false };
+  // New installs start in Netrunner; anyone who has already picked a theme keeps it.
+  const defaults: Prefs = { theme: "netrunner", effects: true, autoUpdate: true, bingWallpaper: true };
+  // Demo mode (README screenshots) keeps the Consilium look unless ?theme= says otherwise.
+  if (!IN_APP) return { ...defaults, theme: demoTheme || "consilium", autoUpdate: false };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
   } catch {
@@ -1568,7 +1570,7 @@ export default function App() {
     { id: "full-capacity", name: "Full Capacity Mode", hint: "Enable unrestricted file & shell access", run: () => fullCapacity() },
     { id: "discuss", name: discuss ? "Disable Discuss Mode" : "Enable Discuss Mode", hint: "Multi-round debate", run: () => toggleDiscuss(!discuss) },
     { id: "theme-glass", name: "Theme: visionOS Glass", hint: "Frosted translucent glass", run: () => setPrefs((p) => ({ ...p, theme: "glass" })) },
-    { id: "theme-consilium", name: "Theme: Consilium", hint: "Default indigo and ivory", run: () => setPrefs((p) => ({ ...p, theme: "consilium" })) },
+    { id: "theme-consilium", name: "Theme: Consilium", hint: "Indigo and ivory", run: () => setPrefs((p) => ({ ...p, theme: "consilium" })) },
     { id: "theme-cyber", name: "Theme: Cyber", hint: "Cyberpunk blue-teal", run: () => setPrefs((p) => ({ ...p, theme: "cyber" })) },
     { id: "theme-slate", name: "Theme: Slate", hint: "Clean slate dark", run: () => setPrefs((p) => ({ ...p, theme: "slate" })) },
     { id: "theme-crt", name: "Theme: CRT", hint: "Green phosphor terminal", run: () => setPrefs((p) => ({ ...p, theme: "crt" })) },
@@ -1920,7 +1922,7 @@ export default function App() {
                     : "Nothing is staged: ask the AIs to find, build and stage the next update"
               }
             >
-              {requestingUpdate ? "Requesting…" : "Request Update"}
+              {requestingUpdate ? "Requesting…" : "Request App Update"}
             </button>
             {stagedUi && !staged && (
               <button

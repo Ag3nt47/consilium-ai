@@ -2546,7 +2546,7 @@ button.attachment {
   cursor: not-allowed;
   opacity: 0.68;
 }
-/* Request Update: installs a staged update, or asks the council to build one. */
+/* Request App Update: installs a staged update, or asks the council to build one. */
 .btn.request-update {
   white-space: nowrap;
   background: #1f6fd6;

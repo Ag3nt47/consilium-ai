@@ -44,7 +44,7 @@ Runs on macOS, Windows and Linux.
 
 | | |
 | --- | --- |
-| ![Conversation in the default Consilium theme](docs/media/conversation.png) | ![The Netrunner cyberpunk theme](docs/media/netrunner.png) |
+| ![Conversation in the Consilium theme](docs/media/conversation.png) | ![The Netrunner cyberpunk theme, the default for new installs](docs/media/netrunner.png) |
 | **Consilium** theme (version tab, messaging indicator, Seen receipts) | **Netrunner** cyberpunk theme (crisp REQUEST callouts, typewriter effects) |
 | ![Voice Chat and per-AI audio visualizers](docs/media/voice.png) | ![The Retro '84 theme](docs/media/retro84.png) |
 | **Voice Chat** & dual audio visualizers | **Retro '84** theme (neon grid, scanlines; effects can be turned off) |
