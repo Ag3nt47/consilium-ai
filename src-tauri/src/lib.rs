@@ -303,10 +303,10 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: italic \"Seen:\" lines show which AIs have read each message, and coloured tags show \
-which AI is working on what; a red Respond to request button jumps to the oldest unanswered request; in the Retro and \
-Netrunner themes the AIs' live activity types itself out; slower PCs run fewer AIs at once and switch off heavy effects \
-under load; AI turns left running after a freeze are stopped at startup; and Update Now works on Windows and Linux too.";
+const WHATS_NEW: &str = "What's new: long conversations are condensed with an offline sliding-window digest; \
+terminal explainability typing runs at half speed; read receipts are fully italicized with live telemetry kept \
+at the bottom bar; red REQUEST cards feature custom text responses; and Respond to request counts and jumps to \
+only unresponded requests.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
