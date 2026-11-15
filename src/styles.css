@@ -2546,6 +2546,28 @@ button.attachment {
   cursor: not-allowed;
   opacity: 0.68;
 }
+/* Request Update: installs a staged update, or asks the council to build one. */
+.btn.request-update {
+  white-space: nowrap;
+  background: #1f6fd6;
+  border-color: #3d8bff;
+  color: #fff;
+  font-weight: 700;
+}
+.btn.request-update:hover {
+  background: #2a7ff0;
+}
+.btn.request-update:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+[data-theme="netrunner"] .btn.request-update {
+  background: #00b3ff;
+  border-color: #00b3ff;
+  color: #000;
+  text-shadow: none;
+  border-radius: 0;
+}
 .request.request-flash {
   animation: request-flash 0.6s ease-in-out 3;
 }

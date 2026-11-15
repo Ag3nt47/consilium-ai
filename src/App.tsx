@@ -781,6 +781,7 @@ export default function App() {
   const [updating, setUpdating] = useState(false);
   const [stagedUi, setStagedUi] = useState<{ version: string } | null>(null);
   const [requestingStatus, setRequestingStatus] = useState(false);
+  const [requestingUpdate, setRequestingUpdate] = useState(false);
 
   // Quick hover explanations for every control that has a title.
   useEffect(() => installHoverTips(), []);
@@ -1109,6 +1110,28 @@ export default function App() {
       setError(`Couldn't request status: ${e}`);
     } finally {
       setRequestingStatus(false);
+    }
+  }
+
+  // Request Update: install what's already built, or else ask the council to find, build and stage the next one.
+  async function requestUpdate() {
+    if (updating || requestingUpdate) return;
+    if (staged) return updateNow();
+    if (stagedUi) return applyUi();
+    if (!current || !members.length) return;
+    setRequestingUpdate(true);
+    setError(null);
+    try {
+      await api.send(
+        current,
+        "Update request: nothing is staged to install. If a build is already running, say so and when it should be ready; don't start a second one. Otherwise agree in one message who takes what, then find the next improvements (unfinished items in docs/UPGRADE_STATUS.md and docs/ROADMAP.md, open bugs, or anything you've noticed), build and test them, commit, and stage them: npm run update:ui for screen-only changes, or a version bump and npm run update:stage for engine changes. Only one build at a time on this machine.",
+        members.map((member) => member.id),
+        1,
+      );
+    } catch (e) {
+      setError(`Couldn't request an update: ${e}`);
+    } finally {
+      setRequestingUpdate(false);
     }
   }
 
@@ -1864,6 +1887,21 @@ export default function App() {
               title={unanswered.length ? `Scroll to the oldest request still waiting for a response${unanswered.length > 1 ? ` (${unanswered.length} waiting)` : ""}` : "No unanswered requests"}
             >
               Respond to request{unanswered.length > 0 ? ` · ${unanswered.length}` : ""}
+            </button>
+            <button
+              type="button"
+              className="btn small request-update"
+              disabled={updating || requestingUpdate || (!staged && !stagedUi && (!current || !members.length))}
+              onClick={requestUpdate}
+              title={
+                staged
+                  ? `Install ${staged.version} now (pauses the AIs and restarts; their work resumes after)`
+                  : stagedUi
+                    ? "Load the staged screen update in place, with no restart"
+                    : "Nothing is staged: ask the AIs to find, build and stage the next update"
+              }
+            >
+              {requestingUpdate ? "Requesting…" : "Request Update"}
             </button>
             {stagedUi && !staged && (
               <button
