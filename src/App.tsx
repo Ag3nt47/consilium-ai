@@ -1,3 +1,4 @@
+import { TypedText, TYPED_THEMES } from "./typed";
 import { dictationHint, paletteKey, paletteKeyWords } from "./platform";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -178,11 +179,13 @@ function ActiveTasks({
   objective,
   agents,
   activities,
+  typed = false,
 }: {
   ids: string[];
   objective: string;
   agents: AgentInfo[];
   activities: Record<string, AgentActivity>;
+  typed?: boolean;
 }) {
   if (!ids.length) return null;
   return (
@@ -194,7 +197,7 @@ function ActiveTasks({
           <div key={id} className="task-pill" style={{ borderColor: taskColor(id) }} title={`${senderName(id, agents)}: ${detail}\nTask: ${objective}`}>
             <span className="task-dot" style={{ backgroundColor: taskColor(id) }} />
             <b>{senderName(id, agents)}</b>
-            <span>{detail}</span>
+            <span><TypedText text={detail} enabled={typed} /></span>
             <small>{objective}</small>
           </div>
         );
@@ -253,6 +256,24 @@ function answeredRequests(events: ChatEvent[]): Map<string, boolean> {
   return out;
 }
 
+/** Requests from the AIs that haven't been approved or denied yet, oldest first. */
+function pendingRequests(events: ChatEvent[], answered: Map<string, boolean>): string[] {
+  const out: string[] = [];
+  for (const e of events) {
+    if (e.kind !== "message" || e.sender === "human") continue;
+    for (const [line, text] of e.text.split("\n").entries()) {
+      if (!/^\s*REQUEST:\s*\S/i.test(text)) continue;
+      const key = requestKey(e.id, line);
+      if (!answered.has(key)) out.push(key);
+    }
+  }
+  return out;
+}
+
+function requestElementId(key: string): string {
+  return `request-${key}`;
+}
+
 type Decide = (key: string, request: string, requester: string, approved: boolean) => void;
 
 /** Message text with REQUEST: lines shown as red request callouts, with Approve/Deny buttons when `decide` is given. */
@@ -274,7 +295,7 @@ function MessageBody({ event, answered, deciding, decide }: { event: ChatEvent; 
         if (m && m[1].trim()) {
           const key = requestKey(event.id, i);
           return (
-            <div key={i} className="request">
+            <div key={i} id={requestElementId(key)} className="request">
               <span className="request-label">REQUEST:</span> <Inline text={m[1]} />
               {decide && (
                 <RequestActions
@@ -1089,6 +1110,19 @@ export default function App() {
     }
   }
   const answered = useMemo(() => answeredRequests(events), [events]);
+  const unanswered = useMemo(() => pendingRequests(events, answered), [events, answered]);
+  const typedActivity = TYPED_THEMES.has(prefs.theme);
+
+  // Scroll to the oldest request still waiting for Approve or Deny, and flash it.
+  function jumpToRequest() {
+    const el = unanswered.length ? document.getElementById(requestElementId(unanswered[0])) : null;
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.remove("request-flash");
+    void el.offsetWidth;
+    el.classList.add("request-flash");
+    window.setTimeout(() => el.classList.remove("request-flash"), 1800);
+  }
 
   async function retryAgent(a: AgentInfo) {
     await api.unbench(a.id).catch(() => undefined);
@@ -1637,7 +1671,7 @@ export default function App() {
                 )}
                 <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={e.sender === "human" ? undefined : decide} />
                 {e.sender === "human" && e.id === latestHumanMessage?.id && busy && (
-                  <ActiveTasks ids={thinkingIds} objective={taskObjective(e.text)} agents={agents} activities={activities} />
+                  <ActiveTasks ids={thinkingIds} objective={taskObjective(e.text)} agents={agents} activities={activities} typed={typedActivity} />
                 )}
                 <ClaimedTask event={e} agents={agents} />
                 <SeenLine receipts={seenByMessage.get(e.id) ?? []} agents={agents} />
@@ -1661,7 +1695,7 @@ export default function App() {
           )}
           {busy && (
             <div className="thinking">
-              <span className="pulse" /> {thinking ?? "Working"}
+              <span className="pulse" /> <TypedText text={thinking ?? "Working"} enabled={typedActivity} />
               {turn && turn.rounds > 1 ? ` · round ${turn.round} of ${turn.rounds}` : ""}
               <span className="cursor">▍</span>
             </div>
@@ -1685,6 +1719,16 @@ export default function App() {
               </label>
             ))}
             <span className="spacer" />
+            {unanswered.length > 0 && (
+              <button
+                type="button"
+                className="btn small respond-request"
+                onClick={jumpToRequest}
+                title={`Scroll to the oldest request still waiting for Approve or Deny${unanswered.length > 1 ? ` (${unanswered.length} waiting)` : ""}`}
+              >
+                Respond to request{unanswered.length > 1 ? ` · ${unanswered.length}` : ""}
+              </button>
+            )}
             {stagedUi && !staged && (
               <button
                 className="btn small update-now"

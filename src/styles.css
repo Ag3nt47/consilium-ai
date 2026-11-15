@@ -2446,3 +2446,35 @@ button.attachment {
   -webkit-backdrop-filter: none !important;
   box-shadow: none;
 }
+
+/* Respond to request: jumps to the oldest request still waiting for Approve or Deny. */
+.btn.respond-request {
+  white-space: nowrap;
+  background: #d61f3c;
+  border-color: #ff3355;
+  color: #fff;
+  font-weight: 700;
+}
+.btn.respond-request:hover {
+  background: #f0294a;
+}
+.request.request-flash {
+  animation: request-flash 0.6s ease-in-out 3;
+}
+@keyframes request-flash {
+  50% {
+    box-shadow: 0 0 0 3px #ff3355;
+  }
+}
+[data-theme="netrunner"] .btn.respond-request {
+  background: #ff1f4b;
+  color: #000;
+  border-color: #ff1f4b;
+  text-shadow: none;
+  border-radius: 0;
+}
+
+/* Retro themes: live activity is typed out like a terminal. */
+.typed {
+  white-space: pre-wrap;
+}
