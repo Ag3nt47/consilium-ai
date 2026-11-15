@@ -218,6 +218,7 @@ fn render(p: Paint, e: &Event) -> String {
             out
         }
         "error" => format!("{}\n\n", p.c("31", &format!("! {}", e.text))),
+        "seen" => String::new(),
         _ => format!("{}\n", p.c("2", &format!("· {}", e.text))),
     }
 }
@@ -1091,6 +1092,7 @@ mod tests {
             text: "Done.\nREQUEST: pick a name".into(),
             requests: vec![],
             add_ai: vec![],
+            seen: vec![],
             usage: None,
             attachments: vec![],
         };

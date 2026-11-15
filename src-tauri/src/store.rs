@@ -87,6 +87,9 @@ pub struct Event {
     /// AIs this message proposes adding to the council, from `ADD_AI:` lines (agent ids).
     #[serde(default)]
     pub add_ai: Vec<String>,
+    /// Message ids handed to this event's sender. Present only when `kind` is `seen`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen: Vec<String>,
     /// Token counts reported by the provider for the turn that produced this event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
@@ -364,7 +367,7 @@ impl Store {
         text: &str,
         attachments: Vec<crate::attach::Attachment>,
     ) -> Result<Event, String> {
-        self.append_full(id, "human", "message", to, text, None, attachments)
+        self.append_full(id, "human", "message", to, text, None, attachments, vec![])
     }
 
     pub fn append_with_usage(
@@ -376,7 +379,12 @@ impl Store {
         text: &str,
         usage: Option<TokenUsage>,
     ) -> Result<Event, String> {
-        self.append_full(id, sender, kind, to, text, usage, vec![])
+        self.append_full(id, sender, kind, to, text, usage, vec![], vec![])
+    }
+
+    /// Records the messages that were handed to an AI in one compact, hidden receipt event.
+    pub fn append_seen(&self, id: &str, sender: &str, seen: Vec<String>) -> Result<Event, String> {
+        self.append_full(id, sender, "seen", vec![], "", None, vec![], seen)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -389,6 +397,7 @@ impl Store {
         text: &str,
         usage: Option<TokenUsage>,
         attachments: Vec<crate::attach::Attachment>,
+        seen: Vec<String>,
     ) -> Result<Event, String> {
         Self::check(id)?;
         // Everything in a conversation is sent to every AI's provider, so secrets are masked first.
@@ -420,6 +429,7 @@ impl Store {
             text: text.to_string(),
             requests: if kind == "message" { requests_in(text) } else { vec![] },
             add_ai: if kind == "message" && sender != "human" { add_ai_in(text) } else { vec![] },
+            seen,
             usage,
             attachments,
         };

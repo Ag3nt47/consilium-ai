@@ -324,6 +324,22 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
         };
         let events = s.store.load(&s.turn.conversation).unwrap_or_default();
         last_seen = Some(events.last().map_or(0, |e| e.seq));
+        let already_seen: HashSet<&str> = events
+            .iter()
+            .filter(|event| event.kind == "seen" && event.sender == id)
+            .flat_map(|event| event.seen.iter().map(String::as_str))
+            .collect();
+        let newly_seen: Vec<String> = prompt::visible_message_ids(&events, &id)
+            .into_iter()
+            .filter(|message| !already_seen.contains(message.as_str()))
+            .collect();
+        // A receipt means this bounded transcript was handed to the AI. Persist it before waiting
+        // for the answer, so a slow, stopped, or failed turn still reports what it received.
+        if !newly_seen.is_empty() {
+            if let Ok(receipt) = s.store.append_seen(&s.turn.conversation, &id, newly_seen) {
+                s.host.event(&receipt);
+            }
+        }
         let result = s.host.ask(agent, n, rounds, events, s.cancel.clone()).await;
         {
             let mut st = s.state.lock().unwrap();
@@ -558,6 +574,42 @@ mod tests {
         let ev = go(&store, &c, Arc::new(f), &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
         assert!(started.elapsed() < Duration::from_millis(4500), "answers ran in parallel: {:?}", started.elapsed());
         assert_eq!(said(&ev), vec![("gpt".into(), "hi from gpt".into()), ("claude".into(), "hi from claude".into())]);
+    }
+
+    #[tokio::test]
+    async fn seen_receipts_are_compact_and_not_repeated_on_the_next_turn() {
+        let (store, c) = setup();
+        let first_message = store.load(&c).unwrap()[0].id.clone();
+        let first = go(
+            &store,
+            &c,
+            Arc::new(fake(|_, _, _| Ok("first answer".into()))),
+            &["gpt"],
+            1,
+            Arc::new(Bench::new()),
+        )
+        .await;
+        let receipts: Vec<&Event> = first.iter().filter(|event| event.kind == "seen").collect();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].sender, "gpt");
+        assert_eq!(receipts[0].seen, vec![first_message.clone()]);
+
+        let second_message = store.append(&c, "human", "message", vec![], "second").unwrap().id;
+        let second = go(
+            &store,
+            &c,
+            Arc::new(fake(|_, _, _| Ok("second answer".into()))),
+            &["gpt"],
+            1,
+            Arc::new(Bench::new()),
+        )
+        .await;
+        let seen: Vec<String> = second
+            .iter()
+            .filter(|event| event.kind == "seen" && event.sender == "gpt")
+            .flat_map(|event| event.seen.clone())
+            .collect();
+        assert_eq!(seen, vec![first_message, second_message]);
     }
 
     #[tokio::test]

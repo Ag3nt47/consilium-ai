@@ -281,28 +281,44 @@ in the council: {}. Never use ADD_AI for a current participant; @mention them in
     )
 }
 
-/// The transcript as text, newest last, trimmed from the oldest end to fit.
-pub fn transcript(events: &[Event], me: &str) -> String {
-    let mut parts: Vec<String> = events
+/// Transcript entries, newest last, trimmed from the oldest end to fit.
+fn transcript_parts<'a>(events: &'a [Event], me: &str) -> (usize, Vec<(&'a Event, String)>) {
+    let mut parts: Vec<(&Event, String)> = events
         .iter()
         .filter(|e| e.kind == "message" || (e.kind == "system" && e.sender == crate::council::CONSILIUM))
         .map(|e| {
             let who = if e.sender == me { format!("{} (you)", label(me)) } else { label(&e.sender) };
-            format!("[{who}] {}{}", e.text, crate::attach::for_transcript(&e.attachments, me))
+            (e, format!("[{who}] {}{}", e.text, crate::attach::for_transcript(&e.attachments, me)))
         })
         .collect();
-    let mut total: usize = parts.iter().map(|p| p.len() + 2).sum();
+    let mut total: usize = parts.iter().map(|(_, p)| p.len() + 2).sum();
     let mut dropped = 0;
     while parts.len() > 1 && total > MAX_TRANSCRIPT_CHARS {
-        total -= parts[0].len() + 2;
+        total -= parts[0].1.len() + 2;
         parts.remove(0);
         dropped += 1;
     }
+    (dropped, parts)
+}
+
+/// Message ids actually included in this AI's bounded transcript.
+pub fn visible_message_ids(events: &[Event], me: &str) -> Vec<String> {
+    transcript_parts(events, me)
+        .1
+        .into_iter()
+        .filter(|(event, _)| event.kind == "message" && event.sender != me)
+        .map(|(event, _)| event.id.clone())
+        .collect()
+}
+
+/// The transcript as text, newest last, trimmed from the oldest end to fit.
+pub fn transcript(events: &[Event], me: &str) -> String {
+    let (dropped, parts) = transcript_parts(events, me);
     let mut out = String::from("CONVERSATION SO FAR\n\n");
     if dropped > 0 {
         out.push_str(&format!("({dropped} earlier messages omitted for length)\n\n"));
     }
-    out.push_str(&parts.join("\n\n"));
+    out.push_str(&parts.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n\n"));
     out.push_str(&format!("\n\nEND OF CONVERSATION. Write your next message as {} now.", label(me)));
     out
 }
@@ -358,6 +374,7 @@ mod tests {
             text: text.into(),
             requests: vec![],
             add_ai: vec![],
+            seen: vec![],
             usage: None,
             attachments: vec![],
         }
@@ -375,10 +392,18 @@ mod tests {
     #[test]
     fn transcript_drops_oldest_messages_first() {
         let big = "x".repeat(MAX_TRANSCRIPT_CHARS / 2);
-        let t = transcript(&[ev("human", &big), ev("gpt", &big), ev("human", "latest")], "gpt");
+        let mut old = ev("human", &big);
+        old.id = "old".into();
+        let mut middle = ev("gpt", &big);
+        middle.id = "middle".into();
+        let mut latest = ev("human", "latest");
+        latest.id = "latest".into();
+        let events = [old, middle, latest];
+        let t = transcript(&events, "gpt");
         assert!(t.contains("latest"));
         assert!(t.contains("earlier messages omitted"));
         assert!(t.len() <= MAX_TRANSCRIPT_CHARS + 500);
+        assert_eq!(visible_message_ids(&events, "gpt"), vec!["latest"]);
     }
 
     #[test]
