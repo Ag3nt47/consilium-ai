@@ -42,6 +42,8 @@ export interface Council {
   access: Record<string, Access>;
   default_workspace: string | null;
   default_access: Access;
+  /** Show codex-reset.com's unofficial forecast of the next global Codex reset. */
+  reset_forecast?: boolean;
 }
 
 export const ACCESS_LEVELS: { id: Access; name: string; note: string }[] = [
@@ -71,10 +73,51 @@ export interface AgentInfo {
   benched_until?: number | null;
 }
 
+export interface UsageWindow {
+  label: string;
+  remaining_percent: number;
+  /** When this limit resets (ms since the epoch), if the provider says. */
+  resets_at?: number | null;
+}
+
+/** The limits of the model in use, or of the AI's whole plan. */
+export interface UsageMeterInfo {
+  /** The model's name, or the AI's. */
+  label: string;
+  remaining_percent: number;
+  windows: UsageWindow[];
+  /** The model has no limit of its own and draws on the overall one. */
+  shared: boolean;
+}
+
 export interface UsageStatus {
   /** Lowest remaining applicable limit; this is the window that will stop the AI first. */
   remaining_percent: number;
-  windows: { label: string; remaining_percent: number }[];
+  windows: UsageWindow[];
+  /** The model in use (changes when the AI is switched to another model). */
+  model?: UsageMeterInfo | null;
+  /** The AI's whole plan, across its models. */
+  overall?: UsageMeterInfo | null;
+}
+
+/** codex-reset.com's unofficial forecast of the next global Codex usage reset. */
+export interface ResetForecast {
+  chance_24h: number | null;
+  chance_48h: number | null;
+  confidence: string | null;
+  last_reset_at: number | null;
+  official: string | null;
+  fetched_at: number;
+}
+
+export const FORECAST_SITE = "https://codex-reset.com/";
+
+/** The `consilium` terminal command. */
+export interface CliInstall {
+  installed: boolean;
+  path: string;
+  command: string;
+  note: string;
 }
 
 export interface TokenUsage {
@@ -128,6 +171,12 @@ const appApi = {
   /** Lets an AI that ran out of usage be asked again now. */
   unbench: (agent: string) => invoke<void>("unbench", { agent }),
   running: () => invoke<string[]>("running"),
+  /** The forecast of the next global Codex reset, when that setting is on. */
+  resetForecast: () => invoke<ResetForecast | null>("reset_forecast"),
+  setResetForecast: (on: boolean) => invoke<void>("set_reset_forecast", { on }),
+  /** Whether the `consilium` terminal command is installed. */
+  cliStatus: () => invoke<CliInstall>("cli_status"),
+  installCli: () => invoke<CliInstall>("install_cli"),
   /** Asks every council member for a one-word reply, in parallel. Uses a little of each AI's allowance. */
   selfCheck: () => invoke<CheckResult[]>("self_check"),
   getCouncil: () => invoke<Council>("get_council"),

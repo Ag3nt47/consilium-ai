@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ACCESS_LEVELS, api, IN_APP, onEvent, onTurn, senderName, type Access, type AgentInfo, type CheckResult, type Council, type ChatEvent, type Conversation, type TurnState } from "./api";
+import { ACCESS_LEVELS, api, FORECAST_SITE, IN_APP, onEvent, onTurn, senderName, type Access, type AgentInfo, type CheckResult, type CliInstall, type Council, type ChatEvent, type Conversation, type ResetForecast, type TurnState, type UsageWindow } from "./api";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
@@ -100,28 +100,33 @@ function agentState(a: AgentInfo): "ready" | "signin" | "missing" | "benched" {
   return a.available ? "ready" : a.path ? "signin" : "missing";
 }
 
-function UsageMeter({ agent }: { agent: AgentInfo }) {
-  const usage = agent.usage;
-  if (!usage) {
-    return agent.available ? (
-      <span className="usage-unavailable" title={`${agent.tool} did not report plan usage`}>
-        usage unavailable
-      </span>
-    ) : null;
-  }
-  const remaining = Math.max(0, Math.min(100, Math.round(usage.remaining_percent)));
+/** The soonest reset among `windows` that is still ahead. */
+function nextReset(windows: UsageWindow[]): number | null {
+  const now = Date.now();
+  const ahead = windows.map((w) => w.resets_at ?? 0).filter((t) => t > now);
+  return ahead.length ? Math.min(...ahead) : null;
+}
+
+function UsageBar({ label, percent, windows, aria, note }: { label: string; percent: number; windows: UsageWindow[]; aria: string; note?: string }) {
+  const remaining = Math.max(0, Math.min(100, Math.round(percent)));
   const color = `hsl(${remaining * 1.2} 72% 46%)`;
-  const details = usage.windows.map((w) => `${w.label}: ${w.remaining_percent}% left`).join("\n");
+  const reset = nextReset(windows);
+  const details = windows
+    .map((w) => `${w.label}: ${w.remaining_percent}% left${w.resets_at ? `, resets ${resetTime(w.resets_at)}` : ""}`)
+    .join("\n");
   return (
-    <div className="usage-meter" title={details}>
+    <div className="usage-row" title={note ? `${note}\n${details}` : details}>
       <div className="usage-label">
-        <span>usage left</span>
-        <b>{remaining}%</b>
+        <span className="usage-name">{label}</span>
+        <span>
+          <b>{remaining}%</b>
+          {reset && <small> · resets {resetTime(reset)}</small>}
+        </span>
       </div>
       <div
         className="usage-track"
         role="meter"
-        aria-label={`${agent.name} plan usage remaining`}
+        aria-label={aria}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={remaining}
@@ -133,6 +138,48 @@ function UsageMeter({ agent }: { agent: AgentInfo }) {
   );
 }
 
+/** The model in use, with the AI's whole plan underneath; for ChatGPT, the reset forecast if on. */
+function UsageMeter({ agent, forecast }: { agent: AgentInfo; forecast?: ResetForecast | null }) {
+  const usage = agent.usage;
+  if (!usage) {
+    return agent.available ? (
+      <span className="usage-unavailable" title={`${agent.tool} did not report plan usage`}>
+        usage unavailable
+      </span>
+    ) : null;
+  }
+  const { model, overall } = usage;
+  return (
+    <div className="usage-meter">
+      {model && (
+        <UsageBar
+          label={model.shared ? `${model.label} · shares overall` : model.label}
+          percent={model.remaining_percent}
+          windows={model.windows}
+          aria={`${model.label} usage remaining`}
+          note={model.shared ? `${model.label} has no separate limit; it uses ${agent.name}'s overall allowance.` : undefined}
+        />
+      )}
+      {overall ? (
+        <UsageBar label={`${agent.name} overall`} percent={overall.remaining_percent} windows={overall.windows} aria={`${agent.name} overall usage remaining`} />
+      ) : (
+        !model && <UsageBar label="usage left" percent={usage.remaining_percent} windows={usage.windows} aria={`${agent.name} plan usage remaining`} />
+      )}
+      {forecast && (
+        <div className="usage-forecast" title={`Unofficial estimate${forecast.confidence ? `, ${forecast.confidence} confidence` : ""}. Not affiliated with OpenAI.`}>
+          {forecast.official
+            ? `Reset announced: ${forecast.official}`
+            : `Global reset: ${forecast.chance_24h ?? "?"}% chance in 24 h`}
+          {" · "}
+          <button className="link" onClick={() => openUrl(FORECAST_SITE)}>
+            data: codex-reset.com
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** "3:40 PM", or "Mon 3:40 PM" when it isn't today. */
 function resetTime(ts: number): string {
   const d = new Date(ts);
@@ -140,7 +187,7 @@ function resetTime(ts: number): string {
   return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
 }
 
-function AgentDot({ agent, onSetup, onRetry, check }: { agent: AgentInfo; onSetup: (a: AgentInfo) => void; onRetry: (a: AgentInfo) => void; check?: CheckResult | "running" }) {
+function AgentDot({ agent, onSetup, onRetry, check, forecast }: { agent: AgentInfo; onSetup: (a: AgentInfo) => void; onRetry: (a: AgentInfo) => void; check?: CheckResult | "running"; forecast?: ResetForecast | null }) {
   const state = agentState(agent);
   const label = { ready: "Ready", signin: "Not signed in", missing: "Not installed", benched: "Out of usage" }[state];
   return (
@@ -170,7 +217,7 @@ function AgentDot({ agent, onSetup, onRetry, check }: { agent: AgentInfo; onSetu
               : `✗ ${check.detail.split("\n")[0].slice(0, 90)}`}
         </span>
       )}
-      <UsageMeter agent={agent} />
+      <UsageMeter agent={agent} forecast={agent.id === "gpt" ? forecast : null} />
       <span className="agent-kind">
         {agent.tool}
         {agent.access !== "chat" && <span className="access-tag"> · {ACCESS_LEVELS.find((l) => l.id === agent.access)?.name}</span>}
@@ -209,6 +256,8 @@ export default function App() {
   const currentRef = useRef<string | null>(null);
   const agentRefreshRef = useRef<Promise<void> | null>(null);
   const usageRefreshRef = useRef(false);
+  const [forecast, setForecast] = useState<ResetForecast | null>(null);
+  const [cli, setCli] = useState<CliInstall | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   currentRef.current = current;
@@ -239,6 +288,8 @@ export default function App() {
         api
           .usage()
           .then((byId) => setAgents((prev) => prev.map((a) => ({ ...a, usage: byId[a.id] ?? null }))))
+          .then(() => api.resetForecast())
+          .then((f) => setForecast(f ?? null))
           .catch(() => undefined)
           .finally(() => {
             usageRefreshRef.current = false;
@@ -475,6 +526,24 @@ export default function App() {
     }
   }
 
+  async function toggleForecast(on: boolean) {
+    try {
+      await api.setResetForecast(on);
+      if (!on) setForecast(null);
+      refreshAgents();
+    } catch (e) {
+      setError(`Couldn't change the setting: ${e}`);
+    }
+  }
+
+  async function installCli() {
+    try {
+      setCli(await api.installCli());
+    } catch (e) {
+      setError(`Couldn't install the terminal command: ${e}`);
+    }
+  }
+
   async function changeDefaultAccess(access: Access) {
     if (access !== "chat") {
       const level = ACCESS_LEVELS.find((l) => l.id === access)!;
@@ -638,7 +707,7 @@ export default function App() {
             </span>
           </div>
           {members.map((a) => (
-            <AgentDot key={a.id} agent={a} onSetup={setupAgent} onRetry={retryAgent} check={checks[a.id]} />
+            <AgentDot key={a.id} agent={a} onSetup={setupAgent} onRetry={retryAgent} check={checks[a.id]} forecast={forecast} />
           ))}
         </div>
         <div className="sidebar-actions">
@@ -649,6 +718,7 @@ export default function App() {
             className="btn ghost"
             onClick={() => {
               setShowSettings(true);
+              api.cliStatus().then(setCli).catch(() => undefined);
               api.getMemory().then((m) => {
                 setMemoryText(m);
                 setMemoryDirty(false);
@@ -935,6 +1005,32 @@ export default function App() {
                 Save memory
               </button>
             </div>
+            <div className="section-label">Usage</div>
+            <p className="muted small">
+              Each AI's card shows its current model's allowance left, with its whole plan underneath, and when they reset.
+              Every AI is told where everyone stands, so they know when the others will be back.
+            </p>
+            <label className="toggle">
+              <input type="checkbox" checked={council?.reset_forecast ?? false} onChange={(e) => toggleForecast(e.target.checked)} />
+              Forecast the next global Codex reset (unofficial, from{" "}
+              <button className="link" onClick={() => openUrl(FORECAST_SITE)}>
+                codex-reset.com
+              </button>
+              ; asks that site every 15 minutes at most)
+            </label>
+            <div className="section-label">Terminal</div>
+            <p className="muted small">
+              Talk to the council from a terminal too, in the same conversations: <code>consilium chat</code>, or{" "}
+              <code>consilium ask "…"</code> for one question. The app and the terminal can be open at the same time;
+              a message sent in one joins the AIs' turn in the other.
+            </p>
+            <div className="row">
+              <button className="btn ghost" onClick={installCli}>
+                {cli?.installed ? "Reinstall terminal command" : "Install terminal command"}
+              </button>
+              <span className="muted small">{cli ? (cli.installed ? `Installed: ${cli.path}` : "Not installed yet") : ""}</span>
+            </div>
+            {cli?.note && <pre className="cli-note small">{cli.note}</pre>}
             <div className="section-label">Updates</div>
             <label className="toggle">
               <input

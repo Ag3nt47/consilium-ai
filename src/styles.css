@@ -319,6 +319,41 @@ code {
   opacity: 0.75;
 }
 
+/* Two meters per AI: the model in use, then its whole plan. */
+.usage-row + .usage-row {
+  margin-top: 5px;
+}
+
+.usage-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-label small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.usage-forecast {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.usage-forecast .link {
+  font-size: inherit;
+}
+
+.cli-note {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+}
+
 .dot {
   width: 9px;
   height: 9px;

@@ -34,16 +34,21 @@ impl Pending {
 
 pub struct Journal {
     path: PathBuf,
-    items: Mutex<HashMap<String, Pending>>,
+    /// Serializes this process's changes; a lock file serializes them with the other process (the
+    /// app and the terminal command share `turns.json`).
+    busy: Mutex<()>,
 }
 
 impl Journal {
     pub fn load(path: PathBuf) -> Self {
-        let items = std::fs::read_to_string(&path)
+        Journal { path, busy: Mutex::new(()) }
+    }
+
+    fn read(&self) -> HashMap<String, Pending> {
+        std::fs::read_to_string(&self.path)
             .ok()
             .and_then(|s| serde_json::from_str::<HashMap<String, Pending>>(&s).ok())
-            .unwrap_or_default();
-        Journal { path, items: Mutex::new(items) }
+            .unwrap_or_default()
     }
 
     fn save(&self, items: &HashMap<String, Pending>) {
@@ -55,68 +60,104 @@ impl Journal {
         }
     }
 
+    /// Reads the journal fresh from disk, lets `f` change it, and saves it if `f` says it changed,
+    /// all under the lock, so an entry another process wrote meanwhile is never lost.
+    fn update<R>(&self, f: impl FnOnce(&mut HashMap<String, Pending>) -> (R, bool)) -> R {
+        let _busy = self.busy.lock().unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.path.with_extension("json.lock"));
+        if let Ok(l) = &lock {
+            let _ = l.lock();
+        }
+        let mut items = self.read();
+        let (r, changed) = f(&mut items);
+        if changed {
+            self.save(&items);
+        }
+        r
+    }
+
     pub fn begin(&self, p: Pending) {
-        let mut items = self.items.lock().unwrap();
-        items.insert(p.conversation.clone(), p);
-        self.save(&items);
+        self.update(|items| {
+            items.insert(p.conversation.clone(), p);
+            ((), true)
+        })
     }
 
     /// Conversations with a turn recorded as in progress.
     pub fn pending_conversations(&self) -> Vec<String> {
-        self.items.lock().unwrap().keys().cloned().collect()
+        self.read().into_keys().collect()
     }
 
     /// An AI answered in this turn, so it isn't stuck: restarts from here count from zero again.
     /// (The attempt limit is for turns that crash the app, not for ones resumed after updates.)
     pub fn progressed(&self, conversation: &str, turn: &str) {
-        let mut items = self.items.lock().unwrap();
-        if let Some(p) = items.get_mut(conversation).filter(|p| p.turn == turn && p.attempts > 0) {
-            p.attempts = 0;
-            self.save(&items);
-        }
+        self.update(|items| match items.get_mut(conversation).filter(|p| p.turn == turn && p.attempts > 0) {
+            Some(p) => {
+                p.attempts = 0;
+                ((), true)
+            }
+            None => ((), false),
+        })
     }
 
     /// The human sent another message into the running turn, addressing `targets`: they are part of
     /// the turn if it has to resume.
     pub fn join(&self, conversation: &str, turn: &str, targets: &[String]) {
-        let mut items = self.items.lock().unwrap();
-        if let Some(p) = items.get_mut(conversation).filter(|p| p.turn == turn) {
-            for t in targets {
-                if !p.targets.contains(t) {
-                    p.targets.push(t.clone());
+        self.update(|items| match items.get_mut(conversation).filter(|p| p.turn == turn) {
+            Some(p) => {
+                for t in targets {
+                    if !p.targets.contains(t) {
+                        p.targets.push(t.clone());
+                    }
                 }
+                ((), true)
             }
-            self.save(&items);
-        }
+            None => ((), false),
+        })
     }
 
     /// Forgets the turn `turn` in `conversation`, if it is still the one recorded there.
     pub fn finish(&self, conversation: &str, turn: &str) {
-        let mut items = self.items.lock().unwrap();
-        if items.get(conversation).is_some_and(|p| p.turn == turn) {
-            items.remove(conversation);
-            self.save(&items);
-        }
+        self.update(|items| {
+            if items.get(conversation).is_some_and(|p| p.turn == turn) {
+                items.remove(conversation);
+                ((), true)
+            } else {
+                ((), false)
+            }
+        })
     }
 
     /// Turns that were interrupted by a quit or crash, each with its attempt count raised.
     /// Those that already failed MAX_ATTEMPTS times are returned separately and dropped.
+    #[cfg(test)]
     pub fn interrupted(&self) -> (Vec<Pending>, Vec<Pending>) {
-        let mut items = self.items.lock().unwrap();
-        let (mut resume, mut give_up) = (Vec::new(), Vec::new());
-        for p in items.values_mut() {
-            if p.attempts >= MAX_ATTEMPTS {
-                give_up.push(p.clone());
-            } else {
-                p.attempts += 1;
-                resume.push(p.clone());
+        self.interrupted_where(|_| true)
+    }
+
+    /// Like `interrupted`, for only the entries `take` accepts; the others are left as they are
+    /// (such as a turn the other process is running right now).
+    pub fn interrupted_where(&self, take: impl Fn(&Pending) -> bool) -> (Vec<Pending>, Vec<Pending>) {
+        self.update(|items| {
+            let (mut resume, mut give_up) = (Vec::new(), Vec::new());
+            for p in items.values_mut().filter(|p| take(p)) {
+                if p.attempts >= MAX_ATTEMPTS {
+                    give_up.push(p.clone());
+                } else {
+                    p.attempts += 1;
+                    resume.push(p.clone());
+                }
             }
-        }
-        for p in &give_up {
-            items.remove(&p.conversation);
-        }
-        self.save(&items);
-        (resume, give_up)
+            for p in &give_up {
+                items.remove(&p.conversation);
+            }
+            let changed = !resume.is_empty() || !give_up.is_empty();
+            ((resume, give_up), changed)
+        })
     }
 }
 

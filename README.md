@@ -12,9 +12,11 @@ Consilium is a desktop app where several AI assistants and you work in one conve
 - **The council can build.** Give a conversation a project folder and choose each AI's access: Chat only (default), Read, Edit, or Full (the permissions you already approved in its own app). With **Full capacity** on, every AI is Unrestricted in the project folder (it can run commands and install software without asking), works on what you ask, splits the work and reviews each other. An AI that @mentions another brings it into the turn. AIs can propose another participant with an `ADD_AI:` line; you approve every addition before its provider receives any transcript.
 - **Shared memory.** A council memory every AI keeps across conversations (AIs add to it with `REMEMBER:`), plus a project's `CONSILIUM.md` as shared project notes.
 - **Picks up where it left off.** On macOS, closing the window keeps the AIs working in the background. If the app quits mid-turn, it resumes that turn on the next launch.
+- **App or terminal, or both.** `consilium chat` talks to the same council in the same conversations from a terminal. Use either, or both at once: a message sent in one joins the AIs' turn in the other.
+- **Usage at a glance, for you and the AIs.** Each AI's card shows its current model's allowance left with its whole plan underneath, and when each resets. Every AI is told where everyone stands, so they know when the others will be back.
 - **One shared transcript**, color-coded by speaker. Anything an AI needs from you appears as a red **REQUEST:** callout.
 - **Turn control.** *Ask* gets one answer from each AI you pick. *Discuss* lets them respond to each other for up to 8 rounds, and stops early when they're done or when one of them needs you. **Stop** ends it immediately.
-- **Private by default.** Conversations stay on your computer. No telemetry. The only network call Consilium itself makes is an optional once-a-day check for a new release on GitHub.
+- **Private by default.** Conversations stay on your computer. No telemetry. The only network calls Consilium itself makes are an optional once-a-day check for a new release on GitHub and, only if you turn it on, codex-reset.com's unofficial forecast of the next global Codex reset.
 - **Themes:** Consilium (indigo, ivory and gold), Cyber, Slate, CRT, and *Retro '84* with neon grid and scanlines.
 
 Runs on macOS, Windows and Linux.
@@ -57,6 +59,20 @@ Consilium checks for both AI tools and shows a **Set up AIs** button for anythin
 | Gemini (optional) | [Antigravity CLI](https://antigravity.google/docs/getting-started/) (`agy`). Google stopped serving the Gemini CLI to personal accounts in June 2026; Consilium still uses it if `agy` isn't installed, for company plans and API keys. | Google account |
 
 Each AI's usage counts against your own plan with that provider.
+
+## Terminal
+
+The app is also a terminal command. Install it from **Settings → Terminal** (the install scripts do it for you), then:
+
+```bash
+consilium chat                      # talk with the council; /help lists the commands
+consilium ask "Review my last commit" --to claude,gpt
+consilium log -f                    # watch a conversation live
+consilium list                      # conversations, newest first
+consilium status                    # who's in the council, signed in, and usage left
+```
+
+It uses the same conversations, council, memory and settings as the app. Both can be open at once: the conversation's AIs run in one of them at a time, a message sent in the other joins that turn, and **Stop** works from either. `consilium help` shows every option.
 
 ## How it works
 

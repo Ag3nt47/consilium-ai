@@ -137,6 +137,10 @@ export const demoApi = {
   setDefaultWorkspace: async () => "/projects",
   getMemory: async () => "- The human prefers short, direct answers (Claude, 2026-11-14)\n- Thumbnails are immutable per image id (ChatGPT, 2026-11-14)\n",
   setMemory: async () => undefined,
+  resetForecast: async () => null,
+  setResetForecast: async () => undefined,
+  cliStatus: async () => ({ installed: true, path: "~/.local/bin/consilium", command: "consilium chat", note: "" }),
+  installCli: async () => ({ installed: true, path: "~/.local/bin/consilium", command: "consilium chat", note: "" }),
   selfCheck: async () => [
     { id: "gpt", name: "ChatGPT", ok: true, ms: 9400, detail: "OK" },
     { id: "claude", name: "Claude", ok: true, ms: 6100, detail: "OK" },

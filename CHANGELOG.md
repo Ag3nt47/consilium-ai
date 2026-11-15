@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Terminal version**: `consilium chat`, `ask`, `say`, `log`, `list`, `new`, `stop`, `status` and `check`,
+  in the same conversations, council, memory and settings as the app. Use either, or both at once:
+  a conversation's AIs run in one process at a time, a message sent from the other joins that turn,
+  and Stop works from either. The app shows what the terminal adds as it happens. Install it from
+  Settings → Terminal or with `consilium install-cli`; the install scripts set it up.
+- **Usage per model and overall**: each AI's card shows the model in use (it follows a switch, for
+  example from Fable to Opus) with the AI's whole plan underneath, and when each limit resets.
+- **The AIs know everyone's usage**: each AI is told every member's model and overall usage left and
+  reset times, so they can plan around an AI that's out until its reset.
+- Optional, off by default: codex-reset.com's unofficial forecast of the next global Codex reset,
+  shown on ChatGPT's card and given to the AIs.
 - Show each AI's provider-reported plan allowance remaining from 0–100%, using the tightest active
   quota window and exposing all reported windows in the meter details.
 - Refresh provider status concurrently and coalesce overlapping UI refreshes, reducing startup and

@@ -22,5 +22,10 @@ Write-Host '==> Installing...' -ForegroundColor Yellow
 Start-Process -FilePath $file -ArgumentList '/S' -Wait
 Remove-Item $file -Force
 
-Write-Host '==> Installed. Start Consilium from the Start menu.' -ForegroundColor Green
+# The terminal command: `consilium chat` and friends (see the README).
+$exe = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Consilium') -Filter '*.exe' -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -notmatch 'uninstall' } | Select-Object -First 1
+if ($exe) { Start-Process -FilePath $exe.FullName -ArgumentList 'install-cli' -Wait -NoNewWindow }
+
+Write-Host '==> Installed. Start Consilium from the Start menu, or type consilium chat in a new terminal.' -ForegroundColor Green
 Write-Host '    Press "Set up AIs" in the app if ChatGPT or Claude isn''t ready yet.'

@@ -3,6 +3,11 @@
 //! Each conversation is `<id>.jsonl` (one event per line) plus `<id>.json` (title and timestamps)
 //! in the app's data folder. Events are only ever appended, so a crash can at worst leave one
 //! half-written last line, which `load` skips.
+//!
+//! The app and the terminal command (`consilium`, see `cli`) can both have the same conversations
+//! open. Appends lock the log file, so two processes never write the same sequence number, and a
+//! conversation's AIs are run by one process at a time: the one holding its turn lock (see
+//! `try_turn_lock`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -151,14 +156,68 @@ pub fn add_ai_in(text: &str) -> Vec<String> {
 
 pub struct Store {
     dir: PathBuf,
-    /// Serializes appends and remembers each conversation's last sequence number.
-    seqs: Mutex<HashMap<String, u64>>,
+    /// Serializes this process's appends; the file lock serializes them with other processes.
+    appending: Mutex<()>,
+}
+
+/// Held while this process runs a conversation's AIs. The operating system releases it when the
+/// file is closed, so a quit or crash can never leave a conversation locked.
+pub struct TurnLock {
+    _file: fs::File,
 }
 
 impl Store {
     pub fn new(dir: PathBuf) -> std::io::Result<Self> {
         fs::create_dir_all(&dir)?;
-        Ok(Store { dir, seqs: Mutex::new(HashMap::new()) })
+        Ok(Store { dir, appending: Mutex::new(()) })
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn turn_lock_path(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("{id}.turn.lock"))
+    }
+
+    fn stop_path(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("{id}.stop"))
+    }
+
+    /// Takes the right to run this conversation's AIs, unless a process (this one or another)
+    /// already has it.
+    pub fn try_turn_lock(&self, id: &str) -> Option<TurnLock> {
+        Self::check(id).ok()?;
+        let file = OpenOptions::new().create(true).truncate(false).write(true).open(self.turn_lock_path(id)).ok()?;
+        file.try_lock().ok()?;
+        Some(TurnLock { _file: file })
+    }
+
+    /// Whether some process is running this conversation's AIs. (A process that holds the lock
+    /// itself knows that already: this probe reports its own lock as held too.)
+    pub fn turn_locked(&self, id: &str) -> bool {
+        // No lock file yet means no turn has ever run (and the probe doesn't create one).
+        valid_id(id) && self.turn_lock_path(id).exists() && self.try_turn_lock(id).is_none()
+    }
+
+    /// Asks whichever process is running this conversation's AIs to stop them (see `take_stop_request`).
+    pub fn request_stop(&self, id: &str) -> Result<(), String> {
+        Self::check(id)?;
+        fs::write(self.stop_path(id), now_ms().to_string()).map_err(|e| e.to_string())
+    }
+
+    /// Whether a stop was asked for since `since` (ms). The request is used up either way, so an old
+    /// one left behind by a process that has gone can't stop a later turn.
+    pub fn take_stop_request(&self, id: &str, since: u64) -> bool {
+        let path = self.stop_path(id);
+        let Ok(text) = fs::read_to_string(&path) else { return false };
+        let _ = fs::remove_file(&path);
+        text.trim().parse::<u64>().is_ok_and(|t| t >= since)
+    }
+
+    /// Size of the conversation's log, to notice cheaply when another process has added to it.
+    pub fn log_len(&self, id: &str) -> u64 {
+        fs::metadata(self.log_path(id)).map(|m| m.len()).unwrap_or(0)
     }
 
     fn log_path(&self, id: &str) -> PathBuf {
@@ -246,7 +305,8 @@ impl Store {
         Self::check(id)?;
         let _ = fs::remove_file(self.log_path(id));
         fs::remove_file(self.meta_path(id)).map_err(|e| e.to_string())?;
-        self.seqs.lock().unwrap().remove(id);
+        let _ = fs::remove_file(self.turn_lock_path(id));
+        let _ = fs::remove_file(self.stop_path(id));
         Ok(())
     }
 
@@ -290,11 +350,16 @@ impl Store {
         usage: Option<TokenUsage>,
     ) -> Result<Event, String> {
         Self::check(id)?;
-        let mut seqs = self.seqs.lock().unwrap();
-        let last = match seqs.get(id) {
-            Some(n) => *n,
-            None => read_events(&self.log_path(id)).last().map_or(0, |e| e.seq),
-        };
+        let appending = self.appending.lock().unwrap();
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.log_path(id))
+            .map_err(|e| e.to_string())?;
+        // Another process may have appended since this one last looked, so the last sequence
+        // number is read under the lock, from the file itself.
+        f.lock().map_err(|e| e.to_string())?;
+        let last = read_events(&self.log_path(id)).last().map_or(0, |e| e.seq);
         let event = Event {
             id: uuid::Uuid::new_v4().to_string(),
             seq: last + 1,
@@ -310,15 +375,10 @@ impl Store {
         };
         let mut line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
         line.push('\n');
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.log_path(id))
-            .map_err(|e| e.to_string())?;
         f.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
         f.sync_data().map_err(|e| e.to_string())?;
-        seqs.insert(id.to_string(), event.seq);
-        drop(seqs);
+        drop(f);
+        drop(appending);
         if let Ok(mut meta) = self.meta(id) {
             meta.updated = event.ts;
             if meta.title == "New conversation" && sender == "human" {
@@ -381,6 +441,58 @@ mod tests {
     fn temp_store() -> (Store, PathBuf) {
         let dir = std::env::temp_dir().join(format!("consilium-test-{}", uuid::Uuid::new_v4()));
         (Store::new(dir.clone()).unwrap(), dir)
+    }
+
+    #[test]
+    fn two_processes_appending_never_share_a_sequence_number() {
+        // Two stores on one folder stand for the app and the terminal command.
+        let (a, dir) = temp_store();
+        let b = Store::new(dir.clone()).unwrap();
+        let c = a.create("x").unwrap();
+        let (a, b) = (std::sync::Arc::new(a), std::sync::Arc::new(b));
+        let threads: Vec<_> = [a.clone(), b.clone()]
+            .into_iter()
+            .map(|s| {
+                let id = c.id.clone();
+                std::thread::spawn(move || {
+                    for i in 0..25 {
+                        s.append(&id, "human", "message", vec![], &format!("m{i}")).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let seqs: Vec<u64> = a.load(&c.id).unwrap().iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, (1..=50).collect::<Vec<u64>>());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn one_process_at_a_time_runs_a_conversation() {
+        let (a, dir) = temp_store();
+        let b = Store::new(dir.clone()).unwrap();
+        let c = a.create("x").unwrap();
+        let lock = a.try_turn_lock(&c.id).expect("free at first");
+        assert!(b.try_turn_lock(&c.id).is_none());
+        assert!(b.turn_locked(&c.id));
+        drop(lock);
+        assert!(!b.turn_locked(&c.id));
+        assert!(b.try_turn_lock(&c.id).is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_stop_request_counts_once_and_only_for_a_later_turn() {
+        let (s, dir) = temp_store();
+        let c = s.create("x").unwrap();
+        s.request_stop(&c.id).unwrap();
+        assert!(!s.take_stop_request(&c.id, now_ms() + 60_000), "older than the turn: ignored");
+        assert!(!s.take_stop_request(&c.id, 0), "and used up");
+        s.request_stop(&c.id).unwrap();
+        assert!(s.take_stop_request(&c.id, 0));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

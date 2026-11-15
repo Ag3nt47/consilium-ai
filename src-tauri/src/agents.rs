@@ -14,7 +14,7 @@
 //! Higher levels run it in the project folder with the matching permissions.
 
 use crate::{config::Access, store::TokenUsage};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -54,17 +54,37 @@ pub struct AgentInfo {
     pub benched_until: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UsageStatus {
     /// The lowest remaining percentage, because this is the limit that will stop the agent first.
     pub remaining_percent: u8,
+    /// Every limit behind the two meters.
     pub windows: Vec<UsageWindow>,
+    /// The model in use, named after it (it changes when the AI is switched to another model).
+    pub model: Option<UsageMeter>,
+    /// The AI's whole plan, across its models.
+    pub overall: Option<UsageMeter>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+/// One meter: the limits of the model in use, or of the AI's whole plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageMeter {
+    /// What it measures: the model's name, or the AI's.
+    pub label: String,
+    /// The lowest of `windows`.
+    pub remaining_percent: u8,
+    pub windows: Vec<UsageWindow>,
+    /// The model has no limit of its own and draws on the overall one (the model meter only).
+    pub shared: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UsageWindow {
     pub label: String,
     pub remaining_percent: u8,
+    /// When this limit resets (ms since the epoch), as the provider reports it.
+    #[serde(default)]
+    pub resets_at: Option<u64>,
 }
 
 pub struct Agent {
@@ -238,23 +258,86 @@ fn percent(n: f64) -> Option<u8> {
     n.is_finite().then(|| n.clamp(0.0, 100.0).round() as u8)
 }
 
-fn from_windows(windows: Vec<UsageWindow>) -> Option<UsageStatus> {
-    let remaining_percent = windows.iter().map(|w| w.remaining_percent).min()?;
-    Some(UsageStatus {
-        remaining_percent,
-        windows,
-    })
-}
-
-fn window_from_used(label: impl Into<String>, used: f64) -> Option<UsageWindow> {
+fn window_from_used(label: impl Into<String>, used: f64, resets_at: Option<u64>) -> Option<UsageWindow> {
     Some(UsageWindow {
         label: label.into(),
         remaining_percent: 100_u8.saturating_sub(percent(used)?),
+        resets_at,
     })
+}
+
+/// An ISO 8601 time such as "2026-11-17T19:00:00.389+00:00" or "2026-11-22T00:24:48Z", in ms
+/// since the epoch.
+pub fn iso_ms(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let num = |a: usize, b: usize| s.get(a..b)?.parse::<i64>().ok();
+    let (y, mo, d, h, mi, sec) = (num(0, 4)?, num(5, 7)?, num(8, 10)?, num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    let mut rest = &s[19..];
+    let mut ms = 0i64;
+    if let Some(frac) = rest.strip_prefix('.') {
+        let digits: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
+        ms = format!("{:0<3}", &digits[..digits.len().min(3)]).parse().ok()?;
+        rest = &frac[digits.len()..];
+    }
+    let offset_min = match rest {
+        "" | "Z" | "z" => 0,
+        o => {
+            let sign = if o.starts_with('-') { -1 } else { 1 };
+            let hh: i64 = o.get(1..3)?.parse().ok()?;
+            let mm: i64 = o.get(4..6).or(o.get(3..5)).and_then(|m| m.parse().ok()).unwrap_or(0);
+            sign * (hh * 60 + mm)
+        }
+    };
+    // Days from civil (Howard Hinnant).
+    let (y2, m2) = if mo <= 2 { (y - 1, mo + 9) } else { (y, mo - 3) };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * m2 + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + h * 3600 + mi * 60 + sec - offset_min * 60;
+    u64::try_from(secs * 1000 + ms).ok()
+}
+
+fn meter(label: impl Into<String>, windows: Vec<UsageWindow>) -> Option<UsageMeter> {
+    let remaining_percent = windows.iter().map(|w| w.remaining_percent).min()?;
+    Some(UsageMeter { label: label.into(), remaining_percent, windows, shared: false })
+}
+
+/// Puts the two meters together. A model without limits of its own (`model` is None) draws on
+/// the overall ones, so its meter shows those, under its name, when the name is known.
+fn usage_from(model_name: Option<String>, model: Option<UsageMeter>, overall: Option<UsageMeter>) -> Option<UsageStatus> {
+    let model = model.or_else(|| {
+        let o = overall.as_ref()?;
+        Some(UsageMeter { label: model_name?, remaining_percent: o.remaining_percent, windows: o.windows.clone(), shared: true })
+    });
+    let mut windows = Vec::new();
+    for m in model.iter().filter(|m| !m.shared).chain(overall.iter()) {
+        windows.extend(m.windows.iter().cloned());
+    }
+    let remaining_percent = windows.iter().map(|w| w.remaining_percent).min()?;
+    Some(UsageStatus { remaining_percent, windows, model, overall })
+}
+
+/// "claude-opus-5-5" or "opus" → "Opus 5.5" / "Opus", for model ids that carry no display name.
+fn model_name(id: &str) -> String {
+    let base = id.split('[').next().unwrap_or(id).trim();
+    let base = base.strip_prefix("claude-").unwrap_or(base);
+    let mut parts = base.split('-').filter(|p| !p.is_empty());
+    let Some(first) = parts.next() else { return id.to_string() };
+    let mut name: String = first.chars().take(1).flat_map(char::to_uppercase).chain(first.chars().skip(1)).collect();
+    // Version numbers, without a trailing date (claude-sonnet-4-5-20250929).
+    let version: Vec<&str> = parts.take_while(|p| p.len() <= 2 && p.chars().all(|c| c.is_ascii_digit())).collect();
+    if !version.is_empty() {
+        name.push(' ');
+        name.push_str(&version.join("."));
+    }
+    name
 }
 
 fn codex_window(label: &str, v: &serde_json::Value) -> Option<UsageWindow> {
     let used = v["usedPercent"].as_f64()?;
+    let resets_at = v["resetsAt"].as_u64().map(|secs| secs * 1000);
     let label = match v["windowDurationMins"].as_u64() {
         Some(300) => "5-hour limit".to_string(),
         Some(10_080) => "Weekly limit".to_string(),
@@ -262,15 +345,11 @@ fn codex_window(label: &str, v: &serde_json::Value) -> Option<UsageWindow> {
         Some(minutes) if minutes % 60 == 0 => format!("{}-hour limit", minutes / 60),
         _ => label.to_string(),
     };
-    window_from_used(label, used)
+    window_from_used(label, used, resets_at)
 }
 
-fn codex_usage_from_line(line: &str) -> Option<UsageStatus> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    if v["id"].as_i64() != Some(2) {
-        return None;
-    }
-    let limits = &v["result"]["rateLimits"];
+/// The limits in one of Codex's rate-limit buckets.
+fn codex_windows(limits: &serde_json::Value) -> Vec<UsageWindow> {
     let mut windows = Vec::new();
     if let Some(w) = codex_window("Primary limit", &limits["primary"]) {
         windows.push(w);
@@ -278,33 +357,70 @@ fn codex_usage_from_line(line: &str) -> Option<UsageStatus> {
     if let Some(w) = codex_window("Secondary limit", &limits["secondary"]) {
         windows.push(w);
     }
-    if let Some(remaining) = limits["individualLimit"]["remainingPercent"]
-        .as_f64()
-        .and_then(percent)
-    {
-        windows.push(UsageWindow {
-            label: "Individual spend limit".into(),
-            remaining_percent: remaining,
-        });
+    if let Some(remaining) = limits["individualLimit"]["remainingPercent"].as_f64().and_then(percent) {
+        windows.push(UsageWindow { label: "Individual spend limit".into(), remaining_percent: remaining, resets_at: None });
     }
-    from_windows(windows)
+    windows
+}
+
+/// Codex's `account/rateLimits/read` reply, with its `model/list` reply (for the default model and
+/// display names) and the model set in Codex's config, if any.
+fn codex_usage_from(limits: &serde_json::Value, models: &serde_json::Value, configured: Option<&str>) -> Option<UsageStatus> {
+    let r = &limits["result"];
+    let by_id = r["rateLimitsByLimitId"].as_object();
+    let overall_bucket = by_id.and_then(|m| m.get("codex")).unwrap_or(&r["rateLimits"]);
+    let overall = meter("ChatGPT", codex_windows(overall_bucket));
+    let list = models["result"]["data"].as_array().cloned().unwrap_or_default();
+    let id = configured.map(str::to_string).or_else(|| {
+        list.iter().find(|m| m["isDefault"].as_bool() == Some(true)).and_then(|m| m["model"].as_str().or(m["id"].as_str())).map(str::to_string)
+    });
+    let name = id.as_ref().map(|id| {
+        list.iter()
+            .find(|m| m["model"].as_str() == Some(id) || m["id"].as_str() == Some(id))
+            .and_then(|m| m["displayName"].as_str())
+            .map_or_else(|| id.clone(), str::to_string)
+    });
+    // A bucket of its own for the model in use, when Codex has one.
+    let own = by_id.and_then(|m| {
+        m.iter().find(|(key, b)| {
+            key.as_str() != "codex"
+                && id.as_deref().is_some_and(|id| b["normalModelSlug"].as_str() == Some(id) || key.as_str() == id)
+        })
+    });
+    let model = own.and_then(|(_, b)| meter(name.clone().unwrap_or_default(), codex_windows(b)));
+    usage_from(name, model, overall)
+}
+
+/// The model set in Codex's config.toml (`model = "..."`, before any [section]), if any.
+fn codex_configured_model() -> Option<String> {
+    let home = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".codex")))?;
+    let text = std::fs::read_to_string(home.join("config.toml")).ok()?;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            break;
+        }
+        if let Some(v) = t.strip_prefix("model").map(str::trim_start).and_then(|r| r.strip_prefix('=')) {
+            let v = v.split('#').next().unwrap_or("").trim().trim_matches('"').trim_matches('\'');
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Codex exposes plan limits through its documented newline-delimited app-server protocol.
 async fn codex_usage(path: &Path) -> Option<UsageStatus> {
     let mut cmd = command(path);
-    cmd.args(["app-server"])
-        .stdin(Stdio::piped())
-        .stderr(Stdio::null());
+    cmd.args(["app-server"]).stdin(Stdio::piped()).stderr(Stdio::null());
     let mut child = cmd.spawn().ok()?;
     let mut stdin = child.stdin.take()?;
     let stdout = child.stdout.take()?;
     let mut lines = BufReader::new(stdout).lines();
     let exchange = async {
         stdin
-            .write_all(
-                b"{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"consilium\",\"version\":\"0.1.0\"}}}\n",
-            )
+            .write_all(b"{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"consilium\",\"version\":\"0.1.0\"}}}\n")
             .await
             .ok()?;
         loop {
@@ -315,27 +431,32 @@ async fn codex_usage(path: &Path) -> Option<UsageStatus> {
             }
         }
         stdin
-            .write_all(b"{\"method\":\"initialized\"}\n{\"id\":2,\"method\":\"account/rateLimits/read\"}\n")
+            .write_all(b"{\"method\":\"initialized\"}\n{\"id\":2,\"method\":\"account/rateLimits/read\"}\n{\"id\":3,\"method\":\"model/list\",\"params\":{}}\n")
             .await
             .ok()?;
-        loop {
-            let line = lines.next_line().await.ok()??;
-            if let Some(usage) = codex_usage_from_line(&line) {
-                break Some(usage);
+        let (mut limits, mut models) = (None, None);
+        while limits.is_none() || models.is_none() {
+            let Ok(Some(line)) = lines.next_line().await else { break };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            match v["id"].as_i64() {
+                Some(2) => limits = Some(v),
+                Some(3) => models = Some(v),
+                _ => {}
             }
         }
+        let limits = limits?;
+        codex_usage_from(&limits, &models.unwrap_or_default(), codex_configured_model().as_deref())
     };
-    let result = tokio::time::timeout(PROBE_TIMEOUT, exchange)
-        .await
-        .ok()
-        .flatten();
+    let result = tokio::time::timeout(PROBE_TIMEOUT, exchange).await.ok().flatten();
     // `kill` also waits for the process to exit, so repeated refreshes cannot leave app-server
     // children behind as zombies.
     let _ = child.kill().await;
     result
 }
 
-fn claude_usage_from_output(output: &str) -> Option<UsageStatus> {
+/// Claude Code's `get_usage` reply. `model` names the model in use when no model-specific limit is
+/// active (Claude Code's settings, or the model of Claude's latest reply).
+fn claude_usage_from_output(output: &str, model: Option<String>) -> Option<UsageStatus> {
     for line in output.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -345,51 +466,54 @@ fn claude_usage_from_output(output: &str) -> Option<UsageStatus> {
             continue;
         }
         let limits = &body["rate_limits"];
-        let mut windows = Vec::new();
+        let (mut overall, mut own, mut active) = (Vec::new(), Vec::new(), None);
         if let Some(rows) = limits["limits"].as_array() {
             for row in rows {
-                // A scoped window only constrains the currently selected model when the CLI marks it active.
-                if !row["scope"].is_null() && row["is_active"].as_bool() != Some(true) {
-                    continue;
-                }
                 let Some(used) = row["percent"].as_f64() else {
                     continue;
                 };
                 let kind = row["kind"].as_str().unwrap_or("Plan limit");
-                let label = match kind {
-                    "session" => "5-hour limit".to_string(),
-                    "weekly_all" => "Weekly limit".to_string(),
-                    "weekly_scoped" => {
-                        let model = row["scope"]["model"]["display_name"]
-                            .as_str()
-                            .unwrap_or("Model");
-                        format!("{model} weekly limit")
-                    }
-                    other => other.replace('_', " "),
-                };
-                if let Some(window) = window_from_used(label, used) {
-                    windows.push(window);
+                let resets = row["resets_at"].as_str().and_then(iso_ms);
+                if row["scope"].is_null() {
+                    let label = match kind {
+                        "session" => "5-hour limit".to_string(),
+                        "weekly_all" => "Weekly limit".to_string(),
+                        other => other.replace('_', " "),
+                    };
+                    overall.extend(window_from_used(label, used, resets));
+                } else if row["is_active"].as_bool() == Some(true) {
+                    // A model's own limit counts only for the model currently selected.
+                    active = row["scope"]["model"]["display_name"].as_str().map(str::to_string);
+                    let label = if kind.starts_with("weekly") { "Weekly limit".to_string() } else { kind.replace('_', " ") };
+                    own.extend(window_from_used(label, used, resets));
                 }
             }
         }
         // Older CLIs have the named windows but not the unified limits array.
-        if windows.is_empty() {
+        if overall.is_empty() {
             for (key, label) in [("five_hour", "5-hour limit"), ("seven_day", "Weekly limit")] {
                 if let Some(used) = limits[key]["utilization"].as_f64() {
-                    if let Some(window) = window_from_used(label, used) {
-                        windows.push(window);
-                    }
+                    overall.extend(window_from_used(label, used, limits[key]["resets_at"].as_str().and_then(iso_ms)));
                 }
             }
         }
-        if let Some(usage) = from_windows(windows) {
+        let name = active.or_else(|| model.clone());
+        let own = meter(name.clone().unwrap_or_default(), own);
+        if let Some(usage) = usage_from(name, own, meter("Claude", overall)) {
             return Some(usage);
         }
     }
     None
 }
 
-async fn claude_usage(path: &Path) -> Option<UsageStatus> {
+/// The model chosen in Claude Code's settings, if any.
+fn claude_configured_model() -> Option<String> {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".claude")))?;
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("settings.json")).ok()?).ok()?;
+    v["model"].as_str().filter(|m| !m.is_empty() && *m != "default").map(model_name)
+}
+
+async fn claude_usage(path: &Path, last_model: Option<&str>) -> Option<UsageStatus> {
     let request = "{\"type\":\"control_request\",\"request_id\":\"consilium-usage\",\"request\":{\"subtype\":\"get_usage\",\"skip_behaviors\":true}}\n";
     let output = probe_input(
         path,
@@ -408,19 +532,18 @@ async fn claude_usage(path: &Path) -> Option<UsageStatus> {
         request,
     )
     .await?;
-    claude_usage_from_output(&output)
+    let model = claude_configured_model().or_else(|| last_model.map(model_name));
+    claude_usage_from_output(&output, model)
 }
 
+/// Antigravity's `/usage`: limits per group of models. The Gemini group is Gemini's whole plan in
+/// Consilium; the model in use is the one the group lists, which draws on the group's limits.
 fn antigravity_usage_from_output(output: &str) -> Option<UsageStatus> {
     let start = output.find('{')?;
     let end = output.rfind('}')? + 1;
     let v: serde_json::Value = serde_json::from_str(&output[start..end]).ok()?;
     let groups = v["command"]["data"]["groups"].as_array()?;
-    let group = groups.iter().find(|g| {
-        g["name"]
-            .as_str()
-            .is_some_and(|n| n.to_ascii_lowercase().contains("gemini"))
-    })?;
+    let group = groups.iter().find(|g| g["name"].as_str().is_some_and(|n| n.to_ascii_lowercase().contains("gemini")))?;
     let mut windows = Vec::new();
     for bucket in group["buckets"].as_array()? {
         let Some(fraction) = bucket["remaining_fraction"].as_f64() else {
@@ -429,19 +552,22 @@ fn antigravity_usage_from_output(output: &str) -> Option<UsageStatus> {
         let Some(remaining_percent) = percent(fraction * 100.0) else {
             continue;
         };
-        let label = bucket["name"].as_str().unwrap_or("Plan limit").to_string();
-        windows.push(UsageWindow {
-            label,
-            remaining_percent,
-        });
+        let label = bucket["name"].as_str().unwrap_or("Plan limit").trim_end_matches(" Remaining").to_string();
+        let resets_at = bucket["reset_time"].as_str().and_then(iso_ms);
+        windows.push(UsageWindow { label, remaining_percent, resets_at });
     }
-    from_windows(windows)
+    let name = group["description"]
+        .as_str()
+        .and_then(|d| d.split_once("Models within this group:"))
+        .map(|(_, models)| models.trim().trim_end_matches('.').to_string())
+        .filter(|m| !m.is_empty());
+    usage_from(name, None, meter("Gemini", windows))
 }
 
-async fn usage(path: &Path, kind: Kind) -> Option<UsageStatus> {
+async fn usage(path: &Path, kind: Kind, last_model: Option<&str>) -> Option<UsageStatus> {
     match kind {
         Kind::Codex => codex_usage(path).await,
-        Kind::ClaudeCode => claude_usage(path).await,
+        Kind::ClaudeCode => claude_usage(path, last_model).await,
         Kind::Antigravity => {
             let output = probe(path, &["-p", "/usage", "--output-format", "json"]).await?;
             antigravity_usage_from_output(&output)
@@ -545,10 +671,12 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
 /// Plan usage for one AI, or None when its CLI is missing or doesn't report it. Kept out of
 /// `status` because these probes start a full CLI session (several seconds each), and sign-in
 /// state shouldn't wait on them.
-pub async fn usage_of(agent: &Agent) -> Option<UsageStatus> {
+/// `last_model` is the model of this AI's latest reply, when known: Claude names its model this way
+/// when neither its settings nor a model-specific limit do.
+pub async fn usage_of(agent: &Agent, last_model: Option<&str>) -> Option<UsageStatus> {
     let kind = effective_kind(agent);
     let path = find(kind)?;
-    usage(&path, kind).await
+    usage(&path, kind, last_model).await
 }
 
 /// Where and how an agent runs for one turn.
@@ -562,6 +690,8 @@ pub struct Plan {
 pub struct AgentReply {
     pub text: String,
     pub usage: Option<TokenUsage>,
+    /// The model that answered, when the CLI says (Claude Code does).
+    pub model: Option<String>,
 }
 
 /// The exact command-line arguments for one turn. `workdir` is the project folder when the AI has
@@ -807,6 +937,7 @@ async fn execute(
     let stderr = String::from_utf8_lossy(&err_buf.lock().unwrap()).to_string();
 
     let usage = token_usage_from_output(kind, &stdout);
+    let model = reply_model(kind, &stdout);
     let reply = match kind {
         Kind::Codex => std::fs::read_to_string(reply_file).unwrap_or_default(),
         Kind::ClaudeCode => match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
@@ -837,7 +968,22 @@ async fn execute(
     Ok(AgentReply {
         text: reply.trim().to_string(),
         usage,
+        model,
     })
+}
+
+/// The model that wrote a reply, when the CLI's output says: Claude Code's JSON result lists the
+/// models a turn used (the main one did most of the writing).
+fn reply_model(kind: Kind, stdout: &str) -> Option<String> {
+    if kind != Kind::ClaudeCode {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let models = v["modelUsage"].as_object()?;
+    models
+        .iter()
+        .max_by_key(|(_, u)| u["outputTokens"].as_u64().unwrap_or(0))
+        .map(|(id, _)| id.clone())
 }
 
 fn json_u64(value: &serde_json::Value, key: &str) -> u64 {
@@ -1034,41 +1180,90 @@ mod plan_tests {
         v.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b))
     }
 
+    fn pct(m: &Option<UsageMeter>) -> (String, u8, bool) {
+        let m = m.as_ref().expect("a meter");
+        (m.label.clone(), m.remaining_percent, m.shared)
+    }
+
     #[test]
-    fn codex_usage_uses_the_most_constrained_window() {
-        let line = r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":37,"windowDurationMins":300},"secondary":{"usedPercent":82,"windowDurationMins":10080}}}}"#;
-        let usage = codex_usage_from_line(line).unwrap();
+    fn codex_usage_shows_the_model_and_the_whole_plan() {
+        let limits: serde_json::Value = serde_json::from_str(r#"{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":37,"windowDurationMins":300},"secondary":{"usedPercent":82,"windowDurationMins":10080,"resetsAt":1795140954}}}}"#).unwrap();
+        let models: serde_json::Value = serde_json::from_str(r#"{"id":3,"result":{"data":[{"id":"gpt-6.1-sol","model":"gpt-6.1-sol","displayName":"GPT-6.1-Sol","isDefault":true},{"id":"gpt-6-astra","model":"gpt-6-astra","displayName":"GPT-6-Astra"}]}}"#).unwrap();
+        // The default model, which has no limit of its own.
+        let usage = codex_usage_from(&limits, &models, None).unwrap();
         assert_eq!(usage.remaining_percent, 18);
+        assert_eq!(pct(&usage.overall), ("ChatGPT".into(), 18, false));
+        assert_eq!(pct(&usage.model), ("GPT-6.1-Sol".into(), 18, true));
         assert_eq!(
             usage.windows,
             vec![
-                UsageWindow {
-                    label: "5-hour limit".into(),
-                    remaining_percent: 63
-                },
-                UsageWindow {
-                    label: "Weekly limit".into(),
-                    remaining_percent: 18
-                },
+                UsageWindow { label: "5-hour limit".into(), remaining_percent: 63, resets_at: None },
+                UsageWindow { label: "Weekly limit".into(), remaining_percent: 18, resets_at: Some(1_795_140_954_000) },
             ]
         );
+        // Switched to a model with a bucket of its own.
+        let limits: serde_json::Value = serde_json::from_str(r#"{"id":2,"result":{"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":10,"windowDurationMins":10080}},"astra":{"normalModelSlug":"gpt-6-astra","primary":{"usedPercent":75,"windowDurationMins":10080}}}}}"#).unwrap();
+        let usage = codex_usage_from(&limits, &models, Some("gpt-6-astra")).unwrap();
+        assert_eq!(pct(&usage.model), ("GPT-6-Astra".into(), 25, false));
+        assert_eq!(pct(&usage.overall), ("ChatGPT".into(), 90, false));
+        assert_eq!(usage.remaining_percent, 25);
     }
 
+    const CLAUDE: &str = r#"{"type":"control_response","response":{"response":{"rate_limits_available":true,"rate_limits":{"limits":[{"kind":"session","percent":22,"scope":null},{"kind":"weekly_all","percent":59,"scope":null},{"kind":"weekly_scoped","percent":100,"is_active":ACTIVE_FABLE,"scope":{"model":{"display_name":"Fable"}}},{"kind":"weekly_scoped","percent":90,"is_active":false,"scope":{"model":{"display_name":"Sonnet"}}}]}}}}"#;
+
     #[test]
-    fn claude_usage_includes_only_the_active_model_scope() {
-        let output = r#"{"type":"control_response","response":{"response":{"rate_limits_available":true,"rate_limits":{"limits":[{"kind":"session","percent":22,"scope":null},{"kind":"weekly_all","percent":59,"scope":null},{"kind":"weekly_scoped","percent":100,"is_active":true,"scope":{"model":{"display_name":"Fable"}}},{"kind":"weekly_scoped","percent":90,"is_active":false,"scope":{"model":{"display_name":"Opus"}}}]}}}}"#;
-        let usage = claude_usage_from_output(output).unwrap();
+    fn claude_usage_follows_the_model_in_use() {
+        // On Fable, which has a weekly limit of its own: Fable's meter, and Claude's overall one.
+        let usage = claude_usage_from_output(&CLAUDE.replace("ACTIVE_FABLE", "true"), None).unwrap();
+        assert_eq!(pct(&usage.model), ("Fable".into(), 0, false));
+        assert_eq!(pct(&usage.overall), ("Claude".into(), 41, false));
         assert_eq!(usage.remaining_percent, 0);
-        assert_eq!(usage.windows.len(), 3);
-        assert_eq!(usage.windows[2].label, "Fable weekly limit");
+        // Switched to Opus, which draws on the overall limits: its meter shows those.
+        let usage = claude_usage_from_output(&CLAUDE.replace("ACTIVE_FABLE", "false"), Some("Opus 5.5".into())).unwrap();
+        assert_eq!(pct(&usage.model), ("Opus 5.5".into(), 41, true));
+        assert_eq!(pct(&usage.overall), ("Claude".into(), 41, false));
+        assert_eq!(usage.remaining_percent, 41);
+        assert_eq!(usage.windows.len(), 2, "an inactive model's limit doesn't count");
+        // Model unknown: the overall meter alone.
+        let usage = claude_usage_from_output(&CLAUDE.replace("ACTIVE_FABLE", "false"), None).unwrap();
+        assert!(usage.model.is_none() && usage.overall.is_some());
     }
 
     #[test]
-    fn antigravity_usage_ignores_the_third_party_model_pool() {
-        let output = r#"{"command":{"data":{"groups":[{"name":"Gemini Models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.61},{"name":"Five Hour Limit Remaining","remaining_fraction":0.83}]},{"name":"Claude and GPT models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.1}]}]}}}"#;
+    fn reset_times_are_read_in_each_providers_format() {
+        assert_eq!(iso_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(iso_ms("2026-11-17T19:00:00.389055+00:00"), Some(1_794_942_000_389));
+        assert_eq!(iso_ms("2026-11-17T20:00:00+01:00"), Some(1_794_942_000_000));
+        assert_eq!(iso_ms("2026-11-22T00:24:48Z"), Some(1_795_307_088_000));
+        assert_eq!(iso_ms("soon"), None);
+        let usage = claude_usage_from_output(&CLAUDE.replace("ACTIVE_FABLE", "true").replace(r#""percent":100,"#, r#""percent":100,"resets_at":"2026-11-17T19:00:00Z","#), None).unwrap();
+        assert_eq!(usage.model.unwrap().windows[0].resets_at, Some(1_794_942_000_000));
+    }
+
+    #[test]
+    fn model_ids_get_readable_names() {
+        assert_eq!(model_name("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(model_name("claude-fable-5-2[1m]"), "Fable 5.2");
+        assert_eq!(model_name("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
+        assert_eq!(model_name("opus"), "Opus");
+    }
+
+    #[test]
+    fn a_claude_reply_names_its_main_model() {
+        let out = r#"{"result":"hi","modelUsage":{"claude-haiku-5-5":{"outputTokens":12},"claude-opus-5-5":{"outputTokens":900}}}"#;
+        assert_eq!(reply_model(Kind::ClaudeCode, out).as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(reply_model(Kind::Codex, out), None);
+    }
+
+    #[test]
+    fn antigravity_usage_is_the_gemini_group_and_ignores_the_third_party_pool() {
+        let output = r#"{"command":{"data":{"groups":[{"name":"Gemini Models","description":"Models within this group: Gemini 3.8 Flash","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.61},{"name":"Five Hour Limit Remaining","remaining_fraction":0.83}]},{"name":"Claude and GPT models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.1}]}]}}}"#;
         let usage = antigravity_usage_from_output(output).unwrap();
         assert_eq!(usage.remaining_percent, 61);
         assert_eq!(usage.windows.len(), 2);
+        assert_eq!(usage.windows[0].label, "Weekly Limit");
+        assert_eq!(pct(&usage.overall), ("Gemini".into(), 61, false));
+        assert_eq!(pct(&usage.model), ("Gemini 3.8 Flash".into(), 61, true));
     }
 
     #[test]

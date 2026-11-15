@@ -38,6 +38,10 @@ pub struct Council {
     /// Access for every AI without its own setting, including AIs added later.
     #[serde(default)]
     pub default_access: Access,
+    /// Show codex-reset.com's unofficial forecast of the next global Codex usage reset (to the
+    /// human and the AIs). Off unless the person turns it on, since it asks a third-party site.
+    #[serde(default)]
+    pub reset_forecast: bool,
 }
 
 impl Default for Council {
@@ -47,6 +51,7 @@ impl Default for Council {
             access: HashMap::new(),
             default_workspace: None,
             default_access: Access::Chat,
+            reset_forecast: false,
         }
     }
 }
@@ -58,30 +63,40 @@ pub struct Config {
 
 impl Config {
     pub fn load(path: PathBuf) -> Self {
-        let council = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Council>(&s).ok())
-            .map(|mut c| {
-                c.members.retain(|m| crate::agents::by_id(m).is_some());
-                c.members.dedup();
-                c
-            })
-            .unwrap_or_default();
+        let council = Self::read(&path).unwrap_or_default();
         Config { path, council: Mutex::new(council) }
     }
 
+    fn read(path: &std::path::Path) -> Option<Council> {
+        std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str::<Council>(&s).ok()).map(|mut c| {
+            c.members.retain(|m| crate::agents::by_id(m).is_some());
+            c.members.dedup();
+            c
+        })
+    }
+
+    /// The settings as saved, re-read each time, so a change made in the app shows up in the
+    /// terminal command and the other way round. (Kept in memory too, for when the file can't be read.)
+    fn current(&self) -> std::sync::MutexGuard<'_, Council> {
+        let mut c = self.council.lock().unwrap();
+        if let Some(saved) = Self::read(&self.path) {
+            *c = saved;
+        }
+        c
+    }
+
     pub fn get(&self) -> Council {
-        self.council.lock().unwrap().clone()
+        self.current().clone()
     }
 
     pub fn access(&self, agent: &str) -> Access {
-        let c = self.council.lock().unwrap();
+        let c = self.current();
         c.access.get(agent).copied().unwrap_or(c.default_access)
     }
 
     /// Sets the council-wide default and clears per-AI settings, so every AI uses it.
     pub fn set_default_access(&self, access: Access) -> Result<Council, String> {
-        let mut c = self.council.lock().unwrap();
+        let mut c = self.current();
         let mut next = c.clone();
         next.default_access = access;
         next.access.clear();
@@ -91,7 +106,7 @@ impl Config {
     }
 
     pub fn is_member(&self, agent: &str) -> bool {
-        self.council.lock().unwrap().members.iter().any(|m| m == agent)
+        self.current().members.iter().any(|m| m == agent)
     }
 
     fn save(&self, c: &Council) -> Result<(), String> {
@@ -104,7 +119,7 @@ impl Config {
         if crate::agents::by_id(agent).is_none() {
             return Err("unknown AI".into());
         }
-        let mut c = self.council.lock().unwrap();
+        let mut c = self.current();
         let mut next = c.clone();
         if member {
             if !next.members.iter().any(|m| m == agent) {
@@ -132,9 +147,18 @@ impl Config {
                 Some(p.display().to_string())
             }
         };
-        let mut c = self.council.lock().unwrap();
+        let mut c = self.current();
         let mut next = c.clone();
         next.default_workspace = folder;
+        self.save(&next)?;
+        *c = next.clone();
+        Ok(next)
+    }
+
+    pub fn set_reset_forecast(&self, on: bool) -> Result<Council, String> {
+        let mut c = self.current();
+        let mut next = c.clone();
+        next.reset_forecast = on;
         self.save(&next)?;
         *c = next.clone();
         Ok(next)
@@ -144,7 +168,7 @@ impl Config {
         if crate::agents::by_id(agent).is_none() {
             return Err("unknown AI".into());
         }
-        let mut c = self.council.lock().unwrap();
+        let mut c = self.current();
         let mut next = c.clone();
         next.access.insert(agent.into(), access);
         self.save(&next)?;

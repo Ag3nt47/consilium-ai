@@ -1,0 +1,831 @@
+//! Runs the council's turns for one process: the app's window, or the terminal command (see `cli`).
+//!
+//! The app and the terminal can be open at the same time on the same conversations, since they
+//! share one data folder:
+//! - A conversation's AIs are run by one process at a time, the one holding its turn lock
+//!   (`Store::try_turn_lock`). The lock belongs to the process, so a quit or crash frees it.
+//! - A message sent from the other process is only recorded there. The process running the turn
+//!   sees it in the conversation (`watch`), and the AIs read it exactly as if it had been sent here.
+//! - Stop in the other process leaves a stop request, which the running process acts on.
+//! - The app's window also shows what the terminal adds to any conversation, as it happens.
+
+use crate::agents::{self, Agent};
+use crate::bench::{self, Bench};
+use crate::config::{Access, Config};
+use crate::council::{self, Council};
+use crate::memory::{self, Memory};
+use crate::prompt;
+use crate::resume::{Journal, Pending};
+use crate::store::{self, Event, Store, TurnLock};
+use serde::Serialize;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+
+/// Upper bound on discussion rounds, whatever the UI asks for, so agents can't loop indefinitely.
+pub const MAX_ROUNDS: u32 = 8;
+
+/// How long Stop waits for a turn's AIs to shut down before letting it go anyway, so the
+/// conversation is never stuck as "still answering".
+pub const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// How often `watch` looks for what the other process has done.
+const WATCH_EVERY: Duration = Duration::from_millis(400);
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct TurnState {
+    pub conversation: String,
+    /// "running" or "idle".
+    pub state: String,
+    /// The first AI working on an answer, if any.
+    pub agent: Option<String>,
+    /// Every AI working on an answer right now; they answer at the same time.
+    pub agents: Vec<String>,
+    pub round: u32,
+    pub rounds: u32,
+}
+
+impl TurnState {
+    pub fn idle(conversation: &str) -> Self {
+        TurnState { conversation: conversation.into(), state: "idle".into(), agent: None, agents: vec![], round: 0, rounds: 0 }
+    }
+}
+
+/// Where a process shows what happens: the app's window, or the terminal.
+pub trait Ui: Send + Sync + 'static {
+    /// An event was recorded (by this process, or, when watching, by the other one).
+    fn event(&self, e: &Event);
+    fn turn(&self, t: TurnState);
+}
+
+pub type Task = Pin<Box<dyn Future<Output = ()> + Send>>;
+/// Starts a background task on the process's async runtime.
+pub type Spawn = dyn Fn(Task) + Send + Sync;
+/// Makes the host a turn uses to reach the AIs (the real ones, or fakes in tests).
+pub type MakeHost = dyn Fn(&Engine, &Pending) -> Arc<dyn council::Host> + Send + Sync;
+
+/// What `watch` needs of a running turn: conversation, turn id, start time, council and cursor.
+type Watched = (String, String, u64, Arc<Council>, Arc<Mutex<u64>>);
+
+/// A turn this process is running.
+#[derive(Clone)]
+struct Running {
+    /// The turn's id (see `resume::Pending::turn`).
+    turn: String,
+    token: CancellationToken,
+    /// Takes the human's further messages while the turn runs.
+    council: Arc<Council>,
+    /// When it started (ms); a stop request from before then is stale.
+    started: u64,
+    /// This process's right to run the conversation's AIs.
+    lock: Arc<TurnLock>,
+    /// The newest event checked for messages sent from the other process. Locked while such a
+    /// message is joined into the turn, so `watch` and the turn's end never both take it, or miss it.
+    cursor: Arc<Mutex<u64>>,
+}
+
+pub struct Engine {
+    /// The data folder.
+    pub data: PathBuf,
+    pub store: Arc<Store>,
+    pub config: Arc<Config>,
+    pub journal: Arc<Journal>,
+    pub memory: Arc<Memory>,
+    pub bench: Arc<Bench>,
+    pub ui: Arc<dyn Ui>,
+    spawn: Box<Spawn>,
+    make_host: Box<MakeHost>,
+    running: Mutex<HashMap<String, Running>>,
+    /// Ids of the human messages sent from this process, to tell them from the other process's.
+    mine: Mutex<HashSet<String>>,
+}
+
+impl Engine {
+    /// An engine on the data folder `data` (the same for the app and the terminal command).
+    pub fn open(data: &std::path::Path, ui: Arc<dyn Ui>, spawn: Box<Spawn>) -> std::io::Result<Self> {
+        Ok(Engine {
+            data: data.to_path_buf(),
+            store: Arc::new(Store::new(data.join("conversations"))?),
+            config: Arc::new(Config::load(data.join("council.json"))),
+            journal: Arc::new(Journal::load(data.join("turns.json"))),
+            memory: Arc::new(Memory::new(data.join("memory.md"))),
+            bench: Arc::new(Bench::new()),
+            ui,
+            spawn,
+            make_host: Box::new(|engine, pending| Arc::new(RealHost::new(engine, pending))),
+            running: Mutex::new(HashMap::new()),
+            mine: Mutex::new(HashSet::new()),
+        })
+    }
+
+    /// The same engine with other AIs (for tests).
+    #[cfg(test)]
+    pub fn with_host(mut self, make_host: Box<MakeHost>) -> Self {
+        self.make_host = make_host;
+        self
+    }
+
+    /// Records the human's message, then asks the addressed council members, who all answer at the
+    /// same time and react to each other's messages as they arrive (see `council`).
+    ///
+    /// `targets` are agent ids. `rounds` is 1 for a single answer from each; more lets each AI
+    /// answer up to that many times as the discussion goes on, up to MAX_ROUNDS.
+    ///
+    /// Sending while the AIs are answering doesn't interrupt them: the message joins the running
+    /// turn, here or in the other process, and those it addresses who weren't taking part join in.
+    pub fn send(self: &Arc<Self>, id: &str, text: &str, targets: Vec<String>, rounds: u32) -> Result<Event, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("the message is empty".into());
+        }
+        let targets = self.addressed(targets, text);
+        let rounds = rounds.clamp(1, MAX_ROUNDS);
+        let mut running = self.running.lock().unwrap();
+        let event = self.store.append(id, "human", "message", targets.clone(), text)?;
+        self.mine.lock().unwrap().insert(event.id.clone());
+        self.ui.event(&event);
+        let lock = match running.get(id) {
+            Some(r) => {
+                if r.council.join(&event, &targets) {
+                    self.journal.join(id, &r.turn, &targets);
+                    return Ok(event);
+                }
+                // That turn has just ended; this message starts a new one, under the same lock.
+                r.lock.clone()
+            }
+            None => {
+                if targets.is_empty() {
+                    return Ok(event);
+                }
+                match self.store.try_turn_lock(id) {
+                    Some(l) => Arc::new(l),
+                    // The other process is running this conversation's AIs; it reads this message.
+                    None => return Ok(event),
+                }
+            }
+        };
+        if targets.is_empty() {
+            return Ok(event);
+        }
+        self.begin(&mut running, Pending::new(id, targets, rounds), lock, event.seq);
+        Ok(event)
+    }
+
+    /// Starts a background task on this process's async runtime.
+    pub fn spawn_task(&self, task: Task) {
+        (self.spawn)(task);
+    }
+
+    /// The model each AI last answered with, where its CLI says (see `agents::AgentReply::model`).
+    pub fn last_models(&self) -> HashMap<String, String> {
+        read_models(&self.data)
+    }
+
+    /// Records a message without asking any AI to answer.
+    pub fn say(&self, id: &str, text: &str) -> Result<Event, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("the message is empty".into());
+        }
+        let event = self.store.append(id, "human", "message", vec![], text)?;
+        self.mine.lock().unwrap().insert(event.id.clone());
+        self.ui.event(&event);
+        Ok(event)
+    }
+
+    /// The council members a message is for: the chosen ones, plus any it @mentions.
+    fn addressed(&self, targets: Vec<String>, text: &str) -> Vec<String> {
+        let mut targets: Vec<String> = targets.into_iter().filter(|t| self.config.is_member(t)).collect();
+        for m in prompt::mentioned_agents(text) {
+            if self.config.is_member(&m) && !targets.contains(&m) {
+                targets.push(m);
+            }
+        }
+        targets
+    }
+
+    /// Sets up the turn `pending` and runs it in the background. `cursor` is the newest event it
+    /// has taken into account; messages from the other process after it are joined in by `watch`.
+    fn begin(self: &Arc<Self>, running: &mut HashMap<String, Running>, pending: Pending, lock: Arc<TurnLock>, cursor: u64) {
+        let host = (self.make_host)(self, &pending);
+        let turn = council::Turn {
+            conversation: pending.conversation.clone(),
+            targets: pending.targets.clone(),
+            rounds: pending.rounds,
+            members: self.config.get().members,
+        };
+        let token = CancellationToken::new();
+        let council = Council::new(turn, self.store.clone(), self.bench.clone(), host, token.clone());
+        let live = Running {
+            turn: pending.turn.clone(),
+            token,
+            council: Arc::new(council),
+            started: store::now_ms(),
+            lock,
+            cursor: Arc::new(Mutex::new(cursor)),
+        };
+        running.insert(pending.conversation.clone(), live.clone());
+        self.journal.begin(pending.clone());
+        // So this turn's AIs, and the next one's, know where everyone's usage stands.
+        crate::usage::refresh_if_stale(self);
+        let engine = self.clone();
+        (self.spawn)(Box::pin(async move { engine.run(pending, live).await }));
+    }
+
+    async fn run(self: Arc<Self>, pending: Pending, live: Running) {
+        let conv = pending.conversation.clone();
+        live.council.run().await;
+        // Messages from the other process that arrived as the turn was ending get a turn of their own,
+        // before the conversation is let go.
+        if !live.token.is_cancelled() {
+            let (unanswered, cursor) = {
+                let mut c = live.cursor.lock().unwrap();
+                let (messages, last) = self.sent_elsewhere(&conv, *c);
+                *c = last;
+                (messages, last)
+            };
+            let targets = self.targets_of(&unanswered);
+            let mut running = self.running.lock().unwrap();
+            if !targets.is_empty() && running.get(&conv).is_some_and(|r| r.turn == pending.turn) {
+                self.journal.finish(&conv, &pending.turn);
+                self.begin(&mut running, Pending::new(&conv, targets, pending.rounds), live.lock.clone(), cursor);
+                return;
+            }
+        }
+        let cursor = *live.cursor.lock().unwrap();
+        drop(live);
+        self.release(&conv, &pending.turn);
+        // A message sent from the other process just before the lock was let go found it still
+        // taken, so its sender left it to this process.
+        let (late, last) = self.sent_elsewhere(&conv, cursor);
+        let targets = self.targets_of(&late);
+        if targets.is_empty() || late.iter().any(|m| self.answered(&conv, m.seq)) {
+            return;
+        }
+        let mut running = self.running.lock().unwrap();
+        if running.contains_key(&conv) {
+            return;
+        }
+        if let Some(lock) = self.store.try_turn_lock(&conv) {
+            self.begin(&mut running, Pending::new(&conv, targets, pending.rounds), Arc::new(lock), last);
+        }
+    }
+
+    /// The human's messages sent from the other process after event `after`, and the newest event.
+    fn sent_elsewhere(&self, conv: &str, after: u64) -> (Vec<Event>, u64) {
+        let events = self.store.load(conv).unwrap_or_default();
+        let last = events.last().map_or(after, |e| e.seq.max(after));
+        let mine = self.mine.lock().unwrap();
+        let messages = events
+            .into_iter()
+            .filter(|e| e.seq > after && e.sender == "human" && e.kind == "message" && !mine.contains(&e.id))
+            .collect();
+        (messages, last)
+    }
+
+    /// Council members addressed by any of `messages`.
+    fn targets_of(&self, messages: &[Event]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for m in messages {
+            for t in &m.to {
+                if self.config.is_member(t) && !out.contains(t) {
+                    out.push(t.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether an AI has said anything after event `seq`.
+    fn answered(&self, conv: &str, seq: u64) -> bool {
+        self.store
+            .load(conv)
+            .unwrap_or_default()
+            .iter()
+            .any(|e| e.seq > seq && e.sender != "human" && e.sender != council::CONSILIUM)
+    }
+
+    /// Marks the turn `turn` as over: the conversation can take new messages, and it won't resume.
+    /// Does nothing to a newer turn that has replaced it.
+    fn release(&self, conversation: &str, turn: &str) {
+        self.journal.finish(conversation, turn);
+        let mut r = self.running.lock().unwrap();
+        if r.get(conversation).is_some_and(|r| r.turn == turn) {
+            r.remove(conversation);
+            drop(r);
+            self.ui.turn(TurnState::idle(conversation));
+        }
+    }
+
+    /// Stops the AIs in a conversation, whichever process is running them. Returns at once,
+    /// with whether there was anything to stop.
+    pub fn stop(self: &Arc<Self>, id: &str) -> bool {
+        if self.running.lock().unwrap().contains_key(id) {
+            let engine = self.clone();
+            let id = id.to_string();
+            (self.spawn)(Box::pin(async move {
+                engine.stop_and_wait(&id).await;
+            }));
+            return true;
+        }
+        if self.store.turn_locked(id) {
+            return self.store.request_stop(id).is_ok();
+        }
+        false
+    }
+
+    /// Stops this process's turn in `conversation`, if any, and waits for its AIs to shut down. One
+    /// that hasn't finished after STOP_GRACE is let go: the conversation is free again either way.
+    pub async fn stop_and_wait(&self, conversation: &str) -> bool {
+        let entry = self.running.lock().unwrap().get(conversation).cloned();
+        let Some(Running { turn, token, .. }) = entry else { return false };
+        token.cancel();
+        let started = std::time::Instant::now();
+        while started.elapsed() < STOP_GRACE {
+            let still = self.running.lock().unwrap().get(conversation).is_some_and(|r| r.turn == turn);
+            if !still {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        self.release(conversation, &turn);
+        true
+    }
+
+    /// Stops every turn this process is running (when the terminal command exits).
+    pub async fn stop_all(&self) {
+        let ids: Vec<String> = self.running.lock().unwrap().keys().cloned().collect();
+        for id in ids {
+            self.stop_and_wait(&id).await;
+        }
+    }
+
+    /// Whether this process runs a turn in `id`.
+    pub fn running_here(&self, id: &str) -> bool {
+        self.running.lock().unwrap().contains_key(id)
+    }
+
+    /// Whether the AIs are working in `id`, in this process or the other.
+    pub fn busy(&self, id: &str) -> bool {
+        self.running_here(id) || self.store.turn_locked(id)
+    }
+
+    /// Conversations whose AIs are working, in this process or the other.
+    pub fn running_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.running.lock().unwrap().keys().cloned().collect();
+        for m in self.store.list() {
+            if !ids.contains(&m.id) && self.store.turn_locked(&m.id) {
+                ids.push(m.id);
+            }
+        }
+        ids
+    }
+
+    /// Continues turns that a quit, crash, restart or update cut short, in every conversation, or
+    /// only in `only`. A turn the other process is running is left to it.
+    pub fn resume_interrupted(self: &Arc<Self>, only: Option<&str>) {
+        let (resume, give_up) = self.journal.interrupted_where(|p| {
+            only.is_none_or(|c| c == p.conversation) && !self.running_here(&p.conversation) && !self.store.turn_locked(&p.conversation)
+        });
+        for p in give_up {
+            let _ = self.note(
+                &p.conversation,
+                "Couldn't resume the AIs' turn after two tries. Send your message again to continue.",
+            );
+        }
+        for mut p in resume {
+            if self.store.meta(&p.conversation).is_err() {
+                self.journal.finish(&p.conversation, &p.turn);
+                continue;
+            }
+            let Some(lock) = self.store.try_turn_lock(&p.conversation) else { continue };
+            if p.turn.is_empty() {
+                // Recorded by a version without turn ids.
+                self.journal.finish(&p.conversation, "");
+                p.turn = uuid::Uuid::new_v4().to_string();
+            }
+            let _ = self.note(&p.conversation, "Consilium restarted; the council is carrying on where it left off.");
+            let cursor = self.store.load(&p.conversation).unwrap_or_default().last().map_or(0, |e| e.seq);
+            let mut running = self.running.lock().unwrap();
+            if running.contains_key(&p.conversation) {
+                continue;
+            }
+            self.begin(&mut running, p, Arc::new(lock), cursor);
+        }
+    }
+
+    /// A note from Consilium itself, which the human and the AIs see.
+    pub fn note(&self, conversation: &str, text: &str) -> Result<Event, String> {
+        let e = self.store.append(conversation, council::CONSILIUM, "system", vec![], text)?;
+        self.ui.event(&e);
+        Ok(e)
+    }
+
+    /// Keeps this process in step with the other one, until the process ends: joins messages sent
+    /// from there into the turns running here, acts on stop requests, and, with `mirror`, shows in
+    /// the UI what the other process adds to any conversation and when its AIs are working.
+    pub async fn watch(self: Arc<Self>, mirror: bool) {
+        // For `mirror`: each conversation's log size and newest event when last looked at, and the
+        // conversations whose AIs the other process is running.
+        let mut seen: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut elsewhere: HashSet<String> = HashSet::new();
+        if mirror {
+            for m in self.store.list() {
+                let last = self.store.load(&m.id).unwrap_or_default().last().map_or(0, |e| e.seq);
+                seen.insert(m.id.clone(), (self.store.log_len(&m.id), last));
+            }
+        }
+        loop {
+            tokio::time::sleep(WATCH_EVERY).await;
+            // Without the turn locks: holding one here could keep the conversation locked a moment
+            // after its turn ends.
+            let here: Vec<Watched> = self
+                .running
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, r)| (k.clone(), r.turn.clone(), r.started, r.council.clone(), r.cursor.clone()))
+                .collect();
+            for (conv, turn, started, council, cursor) in &here {
+                if self.store.take_stop_request(conv, *started) {
+                    self.stop_and_wait(conv).await;
+                    continue;
+                }
+                let mut c = cursor.lock().unwrap();
+                let (messages, last) = self.sent_elsewhere(conv, *c);
+                let mut all = true;
+                for m in messages {
+                    let targets = self.addressed(m.to.clone(), &m.text);
+                    if !council.join(&m, &targets) {
+                        // The turn is ending; `run` gives this message a turn of its own.
+                        all = false;
+                        break;
+                    }
+                    self.journal.join(conv, turn, &targets);
+                    *c = m.seq;
+                }
+                if all {
+                    *c = last;
+                }
+            }
+            if !mirror {
+                continue;
+            }
+            for m in self.store.list() {
+                let len = self.store.log_len(&m.id);
+                let (old_len, old_last) = seen.get(&m.id).copied().unwrap_or((0, 0));
+                let changed = len != old_len;
+                if changed {
+                    let events = self.store.load(&m.id).unwrap_or_default();
+                    let last = events.last().map_or(old_last, |e| e.seq);
+                    // The window drops duplicates, so events this process already showed do no harm.
+                    for e in events.iter().filter(|e| e.seq > old_last) {
+                        self.ui.event(e);
+                    }
+                    seen.insert(m.id.clone(), (len, last));
+                }
+                if self.running_here(&m.id) {
+                    elsewhere.remove(&m.id);
+                    continue;
+                }
+                if changed || elsewhere.contains(&m.id) {
+                    let busy = self.store.turn_locked(&m.id);
+                    if busy && elsewhere.insert(m.id.clone()) {
+                        self.ui.turn(TurnState {
+                            conversation: m.id.clone(),
+                            state: "running".into(),
+                            agent: None,
+                            agents: vec![],
+                            round: 0,
+                            rounds: 0,
+                        });
+                    } else if !busy && elsewhere.remove(&m.id) {
+                        self.ui.turn(TurnState::idle(&m.id));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// How a turn reaches the real AIs and the UI.
+struct RealHost {
+    data: PathBuf,
+    store: Arc<Store>,
+    config: Arc<Config>,
+    memory: Arc<Memory>,
+    journal: Arc<Journal>,
+    ui: Arc<dyn Ui>,
+    conversation: String,
+    turn: String,
+    rounds: u32,
+}
+
+impl RealHost {
+    fn new(engine: &Engine, pending: &Pending) -> Self {
+        RealHost {
+            data: engine.data.clone(),
+            store: engine.store.clone(),
+            config: engine.config.clone(),
+            memory: engine.memory.clone(),
+            journal: engine.journal.clone(),
+            ui: engine.ui.clone(),
+            conversation: pending.conversation.clone(),
+            turn: pending.turn.clone(),
+            rounds: pending.rounds,
+        }
+    }
+}
+
+impl council::Host for RealHost {
+    fn ask(&self, agent: &'static Agent, answer: u32, rounds: u32, events: Vec<Event>, cancel: CancellationToken) -> council::Reply {
+        let conv = self.conversation.as_str();
+        // Read the folder fresh each time, so a change in the UI applies from the next answer.
+        // A conversation without its own folder uses the council's default one, if set.
+        let workspace = self
+            .store
+            .meta(conv)
+            .ok()
+            .and_then(|m| m.workspace)
+            .or_else(|| self.config.get().default_workspace)
+            .filter(|w| std::path::Path::new(w).is_dir());
+        let access = if workspace.is_some() { self.config.access(agent.id) } else { Access::Chat };
+        let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w)));
+        let shared = self.memory.for_prompt();
+        let members = self.config.get().members;
+        let ctx = prompt::Context {
+            members: &members,
+            workspace: workspace.as_deref(),
+            access,
+            memory: shared.as_deref(),
+            project_notes: notes.as_deref(),
+        };
+        let mut system = prompt::system(agent.id, answer, rounds, &ctx);
+        // Everyone's plan usage and reset times, as last read.
+        if let Some(usage) = crate::usage::for_prompt(&crate::usage::load(&self.data), &members, agent.id, store::now_ms()) {
+            system.push_str(&usage);
+        }
+        let transcript = prompt::transcript(&events, agent.id);
+        let ws_path = workspace.map(PathBuf::from);
+        let data = self.data.clone();
+        Box::pin(async move {
+            let reply = agents::run_with_usage(agent, access, ws_path.as_deref(), &system, &transcript, &cancel).await;
+            if let Some(model) = reply.as_ref().ok().and_then(|r| r.model.as_deref()) {
+                record_model(&data, agent.id, model);
+            }
+            reply
+        })
+    }
+
+    fn event(&self, e: &Event) {
+        if e.kind == "message" && e.sender != "human" {
+            self.journal.progressed(&self.conversation, &self.turn);
+        }
+        self.ui.event(e);
+    }
+
+    fn thinking(&self, agents: Vec<String>, round: u32) {
+        self.ui.turn(TurnState {
+            conversation: self.conversation.clone(),
+            state: "running".into(),
+            agent: agents.first().cloned(),
+            agents,
+            round,
+            rounds: self.rounds,
+        });
+    }
+
+    fn installed(&self, agent: &'static Agent) -> bool {
+        agents::find(agents::effective_kind(agent)).is_some()
+    }
+
+    fn remember(&self, agent: &'static Agent, reply: &str) -> Option<String> {
+        let facts = memory::remember_lines(reply);
+        if facts.is_empty() {
+            return None;
+        }
+        let added = self.memory.remember(agent.name, &today(), &facts).ok()?;
+        (!added.is_empty()).then(|| format!("{} saved to council memory: {}", agent.name, added.join("; ")))
+    }
+}
+
+fn read_models(data: &std::path::Path) -> HashMap<String, String> {
+    std::fs::read_to_string(data.join("models.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// Remembers the model an AI just answered with (in `models.json`, shared with the other process),
+/// so its usage meter can name the model when its CLI's limits don't.
+fn record_model(data: &std::path::Path, agent: &str, model: &str) {
+    let mut models = read_models(data);
+    if models.get(agent).map(String::as_str) == Some(model) {
+        return;
+    }
+    models.insert(agent.to_string(), model.to_string());
+    let tmp = data.join("models.json.tmp");
+    if let Ok(bytes) = serde_json::to_vec_pretty(&models) {
+        if std::fs::write(&tmp, bytes).is_ok() {
+            let _ = store::replace_file(&tmp, &data.join("models.json"));
+        }
+    }
+}
+
+/// Today's date as YYYY-MM-DD (UTC), for memory notes.
+pub fn today() -> String {
+    let days = store::now_ms() / 86_400_000;
+    // Civil-from-days (Howard Hinnant), valid for all dates after 1970.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Self-check result for one AI.
+#[derive(Clone, Serialize)]
+pub struct CheckResult {
+    pub id: String,
+    pub name: String,
+    pub ok: bool,
+    /// How long the answer took, in milliseconds.
+    pub ms: u64,
+    /// The reply (trimmed) or the error.
+    pub detail: String,
+}
+
+/// Asks every council member, at the same time, for a one-word reply, with chat-only access in an
+/// empty folder. Each check costs about one short message of that AI's allowance.
+pub async fn self_check(engine: &Engine) -> Vec<CheckResult> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for id in engine.config.get().members {
+        let Some(agent) = agents::by_id(&id) else { continue };
+        let bench = engine.bench.clone();
+        tasks.spawn(async move {
+            let system = "This is an automatic health check from Consilium, not a conversation. Don't use tools \
+or run commands. Reply with exactly the word OK and nothing else.";
+            let started = std::time::Instant::now();
+            let token = CancellationToken::new();
+            let r = tokio::time::timeout(
+                Duration::from_secs(180),
+                agents::run(agent, Access::Chat, None, system, "Health check: reply with OK.", &token),
+            )
+            .await;
+            let ms = started.elapsed().as_millis() as u64;
+            let (ok, detail) = match r {
+                Ok(Ok(reply)) => {
+                    bench.clear(agent.id);
+                    (true, reply.chars().take(80).collect())
+                }
+                Ok(Err(e)) => {
+                    if let Some(until) = bench::usage_limit(&e, store::now_ms()) {
+                        bench.bench(agent.id, until);
+                    }
+                    (false, e)
+                }
+                Err(_) => {
+                    token.cancel();
+                    (false, "no answer within 3 minutes".into())
+                }
+            };
+            CheckResult { id: agent.id.into(), name: agent.name.into(), ok, ms, detail }
+        });
+    }
+    let mut out = Vec::new();
+    while let Some(r) = tasks.join_next().await {
+        if let Ok(r) = r {
+            out.push(r);
+        }
+    }
+    // In council order, whatever order the checks finished in.
+    let members = engine.config.get().members;
+    out.sort_by_key(|r| members.iter().position(|m| *m == r.id).unwrap_or(usize::MAX));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::AgentReply;
+
+    #[test]
+    fn today_is_a_plausible_iso_date() {
+        let t = today();
+        assert_eq!(t.len(), 10);
+        assert!(t.starts_with("20") && t.as_bytes()[4] == b'-' && t.as_bytes()[7] == b'-');
+    }
+
+    struct Quiet;
+    impl Ui for Quiet {
+        fn event(&self, _e: &Event) {}
+        fn turn(&self, _t: TurnState) {}
+    }
+
+    /// AIs that answer "<name> heard: <the human's newest message>" after `delay` ms.
+    struct Echo {
+        delay: u64,
+    }
+    impl council::Host for Echo {
+        fn ask(&self, agent: &'static Agent, _answer: u32, _rounds: u32, events: Vec<Event>, cancel: CancellationToken) -> council::Reply {
+            let heard = events.iter().rev().find(|e| e.sender == "human" && e.kind == "message").map(|e| e.text.clone());
+            let text = format!("{} heard: {}", agent.name, heard.unwrap_or_default());
+            let delay = self.delay;
+            Box::pin(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(delay)) => Ok(AgentReply { text, usage: None, model: None }),
+                    _ = cancel.cancelled() => Err("stopped".into()),
+                }
+            })
+        }
+        fn event(&self, _e: &Event) {}
+        fn thinking(&self, _agents: Vec<String>, _round: u32) {}
+        fn installed(&self, _agent: &'static Agent) -> bool {
+            true
+        }
+        fn remember(&self, _agent: &'static Agent, _reply: &str) -> Option<String> {
+            None
+        }
+    }
+
+    /// Two engines on one data folder, standing for the app and the terminal command.
+    fn pair(delay: u64) -> (Arc<Engine>, Arc<Engine>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("consilium-engine-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("council.json"), r#"{"members":["gpt","claude"]}"#).unwrap();
+        let make = || {
+            let e = Engine::open(&dir, Arc::new(Quiet), Box::new(|t| {
+                tokio::spawn(t);
+            }))
+            .unwrap()
+            .with_host(Box::new(move |_, _| Arc::new(Echo { delay })));
+            let e = Arc::new(e);
+            tokio::spawn(e.clone().watch(true));
+            e
+        };
+        (make(), make(), dir)
+    }
+
+    async fn until_idle(engines: &[&Arc<Engine>], conv: &str) {
+        let started = std::time::Instant::now();
+        while engines.iter().any(|e| e.busy(conv)) {
+            assert!(started.elapsed() < Duration::from_secs(10), "the turn never ended");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn said(engine: &Engine, conv: &str) -> Vec<String> {
+        engine.store.load(conv).unwrap().into_iter().filter(|e| e.kind == "message").map(|e| format!("{}: {}", e.sender, e.text)).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_from_the_terminal_joins_the_turn_the_app_is_running() {
+        let (app, term, dir) = pair(900);
+        let conv = app.store.create("x").unwrap().id;
+        app.send(&conv, "first", vec!["gpt".into()], 1).unwrap();
+        assert!(app.running_here(&conv));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // The terminal can't run this conversation's AIs while the app does; its message is
+        // recorded and the app's turn takes it in, with Claude, whom it addresses.
+        term.send(&conv, "second", vec!["claude".into()], 1).unwrap();
+        assert!(!term.running_here(&conv));
+        until_idle(&[&app, &term], &conv).await;
+        let all = said(&app, &conv);
+        assert!(all.contains(&"claude: Claude heard: second".to_string()), "{all:?}");
+        assert!(all.contains(&"gpt: ChatGPT heard: second".to_string()), "{all:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_terminal_runs_a_turn_when_the_app_is_idle_and_either_can_stop_it() {
+        let (app, term, dir) = pair(5_000);
+        let conv = term.store.create("x").unwrap().id;
+        term.send(&conv, "hello", vec!["gpt".into(), "claude".into()], 1).unwrap();
+        assert!(term.running_here(&conv));
+        assert!(app.busy(&conv) && !app.running_here(&conv));
+        assert!(app.running_ids().contains(&conv));
+        // Stop in the app reaches the terminal's turn.
+        assert!(app.stop(&conv));
+        until_idle(&[&app, &term], &conv).await;
+        assert!(said(&term, &conv).iter().all(|m| m.starts_with("human")), "nobody answered after Stop");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_interrupted_in_one_process_is_not_resumed_while_the_other_runs_it() {
+        let (app, term, dir) = pair(1_500);
+        let conv = term.store.create("x").unwrap().id;
+        term.send(&conv, "hello", vec!["gpt".into()], 1).unwrap();
+        app.resume_interrupted(None);
+        assert!(!app.running_here(&conv), "the terminal's turn is left to the terminal");
+        until_idle(&[&app, &term], &conv).await;
+        assert_eq!(said(&app, &conv).len(), 2, "one answer, not two");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

@@ -494,7 +494,7 @@ mod tests {
     impl Host for Fake {
         fn ask(&self, agent: &'static Agent, answer: u32, _rounds: u32, events: Vec<Event>, cancel: CancellationToken) -> Reply {
             self.asked.lock().unwrap().push((agent.id.to_string(), answer));
-            let r = (self.script)(agent.id, answer, &events).map(|text| AgentReply { text, usage: None });
+            let r = (self.script)(agent.id, answer, &events).map(|text| AgentReply { text, usage: None, model: None });
             let d = self.delay.get(agent.id).copied().unwrap_or(10);
             Box::pin(async move {
                 tokio::select! {

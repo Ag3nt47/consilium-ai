@@ -50,6 +50,7 @@ case "$(uname -s)" in
     # The app isn't notarized yet; remove the download quarantine for this app only.
     xattr -dr com.apple.quarantine "$DEST/Consilium.app" 2>/dev/null || true
     say "Installed to $DEST/Consilium.app"
+    "$DEST/Consilium.app/Contents/MacOS/consilium" install-cli || say "Couldn't set up the consilium terminal command; use Settings → Terminal in the app."
     if [ "$DOCK" = 1 ]; then
       if defaults read com.apple.dock persistent-apps 2>/dev/null | grep -q "Consilium.app"; then
         say "Consilium is already in the Dock."
@@ -84,6 +85,7 @@ Categories=Office;Utility;
 Terminal=false
 EOF
     say "Installed. Find Consilium in your applications menu, or run ~/.local/bin/consilium.AppImage"
+    APPIMAGE="$HOME/.local/bin/consilium.AppImage" "$HOME/.local/bin/consilium.AppImage" install-cli || say "Couldn't set up the consilium terminal command; use Settings → Terminal in the app."
     say "To uninstall: rm ~/.local/bin/consilium.AppImage ~/.local/share/applications/consilium.desktop"
     ;;
   *) die "unsupported system; on Windows use install.ps1." ;;
