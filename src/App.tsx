@@ -354,7 +354,6 @@ function AgentDot({
   forecast,
   isWorking,
   isFrozen,
-  activity,
   load,
 }: {
   agent: AgentInfo;
@@ -364,7 +363,6 @@ function AgentDot({
   forecast?: ResetForecast | null;
   isWorking?: boolean;
   isFrozen?: boolean;
-  activity?: AgentActivity;
   /** Share of the whole PC (0-100) this AI's processes are using right now; undefined when none run. */
   load?: number;
 }) {
@@ -384,10 +382,8 @@ function AgentDot({
       className={`agent agent-${agent.id}`}
       title={
         isFrozen
-          ? `Stalled: no provider activity for 25 seconds${activity?.detail ? `\nLast activity: ${activity.label} · ${activity.detail}` : ""}`
-          : isWorking && activity
-            ? `${activity.label}${activity.detail ? `\n${activity.detail}` : ""}\nObservable provider activity; private reasoning is not exposed.`
-            : isWorking
+          ? "Stalled: no provider activity for 25 seconds"
+          : isWorking
               ? "Generating response…"
               : agent.hint || `${agent.tool} ${agent.version ?? ""}`
       }
@@ -406,7 +402,7 @@ function AgentDot({
       {isFrozen ? (
         <span className="agent-state" style={{ color: "var(--danger)" }} title="No output for a while; it may be stuck. Stop and resend if it doesn't recover.">Stalled</span>
       ) : isWorking ? (
-        <span className="agent-state" style={{ color: "var(--accent)" }}>{activity?.label ?? "Working…"}</span>
+        <span className="agent-state" style={{ color: "var(--accent)" }}>Working…</span>
       ) : state === "ready" ? (
         <span className="agent-state">{label}</span>
       ) : state === "benched" ? (
@@ -420,13 +416,6 @@ function AgentDot({
         <button className="link setup-link" onClick={() => onSetup(agent)} title={agent.hint}>
           {state === "missing" ? "Install" : "Sign in"}
         </button>
-      )}
-      {isWorking && activity && (
-        <span className={`agent-activity activity-${activity.kind}`}>
-          <span className="activity-icon" aria-hidden="true">{activityIcon(activity.kind)}</span>
-          <span className="activity-detail">{activity.detail || activity.label}</span>
-          <span className="activity-time">{elapsedActivity(activity.started_at)}</span>
-        </span>
       )}
       {check && (
         <span className={`check ${check === "running" ? "check-running" : check.ok ? "check-ok" : "check-bad"}`} title={check === "running" ? "" : check.detail}>
@@ -444,27 +433,6 @@ function AgentDot({
       </span>
     </div>
   );
-}
-
-function activityIcon(kind: string): string {
-  return {
-    preparing: "◌",
-    planning: "◇",
-    thinking: "✦",
-    reading: "◫",
-    researching: "⌕",
-    coding: "⌘",
-    running: "›_",
-    tool: "⚙",
-    delegating: "⇄",
-    reporting: "✎",
-  }[kind] ?? "•";
-}
-
-function elapsedActivity(startedAt: number): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
 /** Green at 0%, through yellow, to red at 100%. */
@@ -1325,7 +1293,6 @@ export default function App() {
                 forecast={forecast}
                 isWorking={isWorking}
                 isFrozen={isFrozen}
-                activity={activity}
                 load={agentLoad}
               />
             );

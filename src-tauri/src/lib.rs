@@ -298,10 +298,10 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: each AI shows what it is doing live (reading, editing, running \
-commands, searching) on its card and above its reply; a PC usage meter plus each AI's share of the PC next to its \
-name; Add AI walks through installing and signing in, and opens a provider's own page for any payment; an Update \
-Now button installs a staged build in seconds, pausing the AIs and resuming their work after the restart.";
+const WHATS_NEW: &str = "What's new: what each AI is doing now shows only above its reply in the chat, \
+not on its council card; hover over any control for a short explanation; a Status Request button asks every AI \
+for a status report; the council cards no longer overlap and the window scales down cleanly; Update Now sits \
+beside the prompt box.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs

@@ -336,48 +336,6 @@ code {
   opacity: 0.8;
 }
 
-.agent-activity {
-  grid-column: 2 / -1;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 5px;
-  margin-top: 2px;
-  padding: 4px 6px;
-  border-radius: 7px;
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
-  font-size: 10.5px;
-}
-
-.activity-icon {
-  font-family: var(--mono);
-  text-align: center;
-  color: currentColor;
-}
-
-.activity-detail {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text);
-  opacity: 0.86;
-}
-
-.activity-time {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.activity-coding,
-.activity-running { color: #5fd08a; }
-.activity-researching,
-.activity-reading { color: #55bfff; }
-.activity-delegating { color: #d3a8ff; }
-.activity-reporting { color: var(--gold); }
-
 .usage-meter,
 .usage-unavailable {
   grid-column: 2 / -1;
