@@ -338,6 +338,15 @@ code {
   background: #6b7280;
 }
 
+.dot-benched {
+  background: #f2b84b;
+  box-shadow: 0 0 6px #f2b84b88;
+}
+
+.agent-state.benched {
+  color: #f2b84b;
+}
+
 /* ---------- buttons ---------- */
 .btn {
   border: 1px solid var(--border);

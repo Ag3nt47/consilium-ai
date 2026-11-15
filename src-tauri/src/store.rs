@@ -12,6 +12,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Puts the finished temporary file `tmp` in place of `path`. Some Windows setups (an app container
+/// or a virtualised AppData folder) refuse to rename over an existing file; then the contents are
+/// copied over instead, so the save still lands.
+pub fn replace_file(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    if fs::rename(tmp, path).is_ok() {
+        return Ok(());
+    }
+    fs::copy(tmp, path)?;
+    let _ = fs::remove_file(tmp);
+    Ok(())
+}
+
 /// Provider-reported token counts for one AI turn. Cache and thinking counts stay separate so the
 /// UI can explain the billable total without pretending every provider accounts for them alike.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,12 +46,8 @@ impl TokenUsage {
     fn add(&mut self, other: Self) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
-        self.cache_read_tokens = self
-            .cache_read_tokens
-            .saturating_add(other.cache_read_tokens);
-        self.cache_creation_tokens = self
-            .cache_creation_tokens
-            .saturating_add(other.cache_creation_tokens);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(other.cache_read_tokens);
+        self.cache_creation_tokens = self.cache_creation_tokens.saturating_add(other.cache_creation_tokens);
         self.thinking_tokens = self.thinking_tokens.saturating_add(other.thinking_tokens);
         self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
     }
@@ -91,10 +99,7 @@ pub struct ConversationMeta {
 }
 
 pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 /// Conversation ids are UUIDs we generate; anything else is refused so an id can never name a path.
@@ -133,13 +138,8 @@ pub fn add_ai_in(text: &str) -> Vec<String> {
             continue;
         }
         for word in t[7..].split(|c: char| c == ',' || c.is_whitespace()) {
-            let w = word
-                .trim_matches(|c: char| !c.is_alphanumeric())
-                .to_lowercase();
-            if let Some(a) = crate::agents::AGENTS
-                .iter()
-                .find(|a| a.id == w || a.name.to_lowercase() == w)
-            {
+            let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+            if let Some(a) = crate::agents::AGENTS.iter().find(|a| a.id == w || a.name.to_lowercase() == w) {
                 if !out.iter().any(|x| x == a.id) {
                     out.push(a.id.to_string());
                 }
@@ -158,10 +158,7 @@ pub struct Store {
 impl Store {
     pub fn new(dir: PathBuf) -> std::io::Result<Self> {
         fs::create_dir_all(&dir)?;
-        Ok(Store {
-            dir,
-            seqs: Mutex::new(HashMap::new()),
-        })
+        Ok(Store { dir, seqs: Mutex::new(HashMap::new()) })
     }
 
     fn log_path(&self, id: &str) -> PathBuf {
@@ -210,18 +207,14 @@ impl Store {
 
     fn write_meta(&self, meta: &ConversationMeta) -> Result<(), String> {
         let tmp = self.dir.join(format!("{}.json.tmp", meta.id));
-        fs::write(
-            &tmp,
-            serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        fs::rename(&tmp, self.meta_path(&meta.id)).map_err(|e| e.to_string())
+        fs::write(&tmp, serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        replace_file(&tmp, &self.meta_path(&meta.id)).map_err(|e| e.to_string())
     }
 
     pub fn meta(&self, id: &str) -> Result<ConversationMeta, String> {
         Self::check(id)?;
-        let s = fs::read_to_string(self.meta_path(id))
-            .map_err(|_| "no such conversation".to_string())?;
+        let s = fs::read_to_string(self.meta_path(id)).map_err(|_| "no such conversation".to_string())?;
         serde_json::from_str(&s).map_err(|e| e.to_string())
     }
 
@@ -233,11 +226,7 @@ impl Store {
     }
 
     /// Sets or clears the project folder. Only existing folders are accepted.
-    pub fn set_workspace(
-        &self,
-        id: &str,
-        folder: Option<&str>,
-    ) -> Result<ConversationMeta, String> {
+    pub fn set_workspace(&self, id: &str, folder: Option<&str>) -> Result<ConversationMeta, String> {
         let mut meta = self.meta(id)?;
         meta.workspace = match folder {
             None => None,
@@ -315,16 +304,8 @@ impl Store {
             kind: kind.to_string(),
             to,
             text: text.to_string(),
-            requests: if kind == "message" {
-                requests_in(text)
-            } else {
-                vec![]
-            },
-            add_ai: if kind == "message" && sender != "human" {
-                add_ai_in(text)
-            } else {
-                vec![]
-            },
+            requests: if kind == "message" { requests_in(text) } else { vec![] },
+            add_ai: if kind == "message" && sender != "human" { add_ai_in(text) } else { vec![] },
             usage,
         };
         let mut line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
@@ -368,9 +349,7 @@ fn clean_title(text: &str) -> String {
 }
 
 fn read_events(path: &Path) -> Vec<Event> {
-    let Ok(data) = fs::read_to_string(path) else {
-        return vec![];
-    };
+    let Ok(data) = fs::read_to_string(path) else { return vec![] };
     // Only newline-terminated lines are complete; a trailing partial line is ignored.
     let complete = match data.rfind('\n') {
         Some(i) => &data[..=i],
@@ -386,6 +365,19 @@ fn read_events(path: &Path) -> Vec<Event> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn replace_file_overwrites_and_removes_the_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("consilium-replace-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let (tmp, path) = (dir.join("a.json.tmp"), dir.join("a.json"));
+        fs::write(&path, "old").unwrap();
+        fs::write(&tmp, "new").unwrap();
+        replace_file(&tmp, &path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert!(!tmp.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
     fn temp_store() -> (Store, PathBuf) {
         let dir = std::env::temp_dir().join(format!("consilium-test-{}", uuid::Uuid::new_v4()));
         (Store::new(dir.clone()).unwrap(), dir)
@@ -395,23 +387,8 @@ mod tests {
     fn append_and_load_round_trip_with_sequence_numbers() {
         let (s, dir) = temp_store();
         let c = s.create("New conversation").unwrap();
-        s.append(
-            &c.id,
-            "human",
-            "message",
-            vec!["gpt".into()],
-            "Plan the app\nREQUEST: no",
-        )
-        .unwrap();
-        let e2 = s
-            .append(
-                &c.id,
-                "gpt",
-                "message",
-                vec![],
-                "Sure.\nREQUEST: pick a name",
-            )
-            .unwrap();
+        s.append(&c.id, "human", "message", vec!["gpt".into()], "Plan the app\nREQUEST: no").unwrap();
+        let e2 = s.append(&c.id, "gpt", "message", vec![], "Sure.\nREQUEST: pick a name").unwrap();
         let events = s.load(&c.id).unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].seq, 1);
@@ -460,12 +437,8 @@ mod tests {
     fn partial_last_line_is_ignored() {
         let (s, dir) = temp_store();
         let c = s.create("x").unwrap();
-        s.append(&c.id, "human", "message", vec![], "hello")
-            .unwrap();
-        let mut f = OpenOptions::new()
-            .append(true)
-            .open(s.log_path(&c.id))
-            .unwrap();
+        s.append(&c.id, "human", "message", vec![], "hello").unwrap();
+        let mut f = OpenOptions::new().append(true).open(s.log_path(&c.id)).unwrap();
         f.write_all(b"{\"id\":\"half-writ").unwrap();
         assert_eq!(s.load(&c.id).unwrap().len(), 1);
         fs::remove_dir_all(dir).unwrap();
@@ -483,14 +456,8 @@ mod tests {
 
     #[test]
     fn add_ai_lines_are_parsed_by_id_or_name() {
-        assert_eq!(
-            add_ai_in("Let's bring in help.\nADD_AI: Gemini\nadd_ai: claude, nobody"),
-            vec!["gemini", "claude"]
-        );
-        assert!(
-            add_ai_in("we could ADD_AI: gemini later").is_empty(),
-            "only at the start of a line"
-        );
+        assert_eq!(add_ai_in("Let's bring in help.\nADD_AI: Gemini\nadd_ai: claude, nobody"), vec!["gemini", "claude"]);
+        assert!(add_ai_in("we could ADD_AI: gemini later").is_empty(), "only at the start of a line");
     }
 
     #[test]

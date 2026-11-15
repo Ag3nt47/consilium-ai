@@ -67,10 +67,7 @@ impl Config {
                 c
             })
             .unwrap_or_default();
-        Config {
-            path,
-            council: Mutex::new(council),
-        }
+        Config { path, council: Mutex::new(council) }
     }
 
     pub fn get(&self) -> Council {
@@ -94,22 +91,13 @@ impl Config {
     }
 
     pub fn is_member(&self, agent: &str) -> bool {
-        self.council
-            .lock()
-            .unwrap()
-            .members
-            .iter()
-            .any(|m| m == agent)
+        self.council.lock().unwrap().members.iter().any(|m| m == agent)
     }
 
     fn save(&self, c: &Council) -> Result<(), String> {
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(
-            &tmp,
-            serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| e.to_string())
+        std::fs::write(&tmp, serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        crate::store::replace_file(&tmp, &self.path).map_err(|e| e.to_string())
     }
 
     pub fn set_member(&self, agent: &str, member: bool) -> Result<Council, String> {
@@ -193,19 +181,11 @@ mod tests {
         let c = Config::load(p.clone());
         c.set_access("gpt", Access::Read).unwrap();
         c.set_default_access(Access::Unrestricted).unwrap();
-        assert_eq!(
-            c.access("gpt"),
-            Access::Unrestricted,
-            "per-AI settings are cleared"
-        );
+        assert_eq!(c.access("gpt"), Access::Unrestricted, "per-AI settings are cleared");
         c.set_member("gemini", true).unwrap();
         assert_eq!(c.access("gemini"), Access::Unrestricted);
         c.set_access("claude", Access::Chat).unwrap();
-        assert_eq!(
-            Config::load(p.clone()).access("claude"),
-            Access::Chat,
-            "a per-AI setting still overrides"
-        );
+        assert_eq!(Config::load(p.clone()).access("claude"), Access::Chat, "a per-AI setting still overrides");
         let _ = std::fs::remove_file(p);
     }
 

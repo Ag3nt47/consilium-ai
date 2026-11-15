@@ -25,28 +25,13 @@ fn npm() -> Option<std::path::PathBuf> {
     let mut dirs_: Vec<std::path::PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
-    dirs_.extend(
-        [".local/node/bin", ".volta/bin", ".npm-global/bin"]
-            .iter()
-            .map(|d| home.join(d)),
-    );
-    dirs_.extend(
-        ["/usr/local/bin", "/opt/homebrew/bin"]
-            .iter()
-            .map(std::path::PathBuf::from),
-    );
+    dirs_.extend([".local/node/bin", ".volta/bin", ".npm-global/bin"].iter().map(|d| home.join(d)));
+    dirs_.extend(["/usr/local/bin", "/opt/homebrew/bin"].iter().map(std::path::PathBuf::from));
     if let Some(pf) = std::env::var_os("ProgramFiles") {
         dirs_.push(std::path::PathBuf::from(pf).join("nodejs"));
     }
-    let names: &[&str] = if cfg!(windows) {
-        &["npm.cmd", "npm"]
-    } else {
-        &["npm"]
-    };
-    dirs_
-        .into_iter()
-        .flat_map(|d| names.iter().map(move |n| d.join(n)))
-        .find(|p| p.is_file())
+    let names: &[&str] = if cfg!(windows) { &["npm.cmd", "npm"] } else { &["npm"] };
+    dirs_.into_iter().flat_map(|d| names.iter().map(move |n| d.join(n))).find(|p| p.is_file())
 }
 
 /// A command that runs `exe` with its own folder first on PATH, so Node-based tools
@@ -54,11 +39,7 @@ fn npm() -> Option<std::path::PathBuf> {
 fn with_own_path(exe: &Path, args: &str) -> String {
     let dir = exe.parent().unwrap_or(Path::new("."));
     if cfg!(windows) {
-        format!(
-            "$env:Path = \"{};\" + $env:Path; & \"{}\" {args}",
-            dir.display(),
-            exe.display()
-        )
+        format!("$env:Path = \"{};\" + $env:Path; & \"{}\" {args}", dir.display(), exe.display())
     } else {
         format!("PATH={}:\"$PATH\" {} {args}", sh_quote(dir), sh_quote(exe))
     }
@@ -79,11 +60,7 @@ pub fn step(agent_id: &str, action: &str) -> Result<Step, String> {
             let exe = found.ok_or("Codex isn't installed yet")?;
             Step {
                 title: "Sign in to ChatGPT (Codex)",
-                command: if windows {
-                    format!("& \"{}\" login", exe.display())
-                } else {
-                    format!("{} login", sh_quote(&exe))
-                },
+                command: if windows { format!("& \"{}\" login", exe.display()) } else { format!("{} login", sh_quote(&exe)) },
             }
         }
         (Kind::Codex, "install") => Step {
@@ -160,25 +137,12 @@ pub fn open_in_terminal(step: &Step) -> Result<(), String> {
         let script = dir.join(format!("consilium-setup-{}.sh", uuid::Uuid::new_v4()));
         std::fs::write(&script, posix_script(step)).map_err(|e| e.to_string())?;
         set_executable(&script)?;
-        for (term, flag) in [
-            ("x-terminal-emulator", "-e"),
-            ("gnome-terminal", "--"),
-            ("konsole", "-e"),
-            ("xterm", "-e"),
-        ] {
-            if std::process::Command::new(term)
-                .arg(flag)
-                .arg(&script)
-                .spawn()
-                .is_ok()
-            {
+        for (term, flag) in [("x-terminal-emulator", "-e"), ("gnome-terminal", "--"), ("konsole", "-e"), ("xterm", "-e")] {
+            if std::process::Command::new(term).arg(flag).arg(&script).spawn().is_ok() {
                 return Ok(());
             }
         }
-        return Err(format!(
-            "no terminal app found; run this yourself: {}",
-            step.command
-        ));
+        return Err(format!("no terminal app found; run this yourself: {}", step.command));
     }
     #[cfg(windows)]
     {
@@ -191,16 +155,7 @@ pub fn open_in_terminal(step: &Step) -> Result<(), String> {
         );
         std::fs::write(&script, body).map_err(|e| e.to_string())?;
         std::process::Command::new("cmd")
-            .args([
-                "/c",
-                "start",
-                "Consilium setup",
-                "powershell",
-                "-NoExit",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ])
+            .args(["/c", "start", "Consilium setup", "powershell", "-NoExit", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(&script)
             .spawn()
             .map_err(|e| format!("couldn't open PowerShell: {e}"))?;
@@ -240,17 +195,11 @@ mod tests {
         }
         // Codex installs through npm, run with Node's folder on PATH.
         if npm().is_some() {
-            assert!(step("gpt", "install")
-                .unwrap()
-                .command
-                .ends_with("install -g @openai/codex"));
+            assert!(step("gpt", "install").unwrap().command.ends_with("install -g @openai/codex"));
         }
         // Gemini installs through Google's Antigravity installer (unless only the Gemini CLI is present).
         if agents::find(Kind::GeminiCli).is_none() || agents::find(Kind::Antigravity).is_some() {
-            assert!(step("gemini", "install")
-                .unwrap()
-                .command
-                .contains("antigravity.google/cli/install"));
+            assert!(step("gemini", "install").unwrap().command.contains("antigravity.google/cli/install"));
         }
     }
 
@@ -263,10 +212,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn node_tools_run_with_their_own_folder_on_path() {
-        assert_eq!(
-            with_own_path(Path::new("/x y/bin/gemini"), ""),
-            r#"PATH='/x y/bin':"$PATH" '/x y/bin/gemini' "#
-        );
+        assert_eq!(with_own_path(Path::new("/x y/bin/gemini"), ""), r#"PATH='/x y/bin':"$PATH" '/x y/bin/gemini' "#);
     }
 
     #[cfg(unix)]

@@ -50,6 +50,8 @@ pub struct AgentInfo {
     pub path: Option<String>,
     /// What to do if it isn't usable yet.
     pub hint: String,
+    /// When it ran out of usage, the time (ms since the epoch) its limit resets.
+    pub benched_until: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -73,24 +75,9 @@ pub struct Agent {
 }
 
 pub const AGENTS: [Agent; 3] = [
-    Agent {
-        id: "gpt",
-        name: "ChatGPT",
-        company: "OpenAI",
-        kind: Kind::Codex,
-    },
-    Agent {
-        id: "claude",
-        name: "Claude",
-        company: "Anthropic",
-        kind: Kind::ClaudeCode,
-    },
-    Agent {
-        id: "gemini",
-        name: "Gemini",
-        company: "Google",
-        kind: Kind::Antigravity,
-    },
+    Agent { id: "gpt", name: "ChatGPT", company: "OpenAI", kind: Kind::Codex },
+    Agent { id: "claude", name: "Claude", company: "Anthropic", kind: Kind::ClaudeCode },
+    Agent { id: "gemini", name: "Gemini", company: "Google", kind: Kind::Antigravity },
 ];
 
 pub fn by_id(id: &str) -> Option<&'static Agent> {
@@ -108,11 +95,7 @@ fn base_name(kind: Kind) -> &'static str {
 
 fn exe_names(base: &str) -> Vec<String> {
     if cfg!(windows) {
-        vec![
-            format!("{base}.exe"),
-            format!("{base}.cmd"),
-            base.to_string(),
-        ]
+        vec![format!("{base}.exe"), format!("{base}.cmd"), base.to_string()]
     } else {
         vec![base.to_string()]
     }
@@ -126,21 +109,11 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
     dirs_.extend(
-        [
-            ".local/bin",
-            ".local/node/bin",
-            ".npm-global/bin",
-            ".volta/bin",
-            "bin",
-        ]
-        .iter()
-        .map(|d| home.join(d)),
-    );
-    dirs_.extend(
-        ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"]
+        [".local/bin", ".local/node/bin", ".npm-global/bin", ".volta/bin", "bin"]
             .iter()
-            .map(PathBuf::from),
+            .map(|d| home.join(d)),
     );
+    dirs_.extend(["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"].iter().map(PathBuf::from));
     if let Some(appdata) = std::env::var_os("APPDATA") {
         dirs_.push(PathBuf::from(appdata).join("npm"));
     }
@@ -150,14 +123,9 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
             // The ChatGPT desktop app ships a copy of Codex.
             for app in ["/Applications/ChatGPT.app", "/Applications/Codex.app"] {
                 out.push(PathBuf::from(app).join("Contents/Resources/codex-cli/bin/codex"));
-                out.push(
-                    home.join(app.trim_start_matches('/'))
-                        .join("Contents/Resources/codex-cli/bin/codex"),
-                );
+                out.push(home.join(app.trim_start_matches('/')).join("Contents/Resources/codex-cli/bin/codex"));
             }
-            out.push(PathBuf::from(
-                "/Applications/Codex.app/Contents/Resources/codex",
-            ));
+            out.push(PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"));
         }
         Kind::ClaudeCode => out.push(home.join(".claude/local/claude")),
         Kind::GeminiCli => {}
@@ -183,10 +151,7 @@ pub fn find(kind: Kind) -> Option<PathBuf> {
 /// The tool an agent actually uses: Gemini runs through Antigravity when it's installed, and
 /// falls back to the Gemini CLI (still served to company plans and API keys) when it isn't.
 pub fn effective_kind(agent: &Agent) -> Kind {
-    if agent.kind == Kind::Antigravity
-        && find(Kind::Antigravity).is_none()
-        && find(Kind::GeminiCli).is_some()
-    {
+    if agent.kind == Kind::Antigravity && find(Kind::Antigravity).is_none() && find(Kind::GeminiCli).is_some() {
         Kind::GeminiCli
     } else {
         agent.kind
@@ -212,10 +177,7 @@ fn is_executable(p: &Path) -> bool {
 
 fn command(path: &Path) -> Command {
     let mut cmd = Command::new(path);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     // Node-based CLIs (Gemini, npm installs) start with `#!/usr/bin/env node`, and apps launched from
     // the Dock have a minimal PATH; putting the tool's own folder first lets it find its runtime.
     if let Some(dir) = path.parent() {
@@ -248,10 +210,7 @@ fn command(path: &Path) -> Command {
 async fn probe(path: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = command(path);
     cmd.args(args);
-    let out = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
-        .await
-        .ok()?
-        .ok()?;
+    let out = tokio::time::timeout(PROBE_TIMEOUT, cmd.output()).await.ok()?.ok()?;
     let mut s = String::from_utf8_lossy(&out.stdout).to_string();
     s.push_str(&String::from_utf8_lossy(&out.stderr));
     Some(s.trim().to_string())
@@ -495,16 +454,10 @@ async fn usage(path: &Path, kind: Kind) -> Option<UsageStatus> {
 /// Gemini CLI records the chosen sign-in method in ~/.gemini/settings.json; for a Google account
 /// sign-in it also keeps a credentials file, whose presence (never its contents) is checked here.
 fn gemini_signed_in() -> bool {
-    let Some(home) = dirs::home_dir() else {
-        return false;
-    };
+    let Some(home) = dirs::home_dir() else { return false };
     let dir = home.join(".gemini");
-    let Ok(text) = std::fs::read_to_string(dir.join("settings.json")) else {
-        return false;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return false;
-    };
+    let Ok(text) = std::fs::read_to_string(dir.join("settings.json")) else { return false };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
     let method = v["security"]["auth"]["selectedType"]
         .as_str()
         .or_else(|| v["selectedAuthType"].as_str())
@@ -525,11 +478,7 @@ fn antigravity_signed_in() -> bool {
     [dirs::config_dir(), dirs::data_dir()]
         .into_iter()
         .flatten()
-        .any(|d| {
-            d.join("antigravity")
-                .join("credential-user-scope")
-                .is_file()
-        })
+        .any(|d| d.join("antigravity").join("credential-user-scope").is_file())
 }
 
 pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
@@ -569,19 +518,17 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
         version: None,
         path: None,
         hint: install_hint.into(),
+        benched_until: None,
     };
     let Some(path) = find(kind) else { return info };
     info.path = Some(path.display().to_string());
+    // The version and sign-in checks are independent, so they run at the same time.
     let version_probe = probe(&path, &["--version"]);
     let sign_in_probe = async {
         match kind {
-            Kind::Codex => probe(&path, &["login", "status"])
-                .await
-                .map(|s| s.contains("Logged in")),
+            Kind::Codex => probe(&path, &["login", "status"]).await.map(|s| s.contains("Logged in")),
             Kind::ClaudeCode => probe(&path, &["auth", "status"]).await.and_then(|s| {
-                serde_json::from_str::<serde_json::Value>(&s)
-                    .ok()
-                    .and_then(|v| v["loggedIn"].as_bool())
+                serde_json::from_str::<serde_json::Value>(&s).ok().and_then(|v| v["loggedIn"].as_bool())
             }),
             Kind::GeminiCli => Some(gemini_signed_in()),
             Kind::Antigravity => Some(antigravity_signed_in()),
@@ -591,11 +538,7 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
     info.version = version.and_then(|v| v.lines().next().map(str::to_string));
     info.signed_in = signed_in;
     info.available = signed_in == Some(true);
-    info.hint = if info.available {
-        String::new()
-    } else {
-        login_hint.into()
-    };
+    info.hint = if info.available { String::new() } else { login_hint.into() };
     info
 }
 
@@ -623,14 +566,7 @@ pub struct AgentReply {
 
 /// The exact command-line arguments for one turn. `workdir` is the project folder when the AI has
 /// access to one, otherwise an empty temporary folder; `access` is already "chat" in that case.
-pub fn plan(
-    kind: Kind,
-    access: Access,
-    workdir: &Path,
-    reply_file: &Path,
-    system: &str,
-    prompt: &str,
-) -> Plan {
+pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, system: &str, prompt: &str) -> Plan {
     let mut args: Vec<OsString> = Vec::new();
     let mut push = |a: &str| args.push(a.into());
     let input = match kind {
@@ -715,14 +651,7 @@ pub fn plan(
         Kind::Antigravity => {
             // The conversation goes over stdin as one stream-json message, not as an argument:
             // transcripts can exceed Linux's 128 KB argument and Windows' 32 K command-line limits.
-            for a in [
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--print-timeout",
-                "0s",
-            ] {
+            for a in ["--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", "0s"] {
                 push(a);
             }
             match access {
@@ -759,13 +688,11 @@ pub async fn run(
     prompt: &str,
     cancel: &CancellationToken,
 ) -> Result<String, String> {
-    run_with_usage(agent, access, workspace, system, prompt, cancel)
-        .await
-        .map(|reply| reply.text)
+    run_with_usage(agent, access, workspace, system, prompt, cancel).await.map(|reply| reply.text)
 }
 
-/// The normal council turn path. Unlike `run`, this preserves the provider's token counts so they
-/// can be stored beside the reply. `run` remains the lightweight text-only helper for self-checks.
+/// The normal council turn path. Unlike `run`, this keeps the provider's token counts so they can
+/// be stored beside the reply. `run` remains the lightweight text-only helper for self-checks.
 pub async fn run_with_usage(
     agent: &Agent,
     access: Access,
@@ -776,19 +703,11 @@ pub async fn run_with_usage(
 ) -> Result<AgentReply, String> {
     let kind = effective_kind(agent);
     let path = find(kind).ok_or_else(|| format!("{} isn't installed", agent.name))?;
-    run_at_with_usage(
-        &path,
-        kind,
-        access,
-        workspace,
-        system,
-        prompt,
-        cancel,
-        RUN_TIMEOUT,
-    )
-    .await
+    run_at_with_usage(&path, kind, access, workspace, system, prompt, cancel, RUN_TIMEOUT).await
 }
 
+/// Text-only `run_at_with_usage` at a given CLI path and time limit; the tests drive fake CLIs with it.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_at(
     path: &Path,
@@ -843,28 +762,18 @@ async fn execute(
 ) -> Result<AgentReply, String> {
     let mut cmd = command(path);
     cmd.current_dir(dir).stdin(Stdio::piped()).args(&plan.args);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("couldn't start {}: {e}", path.display()))?;
+    let mut child = cmd.spawn().map_err(|e| format!("couldn't start {}: {e}", path.display()))?;
     let pid = child.id();
     let mut stdin = child.stdin.take().expect("stdin is piped");
-    let mut stdout = child.stdout.take().expect("stdout is piped");
-    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
     let input = plan.input;
     let writer = tokio::spawn(async move {
         let _ = stdin.write_all(input.as_bytes()).await;
         let _ = stdin.shutdown().await;
     });
-    let out_task = tokio::spawn(async move {
-        let mut b = Vec::new();
-        let _ = stdout.read_to_end(&mut b).await;
-        b
-    });
-    let err_task = tokio::spawn(async move {
-        let mut b = Vec::new();
-        let _ = stderr.read_to_end(&mut b).await;
-        b
-    });
+    let (out_buf, out_task) = drain(stdout);
+    let (err_buf, err_task) = drain(stderr);
 
     let outcome = tokio::select! {
         status = child.wait() => Ok(status),
@@ -876,12 +785,26 @@ async fn execute(
         Err(why) => {
             kill_tree(pid, &mut child).await;
             writer.abort();
+            out_task.abort();
+            err_task.abort();
             return Err(why);
         }
     };
-    let _ = writer.await;
-    let stdout = String::from_utf8_lossy(&out_task.await.unwrap_or_default()).to_string();
-    let stderr = String::from_utf8_lossy(&err_task.await.unwrap_or_default()).to_string();
+    writer.abort();
+    // A program the AI started in the background (a dev server, a watcher) can keep the output
+    // pipes open after the CLI itself has exited. Waiting for them to close would hang the turn,
+    // and Stop with it, so whatever has arrived shortly after the exit is the output.
+    let pipes_closed = async {
+        let _ = out_task.await;
+        let _ = err_task.await;
+    };
+    tokio::select! {
+        _ = pipes_closed => {}
+        _ = tokio::time::sleep(PIPE_GRACE) => {}
+        _ = cancel.cancelled() => return Err("stopped".to_string()),
+    }
+    let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap()).to_string();
+    let stderr = String::from_utf8_lossy(&err_buf.lock().unwrap()).to_string();
 
     let usage = token_usage_from_output(kind, &stdout);
     let reply = match kind {
@@ -908,16 +831,8 @@ async fn execute(
         Kind::Antigravity => antigravity_reply(&stdout)?,
     };
     if !status.success() || reply.trim().is_empty() {
-        let detail = if stderr.trim().is_empty() {
-            stdout
-        } else {
-            stderr
-        };
-        return Err(format!(
-            "exit {}: {}",
-            status.code().unwrap_or(-1),
-            tail(&detail)
-        ));
+        let detail = if stderr.trim().is_empty() { stdout } else { stderr };
+        return Err(format!("exit {}: {}", status.code().unwrap_or(-1), tail(&detail)));
     }
     Ok(AgentReply {
         text: reply.trim().to_string(),
@@ -1009,6 +924,28 @@ fn token_usage_from_output(kind: Kind, stdout: &str) -> Option<TokenUsage> {
     }
 }
 
+/// How long to keep reading output after the CLI exits (see `execute`).
+const PIPE_GRACE: Duration = Duration::from_secs(3);
+
+/// Reads a pipe into a shared buffer in the background, so what has arrived can be used even if
+/// the pipe never closes.
+fn drain<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    mut r: R,
+) -> (std::sync::Arc<std::sync::Mutex<Vec<u8>>>, tokio::task::JoinHandle<()>) {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let b = buf.clone();
+    let task = tokio::spawn(async move {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match r.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => b.lock().unwrap().extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+    (buf, task)
+}
+
 /// The reply from Antigravity's stream-json output: the final `result` event's response, or the
 /// streamed text if that is empty. A run that ended without text because a tool it reached for was
 /// blocked is reported as such, rather than as an empty answer.
@@ -1016,9 +953,7 @@ fn antigravity_reply(stdout: &str) -> Result<String, String> {
     let mut streamed = String::new();
     let mut result = None;
     for line in stdout.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         if v["event"] == "step_update" {
             if let Some(t) = v["step_update"]["text_delta"].as_str() {
                 streamed.push_str(t);
@@ -1029,27 +964,13 @@ fn antigravity_reply(stdout: &str) -> Result<String, String> {
     }
     let Some(r) = result else { return Ok(streamed) };
     if r["status"] != "SUCCESS" {
-        let why = r["error"]
-            .as_str()
-            .filter(|e| !e.is_empty())
-            .unwrap_or("no response");
-        return Err(tail(&format!(
-            "{} ({})",
-            why,
-            r["status"].as_str().unwrap_or("ERROR")
-        )));
+        let why = r["error"].as_str().filter(|e| !e.is_empty()).unwrap_or("no response");
+        return Err(tail(&format!("{} ({})", why, r["status"].as_str().unwrap_or("ERROR"))));
     }
-    let text = r["response"]
-        .as_str()
-        .filter(|t| !t.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or(streamed);
+    let text = r["response"].as_str().filter(|t| !t.trim().is_empty()).map(str::to_string).unwrap_or(streamed);
     if text.trim().is_empty() {
         if let Some(denied) = r["denied_actions"].as_array().filter(|d| !d.is_empty()) {
-            let names: Vec<&str> = denied
-                .iter()
-                .filter_map(|d| d["display_name"].as_str())
-                .collect();
+            let names: Vec<&str> = denied.iter().filter_map(|d| d["display_name"].as_str()).collect();
             return Err(format!(
                 "Gemini tried to use a tool its access doesn't allow ({}) and wrote no reply. Ask again, or raise its access in Settings.",
                 names.join(", ")
@@ -1085,13 +1006,16 @@ async fn kill_tree(pid: Option<u32>, child: &mut tokio::process::Child) {
     }
     #[cfg(windows)]
     if let Some(pid) = pid {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // Async, and time-limited, so a slow taskkill can't hold up Stop.
+        let mut tk = Command::new("taskkill");
+        tk.args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null());
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            tk.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(5), tk.status()).await;
     }
-    let _ = child.kill().await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.kill()).await;
 }
 
 #[cfg(test)]
@@ -1099,23 +1023,15 @@ mod plan_tests {
     use super::*;
 
     fn args(kind: Kind, access: Access) -> Vec<String> {
-        plan(
-            kind,
-            access,
-            Path::new("/ws"),
-            Path::new("/r.txt"),
-            "SYS",
-            "P",
-        )
-        .args
-        .iter()
-        .map(|a| a.to_string_lossy().to_string())
-        .collect()
+        plan(kind, access, Path::new("/ws"), Path::new("/r.txt"), "SYS", "P")
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect()
     }
 
     fn has(v: &[String], pair: &[&str]) -> bool {
-        v.windows(pair.len())
-            .any(|w| w.iter().zip(pair).all(|(a, b)| a == b))
+        v.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b))
     }
 
     #[test]
@@ -1194,49 +1110,27 @@ mod plan_tests {
         assert!(args(Kind::Codex, Access::Chat).contains(&"--json".to_string()));
         assert!(has(&args(Kind::Codex, Access::Chat), &["-s", "read-only"]));
         assert!(has(&args(Kind::ClaudeCode, Access::Chat), &["--tools", ""]));
-        assert!(has(
-            &args(Kind::GeminiCli, Access::Chat),
-            &["--approval-mode", "plan"]
-        ));
+        assert!(has(&args(Kind::GeminiCli, Access::Chat), &["--approval-mode", "plan"]));
     }
 
     #[test]
     fn edit_access_allows_file_edits_but_not_shell() {
-        assert!(has(
-            &args(Kind::Codex, Access::Edit),
-            &["-s", "workspace-write"]
-        ));
+        assert!(has(&args(Kind::Codex, Access::Edit), &["-s", "workspace-write"]));
         let c = args(Kind::ClaudeCode, Access::Edit);
         assert!(has(&c, &["--tools", "Read,Grep,Glob,Edit,Write"]));
         assert!(has(&c, &["--permission-mode", "acceptEdits"]));
         assert!(!c.iter().any(|a| a.contains("Bash")));
-        assert!(has(
-            &args(Kind::GeminiCli, Access::Edit),
-            &["--approval-mode", "auto_edit"]
-        ));
+        assert!(has(&args(Kind::GeminiCli, Access::Edit), &["--approval-mode", "auto_edit"]));
     }
 
     #[test]
     fn unrestricted_access_uses_each_tools_own_bypass_switch() {
-        assert!(args(Kind::Codex, Access::Unrestricted)
-            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
-        assert!(args(Kind::ClaudeCode, Access::Unrestricted)
-            .contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(args(Kind::Antigravity, Access::Unrestricted)
-            .contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(has(
-            &args(Kind::GeminiCli, Access::Unrestricted),
-            &["--approval-mode", "yolo"]
-        ));
-        for k in [
-            Kind::Codex,
-            Kind::ClaudeCode,
-            Kind::Antigravity,
-            Kind::GeminiCli,
-        ] {
-            assert!(!args(k, Access::Edit)
-                .iter()
-                .any(|a| a.contains("dangerously") || a == "yolo"));
+        assert!(args(Kind::Codex, Access::Unrestricted).contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(args(Kind::ClaudeCode, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args(Kind::Antigravity, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(has(&args(Kind::GeminiCli, Access::Unrestricted), &["--approval-mode", "yolo"]));
+        for k in [Kind::Codex, Kind::ClaudeCode, Kind::Antigravity, Kind::GeminiCli] {
+            assert!(!args(k, Access::Edit).iter().any(|a| a.contains("dangerously") || a == "yolo"));
         }
     }
 
@@ -1252,34 +1146,15 @@ mod plan_tests {
 
     #[test]
     fn antigravity_sends_the_conversation_on_stdin_with_matching_modes() {
-        let p = plan(
-            Kind::Antigravity,
-            Access::Chat,
-            Path::new("/ws"),
-            Path::new("/r"),
-            "SYS",
-            "P",
-        );
-        let a: Vec<String> = p
-            .args
-            .iter()
-            .map(|x| x.to_string_lossy().to_string())
-            .collect();
-        assert!(
-            has(&a, &["--input-format", "stream-json"])
-                && has(&a, &["--output-format", "stream-json"])
-        );
+        let p = plan(Kind::Antigravity, Access::Chat, Path::new("/ws"), Path::new("/r"), "SYS", "P");
+        let a: Vec<String> = p.args.iter().map(|x| x.to_string_lossy().to_string()).collect();
+        assert!(has(&a, &["--input-format", "stream-json"]) && has(&a, &["--output-format", "stream-json"]));
         assert!(has(&a, &["--mode", "plan"]) && has(&a, &["-p", ""]));
         let line: serde_json::Value = serde_json::from_str(p.input.trim()).unwrap();
         assert_eq!(line["event"], "user");
         assert_eq!(line["message"]["content"], "SYS\n\nP");
-        assert!(has(
-            &args(Kind::Antigravity, Access::Edit),
-            &["--mode", "accept-edits"]
-        ));
-        assert!(!args(Kind::Antigravity, Access::Own)
-            .iter()
-            .any(|x| x == "--mode"));
+        assert!(has(&args(Kind::Antigravity, Access::Edit), &["--mode", "accept-edits"]));
+        assert!(!args(Kind::Antigravity, Access::Own).iter().any(|x| x == "--mode"));
     }
 
     #[test]
@@ -1292,31 +1167,14 @@ mod plan_tests {
         let e = antigravity_reply(blocked).unwrap_err();
         assert!(e.contains("Bash") && e.contains("access"), "{e}");
         let failed = r#"{"event":"result","result":{"status":"ERROR","response":"","error":"authentication failed or timed out"}}"#;
-        assert_eq!(
-            antigravity_reply(failed).unwrap_err(),
-            "authentication failed or timed out (ERROR)"
-        );
+        assert_eq!(antigravity_reply(failed).unwrap_err(), "authentication failed or timed out (ERROR)");
     }
 
     #[test]
     fn instructions_reach_every_tool() {
-        let p = plan(
-            Kind::ClaudeCode,
-            Access::Chat,
-            Path::new("/ws"),
-            Path::new("/r"),
-            "SYS",
-            "P",
-        );
+        let p = plan(Kind::ClaudeCode, Access::Chat, Path::new("/ws"), Path::new("/r"), "SYS", "P");
         assert!(p.args.iter().any(|a| a == "SYS") && p.input == "P");
-        let p = plan(
-            Kind::GeminiCli,
-            Access::Chat,
-            Path::new("/ws"),
-            Path::new("/r"),
-            "SYS",
-            "P",
-        );
+        let p = plan(Kind::GeminiCli, Access::Chat, Path::new("/ws"), Path::new("/r"), "SYS", "P");
         assert!(p.input.starts_with("SYS") && p.input.ends_with("P"));
     }
 }
@@ -1336,24 +1194,8 @@ mod tests {
         p
     }
 
-    async fn go(
-        p: &Path,
-        kind: Kind,
-        access: Access,
-        ws: Option<&Path>,
-        system: &str,
-    ) -> Result<String, String> {
-        run_at(
-            p,
-            kind,
-            access,
-            ws,
-            system,
-            "convo",
-            &CancellationToken::new(),
-            RUN_TIMEOUT,
-        )
-        .await
+    async fn go(p: &Path, kind: Kind, access: Access, ws: Option<&Path>, system: &str) -> Result<String, String> {
+        run_at(p, kind, access, ws, system, "convo", &CancellationToken::new(), RUN_TIMEOUT).await
     }
 
     #[tokio::test]
@@ -1363,9 +1205,7 @@ mod tests {
 input=$(cat)
 printf 'cwd=%s files=%s first=%s' "$(basename "$PWD")" "$(ls -A | wc -l | tr -d ' ')" "$(printf '%s' "$input" | head -1)" > "$out""#,
         );
-        let r = go(&p, Kind::Codex, Access::Chat, None, "SYSTEM LINE")
-            .await
-            .unwrap();
+        let r = go(&p, Kind::Codex, Access::Chat, None, "SYSTEM LINE").await.unwrap();
         assert_eq!(r, "cwd=empty files=0 first=SYSTEM LINE");
     }
 
@@ -1375,63 +1215,25 @@ printf 'cwd=%s files=%s first=%s' "$(basename "$PWD")" "$(ls -A | wc -l | tr -d 
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::write(ws.join("README.md"), "x").unwrap();
         let p = fake(r#"while [ "$1" != "-o" ]; do shift; done; cat >/dev/null; ls -A > "$2""#);
-        assert_eq!(
-            go(&p, Kind::Codex, Access::Edit, Some(&ws), "s")
-                .await
-                .unwrap(),
-            "README.md"
-        );
-        assert!(
-            go(&p, Kind::Codex, Access::Chat, Some(&ws), "s")
-                .await
-                .is_err(),
-            "chat access must not see the project"
-        );
+        assert_eq!(go(&p, Kind::Codex, Access::Edit, Some(&ws), "s").await.unwrap(), "README.md");
+        assert!(go(&p, Kind::Codex, Access::Chat, Some(&ws), "s").await.is_err(), "chat access must not see the project");
         std::fs::remove_dir_all(ws).unwrap();
     }
 
     #[tokio::test]
     async fn claude_reply_is_parsed_from_json_and_errors_are_reported() {
-        let p = fake(
-            r#"cat >/dev/null; printf '{"type":"result","is_error":false,"result":"hello from claude"}'"#,
-        );
-        assert_eq!(
-            go(&p, Kind::ClaudeCode, Access::Chat, None, "s")
-                .await
-                .unwrap(),
-            "hello from claude"
-        );
-        let p = fake(
-            r#"cat >/dev/null; printf '{"type":"result","is_error":true,"result":"Not logged in"}'"#,
-        );
-        assert_eq!(
-            go(&p, Kind::ClaudeCode, Access::Chat, None, "s")
-                .await
-                .unwrap_err(),
-            "Not logged in"
-        );
+        let p = fake(r#"cat >/dev/null; printf '{"type":"result","is_error":false,"result":"hello from claude"}'"#);
+        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap(), "hello from claude");
+        let p = fake(r#"cat >/dev/null; printf '{"type":"result","is_error":true,"result":"Not logged in"}'"#);
+        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err(), "Not logged in");
     }
 
     #[tokio::test]
     async fn gemini_reply_and_errors_are_parsed_from_json() {
-        let p = fake(
-            r#"cat >/dev/null; printf '{"session_id":"x","response":"hello from gemini","stats":{}}'"#,
-        );
-        assert_eq!(
-            go(&p, Kind::GeminiCli, Access::Chat, None, "s")
-                .await
-                .unwrap(),
-            "hello from gemini"
-        );
-        let p = fake(
-            r#"cat >/dev/null; printf '{"session_id":"x","error":{"type":"Error","message":"Please set an Auth method","code":41}}'; exit 41"#,
-        );
-        assert_eq!(
-            go(&p, Kind::GeminiCli, Access::Chat, None, "s")
-                .await
-                .unwrap_err(),
-            "Please set an Auth method"
-        );
+        let p = fake(r#"cat >/dev/null; printf '{"session_id":"x","response":"hello from gemini","stats":{}}'"#);
+        assert_eq!(go(&p, Kind::GeminiCli, Access::Chat, None, "s").await.unwrap(), "hello from gemini");
+        let p = fake(r#"cat >/dev/null; printf '{"session_id":"x","error":{"type":"Error","message":"Please set an Auth method","code":41}}'; exit 41"#);
+        assert_eq!(go(&p, Kind::GeminiCli, Access::Chat, None, "s").await.unwrap_err(), "Please set an Auth method");
     }
 
     #[tokio::test]
@@ -1441,51 +1243,31 @@ printf 'cwd=%s files=%s first=%s' "$(basename "$PWD")" "$(ls -A | wc -l | tr -d 
 echo '{"event":"init","init":{"cwd":"x"}}'
 echo '{"event":"result","result":{"status":"SUCCESS","response":"hello from gemini","error":""}}'"#,
         );
-        assert_eq!(
-            go(&p, Kind::Antigravity, Access::Chat, None, "s")
-                .await
-                .unwrap(),
-            "hello from gemini"
-        );
+        assert_eq!(go(&p, Kind::Antigravity, Access::Chat, None, "s").await.unwrap(), "hello from gemini");
         let p = fake(
             r#"cat >/dev/null
 echo '{"event":"result","result":{"status":"ERROR","response":"","error":"authentication failed or timed out"}}'
 exit 1"#,
         );
         assert_eq!(
-            go(&p, Kind::Antigravity, Access::Chat, None, "s")
-                .await
-                .unwrap_err(),
+            go(&p, Kind::Antigravity, Access::Chat, None, "s").await.unwrap_err(),
             "authentication failed or timed out (ERROR)"
         );
     }
 
     #[tokio::test]
     async fn tool_folder_is_put_on_path_for_node_based_clis() {
-        let p =
-            fake(r#"cat >/dev/null; printf '{"response":"%s"}' "$(echo "$PATH" | cut -d: -f1)""#);
+        let p = fake(r#"cat >/dev/null; printf '{"response":"%s"}' "$(echo "$PATH" | cut -d: -f1)""#);
         let dir = p.parent().unwrap().display().to_string();
-        assert_eq!(
-            go(&p, Kind::GeminiCli, Access::Chat, None, "s")
-                .await
-                .unwrap(),
-            dir
-        );
+        assert_eq!(go(&p, Kind::GeminiCli, Access::Chat, None, "s").await.unwrap(), dir);
     }
 
     #[tokio::test]
     async fn arguments_are_passed_without_a_shell() {
         // A system prompt full of shell syntax must arrive as one literal argument.
-        let p = fake(
-            r#"cat >/dev/null; for a in "$@"; do last="$a"; done; printf '{"result":"%s"}' "$last""#,
-        );
+        let p = fake(r#"cat >/dev/null; for a in "$@"; do last="$a"; done; printf '{"result":"%s"}' "$last""#);
         let tricky = "x; touch /tmp/consilium-pwned $(id) `id`";
-        assert_eq!(
-            go(&p, Kind::ClaudeCode, Access::Chat, None, tricky)
-                .await
-                .unwrap(),
-            tricky
-        );
+        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, tricky).await.unwrap(), tricky);
         assert!(!Path::new("/tmp/consilium-pwned").exists());
     }
 
@@ -1493,10 +1275,7 @@ exit 1"#,
     async fn stop_kills_the_whole_process_group() {
         let marker = std::env::temp_dir().join(format!("consilium-child-{}", uuid::Uuid::new_v4()));
         // The tool starts a grandchild that would create a file after 2 seconds.
-        let p = fake(&format!(
-            "(sleep 2; touch '{}') & sleep 30",
-            marker.display()
-        ));
+        let p = fake(&format!("(sleep 2; touch '{}') & sleep 30", marker.display()));
         let cancel = CancellationToken::new();
         let c2 = cancel.clone();
         tokio::spawn(async move {
@@ -1504,17 +1283,7 @@ exit 1"#,
             c2.cancel();
         });
         let started = std::time::Instant::now();
-        let r = run_at(
-            &p,
-            Kind::Codex,
-            Access::Chat,
-            None,
-            "s",
-            "p",
-            &cancel,
-            RUN_TIMEOUT,
-        )
-        .await;
+        let r = run_at(&p, Kind::Codex, Access::Chat, None, "s", "p", &cancel, RUN_TIMEOUT).await;
         assert_eq!(r.unwrap_err(), "stopped");
         assert!(started.elapsed() < Duration::from_secs(3));
         tokio::time::sleep(Duration::from_millis(2500)).await;
@@ -1522,28 +1291,25 @@ exit 1"#,
     }
 
     #[tokio::test]
+    async fn a_background_program_holding_the_output_open_does_not_hang_the_turn() {
+        // The CLI exits, but a program it started keeps stdout open for 30 seconds.
+        let p = fake(r#"cat >/dev/null; (sleep 30) & printf '{"result":"done"}'"#);
+        let started = std::time::Instant::now();
+        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap(), "done");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[tokio::test]
     async fn time_limit_applies() {
         let p = fake("sleep 30");
-        let r = run_at(
-            &p,
-            Kind::Codex,
-            Access::Chat,
-            None,
-            "s",
-            "p",
-            &CancellationToken::new(),
-            Duration::from_millis(500),
-        )
-        .await;
+        let r = run_at(&p, Kind::Codex, Access::Chat, None, "s", "p", &CancellationToken::new(), Duration::from_millis(500)).await;
         assert!(r.unwrap_err().contains("no answer within"));
     }
 
     #[tokio::test]
     async fn failures_report_the_tool_output() {
         let p = fake("cat >/dev/null; echo 'Error: not logged in' >&2; exit 3");
-        let e = go(&p, Kind::Codex, Access::Chat, None, "s")
-            .await
-            .unwrap_err();
+        let e = go(&p, Kind::Codex, Access::Chat, None, "s").await.unwrap_err();
         assert!(e.contains("exit 3") && e.contains("not logged in"), "{e}");
     }
 }

@@ -95,7 +95,8 @@ function MessageBody({ text }: { text: string }) {
   );
 }
 
-function agentState(a: AgentInfo): "ready" | "signin" | "missing" {
+function agentState(a: AgentInfo): "ready" | "signin" | "missing" | "benched" {
+  if (a.available && a.benched_until && a.benched_until > Date.now()) return "benched";
   return a.available ? "ready" : a.path ? "signin" : "missing";
 }
 
@@ -132,15 +133,29 @@ function UsageMeter({ agent }: { agent: AgentInfo }) {
   );
 }
 
-function AgentDot({ agent, onSetup, check }: { agent: AgentInfo; onSetup: (a: AgentInfo) => void; check?: CheckResult | "running" }) {
+/** "3:40 PM", or "Mon 3:40 PM" when it isn't today. */
+function resetTime(ts: number): string {
+  const d = new Date(ts);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
+}
+
+function AgentDot({ agent, onSetup, onRetry, check }: { agent: AgentInfo; onSetup: (a: AgentInfo) => void; onRetry: (a: AgentInfo) => void; check?: CheckResult | "running" }) {
   const state = agentState(agent);
-  const label = { ready: "Ready", signin: "Not signed in", missing: "Not installed" }[state];
+  const label = { ready: "Ready", signin: "Not signed in", missing: "Not installed", benched: "Out of usage" }[state];
   return (
     <div className={`agent agent-${agent.id}`} title={agent.hint || `${agent.tool} ${agent.version ?? ""}`}>
       <span className={`dot dot-${state}`} />
       <span className="agent-name">{agent.name}</span>
       {state === "ready" ? (
         <span className="agent-state">{label}</span>
+      ) : state === "benched" ? (
+        <span className="agent-state benched" title="It ran out of usage. The council carries on without it until its limit resets.">
+          Out of usage · back {resetTime(agent.benched_until!)}{" "}
+          <button className="link setup-link" onClick={() => onRetry(agent)} title="Ask it again now, without waiting for the reset">
+            Retry
+          </button>
+        </span>
       ) : (
         <button className="link setup-link" onClick={() => onSetup(agent)} title={agent.hint}>
           {state === "missing" ? "Install" : "Sign in"}
@@ -257,6 +272,8 @@ export default function App() {
         setEvents((prev) => (prev.some((p) => p.id === e.id) ? prev : [...prev, e]));
       }
       refreshList();
+      // A note from Consilium (an AI ran out of usage, or is back) changes the AIs' status.
+      if (e.sender === "consilium") refreshAgents();
     });
     const un2 = onTurn((t) => {
       if (t.conversation === currentRef.current) setTurn(t.state === "running" ? t : null);
@@ -298,7 +315,14 @@ export default function App() {
 
   const meta = conversations.find((c) => c.id === current);
   const busy = turn !== null;
-  const thinking = turn?.agent ? senderName(turn.agent, agents) : null;
+  // Every AI answers at the same time, so several can be thinking at once.
+  const thinkingIds = turn?.agents?.length ? turn.agents : turn?.agent ? [turn.agent] : [];
+  const thinkingNames = thinkingIds.map((id) => senderName(id, agents));
+  const thinking = thinkingNames.length
+    ? thinkingNames.length === 1
+      ? `${thinkingNames[0]} is thinking`
+      : `${thinkingNames.slice(0, -1).join(", ")} and ${thinkingNames[thinkingNames.length - 1]} are thinking`
+    : null;
   const readyIds = useMemo(() => new Set(agents.filter((a) => a.available).map((a) => a.id)), [agents]);
   const members = useMemo(() => agents.filter((a) => a.member), [agents]);
 
@@ -316,7 +340,7 @@ export default function App() {
   }, [agents, members]);
   const others = useMemo(() => agents.filter((a) => !a.member), [agents]);
 
-  // Sending while an AI is answering interrupts it: the running turn is stopped, then this is sent.
+  // Sending while the AIs are answering doesn't interrupt them: they read it and carry on. Stop interrupts.
   async function send() {
     if (!current || !draft.trim()) return;
     setError(null);
@@ -324,11 +348,16 @@ export default function App() {
     setDraft("");
     try {
       const to = targets.filter((t) => members.some((m) => m.id === t));
-      await api.send(current, text, to, discuss ? rounds : 1, busy);
+      await api.send(current, text, to, discuss ? rounds : 1);
     } catch (e) {
       setDraft(text);
       setError(String(e));
     }
+  }
+
+  async function retryAgent(a: AgentInfo) {
+    await api.unbench(a.id).catch(() => undefined);
+    refreshAgents();
   }
 
   // Turning Discuss off during a discussion ends it now, not after the current round.
@@ -609,7 +638,7 @@ export default function App() {
             </span>
           </div>
           {members.map((a) => (
-            <AgentDot key={a.id} agent={a} onSetup={setupAgent} check={checks[a.id]} />
+            <AgentDot key={a.id} agent={a} onSetup={setupAgent} onRetry={retryAgent} check={checks[a.id]} />
           ))}
         </div>
         <div className="sidebar-actions">
@@ -741,7 +770,7 @@ export default function App() {
           )}
           {busy && (
             <div className="thinking">
-              <span className="pulse" /> {thinking ? `${thinking} is thinking` : "Working"}
+              <span className="pulse" /> {thinking ?? "Working"}
               {turn && turn.rounds > 1 ? ` · round ${turn.round} of ${turn.rounds}` : ""}
               <span className="cursor">▍</span>
             </div>
@@ -805,9 +834,9 @@ export default function App() {
                 className="btn primary"
                 onClick={send}
                 disabled={!draft.trim()}
-                title={busy ? "Stop the AI that's answering, then send this" : "Send (Enter)"}
+                title={busy ? "Add this to the discussion; the AIs read it without being interrupted (Enter)" : "Send (Enter)"}
               >
-                {busy ? "Interrupt & send" : "Send"}
+                Send
               </button>
             </div>
           </div>

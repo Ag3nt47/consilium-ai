@@ -9,7 +9,21 @@
 - Record provider-reported token counts on each AI reply and expose per-conversation and per-day
   totals for the upcoming Usage panel.
 - Keep conversation navigation, settings and AI status visible at the native window's 760px minimum.
+- A proposal to add an AI (`ADD_AI:`) always waits for the human's approval; the option to let AIs add others without asking is gone.
 - Update the direct `dirs` dependency to version 7 and refresh compatible Rust dependencies.
+
+## 0.2.1
+
+- **Sending doesn't interrupt**: a message sent while the AIs are answering joins the running turn. Every AI reads it (one in the middle of an answer, as soon as it has finished) and gets a fresh set of answers, and anyone it addresses who wasn't taking part joins in. **Stop** is what interrupts.
+
+## 0.2.0
+
+- **No turn order**: every AI answers as soon as it's ready and reacts to new messages on its own time, instead of waiting for the others. In a discussion each AI answers up to the round limit, and the discussion ends when nobody has anything new to say.
+- **Out of usage doesn't stop the conversation**: an AI whose CLI reports a usage limit, rate limit or quota sits out until the limit resets (read from the CLI's message, otherwise 30 minutes), and the others carry on. If nobody else is answering, another council member takes its turn. The Council panel shows "Out of usage · back 3:40 PM" with **Retry**.
+- **Stop and interrupt always work**: they finish within a few seconds, even if an AI left a program running (such as a dev server) that kept its output open, which used to leave the conversation stuck as "still answering". Sending while the AIs are answering always interrupts them, and a message is never refused.
+- **Resume after restart is more robust**: a turn's progress is read back from the conversation, so nobody repeats an answer, and turns resumed after updates aren't given up on.
+- Notes from Consilium (an AI out of usage, a restart, an update) are shown to the AIs as [Consilium] lines; after an update, a note says what changed.
+- Saves of conversations, settings, memory and the resume record fall back to copying when Windows refuses to replace the file, so a turn can't be resumed twice.
 
 ## 0.1.0
 

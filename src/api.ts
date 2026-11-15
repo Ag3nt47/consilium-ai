@@ -67,6 +67,8 @@ export interface AgentInfo {
   /** Filled in separately from `api.usage()`, since usage probes are slow. */
   usage?: UsageStatus | null;
   hint: string;
+  /** When it ran out of usage: the time (ms since the epoch) its limit resets. */
+  benched_until?: number | null;
 }
 
 export interface UsageStatus {
@@ -101,6 +103,8 @@ export interface TurnState {
   conversation: string;
   state: "running" | "idle";
   agent: string | null;
+  /** Every AI working on an answer right now; they answer at the same time. */
+  agents?: string[];
   round: number;
   rounds: number;
 }
@@ -117,10 +121,12 @@ const appApi = {
   rename: (id: string, title: string) => invoke<Conversation>("rename_conversation", { id, title }),
   remove: (id: string) => invoke<void>("delete_conversation", { id }),
   exportMarkdown: (id: string) => invoke<string>("export_markdown", { id }),
-  /** With `interrupt`, a running turn in this conversation is stopped first. */
+  /** Sent while the AIs are answering, the message joins the running turn; it never stops it. */
   send: (id: string, text: string, targets: string[], rounds: number, interrupt = false) =>
     invoke<ChatEvent>("send_message", { id, text, targets, rounds, interrupt }),
   stop: (id: string) => invoke<boolean>("stop", { id }),
+  /** Lets an AI that ran out of usage be asked again now. */
+  unbench: (agent: string) => invoke<void>("unbench", { agent }),
   running: () => invoke<string[]>("running"),
   /** Asks every council member for a one-word reply, in parallel. Uses a little of each AI's allowance. */
   selfCheck: () => invoke<CheckResult[]>("self_check"),
