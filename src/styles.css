@@ -762,6 +762,43 @@ code {
   overflow-wrap: anywhere;
 }
 
+.task-claims-container {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.task-claim-italic {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-style: italic;
+  padding: 3px 10px;
+  border-left: 2px solid currentColor;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.task-claim-italic em {
+  font-style: italic;
+  color: inherit;
+}
+
+.task-claim-italic b {
+  font-weight: 700;
+  font-style: normal;
+}
+
+.task-claim-italic .task-ts {
+  opacity: 0.65;
+  font-style: normal;
+  margin-left: 4px;
+}
+
 .task-dot {
   width: 7px;
   height: 7px;
@@ -836,9 +873,39 @@ pre {
 
 .request-actions {
   display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
   margin-left: 8px;
   vertical-align: middle;
+}
+
+.request-response {
+  display: inline-flex;
+  align-items: center;
+  min-width: min(280px, 100%);
+  gap: 5px;
+}
+
+.request-response input {
+  min-width: 120px;
+  width: min(240px, 38vw);
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--request) 60%, var(--border));
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 90%, black);
+  font: inherit;
+}
+
+.request-response input:focus {
+  outline: 2px solid color-mix(in srgb, var(--request) 60%, transparent);
+  outline-offset: 1px;
+}
+
+.request-actions .respond {
+  border-color: color-mix(in srgb, var(--request) 75%, white);
+  color: color-mix(in srgb, var(--request) 72%, white);
 }
 
 .request-actions .approve {
@@ -868,6 +935,10 @@ pre {
 
 .request-answer.denied {
   color: var(--muted);
+}
+
+.request-answer.responded {
+  color: color-mix(in srgb, var(--request) 45%, white);
 }
 
 .request-label {
@@ -2458,6 +2529,14 @@ button.attachment {
 .btn.respond-request:hover {
   background: #f0294a;
 }
+.btn.respond-request:disabled,
+.btn.respond-request:disabled:hover {
+  background: color-mix(in srgb, var(--muted) 18%, var(--panel));
+  border-color: color-mix(in srgb, var(--muted) 45%, var(--border));
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.68;
+}
 .request.request-flash {
   animation: request-flash 0.6s ease-in-out 3;
 }
@@ -2472,6 +2551,20 @@ button.attachment {
   border-color: #ff1f4b;
   text-shadow: none;
   border-radius: 0;
+}
+[data-theme="netrunner"] .btn.respond-request:disabled,
+[data-theme="netrunner"] .btn.respond-request:disabled:hover {
+  background: #111;
+  color: #666;
+  border-color: #444;
+}
+
+[data-theme="netrunner"] .request-response input {
+  border-radius: 0;
+  border-color: #ff1f4b;
+  background: #050505;
+  color: #fff;
+  text-shadow: none !important;
 }
 
 /* Retro themes: live activity is typed out like a terminal. */

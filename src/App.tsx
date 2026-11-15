@@ -67,6 +67,7 @@ const PROVIDER_PORTALS: Record<string, { account: string; accountLabel: string; 
 
 type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean };
 const PREFS_KEY = "consilium.prefs";
+const REQUEST_FLOOR_KEY = "consilium.request-floor.v2";
 
 function loadPrefs(): Prefs {
   const defaults: Prefs = { theme: "consilium", effects: true, autoUpdate: true, bingWallpaper: true };
@@ -83,6 +84,26 @@ function savePrefs(p: Prefs) {
     localStorage.setItem(PREFS_KEY, JSON.stringify(p));
   } catch {
     /* not saved; the choice still applies until the app closes */
+  }
+}
+
+/**
+ * Ignore the historical backlog when request tracking is first introduced to an existing
+ * conversation. The floor is saved per conversation; every later REQUEST remains pending across
+ * reloads until an Approved, Denied, or custom Response event resolves it.
+ */
+function initializeRequestFloor(conversation: string, loaded: ChatEvent[]): number {
+  if (!IN_APP) return 0;
+  const key = `${REQUEST_FLOOR_KEY}.${conversation}`;
+  try {
+    const saved = Number.parseInt(localStorage.getItem(key) ?? "", 10);
+    if (Number.isSafeInteger(saved) && saved >= 0) return saved;
+    const floor = loaded.reduce((largest, event) => Math.max(largest, event.seq), 0);
+    localStorage.setItem(key, String(floor));
+    return floor;
+  } catch {
+    // The in-memory floor still prevents old requests from appearing during this session.
+    return loaded.reduce((largest, event) => Math.max(largest, event.seq), 0);
   }
 }
 
@@ -142,12 +163,58 @@ function SeenLine({ receipts, agents }: { receipts: SeenReceipt[]; agents: Agent
   );
 }
 
-/** A task badge is shown only when an AI explicitly says it is taking ownership. */
-function claimedTask(text: string): string | null {
-  const explicit = /^\s*(?:TAKING|OWNING|WORKING ON):\s*(.+)$/im.exec(text)?.[1];
-  if (explicit) return explicit.trim().slice(0, 160);
+type TaskClaim = {
+  agent: string;
+  action: string;
+  task: string;
+};
+
+/** Extracts explicit or natural language task ownership from an AI's message. */
+function extractTaskClaims(text: string, defaultAgent: string, agents: AgentInfo[]): TaskClaim[] {
+  if (defaultAgent === "human") return [];
+  const claims: TaskClaim[] = [];
+  const seen = new Set<string>();
+
+  // Check multi-agent breakdown lines: e.g. "- **@claude:** <task>" or "@claude will handle <task>"
+  for (const line of text.split("\n")) {
+    const multiMatch = /^\s*(?:-\s*)?(?:\*\*)?@([a-z0-9_-]+)(?:\*\*)?:?\s*(.+)$/i.exec(line);
+    if (multiMatch) {
+      const targetId = multiMatch[1].toLowerCase();
+      const targetAgent = agents.find((a) => a.id.toLowerCase() === targetId || a.name.toLowerCase() === targetId);
+      if (targetAgent) {
+        const desc = multiMatch[2].trim().slice(0, 160);
+        const key = `${targetAgent.id}:${desc}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          claims.push({ agent: targetAgent.id, action: "is taking", task: desc });
+        }
+      }
+    }
+  }
+
+  // Check explicit author claim
+  const explicit = /^\s*(?:TAKING|OWNING|WORKING ON|CLAIM_TASK):\s*(.+)$/im.exec(text)?.[1];
+  if (explicit) {
+    const desc = explicit.trim().slice(0, 160);
+    const key = `${defaultAgent}:${desc}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      claims.push({ agent: defaultAgent, action: "claimed", task: desc });
+    }
+  }
+
+  // Natural language claim from author
   const natural = /\bI(?:'ll|’ll| will| am|'m|’m)\s+(?:take|handle|own|implement|build|fix|review|work on)\s+([^.!?\n]{3,160})/i.exec(text)?.[1];
-  return natural?.trim() ?? null;
+  if (natural) {
+    const desc = natural.trim();
+    const key = `${defaultAgent}:${desc}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      claims.push({ agent: defaultAgent, action: "is taking", task: desc });
+    }
+  }
+
+  return claims;
 }
 
 function taskColor(agent: string): string {
@@ -155,12 +222,18 @@ function taskColor(agent: string): string {
 }
 
 function ClaimedTask({ event, agents }: { event: ChatEvent; agents: AgentInfo[] }) {
-  const task = claimedTask(event.text);
-  if (!task || event.sender === "human") return null;
+  const claims = useMemo(() => extractTaskClaims(event.text, event.sender, agents), [event.text, event.sender, agents]);
+  if (!claims.length) return null;
   return (
-    <div className="task-claim" style={{ borderColor: taskColor(event.sender) }}>
-      <span className="task-dot" style={{ backgroundColor: taskColor(event.sender) }} />
-      <b>{senderName(event.sender, agents)}</b> is taking: {task}
+    <div className="task-claims-container">
+      {claims.map((c, idx) => (
+        <div key={idx} className="task-claim-italic" style={{ color: taskColor(c.agent) }}>
+          <span className="task-dot" style={{ backgroundColor: taskColor(c.agent) }} />
+          <em>
+            ↳ <b>{senderName(c.agent, agents)}</b> {c.action}: {c.task} <small className="task-ts">({time(event.ts)})</small>
+          </em>
+        </div>
+      ))}
     </div>
   );
 }
@@ -227,6 +300,11 @@ function decisionText(request: string, approved: boolean): string {
   return `${approved ? "Approved" : "Denied"}: ${request.trim()}`;
 }
 
+/** A free-form answer from the response field in a REQUEST card. */
+function responseText(request: string, response: string): string {
+  return `Response to request: ${request.trim()}\n${response.trim()}`;
+}
+
 function requestKey(eventId: string, line: number): string {
   return `${eventId}:${line}`;
 }
@@ -235,8 +313,10 @@ function requestKey(eventId: string, line: number): string {
  * Match each human button answer to the request cards that existed when it was sent.
  * Keeping event-specific keys means a later request with the same wording still gets fresh buttons.
  */
-function answeredRequests(events: ChatEvent[]): Map<string, boolean> {
-  const out = new Map<string, boolean>();
+type RequestResolution = "approved" | "denied" | "responded";
+
+function answeredRequests(events: ChatEvent[]): Map<string, RequestResolution> {
+  const out = new Map<string, RequestResolution>();
   const waiting = new Map<string, string[]>();
   for (const e of events) {
     if (e.kind !== "message") continue;
@@ -248,19 +328,26 @@ function answeredRequests(events: ChatEvent[]): Map<string, boolean> {
       }
       continue;
     }
-    const answer = /^(Approved|Denied):\s*([\s\S]+)$/.exec(e.text.trim());
+    const answer = /^(Approved|Denied|Response to request):\s*([^\n]+)(?:\n[\s\S]*)?$/i.exec(e.text.trim());
     if (!answer) continue;
-    for (const key of waiting.get(answer[2].trim()) ?? []) out.set(key, answer[1] === "Approved");
-    waiting.delete(answer[2].trim());
+    const request = answer[2].trim();
+    const queued = waiting.get(request);
+    const key = queued?.shift();
+    if (key) {
+      const kind = answer[1].toLowerCase();
+      out.set(key, kind === "approved" ? "approved" : kind === "denied" ? "denied" : "responded");
+      if (!queued?.length) waiting.delete(request);
+    }
   }
   return out;
 }
 
 /** Requests from the AIs that haven't been approved or denied yet, oldest first. */
-function pendingRequests(events: ChatEvent[], answered: Map<string, boolean>): string[] {
+function pendingRequests(events: ChatEvent[], answered: Map<string, RequestResolution>, afterSeq: number | null): string[] {
+  if (afterSeq === null) return [];
   const out: string[] = [];
   for (const e of events) {
-    if (e.kind !== "message" || e.sender === "human") continue;
+    if (e.seq <= afterSeq || e.kind !== "message" || e.sender === "human") continue;
     for (const [line, text] of e.text.split("\n").entries()) {
       if (!/^\s*REQUEST:\s*\S/i.test(text)) continue;
       const key = requestKey(e.id, line);
@@ -275,9 +362,10 @@ function requestElementId(key: string): string {
 }
 
 type Decide = (key: string, request: string, requester: string, approved: boolean) => void;
+type Respond = (key: string, request: string, requester: string, response: string) => Promise<void>;
 
-/** Message text with REQUEST: lines shown as red request callouts, with Approve/Deny buttons when `decide` is given. */
-function MessageBody({ event, answered, deciding, decide }: { event: ChatEvent; answered?: Map<string, boolean>; deciding?: Set<string>; decide?: Decide }) {
+/** Message text with REQUEST: lines shown as red request callouts, with decision controls when supplied. */
+function MessageBody({ event, answered, deciding, decide, respond }: { event: ChatEvent; answered?: Map<string, RequestResolution>; deciding?: Set<string>; decide?: Decide; respond?: Respond }) {
   const text = event.text;
   const lines = text.split("\n");
   return (
@@ -302,6 +390,7 @@ function MessageBody({ event, answered, deciding, decide }: { event: ChatEvent; 
                   answer={answered?.get(key)}
                   pending={deciding?.has(key)}
                   onDecide={(ok) => decide(key, m[1], event.sender, ok)}
+                  onRespond={(response) => respond?.(key, m[1], event.sender, response) ?? Promise.resolve()}
                 />
               )}
             </div>
@@ -313,10 +402,21 @@ function MessageBody({ event, answered, deciding, decide }: { event: ChatEvent; 
   );
 }
 
-function RequestActions({ answer, pending, onDecide }: { answer?: boolean; pending?: boolean; onDecide: (approved: boolean) => void }) {
+function RequestActions({ answer, pending, onDecide, onRespond }: { answer?: RequestResolution; pending?: boolean; onDecide: (approved: boolean) => void; onRespond: (response: string) => Promise<void> }) {
+  const [response, setResponse] = useState("");
   if (answer !== undefined) {
-    return <span className={`request-answer ${answer ? "approved" : "denied"}`} aria-live="polite">{answer ? "✓ Approved" : "✕ Denied"}</span>;
+    const label = answer === "approved" ? "✓ Approved" : answer === "denied" ? "✕ Denied" : "↪ Responded";
+    return <span className={`request-answer ${answer}`} aria-live="polite">{label}</span>;
   }
+  const submitResponse = async () => {
+    if (!response.trim() || pending) return;
+    try {
+      await onRespond(response.trim());
+      setResponse("");
+    } catch {
+      // The parent keeps the text in place and shows the send error above the composer.
+    }
+  };
   return (
     <span className="request-actions">
       <button title="Say yes: posts “Approved: …” to the council so the AI that asked can go ahead" type="button" className="btn small-btn approve" disabled={pending} onClick={() => onDecide(true)} aria-label="Approve this request">
@@ -325,6 +425,24 @@ function RequestActions({ answer, pending, onDecide }: { answer?: boolean; pendi
       <button title="Say no: posts “Denied: …” to the council so the AI that asked won't do it" type="button" className="btn small-btn deny" disabled={pending} onClick={() => onDecide(false)} aria-label="Deny this request">
         Deny
       </button>
+      <span className="request-response">
+        <input
+          value={response}
+          disabled={pending}
+          onChange={(event) => setResponse(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void submitResponse();
+            }
+          }}
+          placeholder="Write a response…"
+          aria-label="Write a custom response to this request"
+        />
+        <button title="Send this response to the AI that asked" type="button" className="btn small-btn respond" disabled={pending || !response.trim()} onClick={() => void submitResponse()}>
+          Respond
+        </button>
+      </span>
     </span>
   );
 }
@@ -663,6 +781,7 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [agentsRefreshing, setAgentsRefreshing] = useState(false);
   const [decidingRequests, setDecidingRequests] = useState<Set<string>>(() => new Set());
+  const [requestFloor, setRequestFloor] = useState<number | null>(null);
   const currentRef = useRef<string | null>(null);
   const agentRefreshRef = useRef<Promise<void> | null>(null);
   const usageRefreshRef = useRef(false);
@@ -886,7 +1005,13 @@ export default function App() {
     if (!current) return;
     setTurn(null);
     setActivities({});
-    api.load(current).then(setEvents).catch((e) => setError(String(e)));
+    setRequestFloor(null);
+    api.load(current)
+      .then((loaded) => {
+        setEvents(loaded);
+        setRequestFloor(initializeRequestFloor(current, loaded));
+      })
+      .catch((e) => setError(String(e)));
     api.running().then((ids) => {
       if (ids.includes(current)) setTurn(IN_APP ? { conversation: current, state: "running", agent: null, round: 0, rounds: 0 } : demoTurn);
     });
@@ -1109,8 +1234,30 @@ export default function App() {
       });
     }
   }
+
+  // A custom response resolves the request just like Approve/Deny, while preserving the exact
+  // question and response in the append-only conversation history.
+  async function respondToRequest(key: string, request: string, requester: string, response: string) {
+    if (!current || !response.trim()) return;
+    setError(null);
+    setDecidingRequests((pending) => new Set(pending).add(key));
+    try {
+      const selected = targets.filter((t) => members.some((m) => m.id === t));
+      const to = members.some((m) => m.id === requester) ? [requester] : selected;
+      await api.send(current, responseText(request, response), to, discuss ? rounds : 1);
+    } catch (e) {
+      setError(String(e));
+      throw e;
+    } finally {
+      setDecidingRequests((pending) => {
+        const next = new Set(pending);
+        next.delete(key);
+        return next;
+      });
+    }
+  }
   const answered = useMemo(() => answeredRequests(events), [events]);
-  const unanswered = useMemo(() => pendingRequests(events, answered), [events, answered]);
+  const unanswered = useMemo(() => pendingRequests(events, answered, requestFloor), [events, answered, requestFloor]);
   const typedActivity = TYPED_THEMES.has(prefs.theme);
 
   // Scroll to the oldest request still waiting for Approve or Deny, and flash it.
@@ -1669,7 +1816,7 @@ export default function App() {
                     ))}
                   </div>
                 )}
-                <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={e.sender === "human" ? undefined : decide} />
+                <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={e.sender === "human" ? undefined : decide} respond={e.sender === "human" ? undefined : respondToRequest} />
                 {e.sender === "human" && e.id === latestHumanMessage?.id && busy && (
                   <ActiveTasks ids={thinkingIds} objective={taskObjective(e.text)} agents={agents} activities={activities} typed={typedActivity} />
                 )}
@@ -1719,16 +1866,15 @@ export default function App() {
               </label>
             ))}
             <span className="spacer" />
-            {unanswered.length > 0 && (
-              <button
-                type="button"
-                className="btn small respond-request"
-                onClick={jumpToRequest}
-                title={`Scroll to the oldest request still waiting for Approve or Deny${unanswered.length > 1 ? ` (${unanswered.length} waiting)` : ""}`}
-              >
-                Respond to request{unanswered.length > 1 ? ` · ${unanswered.length}` : ""}
-              </button>
-            )}
+            <button
+              type="button"
+              className="btn small respond-request"
+              disabled={unanswered.length === 0}
+              onClick={jumpToRequest}
+              title={unanswered.length ? `Scroll to the oldest request still waiting for a response${unanswered.length > 1 ? ` (${unanswered.length} waiting)` : ""}` : "No unanswered requests"}
+            >
+              Respond to request{unanswered.length > 0 ? ` · ${unanswered.length}` : ""}
+            </button>
             {stagedUi && !staged && (
               <button
                 className="btn small update-now"
