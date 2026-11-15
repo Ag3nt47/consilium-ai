@@ -22,6 +22,7 @@ test("identifies Consilium temporary artifacts while preserving unrelated files"
 
     // Make timestamps old so idle check passes
     const oldTime = (Date.now() - 3600 * 1000) / 1000;
+    utimesSync(join(fakeTmp, "c0311", "test.txt"), oldTime, oldTime);
     utimesSync(join(fakeTmp, "c0311"), oldTime, oldTime);
     utimesSync(join(fakeTmp, "stage0311.log"), oldTime, oldTime);
     utimesSync(join(fakeTmp, "stage-ui-after0311.sh"), oldTime, oldTime);
@@ -40,6 +41,8 @@ test("identifies Consilium temporary artifacts while preserving unrelated files"
       customTmpDirs: [fakeTmp],
       customDataDir: fakeData,
       customRootDir: fakeRoot,
+      buildActive: false,
+      turnActive: false,
     });
 
     const targetPaths = targets.map((t) => t.path);
@@ -73,6 +76,8 @@ test("respects minimum idle age unless force is passed", () => {
       customRootDir: fakeTmp,
       force: false,
       minAgeMs: 60 * 1000,
+      buildActive: false,
+      turnActive: false,
     });
     assert.ok(!freshTargets.some((t) => t.path === activeFile));
 
@@ -82,6 +87,8 @@ test("respects minimum idle age unless force is passed", () => {
       customDataDir: fakeTmp,
       customRootDir: fakeTmp,
       force: true,
+      buildActive: false,
+      turnActive: false,
     });
     assert.ok(forcedTargets.some((t) => t.path === activeFile));
   } finally {
@@ -101,6 +108,8 @@ test("dry-run reports targets without deleting them", () => {
       customTmpDirs: [fakeTmp],
       customDataDir: fakeTmp,
       customRootDir: fakeTmp,
+      buildActive: false,
+      turnActive: false,
     });
 
     assert.ok(existsSync(artifact), "File must still exist after dry-run");
@@ -124,6 +133,8 @@ test("runClean deletes matching artifacts and leaves unrelated files", () => {
       customTmpDirs: [fakeTmp],
       customDataDir: fakeTmp,
       customRootDir: fakeTmp,
+      buildActive: false,
+      turnActive: false,
     });
 
     assert.ok(!existsSync(artifact), "Matching artifact should be deleted");
@@ -131,5 +142,101 @@ test("runClean deletes matching artifacts and leaves unrelated files", () => {
     assert.ok(res.count >= 1);
   } finally {
     rmSync(fakeTmp, { recursive: true, force: true });
+  }
+});
+
+test("preserves live builds, AI workspaces, updates, and capacity locks", () => {
+  const fakeTmp = mkdtempSync(join(tmpdir(), "consilium-test-active-tmp-"));
+  const fakeData = mkdtempSync(join(tmpdir(), "consilium-test-active-data-"));
+  const fakeRoot = mkdtempSync(join(tmpdir(), "consilium-test-active-root-"));
+  try {
+    const buildDir = join(fakeTmp, "c0312");
+    const turnDir = join(fakeTmp, "consilium-11111111-1111-1111-1111-111111111111");
+    const updateTmp = join(fakeData, "update", "next.tmp");
+    mkdirSync(buildDir);
+    mkdirSync(turnDir);
+    mkdirSync(updateTmp, { recursive: true });
+    mkdirSync(join(fakeData, "agent-slots"));
+    writeFileSync(join(fakeData, "agent-slots", "0"), "capacity lock");
+    mkdirSync(join(fakeRoot, "dist"));
+    const old = (Date.now() - 2 * 60 * 60 * 1000) / 1000;
+    for (const path of [buildDir, turnDir, updateTmp]) utimesSync(path, old, old);
+
+    const targets = findCleanableTargets({
+      all: true,
+      customTmpDirs: [fakeTmp],
+      customDataDir: fakeData,
+      customRootDir: fakeRoot,
+      buildActive: true,
+      turnActive: true,
+    });
+    const paths = targets.map((item) => item.path);
+    assert.ok(!paths.includes(buildDir));
+    assert.ok(!paths.includes(turnDir));
+    assert.ok(!paths.includes(updateTmp));
+    assert.ok(!paths.includes(join(fakeData, "agent-slots", "0")));
+    assert.ok(!paths.includes(join(fakeRoot, "dist")));
+  } finally {
+    rmSync(fakeTmp, { recursive: true, force: true });
+    rmSync(fakeData, { recursive: true, force: true });
+    rmSync(fakeRoot, { recursive: true, force: true });
+  }
+});
+
+test("counts only successful deletions as reclaimed space", () => {
+  const fakeTmp = mkdtempSync(join(tmpdir(), "consilium-test-failure-tmp-"));
+  try {
+    const artifact = join(fakeTmp, "stage-failure.log");
+    writeFileSync(artifact, "still present");
+    const result = runClean({
+      force: true,
+      customTmpDirs: [fakeTmp],
+      customDataDir: fakeTmp,
+      customRootDir: fakeTmp,
+      buildActive: false,
+      turnActive: false,
+      remove: () => {
+        throw new Error("simulated failure");
+      },
+    });
+    assert.equal(result.count, 0);
+    assert.equal(result.totalBytes, 0);
+    assert.ok(existsSync(artifact));
+  } finally {
+    rmSync(fakeTmp, { recursive: true, force: true });
+  }
+});
+
+test("detects a real stage process without matching future shell text", () => {
+  const fakeTmp = mkdtempSync(join(tmpdir(), "consilium-test-process-tmp-"));
+  const fakeData = mkdtempSync(join(tmpdir(), "consilium-test-process-data-"));
+  const fakeRoot = mkdtempSync(join(tmpdir(), "consilium-test-process-root-"));
+  try {
+    const buildDir = join(fakeTmp, "c0312");
+    mkdirSync(buildDir);
+    const old = (Date.now() - 2 * 60 * 60 * 1000) / 1000;
+    utimesSync(buildDir, old, old);
+    const common = {
+      customTmpDirs: [fakeTmp],
+      customDataDir: fakeData,
+      customRootDir: fakeRoot,
+      turnActive: false,
+    };
+    assert.ok(
+      findCleanableTargets({
+        ...common,
+        customProcessList: "bash /bin/bash -lc 'npm run build later'",
+      }).some((item) => item.path === buildDir),
+    );
+    assert.ok(
+      !findCleanableTargets({
+        ...common,
+        customProcessList: "node /workspace/scripts/stage-update.mjs",
+      }).some((item) => item.path === buildDir),
+    );
+  } finally {
+    rmSync(fakeTmp, { recursive: true, force: true });
+    rmSync(fakeData, { recursive: true, force: true });
+    rmSync(fakeRoot, { recursive: true, force: true });
   }
 });

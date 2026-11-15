@@ -96,4 +96,4 @@ not complete the phase.
 | Adaptive support for older or weaker PCs | ✅ | Portable CPU/RAM profile caps local AI processes across the app and terminal; high pressure reduces polling and GPU-heavy visual effects |
 | Crash-safe fail-forward behavior | ✅ | OS-held AI slots release after crashes; a broken capacity gate does not lock the user out; Stop remains cancellation-aware while queued |
 | Clear Netrunner REQUEST callouts | ✅ | Opaque dark-red panel, brighter border/text and unblurred action buttons |
-| Disk & temporary artifact cleanup script | ✅ | `scripts/clean.mjs` (`npm run clean`, `npm run clean:all`, `./scripts/clean.sh`) scrubs leftover build workspaces (`/tmp/c0*`), staging logs/scripts, test artifacts, stale locks, and cargo target caches with `--dry-run` and byte reclamation accounting |
+| Disk & temporary artifact cleanup script | ✅ | `scripts/clean.mjs` (`npm run clean`, `npm run clean:all`, `./scripts/clean.sh`) scrubs idle build workspaces, logs, test artifacts and optional caches with dry-run previews; live turns, builds, updates and capacity locks are preserved |

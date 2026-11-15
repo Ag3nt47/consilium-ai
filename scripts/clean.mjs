@@ -7,12 +7,13 @@
 //   node scripts/clean.mjs --all      Deep clean: includes src-tauri/target build cache and cached repos
 //   node scripts/clean.mjs --target   Cleans src-tauri/target Rust build cache
 //   node scripts/clean.mjs --repos    Cleans cached GitHub repo shallow clones
-//   node scripts/clean.mjs --force    Clean immediately without requiring minimum idle age
+//   node scripts/clean.mjs --force    Ignore minimum age; live turns and builds remain protected
 //   node scripts/clean.mjs --dry-run  Lists files and bytes to clean without deleting
 
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
@@ -38,38 +39,65 @@ const TEMP_FILE_PATTERNS = [
   /^reaper-\d+/,
 ];
 
-// Default idle age threshold (30 minutes) to avoid deleting active in-flight builds or tests.
-const DEFAULT_MIN_AGE_MS = 30 * 60 * 1000;
+// A full hour avoids mistaking a slow AI turn or release link for abandoned work.
+const DEFAULT_MIN_AGE_MS = 60 * 60 * 1000;
 
-function isPidAlive(pid) {
-  if (typeof pid !== "number" || Number.isNaN(pid) || pid <= 0) return false;
+function processList() {
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e && e.code === "EPERM";
+    if (OS === "win32") {
+      return execFileSync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.Name) $($_.CommandLine)\" }"],
+        { encoding: "utf8", timeout: 5000, windowsHide: true },
+      ).toLowerCase();
+    }
+    return execFileSync("ps", ["-A", "-o", "comm=", "-o", "args="], { encoding: "utf8", timeout: 5000 }).toLowerCase();
+  } catch {
+    return null;
   }
 }
 
-function getDirSize(path) {
+function activity(processes = processList()) {
+  // If process inspection fails, preserve anything that might be live.
+  if (processes === null) return { buildActive: true, turnActive: true };
+  const lines = processes.split(/\r?\n/).filter(Boolean);
+  const executable = (line) => line.trim().split(/\s+/, 1)[0].split(/[\\/]/).pop().replace(/\.exe$/i, "");
+  const buildActive = lines.some((line) => {
+    const exe = executable(line);
+    if (/^(cargo|rustc)$/.test(exe)) return true;
+    if (/^(bash|sh|zsh)$/.test(exe) && /stage[^\s]*\.sh/i.test(line)) return true;
+    if (!/^(node|npm|npx|tauri|vite|tsc)$/.test(exe)) return false;
+    return /tauri(\.exe)?\s+build|stage-(update|ui)(\.mjs|\.sh)?|vite(\.js)?\s+(build|dev)|tsc(\.js)?\s+--noemit/i.test(line);
+  });
+  const turnActive = lines.some((line) => /^(consilium|codex|claude|agy)$/.test(executable(line)));
+  return { buildActive, turnActive };
+}
+
+function inspectPath(path) {
   let bytes = 0;
+  let newestMtimeMs = 0;
   try {
     const st = statSync(path);
-    if (!st.isDirectory()) return st.size;
+    newestMtimeMs = st.mtimeMs;
+    if (!st.isDirectory()) return { bytes: st.size, newestMtimeMs };
     bytes += st.size;
     const entries = readdirSync(path, { withFileTypes: true });
     for (const entry of entries) {
       const full = join(path, entry.name);
       try {
         if (entry.isDirectory()) {
-          bytes += getDirSize(full);
+          const child = inspectPath(full);
+          bytes += child.bytes;
+          newestMtimeMs = Math.max(newestMtimeMs, child.newestMtimeMs);
         } else {
-          bytes += statSync(full).size;
+          const child = statSync(full);
+          bytes += child.size;
+          newestMtimeMs = Math.max(newestMtimeMs, child.mtimeMs);
         }
       } catch {}
     }
   } catch {}
-  return bytes;
+  return { bytes, newestMtimeMs };
 }
 
 function formatBytes(bytes) {
@@ -89,21 +117,22 @@ export function findCleanableTargets(opts = {}) {
     customTmpDirs = null,
     customDataDir = null,
     customRootDir = null,
+    nowMs = Date.now(),
   } = opts;
 
   const rootDir = customRootDir || ROOT;
   const dataDir = customDataDir || DATA;
   const targets = [];
-  const now = Date.now();
+  const detected = activity(opts.customProcessList);
+  const buildActive = opts.buildActive ?? detected.buildActive;
+  const turnActive = opts.turnActive ?? detected.turnActive;
 
-  const isIdle = (fullPath) => {
-    if (force || minAgeMs <= 0) return true;
-    try {
-      const st = statSync(fullPath);
-      return now - st.mtimeMs >= minAgeMs;
-    } catch {
-      return false;
-    }
+  const add = (path, category, { aged = false, buildSensitive = false, turnSensitive = false } = {}) => {
+    const info = inspectPath(path);
+    if (aged && !force && minAgeMs > 0 && nowMs - info.newestMtimeMs < minAgeMs) return;
+    if (buildSensitive && buildActive) return;
+    if (turnSensitive && turnActive) return;
+    targets.push({ path, category, bytes: info.bytes });
   };
 
   // 1. Temporary directories (system tmpdir and /tmp on Unix).
@@ -115,9 +144,11 @@ export function findCleanableTargets(opts = {}) {
       for (const name of entries) {
         if (TEMP_FILE_PATTERNS.some((re) => re.test(name))) {
           const full = join(dir, name);
-          if (isIdle(full)) {
-            targets.push({ path: full, category: "temporary artifact", bytes: getDirSize(full) });
-          }
+          add(full, "temporary artifact", {
+            aged: true,
+            buildSensitive: true,
+            turnSensitive: name.startsWith("consilium-"),
+          });
         }
       }
     } catch {}
@@ -132,28 +163,14 @@ export function findCleanableTargets(opts = {}) {
         for (const name of readdirSync(updateDir)) {
           if (name.endsWith(".tmp")) {
             const full = join(updateDir, name);
-            if (isIdle(full)) {
-              targets.push({ path: full, category: "interrupted update", bytes: getDirSize(full) });
-            }
+            add(full, "interrupted update", { aged: true, buildSensitive: true });
           }
         }
       } catch {}
     }
 
-    // Stale agent slots (dead PIDs)
-    const slotsDir = join(dataDir, "agent-slots");
-    if (existsSync(slotsDir)) {
-      try {
-        for (const name of readdirSync(slotsDir)) {
-          const match = name.match(/(\d+)/);
-          const pid = match ? Number.parseInt(match[1], 10) : null;
-          if (pid && !isPidAlive(pid)) {
-            const full = join(slotsDir, name);
-            targets.push({ path: full, category: "stale slot lock", bytes: getDirSize(full) });
-          }
-        }
-      } catch {}
-    }
+    // Never clean agent-slots here. Their numeric names are capacity slot IDs,
+    // not PIDs, and the engine already recovers abandoned file locks safely.
 
     // Cached ingested repositories (cleaned when --all or --repos is requested)
     if (all || repos) {
@@ -162,9 +179,7 @@ export function findCleanableTargets(opts = {}) {
         try {
           for (const name of readdirSync(reposDir)) {
             const full = join(reposDir, name);
-            if (isIdle(full)) {
-              targets.push({ path: full, category: "cached ingested repo", bytes: getDirSize(full) });
-            }
+            add(full, "cached ingested repo", { aged: true, turnSensitive: true });
           }
         } catch {}
       }
@@ -174,19 +189,19 @@ export function findCleanableTargets(opts = {}) {
   // 3. Project repository artifacts.
   const distDir = join(rootDir, "dist");
   if (existsSync(distDir)) {
-    targets.push({ path: distDir, category: "frontend build (dist/)", bytes: getDirSize(distDir) });
+    add(distDir, "frontend build (dist/)", { buildSensitive: true });
   }
 
   const viteCache = join(rootDir, "node_modules", ".vite");
   if (existsSync(viteCache)) {
-    targets.push({ path: viteCache, category: "vite cache", bytes: getDirSize(viteCache) });
+    add(viteCache, "vite cache", { buildSensitive: true });
   }
 
   // Cargo target directory (cleaned when --all or --target is specified).
   if (all || target) {
     const targetDir = join(rootDir, "src-tauri", "target");
     if (existsSync(targetDir)) {
-      targets.push({ path: targetDir, category: "Rust build cache (target/)", bytes: getDirSize(targetDir) });
+      add(targetDir, "Rust build cache (target/)", { buildSensitive: true });
     }
   }
 
@@ -196,17 +211,19 @@ export function findCleanableTargets(opts = {}) {
 export function runClean(opts = {}) {
   const { dryRun = false } = opts;
   const targets = findCleanableTargets(opts);
-  let totalBytes = 0;
+  const cleanableBytes = targets.reduce((sum, item) => sum + item.bytes, 0);
+  let reclaimedBytes = 0;
   let cleanedCount = 0;
 
   for (const item of targets) {
-    totalBytes += item.bytes;
     if (dryRun) {
       console.log(`[dry-run] Would remove: ${item.path} (${item.category}, ${formatBytes(item.bytes)})`);
     } else {
       try {
-        rmSync(item.path, { recursive: true, force: true });
+        (opts.remove || rmSync)(item.path, { recursive: true, force: true });
+        if (existsSync(item.path)) throw new Error("path still exists after removal");
         cleanedCount++;
+        reclaimedBytes += item.bytes;
         console.log(`Removed: ${item.path} (${item.category}, ${formatBytes(item.bytes)})`);
       } catch (err) {
         console.warn(`Could not remove ${item.path}: ${err.message}`);
@@ -214,9 +231,12 @@ export function runClean(opts = {}) {
     }
   }
 
-  const prefix = dryRun ? "[dry-run] Total cleanable:" : "Clean complete:";
-  console.log(`${prefix} ${cleanedCount || targets.length} items, reclaimed ${formatBytes(totalBytes)}.`);
-  return { count: cleanedCount, totalBytes, targets };
+  if (dryRun) {
+    console.log(`[dry-run] Total cleanable: ${targets.length} items, ${formatBytes(cleanableBytes)}.`);
+    return { count: targets.length, totalBytes: cleanableBytes, targets };
+  }
+  console.log(`Clean complete: ${cleanedCount} items, reclaimed ${formatBytes(reclaimedBytes)}.`);
+  return { count: cleanedCount, totalBytes: reclaimedBytes, targets };
 }
 
 // Direct CLI invocation
@@ -230,8 +250,11 @@ Options:
   --all       Deep clean: temp artifacts, dist/, cached repos, and src-tauri/target
   --target    Clean src-tauri/target Rust build directory
   --repos     Clean cached shallow repo clones in Consilium data folder
-  --force     Clean immediately without requiring 30-minute idle age
+  --force     Ignore the one-hour age check (active work is still preserved)
   -h, --help  Show this help message
+
+Active AI turns, builds, staged updates, and agent capacity locks are always
+preserved. If the process table cannot be read, cleanup fails safe.
 `);
     process.exit(0);
   }
