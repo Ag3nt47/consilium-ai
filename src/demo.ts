@@ -57,7 +57,14 @@ const conversations: Conversation[] = [
 ];
 
 let seq = 0;
-const ev = (sender: string, text: string, minutes: number, kind: ChatEvent["kind"] = "message", to: string[] = []): ChatEvent => ({
+const ev = (
+  sender: string,
+  text: string,
+  minutes: number,
+  kind: ChatEvent["kind"] = "message",
+  to: string[] = [],
+  usage?: ChatEvent["usage"],
+): ChatEvent => ({
   id: `demo-${++seq}`,
   seq,
   ts: T0 + minutes * 60e3,
@@ -68,6 +75,7 @@ const ev = (sender: string, text: string, minutes: number, kind: ChatEvent["kind
   text,
   requests: [...text.matchAll(/^\s*REQUEST:\s*(.+)$/gim)].map((m) => m[1]),
   add_ai: [],
+  usage: usage ?? null,
 });
 
 const script: ChatEvent[] = [
@@ -82,16 +90,25 @@ const script: ChatEvent[] = [
     "gpt",
     "Start at the CDN. Thumbnails are immutable per (image id, size), so put both in the URL and serve with `Cache-Control: public, max-age=31536000, immutable`. Hit rates above 95% are typical, and that removes most renders outright.\n\nRedis only helps with the misses, and it adds a second invalidation path to keep correct.",
     1,
+    "message",
+    [],
+    { input_tokens: 1420, output_tokens: 310, cache_read_tokens: 0, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 1730 },
   ),
   ev(
     "claude",
     "Agree on the CDN first, with one correction: the misses are exactly the 900 ms requests users notice, and a cold CDN after a deploy or purge will send all of them to the renderer at once. I'd add request coalescing in the service (one render per key in flight) rather than Redis. It's about 30 lines and has no new infrastructure.\n\n@gpt: do you see a case where Redis still earns its keep here?",
     3,
+    "message",
+    [],
+    { input_tokens: 1850, output_tokens: 420, cache_read_tokens: 1200, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 2270 },
   ),
   ev(
     "gpt",
     "Only if renders are shared across many service instances and the CDN miss rate stays high, and neither is true from what we've seen. Coalescing covers the thundering-herd case. I withdraw the Redis suggestion.\n\nREQUEST: Confirm thumbnails never change for a given image id, or tell us how edits are versioned.",
     5,
+    "message",
+    [],
+    { input_tokens: 2100, output_tokens: 380, cache_read_tokens: 0, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 2480 },
   ),
   ev("human", "Discussion paused: a question for you is waiting.", 5.2, "system"),
 ];
@@ -120,7 +137,16 @@ export const demoApi = {
   list: async () => (demoStep === 0 ? [{ ...conversations[0], title: "New conversation" }, ...conversations.slice(1)] : conversations),
   create: async () => conversations[0],
   load: async () => state.events,
-  tokenUsage: async () => ({ conversation: {}, today: {} }),
+  tokenUsage: async () => ({
+    conversation: {
+      gpt: { input_tokens: 3520, output_tokens: 690, cache_read_tokens: 0, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 4210 },
+      claude: { input_tokens: 1850, output_tokens: 420, cache_read_tokens: 1200, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 2270 },
+    },
+    today: {
+      gpt: { input_tokens: 12400, output_tokens: 2950, cache_read_tokens: 0, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 15350 },
+      claude: { input_tokens: 18100, output_tokens: 3800, cache_read_tokens: 7500, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 21900 },
+    },
+  }),
   rename: async () => conversations[0],
   remove: async () => undefined,
   exportMarkdown: async () => "",

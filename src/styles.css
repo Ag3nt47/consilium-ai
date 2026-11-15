@@ -586,6 +586,49 @@ code {
   margin-left: auto;
 }
 
+.tokens-tag {
+  color: var(--muted);
+  font-size: 11px;
+  background: color-mix(in srgb, var(--muted) 16%, transparent);
+  padding: 1px 6px;
+  border-radius: 99px;
+  cursor: help;
+  font-family: var(--code-font);
+}
+
+.usage-report {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-top: 4px;
+}
+
+.usage-table th,
+.usage-table td {
+  padding: 6px 10px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-table th:first-child,
+.usage-table td:first-child {
+  text-align: left;
+}
+
+.usage-table th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
 .body {
   white-space: pre-wrap;
   word-wrap: break-word;

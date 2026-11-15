@@ -1,7 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { ACCESS_LEVELS, api, FORECAST_SITE, IN_APP, onEvent, onTurn, senderName, type Access, type AgentInfo, type CheckResult, type CliInstall, type Council, type ChatEvent, type Conversation, type ResetForecast, type TurnState, type UsageWindow, type Attachment } from "./api";
+import {
+  ACCESS_LEVELS,
+  api,
+  FORECAST_SITE,
+  IN_APP,
+  onEvent,
+  onTurn,
+  senderName,
+  type Access,
+  type AgentInfo,
+  type Attachment,
+  type CheckResult,
+  type CliInstall,
+  type Council,
+  type ChatEvent,
+  type Conversation,
+  type ResetForecast,
+  type TokenUsageReport,
+  type TurnState,
+  type UsageWindow,
+} from "./api";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
@@ -56,6 +76,12 @@ async function copyText(text: string) {
 
 function time(ts: number) {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "k";
+  return n.toLocaleString();
 }
 
 /** A line of text with `inline code` spans rendered as code. */
@@ -256,6 +282,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(!IN_APP && demoSettings);
   const [showAddAi, setShowAddAi] = useState(!IN_APP && demoAddAi);
+  const [showUsage, setShowUsage] = useState(false);
+  const [tokenReport, setTokenReport] = useState<TokenUsageReport | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
   const [checks, setChecks] = useState<Record<string, CheckResult | "running">>({});
   const [council, setCouncil] = useState<Council | null>(null);
   const [memoryText, setMemoryText] = useState("");
@@ -322,6 +351,29 @@ export default function App() {
     return list;
   }, []);
 
+  const loadTokenUsage = useCallback(async (convId?: string | null) => {
+    const id = convId ?? currentRef.current;
+    if (!id) {
+      setTokenReport(null);
+      return;
+    }
+    setUsageLoading(true);
+    try {
+      const dayStart = new Date().setHours(0, 0, 0, 0);
+      const report = await api.tokenUsage(id, dayStart);
+      setTokenReport(report);
+    } catch {
+      /* ignore */
+    } finally {
+      setUsageLoading(false);
+    }
+  }, []);
+
+  const openUsage = useCallback(() => {
+    setShowUsage(true);
+    loadTokenUsage();
+  }, [loadTokenUsage]);
+
   // Startup: agents, conversations (creating a first one), live events, update check.
   useEffect(() => {
     refreshAgents();
@@ -340,7 +392,10 @@ export default function App() {
     });
     const un2 = onTurn((t) => {
       if (t.conversation === currentRef.current) setTurn(t.state === "running" ? t : null);
-      if (t.state === "idle") refreshAgents();
+      if (t.state === "idle") {
+        refreshAgents();
+        loadTokenUsage();
+      }
     });
     // Coming back to the window (for example after signing in from the Setup terminal) re-checks
     // the AIs, at most once every 10 seconds.
@@ -375,6 +430,10 @@ export default function App() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: prefs.effects ? "smooth" : "auto" });
   }, [events, turn, prefs.effects]);
+
+  useEffect(() => {
+    if (showUsage) loadTokenUsage(current);
+  }, [showUsage, current, loadTokenUsage]);
 
   const meta = conversations.find((c) => c.id === current);
   const busy = turn !== null;
@@ -766,6 +825,13 @@ export default function App() {
               </button>
               <button
                 className="link"
+                onClick={openUsage}
+                title="Show token counts for this conversation and today"
+              >
+                usage
+              </button>
+              <button
+                className="link"
                 onClick={runSelfCheck}
                 disabled={Object.values(checks).includes("running")}
                 title="Send every AI a one-word test message and show who answers (uses a little of each AI's allowance)"
@@ -886,6 +952,14 @@ export default function App() {
                     <span className="to">→ {e.to.map((t) => senderName(t, agents)).join(", ")}</span>
                   )}
                   <span className="when">{time(e.ts)}</span>
+                  {e.usage && e.usage.total_tokens > 0 && (
+                    <span
+                      className="tokens-tag"
+                      title={`Turn usage:\n• Total: ${e.usage.total_tokens.toLocaleString()}\n• Input: ${e.usage.input_tokens.toLocaleString()}\n• Output: ${e.usage.output_tokens.toLocaleString()}${e.usage.thinking_tokens ? `\n• Thinking: ${e.usage.thinking_tokens.toLocaleString()}` : ""}${e.usage.cache_read_tokens ? `\n• Cache read: ${e.usage.cache_read_tokens.toLocaleString()}` : ""}`}
+                    >
+                      {formatTokens(e.usage.total_tokens)} tokens
+                    </span>
+                  )}
                 </div>
                 {e.attachments && e.attachments.length > 0 && (
                   <div className="attachments">
@@ -1226,6 +1300,94 @@ export default function App() {
                 {agentsRefreshing ? "Checking…" : "Check again"}
               </button>
               <button className="btn primary" onClick={() => setShowAddAi(false)}>
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showUsage && (
+        <div className="modal-backdrop" onClick={() => setShowUsage(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Token Usage</h2>
+            <p className="muted small">
+              Provider-reported token counts recorded from CLI outputs (Codex, Claude Code, Antigravity) for each turn.
+            </p>
+            {usageLoading ? (
+              <div className="muted small">Loading token usage…</div>
+            ) : tokenReport ? (
+              <div className="usage-report">
+                <div className="section-label">This conversation</div>
+                {Object.keys(tokenReport.conversation).length === 0 ? (
+                  <p className="muted small">No tokens recorded yet in this conversation.</p>
+                ) : (
+                  <table className="usage-table">
+                    <thead>
+                      <tr>
+                        <th>AI</th>
+                        <th>Input</th>
+                        <th>Output</th>
+                        <th>Thinking</th>
+                        <th>Cache</th>
+                        <th>Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {members.map((m) => {
+                        const u = tokenReport.conversation[m.id];
+                        if (!u) return null;
+                        return (
+                          <tr key={m.id} className={`agent-${m.id}`}>
+                            <td><span className="agent-name">{m.name}</span></td>
+                            <td>{u.input_tokens.toLocaleString()}</td>
+                            <td>{u.output_tokens.toLocaleString()}</td>
+                            <td>{u.thinking_tokens ? u.thinking_tokens.toLocaleString() : "—"}</td>
+                            <td>{u.cache_read_tokens ? u.cache_read_tokens.toLocaleString() : "—"}</td>
+                            <td><b>{u.total_tokens.toLocaleString()}</b></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+
+                <div className="section-label" style={{ marginTop: 16 }}>Today (all conversations)</div>
+                {Object.keys(tokenReport.today).length === 0 ? (
+                  <p className="muted small">No tokens recorded today.</p>
+                ) : (
+                  <table className="usage-table">
+                    <thead>
+                      <tr>
+                        <th>AI</th>
+                        <th>Input</th>
+                        <th>Output</th>
+                        <th>Thinking</th>
+                        <th>Cache</th>
+                        <th>Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {members.map((m) => {
+                        const u = tokenReport.today[m.id];
+                        if (!u) return null;
+                        return (
+                          <tr key={m.id} className={`agent-${m.id}`}>
+                            <td><span className="agent-name">{m.name}</span></td>
+                            <td>{u.input_tokens.toLocaleString()}</td>
+                            <td>{u.output_tokens.toLocaleString()}</td>
+                            <td>{u.thinking_tokens ? u.thinking_tokens.toLocaleString() : "—"}</td>
+                            <td>{u.cache_read_tokens ? u.cache_read_tokens.toLocaleString() : "—"}</td>
+                            <td><b>{u.total_tokens.toLocaleString()}</b></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            ) : null}
+            <div className="row end">
+              <button className="btn primary" onClick={() => setShowUsage(false)}>
                 Done
               </button>
             </div>
