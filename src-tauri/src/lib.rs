@@ -458,6 +458,25 @@ fn set_api_key(agent: String, key: String) -> Result<(), String> {
     apiagent::set_key(a.id, &key)
 }
 
+/// Checks each third-party messaging connection (Signal for now) and reports whether it answers.
+#[tauri::command]
+async fn messaging_status() -> Vec<bridge::ConnectorStatus> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let cfg = bridge::BridgeConfig::load(&bridge::config_path(None));
+        vec![match cfg {
+            Ok(c) => bridge::probe_signal(&c, std::time::Duration::from_secs(2)),
+            Err(_) => bridge::ConnectorStatus {
+                id: "signal",
+                name: "Signal",
+                state: "down",
+                detail: "messaging.json can't be read; fix or remove it".into(),
+            },
+        }]
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Samples host PC CPU and memory pressure (0-100%, green to red).
 #[tauri::command]
 fn system_pressure() -> pressure::SystemPressure {
@@ -540,6 +559,7 @@ pub fn run() {
             setup_agent,
             set_api_key,
             system_pressure,
+            messaging_status,
             update_available,
             update_now,
             ui_update_available,

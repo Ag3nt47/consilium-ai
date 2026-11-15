@@ -179,6 +179,8 @@ pub enum ResolvedSignalAction {
         request: String,
         formatted_message: String,
     },
+    /// An allowlisted local launcher trigger (terminal, vscode, dashboard).
+    Launch { target: String },
     /// A general user instruction or conversation prompt.
     Prompt { text: String },
 }
@@ -237,8 +239,92 @@ pub fn resolve_incoming_message(
         }
     }
 
+    // Check for launcher triggers: "action:launch:<target>" or "launch <target>"
+    if let Some(target) = trimmed.strip_prefix("action:launch:") {
+        let t = target.trim().to_ascii_lowercase();
+        if is_launch_target_allowed(&t) {
+            return ResolvedSignalAction::Launch { target: t };
+        }
+    }
+    if let Some(target) = trimmed.strip_prefix("launch ").or_else(|| trimmed.strip_prefix("Launch ")) {
+        let t = target.trim().to_ascii_lowercase();
+        if is_launch_target_allowed(&t) {
+            return ResolvedSignalAction::Launch { target: t };
+        }
+    }
+
     ResolvedSignalAction::Prompt {
         text: trimmed.to_string(),
+    }
+}
+
+/// Checks if a requested program launcher target is strictly in the local allowlist.
+pub fn is_launch_target_allowed(target: &str) -> bool {
+    matches!(target.trim().to_ascii_lowercase().as_str(), "terminal" | "vscode" | "code" | "dashboard")
+}
+
+/// Executes an allowlisted local developer tool or opens the dashboard directly without a shell.
+pub fn execute_launch_action(target: &str) -> Result<String, String> {
+    let t = target.trim().to_ascii_lowercase();
+    match t.as_str() {
+        "terminal" => {
+            #[cfg(target_os = "macos")]
+            {
+                std::process::Command::new("open")
+                    .arg("-a")
+                    .arg("Terminal")
+                    .spawn()
+                    .map_err(|e| format!("failed to launch Terminal: {e}"))?;
+                Ok("Launched Terminal".into())
+            }
+            #[cfg(target_os = "windows")]
+            {
+                std::process::Command::new("wt.exe")
+                    .spawn()
+                    .map_err(|e| format!("failed to launch Windows Terminal: {e}"))?;
+                Ok("Launched Windows Terminal".into())
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                std::process::Command::new("x-terminal-emulator")
+                    .spawn()
+                    .map_err(|e| format!("failed to launch terminal: {e}"))?;
+                Ok("Launched Terminal".into())
+            }
+        }
+        "vscode" | "code" => {
+            std::process::Command::new("code")
+                .spawn()
+                .map_err(|e| format!("failed to launch VS Code: {e}"))?;
+            Ok("Launched VS Code".into())
+        }
+        "dashboard" => {
+            #[cfg(target_os = "macos")]
+            {
+                std::process::Command::new("open")
+                    .arg("http://localhost:1420")
+                    .spawn()
+                    .map_err(|e| format!("failed to open dashboard: {e}"))?;
+                Ok("Opened dashboard".into())
+            }
+            #[cfg(target_os = "windows")]
+            {
+                std::process::Command::new("cmd")
+                    .args(["/C", "start", "http://localhost:1420"])
+                    .spawn()
+                    .map_err(|e| format!("failed to open dashboard: {e}"))?;
+                Ok("Opened dashboard".into())
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                std::process::Command::new("xdg-open")
+                    .arg("http://localhost:1420")
+                    .spawn()
+                    .map_err(|e| format!("failed to open dashboard: {e}"))?;
+                Ok("Opened dashboard".into())
+            }
+        }
+        _ => Err(format!("target '{target}' is not in the launch allowlist (allowed: terminal, vscode, dashboard)")),
     }
 }
 
@@ -265,9 +351,138 @@ pub fn config_path(base_dir: Option<&Path>) -> PathBuf {
     }
 }
 
+/// Live state of one third-party messaging connection, shown as a check or a cross in the top bar.
+/// `detail` never contains the linked phone number or account identifiers.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ConnectorStatus {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// "off" (not set up or switched off), "ok" (answered just now) or "down" (set up but not answering).
+    pub state: &'static str,
+    pub detail: String,
+}
+
+const PROBE_ID: &str = "consilium-probe";
+
+/// Asks the local signal-cli daemon for its version over JSON-RPC. A reply proves the daemon is
+/// running and reachable; anything else, or a non-loopback endpoint, reports "down".
+pub fn probe_signal(cfg: &BridgeConfig, timeout: std::time::Duration) -> ConnectorStatus {
+    let status = |state, detail: String| ConnectorStatus { id: "signal", name: "Signal", state, detail };
+    if !cfg.enabled {
+        return status("off", "Signal isn't set up. Turn it on in messaging.json.".into());
+    }
+    if let Err(e) = cfg.validate_endpoint() {
+        return status("down", e);
+    }
+    match ask_version(cfg.endpoint.trim(), timeout) {
+        Ok(v) => status("ok", format!("Connected to signal-cli {v} on this computer")),
+        Err(e) => status("down", format!("signal-cli isn't answering: {e}")),
+    }
+}
+
+fn ask_version(endpoint: &str, timeout: std::time::Duration) -> Result<String, String> {
+    #[cfg(unix)]
+    if let Some(path) = endpoint.strip_prefix("unix:").or(endpoint.starts_with('/').then_some(endpoint)) {
+        let s = std::os::unix::net::UnixStream::connect(path).map_err(|e| e.to_string())?;
+        s.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+        s.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+        return exchange(s);
+    }
+    let raw = endpoint
+        .strip_prefix("tcp://")
+        .or_else(|| endpoint.strip_prefix("http://"))
+        .unwrap_or(endpoint);
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<SocketAddr> = raw.to_socket_addrs().map_err(|e| e.to_string())?.collect();
+    // validate_loopback accepted the name; re-check what it resolved to before connecting.
+    let addr = addrs
+        .into_iter()
+        .find(|a| a.ip().is_loopback())
+        .ok_or("endpoint doesn't resolve to this computer")?;
+    let s = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    s.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    exchange(s)
+}
+
+/// Sends one version request and reads lines until its answer, skipping any messages the
+/// daemon pushes in between. Bounded so a chatty or broken daemon can't hold the check.
+fn exchange<S: std::io::Read + std::io::Write>(mut s: S) -> Result<String, String> {
+    use std::io::BufRead;
+    let req = format!("{{\"jsonrpc\":\"2.0\",\"method\":\"version\",\"id\":\"{PROBE_ID}\"}}\n");
+    s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    s.flush().map_err(|e| e.to_string())?;
+    let mut reader = std::io::BufReader::new(std::io::Read::take(s, 256 * 1024));
+    let mut line = String::new();
+    for _ in 0..50 {
+        line.clear();
+        if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+            return Err("connection closed".into());
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if v.get("id").and_then(|i| i.as_str()) != Some(PROBE_ID) {
+            continue;
+        }
+        if let Some(r) = v.get("result") {
+            let ver = r.get("version").and_then(|x| x.as_str()).unwrap_or("");
+            let ver: String = ver.chars().filter(|c| c.is_ascii_alphanumeric() || ".-+".contains(*c)).take(32).collect();
+            return Ok(if ver.is_empty() { "(version unknown)".into() } else { ver });
+        }
+        return Err("it returned an error".into());
+    }
+    Err("no answer to the version request".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn enabled_at(endpoint: String) -> BridgeConfig {
+        BridgeConfig { enabled: true, endpoint, ..BridgeConfig::default() }
+    }
+
+    #[test]
+    fn probe_reports_off_when_not_set_up() {
+        let st = probe_signal(&BridgeConfig::default(), std::time::Duration::from_millis(200));
+        assert_eq!(st.state, "off");
+    }
+
+    #[test]
+    fn probe_refuses_a_remote_endpoint_without_connecting() {
+        let st = probe_signal(&enabled_at("203.0.113.9:7583".into()), std::time::Duration::from_millis(200));
+        assert_eq!(st.state, "down");
+    }
+
+    #[test]
+    fn probe_is_ok_when_the_daemon_answers_after_pushed_messages() {
+        use std::io::{BufRead, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let t = std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(c.try_clone().unwrap()).read_line(&mut line).unwrap();
+            assert!(line.contains("\"version\""));
+            c.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"receive\",\"params\":{}}\n").unwrap();
+            c.write_all(b"{\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"0.13.9\"},\"id\":\"consilium-probe\"}\n").unwrap();
+        });
+        let st = probe_signal(&enabled_at(addr.to_string()), std::time::Duration::from_secs(2));
+        t.join().unwrap();
+        assert_eq!(st.state, "ok", "{}", st.detail);
+        assert!(st.detail.contains("0.13.9"));
+    }
+
+    #[test]
+    fn probe_is_down_when_nothing_listens_or_the_daemon_hangs_up() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let t = std::thread::spawn(move || drop(l.accept().unwrap()));
+        let st = probe_signal(&enabled_at(addr.to_string()), std::time::Duration::from_secs(2));
+        t.join().unwrap();
+        assert_eq!(st.state, "down");
+        let st = probe_signal(&enabled_at(addr.to_string()), std::time::Duration::from_millis(300));
+        assert_eq!(st.state, "down");
+    }
 
     #[test]
     fn loopback_validator_accepts_valid_endpoints() {
@@ -357,5 +572,28 @@ mod tests {
         assert!(!formatted.contains("sk-ant-"));
         assert!(formatted.contains("[REDACTED Anthropic key]"));
         assert!(formatted.contains("⚠️ [Consilium REQUEST from Claude]"));
+    }
+
+    #[test]
+    fn launcher_recognizes_allowed_targets() {
+        assert!(is_launch_target_allowed("terminal"));
+        assert!(is_launch_target_allowed("vscode"));
+        assert!(is_launch_target_allowed("code"));
+        assert!(is_launch_target_allowed("dashboard"));
+        assert!(!is_launch_target_allowed("rm -rf /"));
+        assert!(!is_launch_target_allowed("sh"));
+    }
+
+    #[test]
+    fn resolve_incoming_message_parses_launch_action() {
+        let pending = vec![];
+        let res = resolve_incoming_message("action:launch:terminal", &pending, true);
+        assert_eq!(res, ResolvedSignalAction::Launch { target: "terminal".into() });
+
+        let res2 = resolve_incoming_message("launch vscode", &pending, true);
+        assert_eq!(res2, ResolvedSignalAction::Launch { target: "vscode".into() });
+
+        let res3 = resolve_incoming_message("launch evil_script", &pending, true);
+        assert_eq!(res3, ResolvedSignalAction::Prompt { text: "launch evil_script".into() });
     }
 }

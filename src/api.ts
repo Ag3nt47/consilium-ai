@@ -132,6 +132,14 @@ export interface CliInstall {
   note: string;
 }
 
+export interface ConnectorStatus {
+  id: string;
+  name: string;
+  /** "off" = not set up, "ok" = answered the last check, "down" = set up but not answering. */
+  state: "off" | "ok" | "down";
+  detail: string;
+}
+
 export interface SystemPressure {
   percent: number;
   cpu_percent: number;
@@ -242,6 +250,7 @@ const appApi = {
   setApiKey: (agent: string, key: string) => invoke<void>("set_api_key", { agent, key }),
   /** Samples host PC CPU and memory pressure (0-100%). */
   systemPressure: () => invoke<SystemPressure>("system_pressure"),
+  messagingStatus: () => invoke<ConnectorStatus[]>("messaging_status"),
   /** A newer build staged for Update Now, or null. */
   updateAvailable: () => invoke<StagedUpdate | null>("update_available"),
   /** Pauses the AIs, installs the staged build and relaunches; their turns resume afterwards. */

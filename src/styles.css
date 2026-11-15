@@ -2042,3 +2042,36 @@ button.attachment {
 .audit-request .audit-kind { color: #f2b84b; }
 .audit-update .audit-kind { color: #58a6ff; }
 .audit-phone .audit-kind { color: #bc8cff; }
+
+/* Messaging connection indicator, top left of the top bar */
+.msg-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  max-width: 160px;
+  padding: 2px 8px 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted, inherit);
+  font-size: 11px;
+  cursor: pointer;
+}
+.msg-indicator .msg-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: #6b7280;
+}
+.msg-indicator .msg-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-indicator.ok { border-color: rgba(34, 197, 94, 0.5); }
+.msg-indicator.ok .msg-mark { background: #16a34a; box-shadow: 0 0 6px rgba(34, 197, 94, 0.6); }
+.msg-indicator.down { border-color: rgba(239, 68, 68, 0.55); }
+.msg-indicator.down .msg-mark { background: #dc2626; box-shadow: 0 0 6px rgba(239, 68, 68, 0.6); }
+.msg-indicator.checking .msg-mark { opacity: 0.6; }

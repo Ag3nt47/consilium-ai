@@ -31,6 +31,7 @@ import { VoiceVisualizer } from "./visualizer";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { installHoverTips } from "./tooltip";
 import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
+import { MessagingIndicator } from "./messaging";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const THEMES = [
@@ -1365,6 +1366,7 @@ export default function App() {
         )}
         <header className="topbar">
           <div className="title-block">
+            <MessagingIndicator />
             <h1 onDoubleClick={renameCurrent} title="Double-click to rename">
               {meta?.title ?? "Consilium"}
             </h1>

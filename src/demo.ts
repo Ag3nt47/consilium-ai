@@ -162,6 +162,9 @@ export const demoApi = {
   uiUpdateAvailable: async () => null,
   uiUpdateApply: async () => "",
   uiLoaded: async () => null,
+  messagingStatus: async () => [
+    { id: "signal", name: "Signal", state: "ok" as const, detail: "Connected to signal-cli 0.13.9 on this computer" },
+  ],
   systemPressure: async () => ({
     percent: 24,
     cpu_percent: 18,
