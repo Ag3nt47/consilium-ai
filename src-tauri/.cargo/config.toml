@@ -1,0 +1,4 @@
+# This Mac has 4 cores and 8 GB of RAM. Unlimited parallel rustc jobs alongside three AI CLIs
+# and the app swapped it into a freeze (load average 130), so builds use two jobs at most.
+[build]
+jobs = 2

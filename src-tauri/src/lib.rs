@@ -16,6 +16,7 @@ mod memory;
 mod pressure;
 mod projects;
 mod prompt;
+mod reaper;
 mod redact;
 mod resume;
 mod setup;
@@ -564,6 +565,8 @@ pub fn run() {
                 Some(d) => d,
                 None => app.path().app_data_dir()?,
             };
+            // End AI turns orphaned by a force-quit or freeze before resuming them.
+            reaper::reap_orphans(&data);
             let ui = Arc::new(Window(app.handle().clone()));
             let spawn = Box::new(|task: engine::Task| {
                 tauri::async_runtime::spawn(task);

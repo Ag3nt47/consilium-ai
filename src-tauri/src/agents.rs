@@ -1072,6 +1072,7 @@ async fn execute(
     cmd.current_dir(dir).stdin(Stdio::piped()).args(&plan.args);
     let mut child = cmd.spawn().map_err(|e| format!("couldn't start {}: {e}", path.display()))?;
     let pid = child.id();
+    let _registered = crate::reaper::Registered::new(pid);
     let mut stdin = child.stdin.take().expect("stdin is piped");
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
