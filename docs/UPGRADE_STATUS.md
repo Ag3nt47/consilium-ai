@@ -20,7 +20,7 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Secret redaction | ✅ | `redact.rs`, plus `check-secrets.mjs` before pushes |
 | Git worktree per agent in Full capacity | ⏭ | `consilium/agent-<id>` branches, merged on approval |
 | Atomic memory appends | ✅ | `memory.rs` writes under a lock, size-capped |
-| Pre-commit lint/test before self-modification | 🕓 | |
+| Pre-commit lint/test before self-modification | ✅ | `.githooks/pre-commit`: secret scan, then `tsc` and `npm test` on an export of the staged index |
 | Rollback + oscillation circuit breaker | 🕓 | |
 | Global drag-and-drop | ✅ | Drop anywhere in the window |
 | Parsers: images, PDF, docx, pptx, code | ✅ | `attach.rs`; AST analysis 🕓 |

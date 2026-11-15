@@ -1,0 +1,36 @@
+#!/bin/sh
+# Consilium pre-commit check. Several AIs commit to this repo from one shared working tree, so a
+# commit can easily pick up (or miss) someone else's half-finished lines. This checks exactly what
+# is staged, not the working tree: it exports the index to a temporary folder and type-checks and
+# tests that copy, so a commit that would not build on GitHub is refused here.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+# Skip in an emergency:   git commit --no-verify
+set -e
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+node scripts/check-secrets.mjs --staged
+
+changed=$(git diff --cached --name-only --diff-filter=ACMRD)
+case "$changed" in
+  *src/*|*tests/*|*tsconfig.json*|*package.json*|*vite.config.ts*) ;;
+  *) exit 0 ;;
+esac
+# Only the Rust side changed below this point? Leave that to cargo and GitHub's checks.
+echo "$changed" | grep -qvE '^src-tauri/' || exit 0
+
+snap=$(mktemp -d "${TMPDIR:-/tmp}/consilium-precommit.XXXXXX")
+trap 'rm -rf "$snap"' EXIT INT TERM
+git checkout-index -a --prefix="$snap/"
+ln -s "$root/node_modules" "$snap/node_modules"
+cd "$snap"
+if ! node node_modules/typescript/bin/tsc --noEmit -p .; then
+  echo "pre-commit: the staged screen code does not type-check (see above). Stage the missing files, or unstage the unfinished ones." >&2
+  exit 1
+fi
+if ! node --test tests/ >/dev/null 2>&1; then
+  node --test tests/ >&2 || true
+  echo "pre-commit: the staged tests fail (see above)." >&2
+  exit 1
+fi
