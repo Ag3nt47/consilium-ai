@@ -27,7 +27,7 @@ import {
   type UsageWindow,
 } from "./api";
 import { canListen, canSpeak, Listener, Speaker, voiceOn } from "./voice";
-import { VoiceVisualizer } from "./visualizer";
+import { AgentVoiceMeter, VoiceVisualizer } from "./visualizer";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { installHoverTips } from "./tooltip";
 import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
@@ -444,6 +444,10 @@ function pressureColor(percent: number): string {
   return `hsl(${Math.round(120 - (pct / 100) * 120)}, 85%, 50%)`;
 }
 
+function ordinal(n: number): string {
+  return n === 2 ? "2nd" : n === 3 ? "3rd" : `${n}th`;
+}
+
 function ResourcePressureGauge({ pressure }: { pressure: SystemPressure | null }) {
   if (!pressure) return null;
   const pct = Math.min(100, Math.max(0, pressure.percent));
@@ -508,12 +512,17 @@ export default function App() {
   const [showUsage, setShowUsage] = useState(false);
   const [showPalette, setShowPalette] = useState(false);
   // Voice chat: whether replies are being read aloud right now, and what the recogniser is hearing.
-  const [speaking, setSpeaking] = useState(false);
+  const [speakingAgent, setSpeakingAgent] = useState<string | null>(null);
+  const [speakQueue, setSpeakQueue] = useState<string[]>([]);
+  const speaking = speakingAgent !== null;
   const [heard, setHeard] = useState("");
   const voiceRef = useRef(false);
   const agentsRef = useRef<AgentInfo[]>([]);
   const speakerRef = useRef<Speaker | null>(null);
-  if (!speakerRef.current) speakerRef.current = new Speaker(setSpeaking);
+  if (!speakerRef.current) speakerRef.current = new Speaker((playback) => {
+    setSpeakingAgent(playback.current?.agent ?? null);
+    setSpeakQueue(playback.queued.map((item) => item.agent));
+  });
   const sendTextRef = useRef<(text: string) => void>(() => undefined);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
@@ -1595,7 +1604,7 @@ export default function App() {
               <VoiceVisualizer speaker={speaking ? "ai" : "user"} active={voice} />
               {speaking ? (
                 <>
-                  <span>Reading the replies aloud…</span>
+                  <span>Reading {speakingAgent ? `${senderName(speakingAgent, agents)}’s` : "the"} reply aloud…</span>
                   <button title="Stop reading this reply aloud and move on to the next" className="btn small" onClick={() => speakerRef.current?.stop()}>
                     Skip
                   </button>
@@ -1608,6 +1617,38 @@ export default function App() {
                 </span>
               )}
               {!canSpeak && <span className="voice-warn">Read-aloud isn't available on this system.</span>}
+              <div className="voice-agents" aria-label="Each AI's voice and status">
+                {members.map((a) => {
+                  const isWorking = busy && thinkingIds.includes(a.id);
+                  const activity = isWorking ? activities[a.id] : undefined;
+                  const lastSignal = activity?.updated_at ?? turnStartTime;
+                  const load = pressure?.agents?.[a.id];
+                  const stalled = Boolean(isWorking && lastSignal && Date.now() - lastSignal > 25_000 && load !== undefined && load < 1);
+                  const queuedAt = speakQueue.indexOf(a.id);
+                  const [mode, status] =
+                    speakingAgent === a.id
+                      ? (["speaking", "Speaking"] as const)
+                      : stalled
+                      ? (["stalled", "Stalled"] as const)
+                      : isWorking
+                      ? (["working", activity ? activity.label : "Initializing…"] as const)
+                      : queuedAt >= 0
+                      ? (["queued", queuedAt === 0 ? "Up next" : `Speaks ${ordinal(queuedAt + 2)}`] as const)
+                      : readyIds.has(a.id)
+                      ? (["idle", "Ready"] as const)
+                      : (["off", "Unavailable"] as const);
+                  return (
+                    <AgentVoiceMeter
+                      key={a.id}
+                      id={a.id}
+                      name={a.name}
+                      mode={mode}
+                      status={status}
+                      detail={activity?.detail}
+                    />
+                  );
+                })}
+              </div>
             </div>
           )}
           <PersonaChips value={persona} onChange={setPersona} />

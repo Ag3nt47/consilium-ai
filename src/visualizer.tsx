@@ -40,8 +40,93 @@ async function openMic(): Promise<{ analyser: AnalyserNode; close: () => void } 
   }
 }
 
-export function VoiceVisualizer({ speaker, active }: { speaker: "user" | "ai"; active: boolean }) {
+const STYLE_EVENT = "consilium-visualizer-style";
+
+/** The saved style, kept in step when it's switched anywhere in the window. */
+function useVisualizerStyle(): [VisualizerStyle, (s: VisualizerStyle) => void] {
   const [style, setStyle] = useState<VisualizerStyle>(savedVisualizerStyle);
+  useEffect(() => {
+    const on = () => setStyle(savedVisualizerStyle());
+    window.addEventListener(STYLE_EVENT, on);
+    return () => window.removeEventListener(STYLE_EVENT, on);
+  }, []);
+  const set = (next: VisualizerStyle) => {
+    try {
+      localStorage.setItem(KEY, next);
+    } catch {
+      /* not saved; still switches for now */
+    }
+    setStyle(next);
+    window.dispatchEvent(new Event(STYLE_EVENT));
+  };
+  return [style, set];
+}
+
+export type AgentVoiceMode = "speaking" | "working" | "queued" | "stalled" | "idle" | "off";
+
+/**
+ * One AI's meter in the voice bar: violet bars or orb while it is read aloud, a soft shimmer
+ * while it works, flat when idle; with its name and current status underneath.
+ * Read-aloud exposes no samples, so the motion shows speaking state, not loudness.
+ */
+export function AgentVoiceMeter({ id, name, mode, status, detail }: { id: string; name: string; mode: AgentVoiceMode; status: string; detail?: string }) {
+  const [style, setStyle] = useVisualizerStyle();
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const orbRef = useRef<HTMLDivElement | null>(null);
+  const N = 10;
+
+  useEffect(() => {
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const amp = mode === "speaking" ? 1 : mode === "working" ? 0.35 : mode === "queued" ? 0.15 : 0;
+    const seed = [...id].reduce((h, c) => h + c.charCodeAt(0), 0);
+    let raf = 0;
+    const draw = (t: number) => {
+      const levels: number[] = [];
+      for (let i = 0; i < N; i++) {
+        const v = Math.sin(t / 150 + i * 0.9 + seed) * 0.5 + Math.sin(t / 83 + i * 2.1) * 0.3 + Math.sin(t / 390 + seed) * 0.2;
+        levels.push(Math.max(0.08, amp * (0.55 + 0.45 * v)));
+      }
+      const c = canvasRef.current;
+      if (style === "bars" && c) {
+        const g = c.getContext("2d");
+        if (g) {
+          const { width: w, height: h } = c;
+          g.clearRect(0, 0, w, h);
+          const bw = w / N - 2;
+          const grad = g.createLinearGradient(0, h, 0, 0);
+          grad.addColorStop(0, mode === "stalled" ? "#ef4444" : "#3b82f6");
+          grad.addColorStop(1, mode === "stalled" ? "#f97316" : "#8b5cf6");
+          g.fillStyle = grad;
+          levels.forEach((l, i) => {
+            const bh = Math.max(2, l * h);
+            g.fillRect(i * (bw + 2), h - bh, bw, bh);
+          });
+        }
+      }
+      const orb = orbRef.current;
+      if (style === "orb" && orb) {
+        const vol = levels.reduce((a, b) => a + b, 0) / N;
+        orb.style.transform = `scale(${0.85 + vol * 0.5})`;
+        orb.style.boxShadow = `0 0 ${4 + vol * 18}px rgba(139, 92, 246, ${0.3 + vol * 0.6})`;
+      }
+      if (!reduce && amp > 0) raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [mode, style, id]);
+
+  const tip = `${name}: ${status}${detail ? ` · ${detail}` : ""}. Click to switch every meter to ${style === "bars" ? "pulsing orbs" : "spectrum bars"}.`;
+  return (
+    <button type="button" className={`agent-voice ${mode} ${style}`} title={tip} aria-label={tip} onClick={() => setStyle(style === "bars" ? "orb" : "bars")}>
+      <span className="agent-voice-viz">{style === "bars" ? <canvas ref={canvasRef} width={60} height={18} /> : <span ref={orbRef} className="voice-orb" />}</span>
+      <span className="agent-voice-name">{name}</span>
+      <span className="agent-voice-status">{status}</span>
+    </button>
+  );
+}
+
+export function VoiceVisualizer({ speaker, active }: { speaker: "user" | "ai"; active: boolean }) {
+  const [style, setStyle] = useVisualizerStyle();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const orbRef = useRef<HTMLDivElement | null>(null);
   const micRef = useRef<{ analyser: AnalyserNode; close: () => void } | null>(null);
@@ -118,13 +203,7 @@ export function VoiceVisualizer({ speaker, active }: { speaker: "user" | "ai"; a
   }, [active, speaker, style]);
 
   function toggle() {
-    const next = style === "bars" ? "orb" : "bars";
-    setStyle(next);
-    try {
-      localStorage.setItem(KEY, next);
-    } catch {
-      /* not saved; still switches for now */
-    }
+    setStyle(style === "bars" ? "orb" : "bars");
   }
 
   const who = speaker === "user" ? (live ? "your microphone level" : "listening") : "an AI speaking";

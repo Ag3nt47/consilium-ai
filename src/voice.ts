@@ -42,28 +42,53 @@ function voiceFor(agent: string): SpeechSynthesisVoice | null {
   return voices[h % voices.length];
 }
 
-/** Reads messages aloud one after another. `onSpeaking` reports when speech starts and stops. */
+export interface VoicePlaybackItem {
+  agent: string;
+  name: string;
+}
+
+export interface VoicePlaybackState {
+  current: VoicePlaybackItem | null;
+  queued: VoicePlaybackItem[];
+}
+
+/**
+ * Reads messages aloud one after another. `onPlayback` identifies the AI that is speaking and the
+ * replies waiting behind it, so voice chat can show an honest per-AI status instead of one generic
+ * "an AI is speaking" animation.
+ */
 export class Speaker {
-  private queue: { agent: string; text: string }[] = [];
+  private queue: { agent: string; name: string; text: string }[] = [];
+  private current: VoicePlaybackItem | null = null;
   private busy = false;
-  constructor(private onSpeaking: (speaking: boolean) => void) {}
+  constructor(private onPlayback: (state: VoicePlaybackState) => void) {}
+
+  private report() {
+    this.onPlayback({
+      current: this.current,
+      queued: this.queue.map(({ agent, name }) => ({ agent, name })),
+    });
+  }
 
   say(agent: string, name: string, text: string) {
     const t = speakable(text);
     if (!synth || !t) return;
-    this.queue.push({ agent, text: `${name}: ${t}` });
+    this.queue.push({ agent, name, text: `${name}: ${t}` });
     if (!this.busy) this.next();
+    else this.report();
   }
 
   private next() {
     const item = this.queue.shift();
     if (!synth || !item) {
-      if (this.busy) this.onSpeaking(false);
+      this.current = null;
       this.busy = false;
+      this.report();
       return;
     }
-    if (!this.busy) this.onSpeaking(true);
     this.busy = true;
+    this.current = { agent: item.agent, name: item.name };
+    this.report();
     const u = new SpeechSynthesisUtterance(item.text);
     const v = voiceFor(item.agent);
     if (v) u.voice = v;
@@ -76,8 +101,9 @@ export class Speaker {
   stop() {
     this.queue = [];
     synth?.cancel();
-    if (this.busy) this.onSpeaking(false);
+    this.current = null;
     this.busy = false;
+    this.report();
   }
 }
 

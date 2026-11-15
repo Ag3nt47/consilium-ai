@@ -2075,3 +2075,57 @@ button.attachment {
 .msg-indicator.down { border-color: rgba(239, 68, 68, 0.55); }
 .msg-indicator.down .msg-mark { background: #dc2626; box-shadow: 0 0 6px rgba(239, 68, 68, 0.6); }
 .msg-indicator.checking .msg-mark { opacity: 0.6; }
+
+/* Voice chat: one meter per AI with its live status */
+.voice-agents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1 1 100%;
+  min-width: 0;
+}
+.agent-voice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 6px;
+  align-items: center;
+  flex: 1 1 140px;
+  max-width: 220px;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(15, 23, 42, 0.25);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  animation: agent-voice-in 0.25s ease-out;
+}
+.agent-voice-viz {
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: 60px;
+  height: 18px;
+}
+.agent-voice-viz canvas { width: 60px; height: 18px; }
+.agent-voice .voice-orb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #ddd6fe, #8b5cf6);
+  transition: transform 0.08s linear;
+}
+.agent-voice-name { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-voice-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-voice.speaking { border-color: #8b5cf6; box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.35); }
+.agent-voice.speaking .agent-voice-status { color: #a78bfa; }
+.agent-voice.working .agent-voice-status { color: var(--accent); }
+.agent-voice.stalled { border-color: var(--danger); }
+.agent-voice.stalled .agent-voice-status { color: var(--danger); }
+.agent-voice.off { opacity: 0.55; }
+@keyframes agent-voice-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .agent-voice { animation: none; } }
