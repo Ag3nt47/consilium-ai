@@ -1,5 +1,9 @@
 # Roadmap
 
+Implementation status for both supplied upgrade documents is tracked in
+[`UPGRADE_STATUS.md`](UPGRADE_STATUS.md). That ledger distinguishes finished work from the active,
+next, later, and platform-limited items.
+
 ## v0.1 (this release)
 
 - ChatGPT (Codex CLI) and Claude (Claude Code CLI) in one conversation, using existing sign-ins
