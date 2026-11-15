@@ -30,6 +30,7 @@ import { canListen, canSpeak, Listener, Speaker, voiceOn } from "./voice";
 import { VoiceVisualizer } from "./visualizer";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { installHoverTips } from "./tooltip";
+import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const THEMES = [
@@ -493,6 +494,13 @@ export default function App() {
   const [targets, setTargets] = useState<string[]>(["gpt", "claude"]);
   const [discuss, setDiscuss] = useState(!IN_APP);
   const [rounds, setRounds] = useState(3);
+  const [persona, setPersonaState] = useState(loadPersona);
+  const [auditOpen, setAuditOpen] = useState(false);
+  const setPersona = (id: string) => {
+    setPersonaState(id);
+    savePersona(id);
+  };
+  const agentNames = useMemo(() => Object.fromEntries(agents.map((a) => [a.id, a.name])), [agents]);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(!IN_APP && demoSettings);
   const [showAddAi, setShowAddAi] = useState(!IN_APP && demoAddAi);
@@ -808,7 +816,7 @@ export default function App() {
     setPending([]);
     try {
       const to = targets.filter((t) => members.some((m) => m.id === t));
-      await api.send(current, text, to, discuss ? rounds : 1, false, files);
+      await api.send(current, withPersona(text, persona), to, discuss ? rounds : 1, false, files);
     } catch (e) {
       setDraft(text);
       setPending(files);
@@ -1213,6 +1221,7 @@ export default function App() {
   const paletteCommands = useMemo(() => [
     { id: "new-conv", name: "New Conversation", hint: "Start a fresh topic", run: () => { newConversation(); } },
     { id: "status", name: "Request Council Status", hint: "Ask every AI for its current work and next step", run: () => { requestStatus(); } },
+    { id: "audit", name: "Open Audit Log", hint: "Approvals, requests, updates and errors, newest first", run: () => setAuditOpen(true) },
     { id: "usage", name: "Show Token Usage", hint: "Conversation & daily totals", run: () => openUsage() },
     { id: "self-check", name: "Run Self-Check", hint: "Probe all active council models", run: () => runSelfCheck() },
     { id: "manage-ais", name: "Add / Remove AIs", hint: "Council membership", run: () => setShowAddAi(true) },
@@ -1403,6 +1412,14 @@ export default function App() {
             >
               {requestingStatus ? "Requesting…" : "Status Request"}
             </button>
+            <button
+              title="Open the audit log: every approval, request, update, council change, phone message and error, newest first"
+              className={`btn ghost ${auditOpen ? "on" : ""}`}
+              onClick={() => setAuditOpen((o) => !o)}
+              disabled={!current}
+            >
+              Audit Log
+            </button>
             <button title="Copy the whole conversation to the clipboard as Markdown" className="btn ghost" onClick={exportCurrent} disabled={!events.length}>
               Copy as Markdown
             </button>
@@ -1412,6 +1429,7 @@ export default function App() {
           </div>
         </header>
 
+        {auditOpen && <AuditDrawer events={events} names={agentNames} onClose={() => setAuditOpen(false)} />}
         <section className="messages">
           {!events.length && (
             <div className="empty">
@@ -1590,6 +1608,7 @@ export default function App() {
               {!canSpeak && <span className="voice-warn">Read-aloud isn't available on this system.</span>}
             </div>
           )}
+          <PersonaChips value={persona} onChange={setPersona} />
           <div className="composer-row">
             <textarea
               value={draft}
