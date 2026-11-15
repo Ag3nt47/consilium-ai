@@ -210,6 +210,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")] // Windows and Linux read update/next/VERSION, tested below
     fn reads_the_staged_version_only_when_newer() {
         let dir = std::env::temp_dir().join(format!("consilium-update-{}", std::process::id()));
         let contents = staged_app(&dir).join("Contents");
