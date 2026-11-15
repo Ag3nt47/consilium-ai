@@ -19,6 +19,7 @@ import {
   type Council,
   type ChatEvent,
   type Conversation,
+  type DailyWallpaper,
   type ResetForecast,
   type SystemPressure,
   type StagedUpdate,
@@ -32,6 +33,7 @@ import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { installHoverTips } from "./tooltip";
 import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
 import { MessagingIndicator } from "./messaging";
+import { ProjectVersions } from "./projects";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const THEMES = [
@@ -60,11 +62,11 @@ const PROVIDER_PORTALS: Record<string, { account: string; accountLabel: string; 
   },
 };
 
-type Prefs = { theme: string; effects: boolean; autoUpdate: boolean };
+type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean };
 const PREFS_KEY = "consilium.prefs";
 
 function loadPrefs(): Prefs {
-  const defaults: Prefs = { theme: "consilium", effects: true, autoUpdate: true };
+  const defaults: Prefs = { theme: "consilium", effects: true, autoUpdate: true, bingWallpaper: true };
   if (!IN_APP) return { ...defaults, theme: demoTheme || defaults.theme, autoUpdate: false };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
@@ -501,6 +503,7 @@ export default function App() {
   const [rounds, setRounds] = useState(3);
   const [persona, setPersonaState] = useState(loadPersona);
   const [auditOpen, setAuditOpen] = useState(false);
+  const [wallpaper, setWallpaper] = useState<DailyWallpaper | null>(null);
   const setPersona = (id: string) => {
     setPersonaState(id);
     savePersona(id);
@@ -617,6 +620,14 @@ export default function App() {
     document.documentElement.dataset.effects = prefs.effects ? "on" : "off";
     savePrefs(prefs);
   }, [prefs]);
+
+  useEffect(() => {
+    if (prefs.bingWallpaper) {
+      api.getDailyWallpaper().then(setWallpaper).catch(() => undefined);
+    } else {
+      setWallpaper(null);
+    }
+  }, [prefs.bingWallpaper]);
 
   const refreshAgents = useCallback(() => {
     // Focus, turn completion and the refresh button can all fire together. Share one request so
@@ -1412,6 +1423,7 @@ export default function App() {
                   + Add project folder
                 </button>
               )}
+              <ProjectVersions workspace={meta?.workspace ?? council?.default_workspace ?? null} />
             </div>
           </div>
           <div className="topbar-actions">

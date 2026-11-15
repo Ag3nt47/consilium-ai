@@ -14,6 +14,7 @@ mod engine;
 mod liveui;
 mod memory;
 mod pressure;
+mod projects;
 mod prompt;
 mod redact;
 mod resume;
@@ -459,6 +460,15 @@ fn set_api_key(agent: String, key: String) -> Result<(), String> {
 }
 
 /// Checks each third-party messaging connection (Signal for now) and reports whether it answers.
+/// Versions of the projects being worked on in this folder: this PC's against GitHub's.
+#[tauri::command]
+async fn project_versions(workspace: Option<String>) -> Vec<projects::ProjectVersion> {
+    let Some(folder) = workspace.filter(|w| !w.is_empty()) else { return Vec::new() };
+    tauri::async_runtime::spawn_blocking(move || projects::active(std::path::Path::new(&folder)))
+        .await
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 async fn messaging_status() -> Vec<bridge::ConnectorStatus> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -560,6 +570,7 @@ pub fn run() {
             set_api_key,
             system_pressure,
             messaging_status,
+            project_versions,
             update_available,
             update_now,
             ui_update_available,
