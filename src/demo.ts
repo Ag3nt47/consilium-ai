@@ -128,6 +128,11 @@ export const demoApi = {
   setAccess: async () => undefined,
   setWorkspace: async () => conversations[0],
   pickFolder: async () => null,
+  getCouncil: async () => ({ members: ["gpt", "claude"], access: {}, default_workspace: "/projects", default_access: "edit" as const }),
+  setDefaultAccess: async () => undefined,
+  setDefaultWorkspace: async () => "/projects",
+  getMemory: async () => "- The human prefers short, direct answers (Claude, 2026-11-14)\n- Thumbnails are immutable per image id (ChatGPT, 2026-11-14)\n",
+  setMemory: async () => undefined,
   selfCheck: async () => [
     { id: "gpt", name: "ChatGPT", ok: true, ms: 9400, detail: "OK" },
     { id: "claude", name: "Claude", ok: true, ms: 6100, detail: "OK" },

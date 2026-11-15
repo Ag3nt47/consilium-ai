@@ -1057,3 +1057,13 @@ code {
   color: var(--muted);
   animation: pulse 1.1s ease-in-out infinite;
 }
+
+.memory-editor {
+  width: 100%;
+  resize: vertical;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font: 12.5px/1.5 var(--mono);
+}

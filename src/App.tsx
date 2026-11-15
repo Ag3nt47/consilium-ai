@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ACCESS_LEVELS, api, IN_APP, onEvent, onTurn, senderName, type Access, type AgentInfo, type CheckResult, type ChatEvent, type Conversation, type TurnState } from "./api";
+import { ACCESS_LEVELS, api, IN_APP, onEvent, onTurn, senderName, type Access, type AgentInfo, type CheckResult, type Council, type ChatEvent, type Conversation, type TurnState } from "./api";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
@@ -149,6 +149,10 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(!IN_APP && demoSettings);
   const [showAddAi, setShowAddAi] = useState(!IN_APP && demoAddAi);
   const [checks, setChecks] = useState<Record<string, CheckResult | "running">>({});
+  const [council, setCouncil] = useState<Council | null>(null);
+  const [memoryText, setMemoryText] = useState("");
+  const [memoryDirty, setMemoryDirty] = useState(false);
+  const knownMembers = useRef<string[] | null>(null);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [updateNote, setUpdateNote] = useState<string>("");
   const [toast, setToast] = useState<string | null>(null);
@@ -169,6 +173,7 @@ export default function App() {
 
   const refreshAgents = useCallback(() => {
     api.agents().then(setAgents).catch((e) => setError(String(e)));
+    api.getCouncil().then(setCouncil).catch(() => undefined);
   }, []);
 
   const refreshList = useCallback(async () => {
@@ -240,6 +245,19 @@ export default function App() {
   const thinking = turn?.agent ? senderName(turn.agent, agents) : null;
   const readyIds = useMemo(() => new Set(agents.filter((a) => a.available).map((a) => a.id)), [agents]);
   const members = useMemo(() => agents.filter((a) => a.member), [agents]);
+
+  // Everyone in the council is asked by default: after a restart, and when an AI joins.
+  useEffect(() => {
+    if (!agents.length) return;
+    const ids = members.map((m) => m.id);
+    const before = knownMembers.current;
+    setTargets((t) => {
+      if (before === null) return ids;
+      const added = ids.filter((id) => !before.includes(id));
+      return [...t.filter((id) => ids.includes(id)), ...added.filter((id) => !t.includes(id))];
+    });
+    knownMembers.current = ids;
+  }, [agents, members]);
   const others = useMemo(() => agents.filter((a) => !a.member), [agents]);
 
   // Sending while an AI is answering interrupts it: the running turn is stopped, then this is sent.
@@ -353,21 +371,64 @@ export default function App() {
     }
   }
 
-  // Everyone in, with the most access each AI's own app allows, discussing by default.
+  // Full capacity: a project folder for every conversation, every AI Unrestricted, everyone asked,
+  // Discuss on. The AIs can then run commands and install software in that folder.
   async function fullCapacity() {
-    const ok = confirm(
-      "Full capacity: every AI in the council gets Full access (the permissions you already approved in its own app) " +
-        "in conversations with a project folder, all of them are asked by default, and Discuss is on.\n\nContinue?",
-    );
-    if (!ok) return;
     try {
-      for (const a of members) await api.setAccess(a.id, "own");
+      let folder = council?.default_workspace ?? null;
+      if (!folder) {
+        alert("Choose the folder the AIs will work in. Conversations without their own project folder use it.");
+        folder = await api.pickFolder();
+        if (!folder) return;
+      }
+      const ok = confirm(
+        `Full capacity: every AI becomes Unrestricted in ${folder} and any conversation's own project folder. ` +
+          "They can run any command, install software and change files there without asking you first.\n\nContinue?",
+      );
+      if (!ok) return;
+      await api.setDefaultWorkspace(folder);
+      await api.setDefaultAccess("unrestricted");
       setTargets(members.map((m) => m.id));
       setDiscuss(true);
       setRounds((r) => Math.max(r, 4));
       refreshAgents();
-      setToast("Full capacity on. Add a project folder to a conversation for the AIs to build in.");
+      setToast("Full capacity on: every AI is Unrestricted in the project folder.");
       setTimeout(() => setToast(null), 5000);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function changeDefaultAccess(access: Access) {
+    if (access !== "chat") {
+      const level = ACCESS_LEVELS.find((l) => l.id === access)!;
+      if (!confirm(`Make "${level.name}" the access for every AI (including ones added later)?\n\n${level.note}`)) return;
+    }
+    try {
+      await api.setDefaultAccess(access);
+      refreshAgents();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function chooseDefaultFolder(clear = false) {
+    try {
+      const folder = clear ? null : await api.pickFolder();
+      if (!clear && !folder) return;
+      await api.setDefaultWorkspace(folder);
+      refreshAgents();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function saveMemory() {
+    try {
+      await api.setMemory(memoryText);
+      setMemoryDirty(false);
+      setToast("Council memory saved");
+      setTimeout(() => setToast(null), 2500);
     } catch (e) {
       setError(String(e));
     }
@@ -503,7 +564,16 @@ export default function App() {
           <button className="btn ghost" onClick={() => setShowAddAi(true)} title="Add or remove AIs">
             + Add AI
           </button>
-          <button className="btn ghost" onClick={() => setShowSettings(true)}>
+          <button
+            className="btn ghost"
+            onClick={() => {
+              setShowSettings(true);
+              api.getMemory().then((m) => {
+                setMemoryText(m);
+                setMemoryDirty(false);
+              });
+            }}
+          >
             Settings
           </button>
         </div>
@@ -534,6 +604,13 @@ export default function App() {
                   </span>
                   <button className="link" onClick={chooseFolder}>change</button>
                   <button className="link" onClick={clearFolder}>remove</button>
+                </>
+              ) : council?.default_workspace ? (
+                <>
+                  <span className="folder" title={council.default_workspace}>
+                    Project: <b>{folderName(council.default_workspace)}</b> (default)
+                  </span>
+                  <button className="link" onClick={chooseFolder}>use another folder</button>
                 </>
               ) : (
                 <button className="link" onClick={chooseFolder} title="Let the AIs work in a folder, according to each one's access">
@@ -710,9 +787,32 @@ export default function App() {
             </label>
             <div className="section-label">AI access</div>
             <p className="muted small">
-              Applies in conversations with a project folder (add one under the conversation title). Without a
-              folder, every AI is chat-only.
+              Applies in the conversation's project folder, or the default folder below. Without either, every AI is
+              chat-only.
             </p>
+            <label className="access-row">
+              <span className="agent-name">Every AI</span>
+              <select value={council?.default_access ?? "chat"} onChange={(e) => changeDefaultAccess(e.target.value as Access)}>
+                {ACCESS_LEVELS.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+              <small className="muted">The standard for all AIs, including ones added later. Below, set one AI differently.</small>
+            </label>
+            <div className="row">
+              <span className="muted small">Default project folder:</span>
+              <b className="small">{council?.default_workspace ?? "none"}</b>
+              <button className="link" onClick={() => chooseDefaultFolder()}>
+                choose
+              </button>
+              {council?.default_workspace && (
+                <button className="link" onClick={() => chooseDefaultFolder(true)}>
+                  clear
+                </button>
+              )}
+            </div>
             <div className="access-list">
               {members.map((a) => (
                 <label key={a.id} className={`access-row agent-${a.id}`}>
@@ -736,7 +836,27 @@ export default function App() {
               <button className="btn ghost" onClick={fullCapacity}>
                 Full capacity
               </button>
-              <span className="muted small">Every AI gets Full access, everyone is asked, and Discuss is on.</span>
+              <span className="muted small">Every AI becomes Unrestricted in the project folder, everyone is asked, and Discuss is on.</span>
+            </div>
+            <div className="section-label">Council memory</div>
+            <p className="muted small">
+              Notes every AI receives in every conversation. They add to it with a REMEMBER: line; you can edit or clear it
+              here. A project's own shared notes go in a CONSILIUM.md file in its folder.
+            </p>
+            <textarea
+              className="memory-editor"
+              value={memoryText}
+              onChange={(e) => {
+                setMemoryText(e.target.value);
+                setMemoryDirty(true);
+              }}
+              rows={6}
+              placeholder="- The human prefers short answers&#10;- Builds use npm run app:build"
+            />
+            <div className="row">
+              <button className="btn ghost" onClick={saveMemory} disabled={!memoryDirty}>
+                Save memory
+              </button>
             </div>
             <div className="section-label">Updates</div>
             <label className="toggle">

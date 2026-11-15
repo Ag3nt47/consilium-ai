@@ -21,6 +21,10 @@ pub struct Context<'a> {
     /// The project folder the AI is working in, when its access allows one.
     pub workspace: Option<&'a str>,
     pub access: Access,
+    /// Council memory shared by every participant across conversations.
+    pub memory: Option<&'a str>,
+    /// The project's CONSILIUM.md, shared by every participant.
+    pub project_notes: Option<&'a str>,
 }
 
 pub fn system(me: &str, round: u32, rounds: u32, ctx: &Context) -> String {
@@ -46,13 +50,14 @@ put a [Name] tag on your own message.
 - Address someone with @name when it matters who should answer. The human is @human.
 - When you need a decision, an approval, or an action from the human, put it on its own line \
 starting with REQUEST: so it is shown to them in red. Ask only what you actually need.
-- To bring another AI into the council (for example Gemini), put a line ADD_AI: <name> in your \
-message. Consilium then installs and connects it; the human signs in to that AI's account. Known \
-AIs: {known}.
+- To ask another participant something, @mention them: they answer next in the same turn.{add_ai}
+- To save something every participant should know in future conversations (a decision, a preference \
+of the human's, a fact about this setup), put it on its own line starting REMEMBER:. Keep it to one \
+short sentence, and never save passwords, keys or other secrets.
 - Be direct and specific. Disagree plainly when you think another participant is wrong, and \
 say why; concede in one line when they are right. No pleasantries and no recaps.",
         name = label(me),
-        known = AGENTS.iter().map(|a| format!("{} (@{})", a.name, a.id)).collect::<Vec<_>>().join(", "),
+        add_ai = add_ai_hint(ctx.members),
     );
     s.push_str("\n\n");
     s.push_str(&match (ctx.workspace, ctx.access) {
@@ -65,6 +70,13 @@ Cite paths and lines from what you actually read."
 edit its files. Other AI participants may edit the same folder in their turns, so re-read a file before \
 changing it. Make focused changes, and end your message with a short list of the files you changed and why."
         ),
+        (Some(ws), Access::Unrestricted) => format!(
+            "Workspace: you are working in the project folder {ws} (your current directory) with no approval \
+checks or sandbox: you can run commands, install software and change files. The human has allowed this; use \
+it carefully, avoid destructive commands, and don't touch anything outside what the task needs. Other AI \
+participants may change the same folder in their turns, so re-read files before changing them. End your \
+message with a short list of what you changed or ran, and why."
+        ),
         (Some(ws), Access::Own) => format!(
             "Workspace: you are working in the project folder {ws} (your current directory) with the permissions \
 the human has already approved for you. Other AI participants may change the same folder in their turns, so \
@@ -74,13 +86,23 @@ re-read files before changing them. End your message with a short list of what y
 commands or use tools: answer in text, and say what you would check rather than guessing."
             .to_string(),
     });
-    if ctx.workspace.is_some() && matches!(ctx.access, Access::Edit | Access::Own) {
+    if ctx.workspace.is_some() && matches!(ctx.access, Access::Edit | Access::Own | Access::Unrestricted) {
         s.push_str(
             "\n\nWhen the human asks the council to build or change something, work at full capacity as a team: \
 agree on a short plan, split the work between participants with @mentions so nobody duplicates effort, \
 build your part in the project folder, and review what the others changed. You have creative latitude: \
 make sensible decisions yourself and ask the human (REQUEST:) only for choices that are genuinely theirs.",
         );
+    }
+    if let Some(notes) = ctx.project_notes {
+        s.push_str(&format!(
+            "\n\nPROJECT NOTES (CONSILIUM.md in the project folder, shared by every participant):\n{notes}"
+        ));
+    }
+    if let Some(memory) = ctx.memory {
+        s.push_str(&format!(
+            "\n\nCOUNCIL MEMORY (notes every participant keeps across conversations; newest last):\n{memory}"
+        ));
     }
     if rounds > 1 {
         s.push_str(&format!(
@@ -90,6 +112,24 @@ to add, reply with exactly PASS."
         ));
     }
     s
+}
+
+/// How to bring in an AI that isn't a participant yet; empty when every known AI already is.
+fn add_ai_hint(members: &[String]) -> String {
+    let outside: Vec<String> = AGENTS
+        .iter()
+        .filter(|a| !members.iter().any(|m| m == a.id))
+        .map(|a| format!("{} (@{})", a.name, a.id))
+        .collect();
+    if outside.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n- To bring an AI that isn't a participant yet into the council, put a line ADD_AI: <name> in your \
+message. Consilium then installs and connects it; the human signs in to that AI's account. AIs not yet \
+in the council: {}. Never use ADD_AI for a current participant; @mention them instead.",
+        outside.join(", ")
+    )
 }
 
 /// The transcript as text, newest last, trimmed from the oldest end to fit.
@@ -212,7 +252,7 @@ mod tests {
     #[test]
     fn system_prompt_names_members_and_round_rules() {
         let m = members(&["gpt", "claude", "gemini"]);
-        let ctx = Context { members: &m, workspace: None, access: Access::Chat };
+        let ctx = Context { members: &m, workspace: None, access: Access::Chat, memory: None, project_notes: None };
         let s = system("gpt", 2, 3, &ctx);
         assert!(s.contains("You are ChatGPT"));
         assert!(s.contains("Claude (@claude), Gemini (@gemini)"));
@@ -220,19 +260,27 @@ mod tests {
         assert!(s.contains("no tools"));
         assert!(!system("gpt", 1, 1, &ctx).contains("round"));
         let m = members(&["gpt", "claude"]);
-        let two = system("gpt", 1, 1, &Context { members: &m, workspace: None, access: Access::Chat });
+        let two = system("gpt", 1, 1, &Context { members: &m, workspace: None, access: Access::Chat, memory: None, project_notes: None });
         assert!(two.contains("The other participants are: the Human, and Claude (@claude)."));
         assert!(two.contains("ADD_AI:") && two.contains("Gemini (@gemini)"), "lists AIs that can be added");
+        let all = members(&["gpt", "claude", "gemini"]);
+        let full = system("gpt", 1, 1, &Context { members: &all, workspace: None, access: Access::Chat, memory: None, project_notes: None });
+        assert!(!full.contains("ADD_AI"), "no ADD_AI hint once every AI is a participant");
+        assert!(full.contains("@mention them: they answer next"));
+        let with = system("gpt", 1, 1, &Context { members: &all, workspace: None, access: Access::Chat, memory: Some("- Use Tauri 2"), project_notes: Some("Run cargo test") });
+        assert!(with.contains("COUNCIL MEMORY") && with.contains("Use Tauri 2"));
+        assert!(with.contains("PROJECT NOTES") && with.contains("Run cargo test"));
+        assert!(with.contains("REMEMBER:"));
     }
 
     #[test]
     fn system_prompt_describes_workspace_access() {
         let m = members(&["gpt"]);
-        let edit = system("gpt", 1, 1, &Context { members: &m, workspace: Some("/p"), access: Access::Edit });
+        let edit = system("gpt", 1, 1, &Context { members: &m, workspace: Some("/p"), access: Access::Edit, memory: None, project_notes: None });
         assert!(edit.contains("may read and edit") && edit.contains("/p"));
         assert!(edit.contains("full capacity"));
-        assert!(!system("gpt", 1, 1, &Context { members: &m, workspace: None, access: Access::Edit }).contains("full capacity"));
-        let read = system("gpt", 1, 1, &Context { members: &m, workspace: Some("/p"), access: Access::Read });
+        assert!(!system("gpt", 1, 1, &Context { members: &m, workspace: None, access: Access::Edit, memory: None, project_notes: None }).contains("full capacity"));
+        let read = system("gpt", 1, 1, &Context { members: &m, workspace: Some("/p"), access: Access::Read, memory: None, project_notes: None });
         assert!(read.contains("cannot change files"));
     }
 }

@@ -18,4 +18,7 @@ First release.
 - Project folders and per-AI access (Chat only, Read, Edit, Full); a **Full capacity** preset; build-mode teamwork instructions for the AIs.
 - Gemini runs through Google's Antigravity CLI (Google ended Gemini CLI access for personal accounts in June 2026); the Gemini CLI remains the fallback for company plans and API keys.
 - **self-check** in the Council panel: one tiny test message to every AI at once, with the result and time on each card.
+- Unrestricted access level (each tool's own bypass switch); a council-wide default access, including for AIs added later; a default project folder; Full capacity now sets Unrestricted.
+- Council memory (REMEMBER: lines, editable in Settings) and per-project CONSILIUM.md notes, shared by every AI.
+- An AI that @mentions another council member brings it into the same turn (at most two per round); everyone in the council is asked by default after a restart.
 - Restart resilience: on macOS closing the window keeps the AIs working; a turn cut short by a quit or crash resumes on the next launch.

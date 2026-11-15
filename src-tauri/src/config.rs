@@ -21,6 +21,9 @@ pub enum Access {
     /// Runs in the project folder with the permissions the person already approved in that
     /// AI's own tool (Codex config, Claude Code settings, Gemini approvals). Consilium adds none.
     Own,
+    /// Runs in the project folder with every approval and sandbox check turned off, using each
+    /// tool's own bypass switch: it can run any command, install software and change any file.
+    Unrestricted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,11 +32,22 @@ pub struct Council {
     pub members: Vec<String>,
     #[serde(default)]
     pub access: HashMap<String, Access>,
+    /// Project folder for conversations that don't set their own.
+    #[serde(default)]
+    pub default_workspace: Option<String>,
+    /// Access for every AI without its own setting, including AIs added later.
+    #[serde(default)]
+    pub default_access: Access,
 }
 
 impl Default for Council {
     fn default() -> Self {
-        Council { members: vec!["gpt".into(), "claude".into()], access: HashMap::new() }
+        Council {
+            members: vec!["gpt".into(), "claude".into()],
+            access: HashMap::new(),
+            default_workspace: None,
+            default_access: Access::Chat,
+        }
     }
 }
 
@@ -61,7 +75,19 @@ impl Config {
     }
 
     pub fn access(&self, agent: &str) -> Access {
-        self.council.lock().unwrap().access.get(agent).copied().unwrap_or_default()
+        let c = self.council.lock().unwrap();
+        c.access.get(agent).copied().unwrap_or(c.default_access)
+    }
+
+    /// Sets the council-wide default and clears per-AI settings, so every AI uses it.
+    pub fn set_default_access(&self, access: Access) -> Result<Council, String> {
+        let mut c = self.council.lock().unwrap();
+        let mut next = c.clone();
+        next.default_access = access;
+        next.access.clear();
+        self.save(&next)?;
+        *c = next.clone();
+        Ok(next)
     }
 
     pub fn is_member(&self, agent: &str) -> bool {
@@ -90,6 +116,25 @@ impl Config {
                 return Err("the council needs at least one AI".into());
             }
         }
+        self.save(&next)?;
+        *c = next.clone();
+        Ok(next)
+    }
+
+    pub fn set_default_workspace(&self, folder: Option<&str>) -> Result<Council, String> {
+        let folder = match folder {
+            None => None,
+            Some(f) => {
+                let p = std::fs::canonicalize(f).map_err(|_| format!("{f} doesn't exist"))?;
+                if !p.is_dir() {
+                    return Err(format!("{f} isn't a folder"));
+                }
+                Some(p.display().to_string())
+            }
+        };
+        let mut c = self.council.lock().unwrap();
+        let mut next = c.clone();
+        next.default_workspace = folder;
         self.save(&next)?;
         *c = next.clone();
         Ok(next)
@@ -127,6 +172,20 @@ mod tests {
         let again = Config::load(p.clone());
         assert_eq!(again.get().members, vec!["gpt", "claude", "gemini"]);
         assert_eq!(again.access("gpt"), Access::Own);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn default_access_applies_to_every_ai_including_new_ones() {
+        let p = temp();
+        let c = Config::load(p.clone());
+        c.set_access("gpt", Access::Read).unwrap();
+        c.set_default_access(Access::Unrestricted).unwrap();
+        assert_eq!(c.access("gpt"), Access::Unrestricted, "per-AI settings are cleared");
+        c.set_member("gemini", true).unwrap();
+        assert_eq!(c.access("gemini"), Access::Unrestricted);
+        c.set_access("claude", Access::Chat).unwrap();
+        assert_eq!(Config::load(p.clone()).access("claude"), Access::Chat, "a per-AI setting still overrides");
         let _ = std::fs::remove_file(p);
     }
 

@@ -313,6 +313,7 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
                     push("workspace-write");
                 }
                 Access::Own => {} // the person's own Codex configuration decides
+                Access::Unrestricted => push("--dangerously-bypass-approvals-and-sandbox"),
             }
             push("--color");
             push("never");
@@ -346,6 +347,7 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
                     push("--strict-mcp-config");
                 }
                 Access::Own => {} // the person's own Claude Code settings and allow-lists decide
+                Access::Unrestricted => push("--dangerously-skip-permissions"),
             }
             push("--append-system-prompt");
             args.push(system.into());
@@ -367,6 +369,10 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
                     push("auto_edit");
                 }
                 Access::Own => {} // the Gemini CLI's own approval settings decide
+                Access::Unrestricted => {
+                    push("--approval-mode");
+                    push("yolo");
+                }
             }
             format!("{system}\n\n{prompt}")
         }
@@ -386,6 +392,7 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
                     push("accept-edits");
                 }
                 Access::Own => {} // Antigravity's own permission settings decide
+                Access::Unrestricted => push("--dangerously-skip-permissions"),
             }
             push("-p");
             push("");
@@ -618,6 +625,17 @@ mod plan_tests {
         assert!(has(&c, &["--permission-mode", "acceptEdits"]));
         assert!(!c.iter().any(|a| a.contains("Bash")));
         assert!(has(&args(Kind::GeminiCli, Access::Edit), &["--approval-mode", "auto_edit"]));
+    }
+
+    #[test]
+    fn unrestricted_access_uses_each_tools_own_bypass_switch() {
+        assert!(args(Kind::Codex, Access::Unrestricted).contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(args(Kind::ClaudeCode, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args(Kind::Antigravity, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(has(&args(Kind::GeminiCli, Access::Unrestricted), &["--approval-mode", "yolo"]));
+        for k in [Kind::Codex, Kind::ClaudeCode, Kind::Antigravity, Kind::GeminiCli] {
+            assert!(!args(k, Access::Edit).iter().any(|a| a.contains("dangerously") || a == "yolo"));
+        }
     }
 
     #[test]

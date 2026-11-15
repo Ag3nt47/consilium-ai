@@ -33,13 +33,21 @@ export interface Conversation {
 }
 
 /** How much an AI may do in a conversation's project folder. */
-export type Access = "chat" | "read" | "edit" | "own";
+export type Access = "chat" | "read" | "edit" | "own" | "unrestricted";
+
+export interface Council {
+  members: string[];
+  access: Record<string, Access>;
+  default_workspace: string | null;
+  default_access: Access;
+}
 
 export const ACCESS_LEVELS: { id: Access; name: string; note: string }[] = [
   { id: "chat", name: "Chat only", note: "Sees only the conversation. No files, no tools." },
   { id: "read", name: "Read project", note: "Can read files in the conversation's project folder." },
   { id: "edit", name: "Edit project", note: "Can read and edit files in the project folder. No shell commands." },
-  { id: "own", name: "Full (its own settings)", note: "Works in the project folder with the permissions you already approved in that AI's own app." },
+  { id: "own", name: "Full (its own settings)", note: "Works in the project folder with the permissions you already approved in that AI's own app. Anything that would need your approval is refused, since nobody can approve it in the background." },
+  { id: "unrestricted", name: "Unrestricted", note: "No approval checks or sandbox: runs any command, installs software and changes files in the project folder." },
 ];
 
 export interface AgentInfo {
@@ -88,6 +96,11 @@ const appApi = {
   running: () => invoke<string[]>("running"),
   /** Asks every council member for a one-word reply, in parallel. Uses a little of each AI's allowance. */
   selfCheck: () => invoke<CheckResult[]>("self_check"),
+  getCouncil: () => invoke<Council>("get_council"),
+  setDefaultAccess: (access: Access) => invoke<void>("set_default_access", { access }),
+  setDefaultWorkspace: (folder: string | null) => invoke<string | null>("set_default_workspace", { folder }),
+  getMemory: () => invoke<string>("get_memory"),
+  setMemory: (text: string) => invoke<void>("set_memory", { text }),
   setMember: (agent: string, member: boolean) => invoke<void>("set_member", { agent, member }),
   setAccess: (agent: string, access: Access) => invoke<void>("set_access", { agent, access }),
   setWorkspace: (id: string, folder: string | null) => invoke<Conversation>("set_workspace", { id, folder }),

@@ -2,12 +2,14 @@
 
 mod agents;
 mod config;
+mod memory;
 mod prompt;
 mod resume;
 mod setup;
 mod store;
 
 use config::{Access, Config};
+use memory::Memory;
 use resume::{Journal, Pending};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -20,11 +22,27 @@ use tokio_util::sync::CancellationToken;
 /// Upper bound on discussion rounds, whatever the UI asks for, so agents can't loop indefinitely.
 pub const MAX_ROUNDS: u32 = 8;
 
+/// An answer that @mentions another council member brings it into the same round, at most this
+/// many times per round, so AIs can ask each other things without looping.
+pub const MAX_PULLED_IN: usize = 2;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn today_is_a_plausible_iso_date() {
+        let t = super::today();
+        assert_eq!(t.len(), 10);
+        assert!(t.starts_with("20") && t.as_bytes()[4] == b'-' && t.as_bytes()[7] == b'-');
+    }
+}
+
 struct AppState {
     store: Arc<Store>,
     config: Arc<Config>,
     /// Where each running turn has got to, so it can resume after a quit or crash.
     journal: Arc<Journal>,
+    /// Council memory shared by every AI across conversations.
+    memory: Arc<Memory>,
     /// Conversations with a turn in progress, and how to stop it.
     running: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
@@ -67,6 +85,36 @@ fn set_member(state: State<AppState>, agent: String, member: bool) -> Result<(),
 #[tauri::command]
 fn set_access(state: State<AppState>, agent: String, access: Access) -> Result<(), String> {
     state.config.set_access(&agent, access).map(|_| ())
+}
+
+#[tauri::command]
+fn set_default_access(state: State<AppState>, access: Access) -> Result<(), String> {
+    state.config.set_default_access(access).map(|_| ())
+}
+
+#[tauri::command]
+fn get_council(state: State<AppState>) -> config::Council {
+    state.config.get()
+}
+
+#[tauri::command]
+fn set_default_workspace(state: State<AppState>, folder: Option<String>) -> Result<Option<String>, String> {
+    state.config.set_default_workspace(folder.as_deref()).map(|c| c.default_workspace)
+}
+
+#[tauri::command]
+fn get_default_workspace(state: State<AppState>) -> Option<String> {
+    state.config.get().default_workspace
+}
+
+#[tauri::command]
+fn get_memory(state: State<AppState>) -> String {
+    state.memory.read()
+}
+
+#[tauri::command]
+fn set_memory(state: State<AppState>, text: String) -> Result<(), String> {
+    state.memory.write(&text)
 }
 
 #[tauri::command]
@@ -180,16 +228,17 @@ async fn send_message(
 /// turn continues on the next launch.
 fn start_turns(app: &AppHandle, state: &AppState, pending: Pending, token: CancellationToken) {
     state.journal.begin(pending.clone());
-    let (app, store, config, journal, running) = (
+    let (app, store, config, journal, memory, running) = (
         app.clone(),
         state.store.clone(),
         state.config.clone(),
         state.journal.clone(),
+        state.memory.clone(),
         state.running.clone(),
     );
     tauri::async_runtime::spawn(async move {
         let conv = pending.conversation.clone();
-        run_turns(&app, &store, &config, &journal, &pending, &token).await;
+        run_turns(&app, &store, &config, &journal, &memory, &pending, &token).await;
         journal.finish(&conv);
         running.lock().unwrap().remove(&conv);
         let _ = app.emit(
@@ -228,6 +277,7 @@ async fn run_turns(
     store: &Store,
     config: &Config,
     journal: &Journal,
+    memory: &Memory,
     pending: &Pending,
     cancel: &CancellationToken,
 ) {
@@ -235,14 +285,25 @@ async fn run_turns(
     let members = config.get().members;
     for round in pending.round..=rounds {
         let mut passes = 0;
+        let mut answered = 0;
         let mut asked_human = false;
         let skip = if round == pending.round { pending.index } else { 0 };
-        for (index, agent_id) in targets.iter().enumerate().skip(skip) {
+        // Who answers this round: the addressed AIs, plus any a reply @mentions (see MAX_PULLED_IN).
+        let mut queue: Vec<String> = targets.clone();
+        let mut pulled_in = 0;
+        let mut index = skip;
+        while index < queue.len() {
             if cancel.is_cancelled() {
                 return;
             }
-            journal.at(conv, round, index);
-            let Some(agent) = agents::by_id(agent_id) else { continue };
+            let addressed = index < targets.len();
+            if addressed {
+                journal.at(conv, round, index);
+            }
+            let Some(agent) = agents::by_id(&queue[index]) else {
+                index += 1;
+                continue;
+            };
             let _ = app.emit(
                 TURN,
                 TurnState {
@@ -255,9 +316,23 @@ async fn run_turns(
             );
             let events = store.load(conv).unwrap_or_default();
             // Read the folder fresh each turn, so a change in the UI applies from the next answer.
-            let workspace = store.meta(conv).ok().and_then(|m| m.workspace);
+            // A conversation without its own folder uses the council's default one, if set.
+            let workspace = store
+                .meta(conv)
+                .ok()
+                .and_then(|m| m.workspace)
+                .or_else(|| config.get().default_workspace)
+                .filter(|w| std::path::Path::new(w).is_dir());
             let access = if workspace.is_some() { config.access(agent.id) } else { Access::Chat };
-            let ctx = prompt::Context { members: &members, workspace: workspace.as_deref(), access };
+            let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w)));
+            let shared = memory.for_prompt();
+            let ctx = prompt::Context {
+                members: &members,
+                workspace: workspace.as_deref(),
+                access,
+                memory: shared.as_deref(),
+                project_notes: notes.as_deref(),
+            };
             let system = prompt::system(agent.id, round, rounds, &ctx);
             let transcript = prompt::transcript(&events, agent.id);
             let ws_path = workspace.as_ref().map(PathBuf::from);
@@ -268,9 +343,34 @@ async fn run_turns(
                 }
                 Ok(reply) => {
                     let to = prompt::mentioned_agents(&reply);
+                    for m in &to {
+                        if pulled_in < MAX_PULLED_IN
+                            && m != agent.id
+                            && members.contains(m)
+                            && !queue[index + 1..].contains(m)
+                        {
+                            queue.push(m.clone());
+                            pulled_in += 1;
+                        }
+                    }
                     let ev = store.append(conv, agent.id, "message", to, &reply);
                     if ev.as_ref().is_ok_and(|e| !e.requests.is_empty()) {
                         asked_human = true;
+                    }
+                    let facts = memory::remember_lines(&reply);
+                    if !facts.is_empty() {
+                        let date = today();
+                        if let Ok(added) = memory.remember(agent.name, &date, &facts) {
+                            if !added.is_empty() {
+                                if let Ok(e) = ev.as_ref() {
+                                    let _ = app.emit(EVENT, e);
+                                }
+                                let note = format!("{} saved to council memory: {}", agent.name, added.join("; "));
+                                if let Ok(n) = store.append(conv, agent.id, "system", vec![], &note) {
+                                    let _ = app.emit(EVENT, &n);
+                                }
+                            }
+                        }
                     }
                     ev
                 }
@@ -286,10 +386,14 @@ async fn run_turns(
             if let Ok(e) = event {
                 let _ = app.emit(EVENT, &e);
             }
-            let (next_round, next_index) = pending.after(round, index);
-            journal.at(conv, next_round, next_index);
+            answered += 1;
+            if addressed {
+                let (next_round, next_index) = pending.after(round, index);
+                journal.at(conv, next_round, next_index);
+            }
+            index += 1;
         }
-        if rounds > 1 && (asked_human || passes == targets.len() - skip) {
+        if rounds > 1 && (asked_human || passes == answered) {
             let note = if asked_human {
                 "Discussion paused: a question for you is waiting."
             } else {
@@ -301,6 +405,22 @@ async fn run_turns(
             return;
         }
     }
+}
+
+/// Today's date as YYYY-MM-DD (UTC), for memory notes.
+fn today() -> String {
+    let days = store::now_ms() / 86_400_000;
+    // Civil-from-days (Howard Hinnant), valid for all dates after 1970.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 #[derive(Clone, Serialize)]
@@ -388,10 +508,12 @@ pub fn run() {
             let store = Store::new(data.join("conversations"))?;
             let config = Config::load(data.join("council.json"));
             let journal = Journal::load(data.join("turns.json"));
+            let memory = Memory::new(data.join("memory.md"));
             app.manage(AppState {
                 store: Arc::new(store),
                 config: Arc::new(config),
                 journal: Arc::new(journal),
+                memory: Arc::new(memory),
                 running: Arc::new(Mutex::new(HashMap::new())),
             });
             let state = app.state::<AppState>();
@@ -413,6 +535,12 @@ pub fn run() {
             set_member,
             set_access,
             set_workspace,
+            set_default_workspace,
+            get_default_workspace,
+            set_default_access,
+            get_council,
+            get_memory,
+            set_memory,
             list_conversations,
             new_conversation,
             load_conversation,
