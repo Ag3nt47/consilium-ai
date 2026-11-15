@@ -7,7 +7,7 @@ import { cpSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync, mk
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fingerprint } from "./backend-fingerprint.mjs";
+import { fingerprint, pageFingerprint } from "./backend-fingerprint.mjs";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const ID = "io.github.ag3nt47.consilium";
@@ -39,13 +39,15 @@ try {
   if (execSync("git status --porcelain -- src index.html", { cwd: ROOT }).toString().trim()) commit += "+";
 } catch {}
 const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
-const version = `${pkg.version}-${commit}-${Date.now().toString(36)}`;
+// The page's own content decides whether it's new: an unchanged rebuild is never offered.
+const page = pageFingerprint();
+const version = `${pkg.version}-${commit}`;
 
 mkdirSync(UI, { recursive: true });
 const tmp = join(UI, "staged.tmp");
 rmSync(tmp, { recursive: true, force: true });
 cpSync(join(ROOT, "dist"), tmp, { recursive: true });
-writeFileSync(join(tmp, "ui.json"), JSON.stringify({ version, backend }));
+writeFileSync(join(tmp, "ui.json"), JSON.stringify({ version, backend, page }));
 rmSync(join(UI, "staged"), { recursive: true, force: true });
 renameSync(tmp, join(UI, "staged"));
 console.log(

@@ -19,12 +19,17 @@ use tauri::{Assets, Runtime};
 
 /// The engine this binary was built from; a page staged against another one isn't compatible.
 pub const BACKEND: &str = env!("CONSILIUM_BACKEND_FINGERPRINT");
+/// The page built into this binary (see `build.rs`); a staged copy of it isn't offered.
+pub const BUILT_IN_PAGE: &str = env!("CONSILIUM_PAGE_FINGERPRINT");
 pub const CONFIRM: Duration = Duration::from_secs(20);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Manifest {
     pub version: String,
     pub backend: String,
+    /// Fingerprint of the page's files; older manifests without it fall back to `version`.
+    #[serde(default)]
+    pub page: String,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -79,10 +84,24 @@ impl Live {
         manifest(&dir).map(|m| m.version)
     }
 
-    /// The staged page, if it is built for this engine and differs from the live one.
+    /// Fingerprint of the page being served: the live one's, or the built-in one's.
+    fn page(&self) -> String {
+        let dir = self.active.read().ok().and_then(|a| a.clone());
+        match dir.and_then(|d| manifest(&d)) {
+            Some(m) => m.page,
+            None => BUILT_IN_PAGE.to_string(),
+        }
+    }
+
+    /// The staged page, if it is built for this engine and its content differs from what's shown.
     pub fn staged(&self, data: &Path) -> Option<StagedUi> {
         let m = compatible(&ui_dir(data).join("staged"))?;
-        (self.version().as_deref() != Some(m.version.as_str())).then_some(StagedUi { version: m.version })
+        let same = if m.page.is_empty() {
+            self.version().as_deref() == Some(m.version.as_str())
+        } else {
+            m.page == self.page()
+        };
+        (!same).then_some(StagedUi { version: m.version })
     }
 
     /// Makes the staged page live. The window reloads itself afterwards and must confirm.
@@ -164,7 +183,7 @@ mod tests {
     fn page(dir: &Path, version: &str, backend: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("index.html"), version).unwrap();
-        let m = Manifest { version: version.into(), backend: backend.into() };
+        let m = Manifest { version: version.into(), backend: backend.into(), page: format!("p-{version}") };
         std::fs::write(dir.join("ui.json"), serde_json::to_string(&m).unwrap()).unwrap();
     }
 
@@ -179,7 +198,7 @@ mod tests {
     #[test]
     #[ignore]
     fn print_fingerprint() {
-        println!("fingerprint={BACKEND}");
+        println!("fingerprint={BACKEND} page={BUILT_IN_PAGE}");
     }
 
     #[test]
@@ -202,6 +221,22 @@ mod tests {
         assert_eq!(live.apply(&data), Ok("b".into()));
         assert_eq!(live.version().as_deref(), Some("b"));
         assert!(!data.join("ui/staged").exists());
+        assert_eq!(live.staged(&data), None);
+        // A rebuild with identical content (new version label, same page) isn't offered.
+        page(&data.join("ui/staged"), "b", BACKEND);
+        let m = Manifest { version: "b2".into(), backend: BACKEND.into(), page: "p-b".into() };
+        std::fs::write(data.join("ui/staged/ui.json"), serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(live.staged(&data), None);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn a_copy_of_the_built_in_page_is_not_offered() {
+        let data = temp("builtin");
+        let live = Live::open(&data);
+        page(&data.join("ui/staged"), "e", BACKEND);
+        let m = Manifest { version: "e".into(), backend: BACKEND.into(), page: BUILT_IN_PAGE.into() };
+        std::fs::write(data.join("ui/staged/ui.json"), serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(live.staged(&data), None);
         let _ = std::fs::remove_dir_all(&data);
     }

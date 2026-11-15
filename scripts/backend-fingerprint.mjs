@@ -5,19 +5,30 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..", "src-tauri");
-const PARTS = ["src", "capabilities", "tauri.conf.json"];
+const PARTS = ["src", "capabilities", "tauri.conf.json", "Cargo.toml", "Cargo.lock", "build.rs", "Info.plist"];
 
-function files(rel, out) {
-  const abs = join(ROOT, rel);
+function files(rel, out, root = ROOT) {
+  const abs = join(root, rel);
   if (!existsSync(abs)) return;
   if (statSync(abs).isDirectory()) {
-    for (const e of readdirSync(abs)) files(`${rel}/${e}`, out);
+    for (const e of readdirSync(abs)) files(rel ? `${rel}/${e}` : e, out, root);
   } else out.push(rel);
 }
 
 export function fingerprint() {
   const list = [];
   for (const p of PARTS) files(p, list);
+  return hash(list, ROOT);
+}
+
+// The built page in `dir` (default dist/), as build.rs's page_fingerprint (ui.json left out).
+export function pageFingerprint(dir = join(ROOT, "..", "dist")) {
+  const list = [];
+  files("", list, dir);
+  return hash(list.filter((n) => n !== "ui.json"), dir);
+}
+
+function hash(list, root) {
   // Rust sorts strings by bytes; so does this for the ASCII paths used here.
   list.sort((a, b) => (Buffer.compare(Buffer.from(a), Buffer.from(b))));
   let h = 0xcbf29ce484222325n;
@@ -25,7 +36,7 @@ export function fingerprint() {
     for (const b of buf) h = ((h ^ BigInt(b)) * 0x100000001b3n) & 0xffffffffffffffffn;
   };
   for (const name of list) {
-    let body = readFileSync(join(ROOT, name));
+    let body = readFileSync(join(root, name));
     if (name === "tauri.conf.json") {
       const text = body.toString("utf8").replace(/\r\n/g, "\n");
       body = Buffer.from(text.split("\n").filter((l) => !l.trimStart().startsWith('"version"')).join("\n"));

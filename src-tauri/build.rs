@@ -3,7 +3,15 @@
 //! the same value; keep the two in step.
 use std::path::{Path, PathBuf};
 
-const PARTS: [&str; 3] = ["src", "capabilities", "tauri.conf.json"];
+const PARTS: [&str; 7] = [
+    "src",
+    "capabilities",
+    "tauri.conf.json",
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "Info.plist",
+];
 
 fn files(p: &Path, out: &mut Vec<PathBuf>) {
     if p.is_dir() {
@@ -22,10 +30,30 @@ fn fingerprint() -> String {
     for part in PARTS {
         files(Path::new(part), &mut list);
     }
-    let mut names: Vec<(String, PathBuf)> = list
+    let names: Vec<(String, PathBuf)> = list
         .into_iter()
         .map(|p| (p.to_string_lossy().replace('\\', "/"), p))
         .collect();
+    hash(names)
+}
+
+/// The same FNV-1a over the built page in `../dist` (paths relative to it, `ui.json` left out), so
+/// the app knows which page it carries and a staged copy of that same page isn't offered.
+fn page_fingerprint() -> String {
+    let root = Path::new("../dist");
+    let mut list = Vec::new();
+    files(root, &mut list);
+    let names: Vec<(String, PathBuf)> = list
+        .into_iter()
+        .filter_map(|p| {
+            let rel = p.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
+            (rel != "ui.json").then_some((rel, p))
+        })
+        .collect();
+    hash(names)
+}
+
+fn hash(mut names: Vec<(String, PathBuf)>) -> String {
     names.sort();
     let mut h: u64 = 0xcbf29ce484222325;
     let mut feed = |bytes: &[u8]| {
@@ -57,6 +85,8 @@ fn main() {
     for part in PARTS {
         println!("cargo:rerun-if-changed={part}");
     }
+    println!("cargo:rerun-if-changed=../dist");
     println!("cargo:rustc-env=CONSILIUM_BACKEND_FINGERPRINT={}", fingerprint());
+    println!("cargo:rustc-env=CONSILIUM_PAGE_FINGERPRINT={}", page_fingerprint());
     tauri_build::build()
 }
