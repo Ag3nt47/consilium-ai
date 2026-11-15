@@ -54,10 +54,14 @@ impl engine::Ui for Window {
     fn turn(&self, t: TurnState) {
         let _ = self.0.emit(TURN, t);
     }
+    fn activity(&self, activity: &engine::AgentActivity) {
+        let _ = self.0.emit(ACTIVITY, activity);
+    }
 }
 
 const EVENT: &str = "consilium://event";
 const TURN: &str = "consilium://turn";
+const ACTIVITY: &str = "consilium://activity";
 
 /// Every known AI with its install and sign-in state, council membership and access level.
 #[tauri::command]

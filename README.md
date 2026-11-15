@@ -18,7 +18,7 @@ Consilium is a desktop app where several AI assistants and you work in one conve
 - **Real-Time Secret & Credential Redaction.** Automatic redaction scrubber filters API keys, GitHub tokens, JWTs, private keys, and environment variables from transcripts and persistent memory before disk writes.
 - **visionOS Glassmorphic UI & Hover-to-Expand Controls.** Translucent frosted glass aesthetic (`backdrop-filter: blur(25px)`), ambient glow, hairline gradient borders, and minimal hover-to-expand secondary controls.
 - **Spotlight Command Palette (Cmd+K / Ctrl+K).** Global keyboard-driven command palette for instant access to session actions, theme switching, diagnostic self-checks, and discussion controls.
-- **Live Agent Activity & Health Indicators.** A pulsing cyan glow marks AIs assigned to the current turn; a red elapsed-time warning calls attention to a turn that may be stalled.
+- **Native Agent Activity & Health Indicators.** Live provider telemetry says when each AI is planning, reading, researching, editing, running a command, using a tool, delegating, or writing its report. Details come from each CLI's structured events; private chain-of-thought is never requested or shown. A red warning appears only when output is silent *and* the AI process has no measurable CPU or memory activity.
 - **Token Accounting & Usage Breakdown.** Granular per-turn token tracking (input, output, cache read/creation, thinking tokens) and daily totals.
 - **Shared memory.** A council memory every AI keeps across conversations (AIs add to it with `REMEMBER:`), plus a project's `CONSILIUM.md` as shared project notes.
 - **Picks up where it left off.** On macOS, closing the window keeps the AIs working in the background. If the app quits mid-turn, it resumes that turn on the next launch and tells an interrupted coding agent to inspect `git status` and `git diff` before continuing.
@@ -106,7 +106,7 @@ The next releases focus on safe foundations before unattended autonomy:
 
 - **Ground-truth context:** inject a bounded git status/diff summary into coding turns and compact old transcript context without hiding current decisions.
 - **Concurrency isolation:** create one git worktree and task branch per editing agent, with validation gates before changes return to the main checkout.
-- **Observable execution:** stream terminal activity into a drawer and distinguish working, waiting for input, silent-but-computing and stalled states from backend evidence.
+- **Deeper observable execution:** retain the new native activity strip while adding a terminal drawer, prompt-wait recovery controls and a bounded per-turn action timeline.
 - **Multimodal workflows:** strengthen document/image ingestion and add explicit `/deconstruct` and `/reassemble` pipelines.
 - **Extensible tools:** add sandboxed GitHub repository inspection, MCP clients, local/OpenAI-compatible models and a private skill registry before any public metadata sync.
 - **Supervised automation:** nightly audits and maintenance branches with budgets, test gates and human review—never unattended merges or host-level changes.

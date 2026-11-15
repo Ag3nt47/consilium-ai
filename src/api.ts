@@ -174,6 +174,17 @@ export interface TurnState {
   rounds: number;
 }
 
+/** Live provider telemetry. Observable phases/tool actions only; never hidden reasoning text. */
+export interface AgentActivity {
+  conversation: string;
+  agent: string;
+  kind: "preparing" | "planning" | "thinking" | "reading" | "researching" | "coding" | "running" | "tool" | "delegating" | "reporting" | "working" | string;
+  label: string;
+  detail: string;
+  started_at: number;
+  updated_at: number;
+}
+
 const appApi = {
   agents: () => invoke<AgentInfo[]>("agents_status"),
   /** Remaining plan usage per council member id; members that don't report it are absent. */
@@ -243,6 +254,11 @@ export function onEvent(fn: (e: ChatEvent) => void): Promise<UnlistenFn> {
 export function onTurn(fn: (t: TurnState) => void): Promise<UnlistenFn> {
   if (!IN_APP) return Promise.resolve(() => undefined);
   return listen<TurnState>("consilium://turn", (msg) => fn(msg.payload));
+}
+
+export function onActivity(fn: (activity: AgentActivity) => void): Promise<UnlistenFn> {
+  if (!IN_APP) return Promise.resolve(() => undefined);
+  return listen<AgentActivity>("consilium://activity", (msg) => fn(msg.payload));
 }
 
 export function senderName(sender: Sender, agents: AgentInfo[]): string {

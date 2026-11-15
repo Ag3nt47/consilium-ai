@@ -49,6 +49,19 @@ pub struct TurnState {
     pub rounds: u32,
 }
 
+/// Live, non-persistent provider telemetry for one AI. It contains observable phases and tool
+/// actions only; hidden reasoning text is never requested or emitted.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct AgentActivity {
+    pub conversation: String,
+    pub agent: String,
+    pub kind: String,
+    pub label: String,
+    pub detail: String,
+    pub started_at: u64,
+    pub updated_at: u64,
+}
+
 impl TurnState {
     pub fn idle(conversation: &str) -> Self {
         TurnState { conversation: conversation.into(), state: "idle".into(), agent: None, agents: vec![], round: 0, rounds: 0 }
@@ -60,6 +73,7 @@ pub trait Ui: Send + Sync + 'static {
     /// An event was recorded (by this process, or, when watching, by the other one).
     fn event(&self, e: &Event);
     fn turn(&self, t: TurnState);
+    fn activity(&self, activity: &AgentActivity);
 }
 
 pub type Task = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -621,8 +635,42 @@ impl council::Host for RealHost {
         let files = crate::attach::files_for(&events, &self.store.files_dir(conv));
         let ws_path = workspace.map(PathBuf::from);
         let data = self.data.clone();
+        let ui = self.ui.clone();
+        let conversation = self.conversation.clone();
+        let id = agent.id.to_string();
+        let started_at = store::now_ms();
+        ui.activity(&AgentActivity {
+            conversation: conversation.clone(),
+            agent: id.clone(),
+            kind: "preparing".into(),
+            label: format!("Starting {}", agent.name),
+            detail: agent_tool_label(agent).into(),
+            started_at,
+            updated_at: started_at,
+        });
+        let activity: agents::ActivitySink = Arc::new(move |signal| {
+            ui.activity(&AgentActivity {
+                conversation: conversation.clone(),
+                agent: id.clone(),
+                kind: signal.kind,
+                label: signal.label,
+                detail: signal.detail,
+                started_at,
+                updated_at: store::now_ms(),
+            });
+        });
         Box::pin(async move {
-            let reply = agents::run_with_files(agent, access, ws_path.as_deref(), &system, &transcript, &files, &cancel).await;
+            let reply = agents::run_with_files_observed(
+                agent,
+                access,
+                ws_path.as_deref(),
+                &system,
+                &transcript,
+                &files,
+                &cancel,
+                Some(activity),
+            )
+            .await;
             if let Some(model) = reply.as_ref().ok().and_then(|r| r.model.as_deref()) {
                 record_model(&data, agent.id, model);
             }
@@ -659,6 +707,17 @@ impl council::Host for RealHost {
         }
         let added = self.memory.remember(agent.name, &today(), &facts).ok()?;
         (!added.is_empty()).then(|| format!("{} saved to council memory: {}", agent.name, added.join("; ")))
+    }
+}
+
+fn agent_tool_label(agent: &Agent) -> &'static str {
+    match agents::effective_kind(agent) {
+        agents::Kind::Codex => "Codex CLI",
+        agents::Kind::ClaudeCode => "Claude Code CLI",
+        agents::Kind::GeminiCli => "Gemini CLI",
+        agents::Kind::Antigravity => "Antigravity CLI",
+        agents::Kind::XaiApi => "xAI API",
+        agents::Kind::DeepSeekApi => "DeepSeek API",
     }
 }
 
@@ -775,6 +834,7 @@ mod tests {
     impl Ui for Quiet {
         fn event(&self, _e: &Event) {}
         fn turn(&self, _t: TurnState) {}
+        fn activity(&self, _activity: &AgentActivity) {}
     }
 
     /// AIs that answer "<name> heard: <the human's newest message>" after `delay` ms.

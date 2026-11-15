@@ -6,10 +6,12 @@ import {
   api,
   FORECAST_SITE,
   IN_APP,
+  onActivity,
   onEvent,
   onTurn,
   senderName,
   type Access,
+  type AgentActivity,
   type AgentInfo,
   type Attachment,
   type CheckResult,
@@ -350,6 +352,7 @@ function AgentDot({
   forecast,
   isWorking,
   isFrozen,
+  activity,
   load,
 }: {
   agent: AgentInfo;
@@ -359,6 +362,7 @@ function AgentDot({
   forecast?: ResetForecast | null;
   isWorking?: boolean;
   isFrozen?: boolean;
+  activity?: AgentActivity;
   /** Share of the whole PC (0-100) this AI's processes are using right now; undefined when none run. */
   load?: number;
 }) {
@@ -376,7 +380,15 @@ function AgentDot({
   return (
     <div
       className={`agent agent-${agent.id}`}
-      title={isFrozen ? "Stalled / waiting on input" : isWorking ? "Generating response…" : agent.hint || `${agent.tool} ${agent.version ?? ""}`}
+      title={
+        isFrozen
+          ? `Stalled: no provider activity for 25 seconds${activity?.detail ? `\nLast activity: ${activity.label} · ${activity.detail}` : ""}`
+          : isWorking && activity
+            ? `${activity.label}${activity.detail ? `\n${activity.detail}` : ""}\nObservable provider activity; private reasoning is not exposed.`
+            : isWorking
+              ? "Generating response…"
+              : agent.hint || `${agent.tool} ${agent.version ?? ""}`
+      }
     >
       <span className={`dot ${dotClass}`} />
       <span className="agent-name">{agent.name}</span>
@@ -392,7 +404,7 @@ function AgentDot({
       {isFrozen ? (
         <span className="agent-state" style={{ color: "var(--danger)" }}>Stalled</span>
       ) : isWorking ? (
-        <span className="agent-state" style={{ color: "var(--accent)" }}>Working…</span>
+        <span className="agent-state" style={{ color: "var(--accent)" }}>{activity?.label ?? "Working…"}</span>
       ) : state === "ready" ? (
         <span className="agent-state">{label}</span>
       ) : state === "benched" ? (
@@ -406,6 +418,13 @@ function AgentDot({
         <button className="link setup-link" onClick={() => onSetup(agent)} title={agent.hint}>
           {state === "missing" ? "Install" : "Sign in"}
         </button>
+      )}
+      {isWorking && activity && (
+        <span className={`agent-activity activity-${activity.kind}`}>
+          <span className="activity-icon" aria-hidden="true">{activityIcon(activity.kind)}</span>
+          <span className="activity-detail">{activity.detail || activity.label}</span>
+          <span className="activity-time">{elapsedActivity(activity.started_at)}</span>
+        </span>
       )}
       {check && (
         <span className={`check ${check === "running" ? "check-running" : check.ok ? "check-ok" : "check-bad"}`} title={check === "running" ? "" : check.detail}>
@@ -423,6 +442,27 @@ function AgentDot({
       </span>
     </div>
   );
+}
+
+function activityIcon(kind: string): string {
+  return {
+    preparing: "◌",
+    planning: "◇",
+    thinking: "✦",
+    reading: "◫",
+    researching: "⌕",
+    coding: "⌘",
+    running: "›_",
+    tool: "⚙",
+    delegating: "⇄",
+    reporting: "✎",
+  }[kind] ?? "•";
+}
+
+function elapsedActivity(startedAt: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
 /** Green at 0%, through yellow, to red at 100%. */
@@ -474,6 +514,7 @@ export default function App() {
   const [current, setCurrent] = useState<string | null>(null);
   const [events, setEvents] = useState<ChatEvent[]>([]);
   const [turn, setTurn] = useState<TurnState | null>(null);
+  const [activities, setActivities] = useState<Record<string, AgentActivity>>({});
   const [draft, setDraft] = useState(IN_APP ? "" : demoDraft);
   /** Files waiting to go with the next message. */
   const [pending, setPending] = useState<Attachment[]>([]);
@@ -635,12 +676,17 @@ export default function App() {
           setTurnStartTime((prev) => prev ?? Date.now());
         } else {
           setTurnStartTime(null);
+          setActivities({});
         }
       }
       if (t.state === "idle") {
         refreshAgents();
         loadTokenUsage();
       }
+    });
+    const un3 = onActivity((activity) => {
+      if (activity.conversation !== currentRef.current) return;
+      setActivities((previous) => ({ ...previous, [activity.agent]: activity }));
     });
     // Coming back to the window (for example after signing in from the Setup terminal) re-checks
     // the AIs, at most once every 10 seconds.
@@ -655,6 +701,7 @@ export default function App() {
     return () => {
       un1.then((f) => f());
       un2.then((f) => f());
+      un3.then((f) => f());
       window.removeEventListener("focus", onFocus);
     };
   }, [refreshAgents, refreshList]);
@@ -666,6 +713,7 @@ export default function App() {
   useEffect(() => {
     if (!current) return;
     setTurn(null);
+    setActivities({});
     api.load(current).then(setEvents).catch((e) => setError(String(e)));
     api.running().then((ids) => {
       if (ids.includes(current)) setTurn(IN_APP ? { conversation: current, state: "running", agent: null, round: 0, rounds: 0 } : demoTurn);
@@ -702,7 +750,17 @@ export default function App() {
   // Every AI answers at the same time, so several can be thinking at once.
   const thinkingIds = turn?.agents?.length ? turn.agents : turn?.agent ? [turn.agent] : [];
   const thinkingNames = thinkingIds.map((id) => senderName(id, agents));
-  const thinking = thinkingNames.length
+  const nativeActivity = thinkingIds
+    .map((id) => {
+      const activity = activities[id];
+      if (!activity) return null;
+      const name = senderName(id, agents);
+      return `${name}: ${activity.label}${activity.detail ? ` · ${activity.detail}` : ""}`;
+    })
+    .filter((line): line is string => Boolean(line));
+  const thinking = nativeActivity.length
+    ? nativeActivity.join("  •  ")
+    : thinkingNames.length
     ? thinkingNames.length === 1
       ? `${thinkingNames[0]} is thinking`
       : `${thinkingNames.slice(0, -1).join(", ")} and ${thinkingNames[thinkingNames.length - 1]} are thinking`
@@ -1202,7 +1260,14 @@ export default function App() {
           </div>
           {members.map((a) => {
             const isWorking = busy && (turn?.agents?.includes(a.id) ?? (turn?.agent === a.id));
-            const isFrozen = Boolean(isWorking && turnStartTime && Date.now() - turnStartTime > 25_000);
+            const activity = activities[a.id];
+            const lastSignal = activity?.updated_at ?? turnStartTime;
+            const agentLoad = pressure?.agents?.[a.id];
+            // Silence plus no measurable process activity is a stall. Silence while CPU or memory
+            // is moving is honest heavy-compute time, not labelled frozen.
+            const isFrozen = Boolean(
+              isWorking && lastSignal && Date.now() - lastSignal > 25_000 && agentLoad !== undefined && agentLoad < 1,
+            );
             return (
               <AgentDot
                 key={a.id}
@@ -1213,7 +1278,8 @@ export default function App() {
                 forecast={forecast}
                 isWorking={isWorking}
                 isFrozen={isFrozen}
-                load={pressure?.agents?.[a.id]}
+                activity={activity}
+                load={agentLoad}
               />
             );
           })}

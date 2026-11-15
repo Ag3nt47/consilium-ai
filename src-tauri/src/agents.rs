@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -765,6 +766,20 @@ pub struct Plan {
     pub input: String,
 }
 
+/// One provider-reported description of what an AI is doing. This deliberately exposes only
+/// observable tool/phase telemetry, never hidden reasoning text or chain-of-thought.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivitySignal {
+    /// Stable semantic category used for colour and icon choices in the UI.
+    pub kind: String,
+    /// Short provider-native action label (for example "Running command").
+    pub label: String,
+    /// Optional concise native detail, such as the tool name or search query.
+    pub detail: String,
+}
+
+pub type ActivitySink = Arc<dyn Fn(ActivitySignal) + Send + Sync>;
+
 /// One provider turn, including token accounting when the CLI reports it.
 pub struct AgentReply {
     pub text: String,
@@ -830,7 +845,9 @@ pub fn plan_with_files(
             format!("{system}\n\n{prompt}")
         }
         Kind::ClaudeCode => {
-            for a in ["-p", "--output-format", "json", "--no-session-persistence"] {
+            // Stream JSON preserves Claude Code's native tool-use events so the app can show what
+            // it is doing. The final `result` event still contains the reply and usage data.
+            for a in ["-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence"] {
                 push(a);
             }
             match access {
@@ -961,15 +978,37 @@ pub async fn run_with_files(
     files: &crate::attach::Files,
     cancel: &CancellationToken,
 ) -> Result<AgentReply, String> {
+    run_with_files_observed(agent, access, workspace, system, prompt, files, cancel, None).await
+}
+
+/// `run_with_files`, reporting provider-native activity as structured output arrives.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_files_observed(
+    agent: &Agent,
+    access: Access,
+    workspace: Option<&Path>,
+    system: &str,
+    prompt: &str,
+    files: &crate::attach::Files,
+    cancel: &CancellationToken,
+    activity: Option<ActivitySink>,
+) -> Result<AgentReply, String> {
     if let Some(provider) = api_provider(agent.kind) {
         // Attached files aren't sent: the API agents see only the conversation text.
+        if let Some(sink) = &activity {
+            sink(ActivitySignal {
+                kind: "thinking".into(),
+                label: format!("Waiting for {}", agent.name),
+                detail: "API response".into(),
+            });
+        }
         let (text, usage, model) =
             crate::apiagent::run(agent.id, agent.name, provider, system, prompt, cancel, RUN_TIMEOUT).await?;
         return Ok(AgentReply { text, usage, model: Some(model) });
     }
     let kind = effective_kind(agent);
     let path = find(kind).ok_or_else(|| format!("{} isn't installed", agent.name))?;
-    run_at_with_usage(&path, kind, access, workspace, system, prompt, files, cancel, RUN_TIMEOUT).await
+    run_at_with_usage(&path, kind, access, workspace, system, prompt, files, cancel, RUN_TIMEOUT, activity).await
 }
 
 /// Text-only `run_at_with_usage` at a given CLI path and time limit; the tests drive fake CLIs
@@ -986,7 +1025,7 @@ pub async fn run_at(
     cancel: &CancellationToken,
     timeout: Duration,
 ) -> Result<String, String> {
-    run_at_with_usage(path, kind, access, workspace, system, prompt, &crate::attach::Files::default(), cancel, timeout)
+    run_at_with_usage(path, kind, access, workspace, system, prompt, &crate::attach::Files::default(), cancel, timeout, None)
         .await
         .map(|reply| reply.text)
 }
@@ -1002,6 +1041,7 @@ async fn run_at_with_usage(
     files: &crate::attach::Files,
     cancel: &CancellationToken,
     timeout: Duration,
+    activity: Option<ActivitySink>,
 ) -> Result<AgentReply, String> {
     let work = std::env::temp_dir().join(format!("consilium-{}", uuid::Uuid::new_v4()));
     let empty = work.join("empty");
@@ -1012,11 +1052,12 @@ async fn run_at_with_usage(
     };
     let reply_file = work.join("reply.txt");
     let plan = plan_with_files(kind, access, &dir, &reply_file, system, prompt, files);
-    let result = execute(path, kind, &dir, &reply_file, plan, cancel, timeout).await;
+    let result = execute(path, kind, &dir, &reply_file, plan, cancel, timeout, activity).await;
     let _ = std::fs::remove_dir_all(&work);
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     path: &Path,
     kind: Kind,
@@ -1025,6 +1066,7 @@ async fn execute(
     plan: Plan,
     cancel: &CancellationToken,
     timeout: Duration,
+    activity: Option<ActivitySink>,
 ) -> Result<AgentReply, String> {
     let mut cmd = command(path);
     cmd.current_dir(dir).stdin(Stdio::piped()).args(&plan.args);
@@ -1048,6 +1090,7 @@ async fn execute(
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
     let mut recent_output = String::new();
+    let mut activity_output = String::new();
     let mut watch_output = true;
     let outcome = loop {
         tokio::select! {
@@ -1059,6 +1102,17 @@ async fn execute(
                 };
                 recent_output.push_str(&String::from_utf8_lossy(&chunk));
                 keep_tail(&mut recent_output, 8_192);
+                if let Some(sink) = &activity {
+                    activity_output.push_str(&String::from_utf8_lossy(&chunk));
+                    while let Some(end) = activity_output.find('\n') {
+                        let line = activity_output[..end].trim_end_matches('\r').to_string();
+                        activity_output.drain(..=end);
+                        if let Some(signal) = activity_from_line(kind, &line) {
+                            sink(signal);
+                        }
+                    }
+                    keep_tail(&mut activity_output, 32_768);
+                }
                 if let Some(line) = interactive_prompt(&recent_output) {
                     break Err(format!(
                         "{} is waiting for interactive input: {line}\nREQUEST: Open {} in a terminal, complete the prompt, then press Retry in Consilium.",
@@ -1101,15 +1155,15 @@ async fn execute(
     let model = reply_model(kind, &stdout);
     let reply = match kind {
         Kind::Codex => std::fs::read_to_string(reply_file).unwrap_or_default(),
-        Kind::ClaudeCode => match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-            Ok(v) => {
+        Kind::ClaudeCode => match claude_result(&stdout) {
+            Some(v) => {
                 let text = v["result"].as_str().unwrap_or_default().to_string();
                 if v["is_error"].as_bool() == Some(true) {
                     return Err(tail(if text.is_empty() { &stderr } else { &text }));
                 }
                 text
             }
-            Err(_) => String::new(),
+            None => String::new(),
         },
         Kind::GeminiCli => match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
             Ok(v) => {
@@ -1140,12 +1194,26 @@ fn reply_model(kind: Kind, stdout: &str) -> Option<String> {
     if kind != Kind::ClaudeCode {
         return None;
     }
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let v = claude_result(stdout)?;
     let models = v["modelUsage"].as_object()?;
     models
         .iter()
         .max_by_key(|(_, u)| u["outputTokens"].as_u64().unwrap_or(0))
         .map(|(id, _)| id.clone())
+}
+
+/// Claude Code returns one JSON object in legacy JSON mode and a line-delimited `result` object in
+/// stream mode. Accept both so older installations and recorded test fixtures remain readable.
+fn claude_result(stdout: &str) -> Option<serde_json::Value> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        if v["type"] == "result" || v.get("result").is_some() {
+            return Some(v);
+        }
+    }
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .rfind(|v| v["type"] == "result")
 }
 
 fn json_u64(value: &serde_json::Value, key: &str) -> u64 {
@@ -1177,7 +1245,7 @@ fn token_usage_from_output(kind: Kind, stdout: &str) -> Option<TokenUsage> {
                 })?
             }),
         Kind::ClaudeCode => {
-            let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+            let v = claude_result(stdout)?;
             let usage = &v["usage"];
             let input_tokens = json_u64(usage, "input_tokens");
             let output_tokens = json_u64(usage, "output_tokens");
@@ -1269,6 +1337,165 @@ fn tool_name(kind: Kind) -> &'static str {
         Kind::Antigravity => "Antigravity CLI",
         Kind::XaiApi => "xAI API",
         Kind::DeepSeekApi => "DeepSeek API",
+    }
+}
+
+/// Turns one complete structured-output line into a compact, safe activity description. Provider
+/// schemas evolve, so unknown events are ignored rather than guessed at. Reasoning text and model
+/// prose are never copied into activity details.
+fn activity_from_line(kind: Kind, line: &str) -> Option<ActivitySignal> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    match kind {
+        Kind::Codex => codex_activity(&v),
+        Kind::ClaudeCode => claude_activity(&v),
+        Kind::Antigravity => antigravity_activity(&v),
+        Kind::GeminiCli | Kind::XaiApi | Kind::DeepSeekApi => None,
+    }
+}
+
+fn signal(kind: &str, label: &str, detail: impl AsRef<str>) -> ActivitySignal {
+    ActivitySignal {
+        kind: kind.into(),
+        label: label.into(),
+        detail: safe_activity_detail(detail.as_ref()),
+    }
+}
+
+fn safe_activity_detail(detail: &str) -> String {
+    let scrubbed = crate::redact::scrub(detail);
+    let one_line = scrubbed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = one_line.chars().take(140).collect();
+    if one_line.chars().count() > 140 {
+        out.push('…');
+    }
+    out
+}
+
+fn codex_activity(v: &serde_json::Value) -> Option<ActivitySignal> {
+    match v["type"].as_str()? {
+        "thread.started" => Some(signal("preparing", "Starting Codex", "")),
+        "turn.started" => Some(signal("thinking", "Planning", "")),
+        "turn.completed" => Some(signal("reporting", "Finishing report", "")),
+        "item.started" | "item.completed" => {
+            let item = &v["item"];
+            match item["type"].as_str()? {
+                // Never surface the reasoning text itself.
+                "reasoning" => Some(signal("thinking", "Reasoning", "")),
+                "command_execution" => Some(signal(
+                    "running",
+                    "Running command",
+                    item["command"].as_str().unwrap_or_default(),
+                )),
+                "file_change" => Some(signal(
+                    "coding",
+                    "Editing files",
+                    item["path"]
+                        .as_str()
+                        .or_else(|| item["file_path"].as_str())
+                        .unwrap_or_default(),
+                )),
+                "mcp_tool_call" | "dynamic_tool_call" => {
+                    let server = item["server"].as_str().unwrap_or_default();
+                    let tool = item["tool"]
+                        .as_str()
+                        .or_else(|| item["name"].as_str())
+                        .unwrap_or_default();
+                    Some(signal("tool", "Using tool", format!("{server} {tool}")))
+                }
+                "web_search" => Some(signal(
+                    "researching",
+                    "Searching the web",
+                    item["query"].as_str().unwrap_or_default(),
+                )),
+                "todo_list" | "plan" => Some(signal("planning", "Updating plan", "")),
+                "agent_message" => Some(signal("reporting", "Writing report", "")),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn claude_activity(v: &serde_json::Value) -> Option<ActivitySignal> {
+    match v["type"].as_str()? {
+        "system" if v["subtype"] == "init" => Some(signal("preparing", "Starting Claude Code", "")),
+        "result" => Some(signal("reporting", "Finishing report", "")),
+        "assistant" => {
+            let content = v["message"]["content"].as_array()?;
+            for block in content.iter().rev() {
+                match block["type"].as_str() {
+                    Some("tool_use") => return Some(claude_tool_activity(block)),
+                    Some("text") => return Some(signal("reporting", "Writing report", "")),
+                    Some("thinking") => return Some(signal("thinking", "Thinking", "")),
+                    _ => {}
+                }
+            }
+            None
+        }
+        "user" => Some(signal("tool", "Checking tool result", "")),
+        _ => None,
+    }
+}
+
+fn claude_tool_activity(block: &serde_json::Value) -> ActivitySignal {
+    let name = block["name"].as_str().unwrap_or("tool");
+    let input = &block["input"];
+    let detail = input["file_path"]
+        .as_str()
+        .or_else(|| input["path"].as_str())
+        .or_else(|| input["query"].as_str())
+        .or_else(|| input["pattern"].as_str())
+        .or_else(|| input["description"].as_str())
+        .or_else(|| input["command"].as_str())
+        .unwrap_or(name);
+    match name.to_ascii_lowercase().as_str() {
+        "read" | "glob" => signal("reading", &format!("Using {name}"), detail),
+        "grep" | "websearch" | "webfetch" => signal("researching", &format!("Using {name}"), detail),
+        "edit" | "write" | "multiedit" | "notebookedit" => signal("coding", &format!("Using {name}"), detail),
+        "bash" => signal("running", "Running command", detail),
+        "task" | "agent" => signal("delegating", "Delegating task", detail),
+        _ => signal("tool", &format!("Using {name}"), detail),
+    }
+}
+
+fn antigravity_activity(v: &serde_json::Value) -> Option<ActivitySignal> {
+    match v["event"].as_str()? {
+        "init" => Some(signal("preparing", "Starting Antigravity", "")),
+        "result" => Some(signal("reporting", "Finishing report", "")),
+        "step_update" => {
+            let step = &v["step_update"];
+            let step_type = step["step_type"].as_str().unwrap_or_default();
+            let tool = step["tool_name"]
+                .as_str()
+                .or_else(|| step["display_name"].as_str())
+                .or_else(|| step["tool"]["name"].as_str());
+            if let Some(tool) = tool {
+                let detail = step["description"]
+                    .as_str()
+                    .or_else(|| step["command"].as_str())
+                    .or_else(|| step["query"].as_str())
+                    .unwrap_or_default();
+                let lower = tool.to_ascii_lowercase();
+                return Some(if lower.contains("search") || lower.contains("browser") || lower.contains("read") {
+                    signal("researching", &format!("Using {tool}"), detail)
+                } else if lower.contains("write") || lower.contains("replace") || lower.contains("edit") {
+                    signal("coding", &format!("Using {tool}"), detail)
+                } else if lower.contains("command") || lower.contains("terminal") {
+                    signal("running", &format!("Using {tool}"), detail)
+                } else {
+                    signal("tool", &format!("Using {tool}"), detail)
+                });
+            }
+            match step_type {
+                "agent_response" => Some(signal("reporting", "Writing report", "")),
+                "thinking" | "reasoning" => Some(signal("thinking", "Thinking", "")),
+                "tool_use" | "tool_call" => Some(signal("tool", "Using tool", "")),
+                "user_input" => None,
+                other if !other.is_empty() => Some(signal("working", "Working", other.replace('_', " "))),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1528,10 +1755,58 @@ mod plan_tests {
     }
 
     #[test]
+    fn native_activity_is_classified_without_exposing_reasoning_text() {
+        let reasoning = activity_from_line(
+            Kind::Codex,
+            r#"{"type":"item.started","item":{"type":"reasoning","text":"private chain of thought"}}"#,
+        )
+        .unwrap();
+        assert_eq!(reasoning, signal("thinking", "Reasoning", ""));
+        assert!(!reasoning.detail.contains("private"));
+
+        let command_line = serde_json::json!({
+            "type": "item.started",
+            "item": {"type": "command_execution", "command": format!("npm test API_KEY={}", "a".repeat(24))}
+        })
+        .to_string();
+        let command = activity_from_line(Kind::Codex, &command_line).unwrap();
+        assert_eq!(command.kind, "running");
+        assert!(command.detail.contains("[REDACTED"), "{}", command.detail);
+
+        let claude = activity_from_line(
+            Kind::ClaudeCode,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"src/App.tsx"}}]}}"#,
+        )
+        .unwrap();
+        assert_eq!((claude.kind.as_str(), claude.label.as_str(), claude.detail.as_str()), ("coding", "Using Edit", "src/App.tsx"));
+
+        let gemini = activity_from_line(
+            Kind::Antigravity,
+            r#"{"event":"step_update","step_update":{"step_type":"tool_call","tool_name":"search_web","query":"Tauri events"}}"#,
+        )
+        .unwrap();
+        assert_eq!((gemini.kind.as_str(), gemini.label.as_str()), ("researching", "Using search_web"));
+    }
+
+    #[test]
+    fn claude_stream_result_remains_the_reply_and_usage_source() {
+        let out = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n",
+            "{\"type\":\"result\",\"is_error\":false,\"result\":\"hello\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5},\"modelUsage\":{\"claude-opus-5-5\":{\"outputTokens\":5}}}\n"
+        );
+        assert_eq!(claude_result(out).unwrap()["result"], "hello");
+        assert_eq!(token_usage_from_output(Kind::ClaudeCode, out).unwrap().total_tokens, 15);
+        assert_eq!(reply_model(Kind::ClaudeCode, out).as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
     fn chat_access_turns_tools_off_everywhere() {
         assert!(args(Kind::Codex, Access::Chat).contains(&"--json".to_string()));
         assert!(has(&args(Kind::Codex, Access::Chat), &["-s", "read-only"]));
         assert!(has(&args(Kind::ClaudeCode, Access::Chat), &["--tools", ""]));
+        assert!(has(&args(Kind::ClaudeCode, Access::Chat), &["--output-format", "stream-json"]));
+        assert!(args(Kind::ClaudeCode, Access::Chat).contains(&"--verbose".to_string()));
         assert!(has(&args(Kind::GeminiCli, Access::Chat), &["--approval-mode", "plan"]));
     }
 
@@ -1651,6 +1926,39 @@ printf 'cwd=%s files=%s first=%s' "$(basename "$PWD")" "$(ls -A | wc -l | tr -d 
         );
         let r = go(&p, Kind::Codex, Access::Chat, None, "SYSTEM LINE").await.unwrap();
         assert_eq!(r, "cwd=empty files=0 first=SYSTEM LINE");
+    }
+
+    #[tokio::test]
+    async fn structured_activity_is_streamed_before_the_reply_finishes() {
+        let p = fake(
+            r#"while [ "$1" != "-o" ]; do shift; done; out="$2"
+cat >/dev/null
+echo '{"type":"turn.started"}'
+echo '{"type":"item.started","item":{"type":"command_execution","command":"npm test"}}'
+printf 'done' > "$out""#,
+        );
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<ActivitySignal>::new()));
+        let captured = seen.clone();
+        let sink: ActivitySink = Arc::new(move |activity| captured.lock().unwrap().push(activity));
+        let reply = run_at_with_usage(
+            &p,
+            Kind::Codex,
+            Access::Chat,
+            None,
+            "system",
+            "prompt",
+            &crate::attach::Files::default(),
+            &CancellationToken::new(),
+            RUN_TIMEOUT,
+            Some(sink),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.text, "done");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![signal("thinking", "Planning", ""), signal("running", "Running command", "npm test")]
+        );
     }
 
     #[tokio::test]

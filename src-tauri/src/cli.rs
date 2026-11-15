@@ -354,6 +354,17 @@ impl Ui for Term {
         print(&self.paint.c("2", &format!("… {} {verb} thinking\n", names.join(" and "))));
         *thinking = t.agents;
     }
+    fn activity(&self, activity: &crate::engine::AgentActivity) {
+        if *self.conversation.lock().unwrap() != activity.conversation {
+            return;
+        }
+        let detail = if activity.detail.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", activity.detail)
+        };
+        print(&self.paint.c("2", &format!("… {}: {}{detail}\n", name_of(&activity.agent), activity.label)));
+    }
 }
 
 // ---------------------------------------------------------------- commands
