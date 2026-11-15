@@ -904,6 +904,16 @@ mod tests {
     use crate::agents::AgentReply;
 
     #[test]
+    fn local_ai_slots_are_shared_and_released_on_drop() {
+        let dir = std::env::temp_dir().join(format!("consilium-agent-slots-{}", std::process::id()));
+        let first = try_agent_slot(&dir, 1).unwrap().expect("first process gets the slot");
+        assert!(try_agent_slot(&dir, 1).unwrap().is_none(), "a second process must wait");
+        drop(first);
+        assert!(try_agent_slot(&dir, 1).unwrap().is_some(), "the OS releases a dropped slot");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn today_is_a_plausible_iso_date() {
         let t = today();
         assert_eq!(t.len(), 10);
