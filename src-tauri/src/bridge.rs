@@ -369,6 +369,136 @@ pub struct ConnectorStatus {
     pub detail: String,
 }
 
+/// What the messaging settings panel shows. The phone number is only ever returned masked.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SetupView {
+    pub enabled: bool,
+    pub endpoint: String,
+    /// e.g. "•••• 4821", or "" when no number is saved.
+    pub account_hint: String,
+    pub allowed_acis: Vec<String>,
+    pub auto_forward_decisions: bool,
+    /// Where signal-cli was found, if it's installed.
+    pub signal_cli: Option<String>,
+    /// Whether Homebrew is available for the one-click install.
+    pub can_install: bool,
+    pub config_path: String,
+}
+
+fn find_tool(name: &str) -> Option<PathBuf> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let mut dirs_: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    dirs_.extend(["/opt/homebrew/bin", "/usr/local/bin"].iter().map(PathBuf::from));
+    dirs_.push(home.join(".local/bin"));
+    dirs_.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
+}
+
+pub fn view(cfg: &BridgeConfig, path: &Path) -> SetupView {
+    let digits: String = cfg.account.chars().filter(|c| c.is_ascii_digit()).collect();
+    let account_hint = if digits.len() >= 4 { format!("•••• {}", &digits[digits.len() - 4..]) } else { String::new() };
+    SetupView {
+        enabled: cfg.enabled,
+        endpoint: cfg.endpoint.clone(),
+        account_hint,
+        allowed_acis: cfg.allowed_acis.clone(),
+        auto_forward_decisions: cfg.auto_forward_decisions,
+        signal_cli: find_tool("signal-cli").map(|p| p.display().to_string()),
+        can_install: cfg!(target_os = "macos") && find_tool("brew").is_some(),
+        config_path: path.display().to_string(),
+    }
+}
+
+/// A phone number in international form: "+" then 8 to 15 digits, nothing else.
+pub fn valid_account(s: &str) -> bool {
+    let d = s.strip_prefix('+').unwrap_or("");
+    (8..=15).contains(&d.len()) && d.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Changes from the settings panel. `account: None` keeps the saved number.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetupChange {
+    pub enabled: bool,
+    pub account: Option<String>,
+    pub endpoint: String,
+    pub allowed_acis: Vec<String>,
+    pub auto_forward_decisions: bool,
+}
+
+/// Validates and applies a settings change. Nothing is saved if any field is wrong.
+pub fn apply_change(cfg: &BridgeConfig, ch: SetupChange) -> Result<BridgeConfig, String> {
+    let mut next = cfg.clone();
+    if let Some(a) = ch.account {
+        let a: String = a.chars().filter(|c| !c.is_whitespace() && *c != '-' && *c != '(' && *c != ')').collect();
+        if !a.is_empty() && !valid_account(&a) {
+            return Err("Enter the phone number in international form, like +15551234567".into());
+        }
+        next.account = a;
+    }
+    let endpoint = ch.endpoint.trim();
+    next.endpoint = if endpoint.is_empty() { DEFAULT_ENDPOINT.into() } else { endpoint.into() };
+    validate_loopback(&next.endpoint)?;
+    let mut acis = Vec::new();
+    for a in ch.allowed_acis.iter().map(|a| a.trim()).filter(|a| !a.is_empty()) {
+        let id = uuid::Uuid::parse_str(a).map_err(|_| format!("\"{a}\" isn't a Signal account ID (a UUID)"))?;
+        acis.push(id.to_string());
+    }
+    next.allowed_acis = acis;
+    next.auto_forward_decisions = ch.auto_forward_decisions;
+    if ch.enabled && next.account.is_empty() {
+        return Err("Add the phone number linked to Signal before turning it on".into());
+    }
+    next.enabled = ch.enabled;
+    Ok(next)
+}
+
+/// A fixed setup command for the terminal. Nothing typed in the UI goes into it except a phone
+/// number that passed `valid_account` and a loopback address that passed `validate_loopback`.
+pub fn setup_command(action: &str, cfg: &BridgeConfig) -> Result<(&'static str, String), String> {
+    let quote = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', r"'\''"));
+    match action {
+        "install" => {
+            let brew = find_tool("brew").filter(|_| cfg!(target_os = "macos")).ok_or(
+                "One-click install needs Homebrew on a Mac. Otherwise install signal-cli from its GitHub releases page",
+            )?;
+            Ok(("Install signal-cli and qrencode", format!("{} install signal-cli qrencode", quote(&brew))))
+        }
+        "link" => {
+            let cli = find_tool("signal-cli").ok_or("Install signal-cli first")?;
+            let qr = find_tool("qrencode");
+            let cmd = match qr {
+                Some(q) => format!(
+                    "echo 'On your phone: Signal > Settings > Linked devices > Link new device, then scan this code.'; {} link -n Consilium | tee >(xargs -L 1 {} -t ansiutf8)",
+                    quote(&cli),
+                    quote(&q)
+                ),
+                None => format!(
+                    "echo 'Open the sgnl:// link below on your phone, or install qrencode to see a QR code.'; {} link -n Consilium",
+                    quote(&cli)
+                ),
+            };
+            Ok(("Link Consilium to your Signal account", cmd))
+        }
+        "start" => {
+            let cli = find_tool("signal-cli").ok_or("Install signal-cli first")?;
+            if !valid_account(&cfg.account) {
+                return Err("Save the phone number linked to Signal first".into());
+            }
+            validate_loopback(&cfg.endpoint)?;
+            let raw = cfg.endpoint.trim().trim_start_matches("tcp://").trim_start_matches("http://");
+            let addr: SocketAddr = raw
+                .parse()
+                .map_err(|_| "One-click start needs an address like 127.0.0.1:7583".to_string())?;
+            Ok((
+                "Start Signal for Consilium (keep this window open)",
+                format!("{} -a {} daemon --tcp {addr}", quote(&cli), cfg.account),
+            ))
+        }
+        _ => Err("unknown messaging setup step".into()),
+    }
+}
+
 const PROBE_ID: &str = "consilium-probe";
 
 /// Asks the local signal-cli daemon for its version over JSON-RPC. A reply proves the daemon is
@@ -376,7 +506,7 @@ const PROBE_ID: &str = "consilium-probe";
 pub fn probe_signal(cfg: &BridgeConfig, timeout: std::time::Duration) -> ConnectorStatus {
     let status = |state, detail: String| ConnectorStatus { id: "signal", name: "Signal", state, detail };
     if !cfg.enabled {
-        return status("off", "Signal isn't set up. Turn it on in messaging.json.".into());
+        return status("off", "Signal isn't set up. Click to set it up.".into());
     }
     if let Err(e) = cfg.validate_endpoint() {
         return status("down", e);
@@ -632,5 +762,57 @@ mod tests {
 
         let res3 = resolve_incoming_message("launch evil_script", &pending, true);
         assert_eq!(res3, ResolvedSignalAction::Prompt { text: "launch evil_script".into() });
+    }
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    fn change(account: Option<&str>, enabled: bool) -> SetupChange {
+        SetupChange {
+            enabled,
+            account: account.map(String::from),
+            endpoint: String::new(),
+            allowed_acis: vec![],
+            auto_forward_decisions: true,
+        }
+    }
+
+    #[test]
+    fn saves_valid_settings_and_masks_the_number() {
+        let next = apply_change(&BridgeConfig::default(), change(Some("+1 (555) 123-4821"), true)).unwrap();
+        assert_eq!(next.account, "+15551234821");
+        assert_eq!(next.endpoint, DEFAULT_ENDPOINT);
+        let v = view(&next, Path::new("/x/messaging.json"));
+        assert_eq!(v.account_hint, "•••• 4821");
+        assert!(!format!("{v:?}").contains("5551234821"));
+        // None keeps the saved number.
+        assert_eq!(apply_change(&next, change(None, true)).unwrap().account, "+15551234821");
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        let d = BridgeConfig::default();
+        assert!(apply_change(&d, change(Some("5551234"), false)).is_err());
+        assert!(apply_change(&d, change(Some("+1555; rm -rf ~"), false)).is_err());
+        assert!(apply_change(&d, change(None, true)).is_err(), "can't turn on without a number");
+        let mut c = change(Some("+15551234821"), true);
+        c.endpoint = "203.0.113.5:7583".into();
+        assert!(apply_change(&d, c).is_err(), "remote endpoints are refused");
+        let mut c = change(Some("+15551234821"), true);
+        c.allowed_acis = vec!["not-a-uuid".into()];
+        assert!(apply_change(&d, c).is_err());
+    }
+
+    #[test]
+    fn start_command_uses_only_validated_values() {
+        let mut cfg = BridgeConfig::default();
+        assert!(setup_command("start", &cfg).is_err() || find_tool("signal-cli").is_none());
+        cfg.account = "+15551234821".into();
+        if let Ok((_, cmd)) = setup_command("start", &cfg) {
+            assert!(cmd.ends_with("-a +15551234821 daemon --tcp 127.0.0.1:7583"));
+        }
+        assert!(setup_command("rm", &cfg).is_err());
     }
 }

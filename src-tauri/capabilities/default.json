@@ -33,6 +33,9 @@
         },
         {
           "url": "https://platform.deepseek.com/*"
+        },
+        {
+          "url": "https://github.com/AsamK/signal-cli/*"
         }
       ]
     },

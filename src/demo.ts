@@ -165,6 +165,20 @@ export const demoApi = {
   messagingStatus: async () => [
     { id: "signal", name: "Signal", state: "ok" as const, detail: "Connected to signal-cli 0.13.9 on this computer" },
   ],
+  messagingConfig: async () => ({
+    enabled: false,
+    endpoint: "127.0.0.1:7583",
+    account_hint: "",
+    allowed_acis: [],
+    auto_forward_decisions: true,
+    signal_cli: null,
+    can_install: true,
+    config_path: "~/.config/consilium/messaging.json",
+  }),
+  messagingSave: async () => {
+    throw new Error("Not available in the browser preview");
+  },
+  messagingSetup: async () => "",
   systemPressure: async () => ({
     percent: 24,
     cpu_percent: 18,
@@ -194,6 +208,7 @@ export const demoApi = {
     { id: "gpt", name: "ChatGPT", ok: true, ms: 9400, detail: "OK" },
     { id: "claude", name: "Claude", ok: true, ms: 6100, detail: "OK" },
   ],
+  getDailyWallpaper: async () => null,
 };
 export const demoAddAi = params.get("addai") === "1";
 

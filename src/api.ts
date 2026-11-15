@@ -132,6 +132,27 @@ export interface CliInstall {
   note: string;
 }
 
+export interface MessagingSetup {
+  enabled: boolean;
+  endpoint: string;
+  /** Masked, e.g. "•••• 4821"; empty when no number is saved. */
+  account_hint: string;
+  allowed_acis: string[];
+  auto_forward_decisions: boolean;
+  signal_cli: string | null;
+  can_install: boolean;
+  config_path: string;
+}
+
+export interface MessagingChange {
+  enabled: boolean;
+  /** null keeps the saved number. */
+  account: string | null;
+  endpoint: string;
+  allowed_acis: string[];
+  auto_forward_decisions: boolean;
+}
+
 export interface ConnectorStatus {
   id: string;
   name: string;
@@ -251,6 +272,12 @@ const appApi = {
   /** Samples host PC CPU and memory pressure (0-100%). */
   systemPressure: () => invoke<SystemPressure>("system_pressure"),
   messagingStatus: () => invoke<ConnectorStatus[]>("messaging_status"),
+  /** Messaging settings, phone number masked. */
+  messagingConfig: () => invoke<MessagingSetup>("messaging_config"),
+  /** Validates and saves messaging settings on this computer. */
+  messagingSave: (change: MessagingChange) => invoke<MessagingSetup>("messaging_save", { change }),
+  /** Opens a terminal for one fixed setup step. */
+  messagingSetup: (action: "install" | "link" | "start") => invoke<string>("messaging_setup", { action }),
   /** A newer build staged for Update Now, or null. */
   updateAvailable: () => invoke<StagedUpdate | null>("update_available"),
   /** Pauses the AIs, installs the staged build and relaunches; their turns resume afterwards. */
@@ -261,7 +288,16 @@ const appApi = {
   uiUpdateApply: () => invoke<string>("ui_update_apply"),
   /** Tells the app this page started, so it isn't rolled back. */
   uiLoaded: () => invoke<string | null>("ui_loaded"),
+  /** Fetches today's Bing wallpaper metadata and image data URL. */
+  getDailyWallpaper: () => invoke<DailyWallpaper | null>("get_daily_wallpaper"),
 };
+
+export interface DailyWallpaper {
+  data_url: string;
+  title?: string;
+  copyright?: string;
+  date: string;
+}
 
 export interface StagedUpdate {
   version: string;

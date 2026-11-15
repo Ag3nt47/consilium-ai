@@ -19,6 +19,7 @@ import {
   type Council,
   type ChatEvent,
   type Conversation,
+  type DailyWallpaper,
   type ResetForecast,
   type SystemPressure,
   type StagedUpdate,
@@ -31,7 +32,7 @@ import { AgentVoiceMeter, VoiceVisualizer } from "./visualizer";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { installHoverTips } from "./tooltip";
 import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
-import { MessagingIndicator } from "./messaging";
+import { MessagingIndicator, MessagingSettings } from "./messaging";
 import { ProjectVersions } from "./projects";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
@@ -61,11 +62,11 @@ const PROVIDER_PORTALS: Record<string, { account: string; accountLabel: string; 
   },
 };
 
-type Prefs = { theme: string; effects: boolean; autoUpdate: boolean };
+type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean };
 const PREFS_KEY = "consilium.prefs";
 
 function loadPrefs(): Prefs {
-  const defaults: Prefs = { theme: "consilium", effects: true, autoUpdate: true };
+  const defaults: Prefs = { theme: "consilium", effects: true, autoUpdate: true, bingWallpaper: true };
   if (!IN_APP) return { ...defaults, theme: demoTheme || defaults.theme, autoUpdate: false };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
@@ -502,6 +503,7 @@ export default function App() {
   const [rounds, setRounds] = useState(3);
   const [persona, setPersonaState] = useState(loadPersona);
   const [auditOpen, setAuditOpen] = useState(false);
+  const [wallpaper, setWallpaper] = useState<DailyWallpaper | null>(null);
   const setPersona = (id: string) => {
     setPersonaState(id);
     savePersona(id);
@@ -618,6 +620,14 @@ export default function App() {
     document.documentElement.dataset.effects = prefs.effects ? "on" : "off";
     savePrefs(prefs);
   }, [prefs]);
+
+  useEffect(() => {
+    if (prefs.bingWallpaper) {
+      api.getDailyWallpaper().then(setWallpaper).catch(() => undefined);
+    } else {
+      setWallpaper(null);
+    }
+  }, [prefs.bingWallpaper]);
 
   const refreshAgents = useCallback(() => {
     // Focus, turn completion and the refresh button can all fire together. Share one request so
@@ -1362,7 +1372,10 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="main">
+      <main
+        className={`main ${wallpaper && prefs.bingWallpaper ? "has-wallpaper" : ""}`}
+        style={wallpaper && prefs.bingWallpaper ? ({ "--bing-wallpaper": `url(${wallpaper.data_url})` } as React.CSSProperties) : undefined}
+      >
         {update && (
           <div className="banner">
             Consilium {update.latest} is available (you have {update.current}).
@@ -1377,6 +1390,14 @@ export default function App() {
         <header className="topbar">
           <div className="title-block">
             <MessagingIndicator />
+            {wallpaper && prefs.bingWallpaper && wallpaper.title && (
+              <span
+                className="wallpaper-pill"
+                title={wallpaper.copyright ? `${wallpaper.title} (${wallpaper.copyright})` : wallpaper.title}
+              >
+                🖼️ {wallpaper.title}
+              </span>
+            )}
             <h1 onDoubleClick={renameCurrent} title="Double-click to rename">
               {meta?.title ?? "Consilium"}
             </h1>
@@ -1727,6 +1748,34 @@ export default function App() {
               <input type="checkbox" checked={prefs.effects} onChange={(e) => setPrefs({ ...prefs, effects: e.target.checked })} />
               Visual effects (scanlines, glow and animation in Retro '84 and CRT)
             </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={prefs.bingWallpaper}
+                onChange={(e) => setPrefs({ ...prefs, bingWallpaper: e.target.checked })}
+              />
+              Bing daily wallpaper (with dark frosted glass overlay)
+            </label>
+            {prefs.bingWallpaper && (
+              <div className="wallpaper-actions">
+                <button
+                  type="button"
+                  className="btn small-btn"
+                  title="Download and apply today's wallpaper from Bing automatically"
+                  onClick={() => {
+                    setWallpaper(null);
+                    api.getDailyWallpaper().then(setWallpaper).catch(() => undefined);
+                  }}
+                >
+                  🔄 Download & Apply Today's Wallpaper
+                </button>
+                {wallpaper && (
+                  <span className="muted small">
+                    {wallpaper.title ? `Active: ${wallpaper.title}` : `Active: ${wallpaper.date}`}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="section-label">AI access</div>
             <p className="muted small">
               Applies in the conversation's project folder, or the default folder below. Without either, every AI is
@@ -1822,6 +1871,8 @@ export default function App() {
               <span className="muted small">{cli ? (cli.installed ? `Installed: ${cli.path}` : "Not installed yet") : ""}</span>
             </div>
             {cli?.note && <pre className="cli-note small">{cli.note}</pre>}
+            <div className="section-label">Messaging</div>
+            <MessagingSettings />
             <div className="section-label">Updates</div>
             <label className="toggle">
               <input

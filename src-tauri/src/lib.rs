@@ -22,6 +22,7 @@ mod setup;
 mod store;
 mod update;
 mod usage;
+pub mod wallpaper;
 
 use config::Access;
 use engine::{Engine, TurnState};
@@ -459,7 +460,6 @@ fn set_api_key(agent: String, key: String) -> Result<(), String> {
     apiagent::set_key(a.id, &key)
 }
 
-/// Checks each third-party messaging connection (Signal for now) and reports whether it answers.
 /// Versions of the projects being worked on in this folder: this PC's against GitHub's.
 #[tauri::command]
 async fn project_versions(workspace: Option<String>) -> Vec<projects::ProjectVersion> {
@@ -469,6 +469,7 @@ async fn project_versions(workspace: Option<String>) -> Vec<projects::ProjectVer
         .unwrap_or_default()
 }
 
+/// Checks each third-party messaging connection (Signal for now) and reports whether it answers.
 #[tauri::command]
 async fn messaging_status() -> Vec<bridge::ConnectorStatus> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -487,10 +488,58 @@ async fn messaging_status() -> Vec<bridge::ConnectorStatus> {
     .unwrap_or_default()
 }
 
+/// Messaging settings for the setup panel, with the phone number masked.
+#[tauri::command]
+fn messaging_config() -> Result<bridge::SetupView, String> {
+    let path = bridge::config_path(None);
+    Ok(bridge::view(&bridge::BridgeConfig::load(&path)?, &path))
+}
+
+/// Validates and saves messaging settings (file mode 0600, never in git).
+#[tauri::command]
+fn messaging_save(change: bridge::SetupChange) -> Result<bridge::SetupView, String> {
+    let path = bridge::config_path(None);
+    let current = bridge::BridgeConfig::load(&path).unwrap_or_default();
+    let next = bridge::apply_change(&current, change)?;
+    next.save(&path)?;
+    Ok(bridge::view(&next, &path))
+}
+
+/// Opens a terminal for one fixed messaging setup step: "install", "link" or "start".
+#[tauri::command]
+fn messaging_setup(action: String) -> Result<String, String> {
+    let cfg = bridge::BridgeConfig::load(&bridge::config_path(None))?;
+    let (title, command) = bridge::setup_command(&action, &cfg)?;
+    setup::open_in_terminal(&setup::Step { title, command })?;
+    Ok(title.to_string())
+}
+
 /// Samples host PC CPU and memory pressure (0-100%, green to red).
 #[tauri::command]
 fn system_pressure() -> pressure::SystemPressure {
     pressure::sample()
+}
+
+/// Fetches today's Bing daily wallpaper and caches it locally, returning a base64 data URL.
+#[tauri::command]
+async fn get_daily_wallpaper() -> Result<Option<wallpaper::DailyWallpaper>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("ConsiliumDesktopApp/1.0")
+        .build()
+        .map_err(|e| format!("failed to create HTTP client: {e}"))?;
+
+    let dir = wallpaper::wallpaper_dir();
+    match wallpaper::fetch_and_cache_daily_wallpaper(&client, &dir).await {
+        Ok(wp) => Ok(Some(wp)),
+        Err(e) => {
+            if let Some(fallback) = wallpaper::get_fallback_wallpaper(&dir) {
+                Ok(Some(fallback))
+            } else {
+                eprintln!("wallpaper fetch error: {e}");
+                Ok(None)
+            }
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -570,6 +619,9 @@ pub fn run() {
             set_api_key,
             system_pressure,
             messaging_status,
+            messaging_config,
+            messaging_save,
+            messaging_setup,
             project_versions,
             update_available,
             update_now,
@@ -584,7 +636,8 @@ pub fn run() {
             set_reset_forecast,
             attach_files,
             attach_data,
-            open_attachment
+            open_attachment,
+            get_daily_wallpaper
         ])
         .build(context)
         .expect("error while starting Consilium")

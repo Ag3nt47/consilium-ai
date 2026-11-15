@@ -15,7 +15,7 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Pre-flight auth check | ✅ | Add AI / setup checks each CLI's sign-in before use |
 | Devil's advocate in round 3+ | ✅ | Rotating reviewer |
 | Context sliding window (summarise long sessions) | ⏭ | Summarise old turns once a token threshold is crossed |
-| File-state hashing / git diff in each turn | 🔨 | Implementation is in progress; bounded, redacted snapshots still need a hard subprocess timeout |
+| File-state hashing / git diff in each turn | ✅ | Bounded, redacted status/diff snapshot with a hard Git subprocess timeout before each editable turn |
 | Destructive command sanitizer for Full capacity | ⏭ | Can only gate what Consilium itself runs; the CLIs execute their own commands, so the real guard is their own permission modes plus worktrees |
 | Secret redaction | ✅ | `redact.rs`, plus `check-secrets.mjs` before pushes |
 | Git worktree per agent in Full capacity | ⏭ | `consilium/agent-<id>` branches, merged on approval |
@@ -47,10 +47,10 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Instant screen-only updates | ✅ | 0.3.5; hardened in 0.3.6 |
 | Signal phone bridge, phone Approve/Deny | 🔨 | Adapter in `bridge.rs` (Gemini); not yet connected to the app |
 | Voice visualizer, bars + orb, cyan/violet | ✅ | 0.3.6. AI side is an animation: system speech has no audio samples |
-| Daily Bing wallpaper with frosted layer, off switch | ⏭ | Gemini, after Signal |
+| Daily Bing wallpaper with frosted layer, off switch | ✅ | 0.3.7. Cached in ~/.config/consilium/wallpapers, base64 data-URL, off switch in Settings |
 | Audit log drawer | ✅ | Applied instantly on 0.3.6 without restarting |
 | Persona chips above the prompt | ✅ | Applied instantly on 0.3.6 without restarting |
-| Phone "launch" actions | ⏭ | Fixed app list in local config, no shell |
+| Phone "launch" actions | ✅ | 0.3.7. Allowlisted targets (terminal, vscode, dashboard) executed without shell |
 | Telegram / Discord | 🕓 | After Signal |
 | Quick-summon hotkey, clipboard/screenshot capture, Whisper, Ollama + HUD | 🕓 | |
 | Obsidian search, secrets vault, fix-drafting watchdog, widget dock | 🕓 | |

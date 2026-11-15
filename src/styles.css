@@ -2155,3 +2155,77 @@ button.attachment {
 .pv-cols { display: flex; gap: 14px; flex-wrap: wrap; }
 .pv-cols small { color: var(--muted); }
 .pv-note { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+
+/* Bing Daily Wallpaper with Frosted Glass Overlay */
+.main.has-wallpaper {
+  background-image: var(--bing-wallpaper);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+  background-size: cover;
+}
+
+.main.has-wallpaper .topbar {
+  background: var(--glass-bg, rgba(15, 23, 42, 0.75));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.main.has-wallpaper .messages {
+  background: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: 12px;
+  margin: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.main.has-wallpaper .composer {
+  background: var(--glass-bg, rgba(15, 23, 42, 0.8));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.wallpaper-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e2e8f0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallpaper-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  margin-bottom: 8px;
+  margin-left: 24px;
+  flex-wrap: wrap;
+}
+
+/* Messaging setup panel (from the top-left indicator and in Settings) */
+.msg-setup { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.msg-status-row { display: flex; align-items: center; gap: 8px; max-width: none; cursor: default; padding: 6px 10px; border-radius: 10px; font-size: 12px; }
+.msg-status-row > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.msg-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; counter-reset: msgstep; }
+.msg-steps li { counter-increment: msgstep; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; }
+.msg-steps li::before { content: counter(msgstep); display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: #6b7280; color: #fff; font-size: 11px; font-weight: 700; flex-shrink: 0; }
+.msg-steps li.done::before { content: "✓"; background: #16a34a; }
+.msg-steps li > span { flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.msg-steps li small { opacity: 0.75; overflow-wrap: anywhere; }
+.msg-input { min-width: 0; flex: 1 1 160px; max-width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: inherit; font: inherit; }
+.msg-advanced summary { cursor: pointer; font-size: 12px; }
+.msg-field { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 12px; }
+.msg-save-row { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+.msg-note { flex: 1; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.msg-note.ok { color: #16a34a; }
+.msg-note.err { color: #dc2626; }
