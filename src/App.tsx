@@ -1601,7 +1601,7 @@ export default function App() {
           )}
           {voice && (
             <div className={`voice-bar ${speaking ? "voice-speaking" : "voice-listening"}`}>
-              <VoiceVisualizer speaker={speaking ? "ai" : "user"} active={voice} />
+              {!speaking && <VoiceVisualizer speaker="user" active={voice} />}
               {speaking ? (
                 <>
                   <span>Reading {speakingAgent ? `${senderName(speakingAgent, agents)}’s` : "the"} reply aloud…</span>
@@ -1617,7 +1617,7 @@ export default function App() {
                 </span>
               )}
               {!canSpeak && <span className="voice-warn">Read-aloud isn't available on this system.</span>}
-              <div className="voice-agents" aria-label="Each AI's voice and status">
+              <div className="voice-agents" aria-label="Each AI's voice and status" aria-live="polite">
                 {members.map((a) => {
                   const isWorking = busy && thinkingIds.includes(a.id);
                   const activity = isWorking ? activities[a.id] : undefined;
