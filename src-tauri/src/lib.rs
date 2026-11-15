@@ -356,10 +356,11 @@ fn update_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
          continue from `git status` and `git diff` when you come back.",
         staged.version
     );
+    // Start the installer first: if it can't run, nobody is told to stop for an update that won't come.
+    update::start_install(&data)?;
     for id in state.engine.running_ids() {
         let _ = state.engine.note(&id, &note);
     }
-    update::start_install(&data)?;
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(300));

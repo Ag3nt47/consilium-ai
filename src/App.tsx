@@ -1,3 +1,4 @@
+import { dictationHint, paletteKey, paletteKeyWords } from "./platform";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -386,7 +387,7 @@ function ApiKeyField({ agent, onSaved, onError }: { agent: AgentInfo; onSaved: (
         onChange={(e) => setKey(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && key.trim() && save(key)}
       />
-      <button title="Check this API key with the provider and save it on this Mac only" className="btn ghost small-btn" disabled={busy || !key.trim()} onClick={() => save(key)}>
+      <button title="Check this API key with the provider and save it on this computer only" className="btn ghost small-btn" disabled={busy || !key.trim()} onClick={() => save(key)}>
         {busy ? "Checking…" : "Save"}
       </button>
       {agent.path && (
@@ -1509,10 +1510,10 @@ export default function App() {
                 setPaletteIndex(0);
                 setShowPalette(true);
               }}
-              title="Open command palette (Cmd+K)"
+              title={`Open command palette (${paletteKeyWords})`}
               style={{ fontSize: "11px", padding: "2px 7px", border: "1px solid var(--border)", borderRadius: "4px" }}
             >
-              ⌘K
+              {paletteKey}
             </button>
             <div className="workspace">
               {meta?.workspace ? (
@@ -1742,7 +1743,7 @@ export default function App() {
                 <span className="voice-heard">{heard || "Listening… speak, and your message is sent when you pause."}</span>
               ) : (
                 <span>
-                  Speech recognition isn't available in this window. Press the Fn key twice (macOS Dictation) in the message box to speak, then Enter to send.
+                  Speech recognition isn't available in this window. {dictationHint}, then Enter to send.
                 </span>
               )}
               {!canSpeak && <span className="voice-warn">Read-aloud isn't available on this system.</span>}

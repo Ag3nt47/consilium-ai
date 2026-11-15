@@ -12,7 +12,7 @@
     "app:dev": "tauri dev",
     "app:build": "tauri build",
     "app:build:mac": "tauri build --bundles app",
-    "update:stage": "bash scripts/stage-update.sh",
+    "update:stage": "node scripts/stage-update.mjs",
     "update:ui": "node scripts/stage-ui.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
     "test": "node --test tests/"

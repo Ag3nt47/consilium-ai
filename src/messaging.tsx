@@ -1,3 +1,4 @@
+import { OS, terminalName } from "./platform";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -160,7 +161,7 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
         setNote({ ok: true, text: `${title}.` });
         setCfg(await api.messagingConfig());
       } else {
-        setNote({ ok: true, text: `${title}: a Terminal window opened. Press Enter there to run it.` });
+        setNote({ ok: true, text: `${title}: a ${terminalName} window opened. Press Enter there to run it.` });
       }
     } catch (e) {
       setNote({ ok: false, text: String(e) });
@@ -205,7 +206,7 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
           {!installed &&
             (cfg?.can_install ? (
               <button
-                title="Download and install Java and signal-cli for this user, checked against fixed checksums. No password needed. If Homebrew is installed, it opens Terminal and uses Homebrew instead"
+                title="Download and install Java and signal-cli for this user, checked against fixed checksums. No password needed. On a Mac with Homebrew, it opens Terminal and uses Homebrew instead"
                 className="btn small-btn"
                 disabled={!cfg || cfg.install_running}
                 onClick={() => step("install")}
@@ -238,17 +239,17 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
             <b>Link this computer</b>
             <small>Shows a QR code. On your phone: Signal › Settings › Linked devices › Link new device.</small>
           </span>
-          <button title="Open Terminal with the link command and QR code" className="btn small-btn" disabled={!installed} onClick={() => step("link")}>
+          <button title={`Open ${terminalName} with the link command${OS === "windows" ? "" : " and QR code"}`} className="btn small-btn" disabled={!installed} onClick={() => step("link")}>
             Link
           </button>
         </li>
         <li className={signal?.state === "ok" ? "done" : ""}>
           <span>
             <b>Start Signal for Consilium</b>
-            <small>Runs signal-cli in a Terminal window on this computer only. Keep that window open.</small>
+            <small>Runs signal-cli in a {terminalName} window on this computer only. Keep that window open.</small>
           </span>
           <button
-            title="Open Terminal running signal-cli for Consilium; save your number first"
+            title={`Open ${terminalName} running signal-cli for Consilium; save your number first`}
             className="btn small-btn"
             disabled={!installed || !hasNumber}
             onClick={() => step("start")}

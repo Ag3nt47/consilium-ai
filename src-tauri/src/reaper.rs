@@ -4,6 +4,7 @@
 //! is that when Consilium dies without a clean exit, those groups survive as orphans (parent
 //! pid 1) and keep running whatever they were doing, such as a full Rust build, with nobody
 //! reading their output. On a small machine that load is enough to freeze the next session.
+//! On Windows the same happens to process trees whose parent Consilium is gone.
 //! Every turn's group leader is recorded in `children.pids`; on startup, any recorded leader that
 //! is now an orphan and is still an AI CLI has its whole group ended.
 
@@ -80,37 +81,106 @@ fn orphaned_agent(pid: u32) -> bool {
     ppid == "1" && AGENT_NAMES.contains(&name)
 }
 
+/// Whether a Windows process is an AI CLI: its image is one (`claude.exe`, `node.exe`, …), or it
+/// is the `cmd.exe` that runs an npm `.cmd` shim for one.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn windows_agent(image: &str, cmdline: &str) -> bool {
+    let image = image.to_ascii_lowercase();
+    let stem = image.strip_suffix(".exe").unwrap_or(&image);
+    if AGENT_NAMES.iter().any(|n| n.eq_ignore_ascii_case(stem)) {
+        return true;
+    }
+    let line = cmdline.to_ascii_lowercase();
+    stem == "cmd" && ["claude", "codex", "agy", "gemini"].iter().any(|n| line.contains(&format!("{n}.cmd")))
+}
+
+/// Windows has no reparenting to pid 1: a turn is orphaned when the process that started it
+/// (an earlier Consilium) is gone.
+#[cfg(windows)]
+fn orphaned_agent(pid: u32) -> bool {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    let Some(p) = sys.process(Pid::from_u32(pid)) else {
+        return false;
+    };
+    let parent_alive = p.parent().is_some_and(|pp| sys.process(pp).is_some());
+    let cmdline = p.cmd().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ");
+    !parent_alive && windows_agent(&p.name().to_string_lossy(), &cmdline)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn orphaned_agent(_pid: u32) -> bool {
+    false
+}
+
+/// Ends a turn and everything it started: its process group on Unix, its process tree on Windows.
+fn end_turn(pid: u32, force: bool) {
+    #[cfg(unix)]
+    // SAFETY: plain signal calls on a process group this app created.
+    unsafe {
+        libc::killpg(pid as i32, if force { libc::SIGKILL } else { libc::SIGTERM });
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut tk = std::process::Command::new("taskkill");
+        tk.args(["/PID", &pid.to_string(), "/T"]);
+        if force {
+            tk.arg("/F");
+        }
+        let _ = tk
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = (pid, force);
+}
+
 /// Ends every orphaned turn recorded by an earlier run. Called once at startup, before any new
 /// turn starts, so everything in the file belongs to a previous session. Returns how many
-/// groups were ended.
+/// turns were ended.
 pub fn reap_orphans(data: &Path) -> usize {
     let path = data.join(FILE);
     let _g = LOCK.lock();
     let mut ended = 0;
-    #[cfg(unix)]
     for pid in read(&path) {
         if orphaned_agent(pid) {
-            // SAFETY: plain signal calls on a process group this app created.
-            unsafe {
-                libc::killpg(pid as i32, libc::SIGTERM);
-            }
+            end_turn(pid, cfg!(windows)); // Windows console programs ignore a polite taskkill
             ended += 1;
         }
     }
     if ended > 0 {
         std::thread::sleep(std::time::Duration::from_millis(1500));
-        #[cfg(unix)]
         for pid in read(&path) {
             if orphaned_agent(pid) {
-                // SAFETY: as above; the group ignored SIGTERM.
-                unsafe {
-                    libc::killpg(pid as i32, libc::SIGKILL);
-                }
+                end_turn(pid, true); // it ignored the polite request
             }
         }
     }
     let _ = std::fs::remove_file(&path);
     ended
+}
+
+#[cfg(test)]
+mod portable_tests {
+    use super::windows_agent;
+
+    #[test]
+    fn recognises_windows_agent_processes_only() {
+        assert!(windows_agent("claude.exe", "claude.exe -p"));
+        assert!(windows_agent("Node.EXE", "node codex.js"));
+        assert!(windows_agent("cmd.exe", r"C:\Windows\system32\cmd.exe /c C:\Users\username\AppData\Roaming\npm\codex.cmd exec")); // consilium-allow-secret-scan (dummy Windows test path)
+        assert!(!windows_agent("cmd.exe", "cmd.exe /c build.bat"));
+        assert!(!windows_agent("explorer.exe", "explorer.exe"));
+    }
 }
 
 #[cfg(all(test, unix))]

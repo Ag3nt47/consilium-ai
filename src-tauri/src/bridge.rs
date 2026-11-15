@@ -396,7 +396,13 @@ fn find_tool(name: &str) -> Option<PathBuf> {
         .unwrap_or_default();
     dirs_.extend(["/opt/homebrew/bin", "/usr/local/bin"].iter().map(PathBuf::from));
     dirs_.push(home.join(".local/bin"));
-    dirs_.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
+    // Windows tools are `signal-cli.bat`, `code.cmd`, `git.exe`: try those names too.
+    let names: Vec<String> = if cfg!(windows) {
+        ["exe", "bat", "cmd"].iter().map(|e| format!("{name}.{e}")).chain([name.to_string()]).collect()
+    } else {
+        vec![name.to_string()]
+    };
+    dirs_.into_iter().flat_map(|d| names.iter().map(move |n| d.join(n))).find(|p| p.is_file())
 }
 
 pub fn view(cfg: &BridgeConfig, path: &Path) -> SetupView {
@@ -409,7 +415,7 @@ pub fn view(cfg: &BridgeConfig, path: &Path) -> SetupView {
         allowed_acis: cfg.allowed_acis.clone(),
         auto_forward_decisions: cfg.auto_forward_decisions,
         signal_cli: find_tool("signal-cli").map(|p| p.display().to_string()),
-        can_install: cfg!(target_os = "macos"),
+        can_install: cfg!(any(target_os = "macos", target_os = "linux")),
         install_running: install_root().join("installing").exists(),
         install_error: std::fs::read_to_string(install_root().join("failed")).ok().map(|e| e.trim().to_string()),
         config_path: path.display().to_string(),
@@ -462,7 +468,15 @@ pub fn apply_change(cfg: &BridgeConfig, ch: SetupChange) -> Result<BridgeConfig,
 /// A fixed setup command for the terminal. Nothing typed in the UI goes into it except a phone
 /// number that passed `valid_account` and a loopback address that passed `validate_loopback`.
 pub fn setup_command(action: &str, cfg: &BridgeConfig) -> Result<(&'static str, String), String> {
-    let quote = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', r"'\''"));
+    // The step runs in a POSIX shell on macOS and Linux and in PowerShell on Windows (see
+    // `setup::open_in_terminal`); PowerShell needs `&` to run a quoted program path.
+    let quote = |p: &Path| {
+        if cfg!(windows) {
+            format!("& '{}'", p.display().to_string().replace('\'', "''"))
+        } else {
+            format!("'{}'", p.display().to_string().replace('\'', r"'\''"))
+        }
+    };
     match action {
         "install" => {
             if !cfg!(target_os = "macos") {
@@ -473,7 +487,7 @@ pub fn setup_command(action: &str, cfg: &BridgeConfig) -> Result<(&'static str, 
         }
         "link" => {
             let cli = find_tool("signal-cli").ok_or("Install signal-cli first")?;
-            let qr = find_tool("qrencode");
+            let qr = find_tool("qrencode").filter(|_| !cfg!(windows)); // PowerShell has no `>(…)`
             let cmd = match qr {
                 Some(q) => format!(
                     "echo 'On your phone: Signal > Settings > Linked devices > Link new device, then scan this code.'; {} link -n Consilium | tee >(xargs -L 1 {} -t ansiutf8)",
@@ -499,7 +513,7 @@ pub fn setup_command(action: &str, cfg: &BridgeConfig) -> Result<(&'static str, 
                 .map_err(|_| "One-click start needs an address like 127.0.0.1:7583".to_string())?;
             Ok((
                 "Start Signal for Consilium (keep this window open)",
-                format!("{} -a {} daemon --tcp {addr}", quote(&cli), cfg.account),
+                format!("{} -a '{}' daemon --tcp {addr}", quote(&cli), cfg.account),
             ))
         }
         _ => Err("unknown messaging setup step".into()),
@@ -517,10 +531,10 @@ fn install_root() -> PathBuf {
 /// One-click install. With Homebrew it opens Terminal as before; without it, it runs the
 /// password-free install in the background and the panel follows `install_running`.
 pub fn start_install() -> Result<Option<&'static str>, String> {
-    if !cfg!(target_os = "macos") {
-        return Err("One-click install is for macOS. Otherwise install signal-cli from its GitHub releases page".into());
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return Err("One-click install is for macOS and Linux. On Windows, install Java 21 or newer and signal-cli from its GitHub releases page".into());
     }
-    if find_tool("brew").is_some() {
+    if cfg!(target_os = "macos") && find_tool("brew").is_some() {
         return Ok(None); // caller opens Terminal with `setup_command("install")`
     }
     if install_root().join("installing").exists() {
@@ -848,7 +862,7 @@ mod setup_tests {
         assert!(setup_command("start", &cfg).is_err() || find_tool("signal-cli").is_none());
         cfg.account = "+15551234821".into();
         if let Ok((_, cmd)) = setup_command("start", &cfg) {
-            assert!(cmd.ends_with("-a +15551234821 daemon --tcp 127.0.0.1:7583"));
+            assert!(cmd.ends_with("-a '+15551234821' daemon --tcp 127.0.0.1:7583"));
         }
         assert!(setup_command("rm", &cfg).is_err());
     }
@@ -859,7 +873,7 @@ mod setup_tests {
         assert!(s.starts_with("#!/bin/sh") && s.contains("set -eu"));
         assert!(s.contains("shasum -a 256") && s.contains("didn't match its expected checksum"));
         assert!(!s.contains("sudo") && !s.contains("| sh") && !s.contains("| bash"));
-        assert!(s.contains("SIGNAL_SHA=") && s.matches("JRE_SHA=").count() == 2);
+        assert!(s.contains("SIGNAL_SHA=") && s.matches("JRE_SHA=").count() == 4 && s.contains("sha256sum"));
     }
 
 }
