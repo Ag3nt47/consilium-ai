@@ -1563,6 +1563,21 @@ button.attachment {
   color: inherit;
 }
 
+.setup-boundary {
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.addai-steps .optional-step {
+  color: var(--muted);
+  list-style-type: circle;
+}
+
 /* ---------- PC Resource Pressure Meter (0-100%, Green to Red) ---------- */
 .pc-pressure {
   margin: 10px 0 6px 0;

@@ -18,6 +18,21 @@
         },
         {
           "url": "https://codex-reset.com/*"
+        },
+        {
+          "url": "https://chatgpt.com/*"
+        },
+        {
+          "url": "https://claude.ai/*"
+        },
+        {
+          "url": "https://antigravity.google/*"
+        },
+        {
+          "url": "https://console.x.ai/*"
+        },
+        {
+          "url": "https://platform.deepseek.com/*"
         }
       ]
     },

@@ -36,6 +36,23 @@ const THEMES = [
   { id: "retro84", name: "Retro '84", note: "Neon grid, scanlines, glow" },
 ] as const;
 
+/** Official account/key and plan portals used by the approval-gated Add AI wizard. */
+const PROVIDER_PORTALS: Record<string, { account: string; accountLabel: string; plan?: string }> = {
+  gpt: { account: "https://chatgpt.com/", accountLabel: "Open ChatGPT", plan: "https://chatgpt.com/#pricing" },
+  claude: { account: "https://claude.ai/", accountLabel: "Open Claude", plan: "https://claude.ai/upgrade" },
+  gemini: {
+    account: "https://antigravity.google/pricing?app=cli",
+    accountLabel: "Open Antigravity plans",
+    plan: "https://antigravity.google/pricing?app=cli",
+  },
+  grok: { account: "https://console.x.ai/", accountLabel: "Open xAI console", plan: "https://console.x.ai/" },
+  deepseek: {
+    account: "https://platform.deepseek.com/api_keys",
+    accountLabel: "Open DeepSeek API keys",
+    plan: "https://platform.deepseek.com/top_up",
+  },
+};
+
 type Prefs = { theme: string; effects: boolean; autoUpdate: boolean };
 const PREFS_KEY = "consilium.prefs";
 
@@ -900,6 +917,14 @@ export default function App() {
   // Bring an AI into the council: install or sign in first if needed, then ask the person to add it.
   async function bringIn(a: AgentInfo) {
     const st = agentState(a);
+    if (a.transport === "api" && st !== "ready") {
+      setShowAddAi(true);
+      const portal = PROVIDER_PORTALS[a.id];
+      if (portal) await openUrl(portal.account).catch((e) => setError(`Couldn't open ${a.company}: ${e}`));
+      setToast(`Finish account, billing, and API-key setup with ${a.company}; then paste only the key in Add AI`);
+      setTimeout(() => setToast(null), 8000);
+      return;
+    }
     if (st !== "ready") {
       try {
         const title = await api.setup(a.id, st === "missing" ? "install" : "signin");
@@ -1623,9 +1648,14 @@ export default function App() {
               have no such tool, so they use an API key you paste here: it is saved only on this computer, never in the chat.
               You decide who joins; an AI in the conversation can suggest one, but only you can add it.
             </p>
+            <p className="setup-boundary">
+              Consilium can open the official installer, sign-in, account, key, and plan pages. Provider pages open in a
+              separate browser window; you enter any identity or payment details and confirm any purchase yourself.
+            </p>
             {others.length === 0 && <p className="muted">Every available AI is already in the council.</p>}
             {others.map((a) => {
               const st = agentState(a);
+              const portal = PROVIDER_PORTALS[a.id];
               return (
                 <div key={a.id} className={`addai-card agent-${a.id}`}>
                   <div className="addai-head">
@@ -1638,6 +1668,19 @@ export default function App() {
                   </div>
                   {a.transport === "api" ? (
                   <ol className="addai-steps">
+                    <li>
+                      Create or open your {a.company} account
+                      {portal && (
+                        <button className="btn ghost small-btn" onClick={() => openUrl(portal.account).catch((e) => setError(String(e)))}>
+                          {portal.accountLabel}
+                        </button>
+                      )}
+                      {portal?.plan && portal.plan !== portal.account && (
+                        <button className="link" onClick={() => openUrl(portal.plan!).catch((e) => setError(String(e)))}>
+                          billing / plans
+                        </button>
+                      )}
+                    </li>
                     <li className={st === "ready" ? "done" : ""}>
                       {st === "ready" ? `API key saved (model ${a.version ?? "?"})` : `Paste your ${a.company} API key`}
                       <ApiKeyField agent={a} onSaved={refreshAgents} onError={(e) => setError(e)} />
@@ -1673,6 +1716,14 @@ export default function App() {
                         Add {a.name}
                       </button>
                     </li>
+                    {portal?.plan && (
+                      <li className="optional-step">
+                        Optional: review higher provider limits
+                        <button className="link" onClick={() => openUrl(portal.plan!).catch((e) => setError(String(e)))}>
+                          open plans
+                        </button>
+                      </li>
+                    )}
                   </ol>
                   )}
                   {st !== "ready" && <p className="muted small">{a.hint}{a.transport === "api" ? "" : " When you're done, come back here; it checks again automatically."}</p>}
