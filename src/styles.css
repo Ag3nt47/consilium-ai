@@ -1633,3 +1633,12 @@ button.attachment {
 .pc-pressure-status {
   font-weight: 500;
 }
+
+/* Per-AI share of the PC, next to each AI's name (green to red). */
+.agent-load {
+  font-size: 0.72em;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  margin-left: 4px;
+  transition: color 0.4s ease;
+}

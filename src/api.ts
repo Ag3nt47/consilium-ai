@@ -138,6 +138,8 @@ export interface SystemPressure {
   memory_percent: number;
   cores: number;
   label: string;
+  /** Per-AI share of the PC (0-100), keyed by agent id; only AIs with a running process appear. */
+  agents?: Record<string, number>;
 }
 
 export interface TokenUsage {

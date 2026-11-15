@@ -350,6 +350,7 @@ function AgentDot({
   forecast,
   isWorking,
   isFrozen,
+  load,
 }: {
   agent: AgentInfo;
   onSetup: (a: AgentInfo) => void;
@@ -358,6 +359,8 @@ function AgentDot({
   forecast?: ResetForecast | null;
   isWorking?: boolean;
   isFrozen?: boolean;
+  /** Share of the whole PC (0-100) this AI's processes are using right now; undefined when none run. */
+  load?: number;
 }) {
   const state = agentState(agent);
   const dotClass = isFrozen
@@ -377,6 +380,15 @@ function AgentDot({
     >
       <span className={`dot ${dotClass}`} />
       <span className="agent-name">{agent.name}</span>
+      {load !== undefined && (
+        <span
+          className="agent-load"
+          style={{ color: pressureColor(load) }}
+          title={`${agent.name}'s processes are using ${load}% of this PC (the busier of its CPU and memory share)`}
+        >
+          ▣ {load}%
+        </span>
+      )}
       {isFrozen ? (
         <span className="agent-state" style={{ color: "var(--danger)" }}>Stalled</span>
       ) : isWorking ? (
@@ -413,11 +425,16 @@ function AgentDot({
   );
 }
 
+/** Green at 0%, through yellow, to red at 100%. */
+function pressureColor(percent: number): string {
+  const pct = Math.min(100, Math.max(0, percent));
+  return `hsl(${Math.round(120 - (pct / 100) * 120)}, 85%, 50%)`;
+}
+
 function ResourcePressureGauge({ pressure }: { pressure: SystemPressure | null }) {
   if (!pressure) return null;
   const pct = Math.min(100, Math.max(0, pressure.percent));
-  const hue = Math.max(0, Math.round(120 - (pct / 100) * 120));
-  const color = `hsl(${hue}, 85%, 50%)`;
+  const color = pressureColor(pct);
   return (
     <div
       className="pc-pressure"
@@ -1196,6 +1213,7 @@ export default function App() {
                 forecast={forecast}
                 isWorking={isWorking}
                 isFrozen={isFrozen}
+                load={pressure?.agents?.[a.id]}
               />
             );
           })}
