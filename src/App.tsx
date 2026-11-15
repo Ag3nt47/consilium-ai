@@ -240,48 +240,6 @@ function ClaimedTask({ event, agents }: { event: ChatEvent; agents: AgentInfo[] 
   );
 }
 
-function taskObjective(text: string): string {
-  const first = text
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line && !/^\[(?:Persona|Role):/i.test(line));
-  if (!first) return "this request";
-  return first.length > 90 ? `${first.slice(0, 87)}…` : first;
-}
-
-/** Live, color-coded ownership shown beneath the human input while its AIs are working. */
-function ActiveTasks({
-  ids,
-  objective,
-  agents,
-  activities,
-  typed = false,
-}: {
-  ids: string[];
-  objective: string;
-  agents: AgentInfo[];
-  activities: Record<string, AgentActivity>;
-  typed?: boolean;
-}) {
-  if (!ids.length) return null;
-  return (
-    <div className="active-tasks" aria-label="AIs working on this message">
-      {ids.map((id) => {
-        const activity = activities[id];
-        const detail = activity ? `${activity.label}${activity.detail ? ` · ${activity.detail}` : ""}` : "Initializing";
-        return (
-          <div key={id} className="task-pill" style={{ borderColor: taskColor(id) }} title={`${senderName(id, agents)}: ${detail}\nTask: ${objective}`}>
-            <span className="task-dot" style={{ backgroundColor: taskColor(id) }} />
-            <b>{senderName(id, agents)}</b>
-            <span><TypedText text={detail} enabled={typed} /></span>
-            <small>{objective}</small>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "k";
@@ -1066,10 +1024,6 @@ export default function App() {
       : `${thinkingNames.slice(0, -1).join(", ")} and ${thinkingNames[thinkingNames.length - 1]} are thinking`
     : null;
   const seenByMessage = useMemo(() => receiptsByMessage(events), [events]);
-  const latestHumanMessage = useMemo(
-    () => events.slice().reverse().find((event) => event.kind === "message" && event.sender === "human") ?? null,
-    [events],
-  );
   const readyIds = useMemo(() => new Set(agents.filter((a) => a.available).map((a) => a.id)), [agents]);
   const members = useMemo(() => agents.filter((a) => a.member), [agents]);
 
@@ -1820,9 +1774,6 @@ export default function App() {
                   </div>
                 )}
                 <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={e.sender === "human" ? undefined : decide} respond={e.sender === "human" ? undefined : respondToRequest} />
-                {e.sender === "human" && e.id === latestHumanMessage?.id && busy && (
-                  <ActiveTasks ids={thinkingIds} objective={taskObjective(e.text)} agents={agents} activities={activities} typed={typedActivity} />
-                )}
                 <ClaimedTask event={e} agents={agents} />
                 <SeenLine receipts={seenByMessage.get(e.id) ?? []} agents={agents} />
                 {e.add_ai?.filter((id) => agents.some((a) => a.id === id && !a.member)).map((id) => {
