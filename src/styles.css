@@ -1826,75 +1826,35 @@ button.attachment {
 }
 .hover-tip.show { opacity: 1; transform: none; }
 
-/* ---------- responsive window fit ----------
-   Consilium supports a 760x520 window. Every major flex/grid child must be allowed to shrink,
-   wrap, or scroll instead of pushing its parent beyond the window. */
-.sidebar,
+/* Remaining fit rules for narrow modals, forms, and the supported 760x520 minimum window. */
 .main,
-.topbar,
 .title-block,
 .workspace,
-.topbar-actions,
 .composer,
 .composer-controls,
-.composer-row,
 .voice-bar,
-.msg,
-.body,
 .modal,
 .addai-card,
 .row {
   min-width: 0;
 }
 
-.sidebar {
-  overflow-y: auto;
-  overflow-x: hidden;
-}
-
 .section-label > span,
 .workspace,
-.topbar-actions,
 .row,
 .member-row,
 .addai-head,
-.addai-suggest,
-.voice-bar {
+.addai-suggest {
   flex-wrap: wrap;
 }
 
 .folder,
-.voice-heard,
 .addai-suggest,
-.body,
 .note,
 .setup-boundary,
 .modal p,
 .modal small {
   overflow-wrap: anywhere;
-}
-
-.msg {
-  width: fit-content;
-  min-width: min(260px, 100%);
-}
-
-.from-human {
-  max-width: min(820px, 92%);
-}
-
-.msg-head {
-  flex-wrap: wrap;
-}
-
-.msg-head .when {
-  white-space: nowrap;
-}
-
-.usage-report,
-.cli-note {
-  max-width: 100%;
-  overflow-x: auto;
 }
 
 .composer textarea,
@@ -1920,12 +1880,6 @@ button.attachment {
 }
 
 @media (max-width: 1050px) {
-  .topbar {
-    align-items: flex-start;
-    flex-wrap: wrap;
-    padding-block: 10px;
-  }
-
   .title-block {
     flex: 1 1 280px;
   }
@@ -1939,62 +1893,11 @@ button.attachment {
     padding: 5px 9px;
     font-size: 12px;
   }
-
-  .msg {
-    max-width: 100%;
-  }
-}
-
-@media (max-width: 900px) {
-  .app {
-    grid-template-columns: 205px minmax(0, 1fr);
-  }
-
-  .sidebar {
-    gap: 8px;
-    padding-inline: 8px;
-  }
-
-  .brand-icon {
-    width: 32px;
-    height: 32px;
-  }
-
-  .brand-name {
-    font-size: 18px;
-  }
-
-  .agent {
-    padding: 6px 7px;
-    column-gap: 6px;
-  }
-
-  .messages {
-    padding: 12px 12px 6px;
-  }
-
-  .topbar,
-  .composer {
-    padding-inline: 12px;
-  }
-
-  .composer-controls {
-    gap: 6px;
-  }
-
-  .chip {
-    padding-inline: 9px;
-    font-size: 12px;
-  }
-
-  .access-row {
-    grid-template-columns: 76px minmax(130px, 180px) minmax(0, 1fr);
-  }
 }
 
 @media (max-width: 780px) {
   .app {
-    grid-template-columns: 188px minmax(0, 1fr);
+    grid-template-columns: 190px minmax(0, 1fr);
   }
 
   .topbar-actions {
@@ -2006,40 +1909,20 @@ button.attachment {
     flex: 1 1 auto;
   }
 
-  .composer-row {
-    gap: 6px;
-  }
-
-  .composer-row .btn {
-    min-width: 68px;
-    padding-inline: 9px;
-  }
-
-  .modal {
-    padding: 14px;
-  }
-
   .access-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 4px;
   }
 
-  .access-row > * {
-    grid-column: 1;
-  }
-
+  .access-row > *,
   .check {
     grid-column: 1;
   }
 
-  .addai-steps li,
-  .apikey-field {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
   .apikey-field {
     display: flex;
+    align-items: stretch;
+    flex-direction: column;
     margin-left: 0;
   }
 }
@@ -2048,27 +1931,9 @@ button.attachment {
   .app {
     grid-template-columns: minmax(0, 1fr);
   }
-
-  .topbar-actions .status-request {
-    flex-basis: 100%;
-  }
 }
 
-@media (max-height: 650px) {
-  .sidebar {
-    gap: 5px;
-    padding-block: 7px;
-  }
-
-  .brand {
-    padding-bottom: 2px;
-  }
-
-  .brand-icon {
-    width: 28px;
-    height: 28px;
-  }
-
+@media (max-height: 600px) {
   .brand-tagline,
   .agent-kind,
   .usage-meter,
@@ -2081,35 +1946,9 @@ button.attachment {
     flex-basis: 52px;
   }
 
-  .agents {
-    gap: 3px;
-    padding-top: 6px;
-  }
-
-  .agent,
-  .pc-pressure {
-    padding-block: 4px;
-  }
-
   .pc-pressure {
     margin-block: 3px;
-  }
-
-  .topbar {
-    padding-block: 7px;
-  }
-
-  .messages {
-    padding-block: 8px 4px;
-  }
-
-  .composer {
-    padding-block: 7px;
-    gap: 5px;
-  }
-
-  .composer textarea {
-    min-height: 44px;
+    padding-block: 4px;
   }
 
   .modal {

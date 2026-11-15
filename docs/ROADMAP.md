@@ -21,18 +21,18 @@ provider-reported plan allowance remaining, from 0–100%:
 - If a connector or account type does not expose plan limits, the UI says *usage unavailable*;
   Consilium never estimates a plan percentage.
 
-A larger **Usage panel** per AI remains planned:
+A larger **Usage panel** now shows per-agent conversation and daily token totals. Remaining budget work:
 
-- The back end now records tokens per turn from each CLI's official machine-readable output (Codex
+- The back end records tokens per turn from each CLI's official machine-readable output (Codex
   `--json` `turn.completed.usage`, Claude Code JSON result `usage`, and Antigravity stream-json
-  result `usage`) and exposes conversation/day totals. The Usage panel UI remains to be built.
+  result `usage`) and exposes them in the Usage panel as conversation/day totals.
 - A budget you set ("warn me at N tokens a day"), with a red `REQUEST:` before a Discuss run would exceed it.
 
 ## v0.2: Voice Studio
 
-A toggleable voice mode where you and both AIs talk:
+A toggleable voice mode now reads AI replies aloud and, where the WebView supports it, sends the
+human's transcribed speech after a pause. macOS Dictation is the local fallback. Future extensions:
 
-- Push-to-talk by default, optional hands-free. Local speech recognition and text-to-speech first; any cloud voice service optional and clearly labeled.
 - A distinct, configurable voice for each participant.
 - A central live workspace showing the current file, code selection, proposed diff, command, test result or task status.
 - One merged explanation panel in which every segment keeps its speaker's color (ChatGPT green, Claude amber, you ivory).
