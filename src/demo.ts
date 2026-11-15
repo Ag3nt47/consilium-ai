@@ -17,7 +17,7 @@ const T0 = Date.UTC(2026, 10, 14, 15, 2);
 const CONV = "00000000-0000-4000-8000-000000000001";
 
 const agents: AgentInfo[] = [
-  { id: "gpt", name: "ChatGPT", company: "OpenAI", member: true, access: "edit", transport: "local-cli", tool: "Codex CLI", available: true, signed_in: true, version: "codex-cli", path: "codex", hint: "" },
+  { id: "gpt", name: "ChatGPT", company: "OpenAI", member: true, access: "edit", transport: "local-cli", tool: "Codex CLI", available: true, signed_in: true, version: "codex-cli", path: "codex", usage: { remaining_percent: 74, windows: [{ label: "5-hour limit", remaining_percent: 74 }, { label: "Weekly limit", remaining_percent: 88 }] }, hint: "" },
   {
     id: "claude",
     name: "Claude",
@@ -30,6 +30,7 @@ const agents: AgentInfo[] = [
     signed_in: !needsSetup,
     version: "Claude Code",
     path: "claude",
+    usage: needsSetup ? null : { remaining_percent: 41, windows: [{ label: "5-hour limit", remaining_percent: 78 }, { label: "Weekly limit", remaining_percent: 41 }] },
     hint: needsSetup ? "Run `claude auth login` in a terminal and sign in with your Claude account." : "",
   },
   {
@@ -44,6 +45,7 @@ const agents: AgentInfo[] = [
     signed_in: false,
     version: "Gemini CLI",
     path: "gemini",
+    usage: null,
     hint: "Run `gemini` in a terminal, choose Sign in with Google, then type /quit.",
   },
 ];
@@ -114,9 +116,11 @@ const state = stepState(demoStep);
 
 export const demoApi = {
   agents: async () => agents,
+  usage: async () => Object.fromEntries(agents.flatMap((a) => (a.usage ? [[a.id, a.usage]] : []))),
   list: async () => (demoStep === 0 ? [{ ...conversations[0], title: "New conversation" }, ...conversations.slice(1)] : conversations),
   create: async () => conversations[0],
   load: async () => state.events,
+  tokenUsage: async () => ({ conversation: {}, today: {} }),
   rename: async () => conversations[0],
   remove: async () => undefined,
   exportMarkdown: async () => "",

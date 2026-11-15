@@ -27,7 +27,14 @@ pub struct Pending {
 
 impl Pending {
     pub fn new(conversation: &str, targets: Vec<String>, rounds: u32) -> Self {
-        Pending { conversation: conversation.into(), targets, rounds, round: 1, index: 0, attempts: 0 }
+        Pending {
+            conversation: conversation.into(),
+            targets,
+            rounds,
+            round: 1,
+            index: 0,
+            attempts: 0,
+        }
     }
 
     /// The position after the AI at (`round`, `index`) has answered.
@@ -51,7 +58,10 @@ impl Journal {
             .ok()
             .and_then(|s| serde_json::from_str::<HashMap<String, Pending>>(&s).ok())
             .unwrap_or_default();
-        Journal { path, items: Mutex::new(items) }
+        Journal {
+            path,
+            items: Mutex::new(items),
+        }
     }
 
     fn save(&self, items: &HashMap<String, Pending>) {
@@ -128,7 +138,10 @@ mod tests {
         let (resume, give_up) = after_restart.interrupted();
         assert_eq!(resume.len(), 1);
         assert!(give_up.is_empty());
-        assert_eq!((resume[0].round, resume[0].index, resume[0].attempts), (2, 1, 1));
+        assert_eq!(
+            (resume[0].round, resume[0].index, resume[0].attempts),
+            (2, 1, 1)
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -141,7 +154,10 @@ mod tests {
         let (resume, give_up) = Journal::load(path.clone()).interrupted();
         assert!(resume.is_empty());
         assert_eq!(give_up.len(), 1);
-        assert!(Journal::load(path.clone()).interrupted().1.is_empty(), "dropped after giving up");
+        assert!(
+            Journal::load(path.clone()).interrupted().1.is_empty(),
+            "dropped after giving up"
+        );
         let _ = std::fs::remove_file(path);
     }
 

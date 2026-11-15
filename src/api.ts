@@ -21,6 +21,8 @@ export interface ChatEvent {
   requests: string[];
   /** AIs this message proposes adding to the council (from ADD_AI: lines). */
   add_ai: string[];
+  /** Provider-reported counts for the AI turn that produced this event. */
+  usage?: TokenUsage | null;
 }
 
 export interface Conversation {
@@ -62,7 +64,29 @@ export interface AgentInfo {
   signed_in: boolean | null;
   version: string | null;
   path: string | null;
+  /** Filled in separately from `api.usage()`, since usage probes are slow. */
+  usage?: UsageStatus | null;
   hint: string;
+}
+
+export interface UsageStatus {
+  /** Lowest remaining applicable limit; this is the window that will stop the AI first. */
+  remaining_percent: number;
+  windows: { label: string; remaining_percent: number }[];
+}
+
+export interface TokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  thinking_tokens: number;
+  total_tokens: number;
+}
+
+export interface TokenUsageReport {
+  conversation: Record<string, TokenUsage>;
+  today: Record<string, TokenUsage>;
 }
 
 export interface CheckResult {
@@ -83,9 +107,13 @@ export interface TurnState {
 
 const appApi = {
   agents: () => invoke<AgentInfo[]>("agents_status"),
+  /** Remaining plan usage per council member id; members that don't report it are absent. */
+  usage: () => invoke<Record<string, UsageStatus>>("agents_usage"),
   list: () => invoke<Conversation[]>("list_conversations"),
   create: () => invoke<Conversation>("new_conversation"),
   load: (id: string) => invoke<ChatEvent[]>("load_conversation", { id }),
+  /** Token totals for one conversation and across all conversations since local midnight. */
+  tokenUsage: (id: string, dayStart: number) => invoke<TokenUsageReport>("token_usage_report", { id, dayStart }),
   rename: (id: string, title: string) => invoke<Conversation>("rename_conversation", { id, title }),
   remove: (id: string) => invoke<void>("delete_conversation", { id }),
   exportMarkdown: (id: string) => invoke<string>("export_markdown", { id }),

@@ -13,13 +13,13 @@
 //! conversation has no project folder, it runs in a fresh empty temporary folder with tools off.
 //! Higher levels run it in the project folder with the matching permissions.
 
-use crate::config::Access;
+use crate::{config::Access, store::TokenUsage};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
@@ -52,6 +52,19 @@ pub struct AgentInfo {
     pub hint: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UsageStatus {
+    /// The lowest remaining percentage, because this is the limit that will stop the agent first.
+    pub remaining_percent: u8,
+    pub windows: Vec<UsageWindow>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UsageWindow {
+    pub label: String,
+    pub remaining_percent: u8,
+}
+
 pub struct Agent {
     pub id: &'static str,
     pub name: &'static str,
@@ -60,9 +73,24 @@ pub struct Agent {
 }
 
 pub const AGENTS: [Agent; 3] = [
-    Agent { id: "gpt", name: "ChatGPT", company: "OpenAI", kind: Kind::Codex },
-    Agent { id: "claude", name: "Claude", company: "Anthropic", kind: Kind::ClaudeCode },
-    Agent { id: "gemini", name: "Gemini", company: "Google", kind: Kind::Antigravity },
+    Agent {
+        id: "gpt",
+        name: "ChatGPT",
+        company: "OpenAI",
+        kind: Kind::Codex,
+    },
+    Agent {
+        id: "claude",
+        name: "Claude",
+        company: "Anthropic",
+        kind: Kind::ClaudeCode,
+    },
+    Agent {
+        id: "gemini",
+        name: "Gemini",
+        company: "Google",
+        kind: Kind::Antigravity,
+    },
 ];
 
 pub fn by_id(id: &str) -> Option<&'static Agent> {
@@ -80,7 +108,11 @@ fn base_name(kind: Kind) -> &'static str {
 
 fn exe_names(base: &str) -> Vec<String> {
     if cfg!(windows) {
-        vec![format!("{base}.exe"), format!("{base}.cmd"), base.to_string()]
+        vec![
+            format!("{base}.exe"),
+            format!("{base}.cmd"),
+            base.to_string(),
+        ]
     } else {
         vec![base.to_string()]
     }
@@ -94,11 +126,21 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
     dirs_.extend(
-        [".local/bin", ".local/node/bin", ".npm-global/bin", ".volta/bin", "bin"]
-            .iter()
-            .map(|d| home.join(d)),
+        [
+            ".local/bin",
+            ".local/node/bin",
+            ".npm-global/bin",
+            ".volta/bin",
+            "bin",
+        ]
+        .iter()
+        .map(|d| home.join(d)),
     );
-    dirs_.extend(["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"].iter().map(PathBuf::from));
+    dirs_.extend(
+        ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"]
+            .iter()
+            .map(PathBuf::from),
+    );
     if let Some(appdata) = std::env::var_os("APPDATA") {
         dirs_.push(PathBuf::from(appdata).join("npm"));
     }
@@ -108,9 +150,14 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
             // The ChatGPT desktop app ships a copy of Codex.
             for app in ["/Applications/ChatGPT.app", "/Applications/Codex.app"] {
                 out.push(PathBuf::from(app).join("Contents/Resources/codex-cli/bin/codex"));
-                out.push(home.join(app.trim_start_matches('/')).join("Contents/Resources/codex-cli/bin/codex"));
+                out.push(
+                    home.join(app.trim_start_matches('/'))
+                        .join("Contents/Resources/codex-cli/bin/codex"),
+                );
             }
-            out.push(PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"));
+            out.push(PathBuf::from(
+                "/Applications/Codex.app/Contents/Resources/codex",
+            ));
         }
         Kind::ClaudeCode => out.push(home.join(".claude/local/claude")),
         Kind::GeminiCli => {}
@@ -136,7 +183,10 @@ pub fn find(kind: Kind) -> Option<PathBuf> {
 /// The tool an agent actually uses: Gemini runs through Antigravity when it's installed, and
 /// falls back to the Gemini CLI (still served to company plans and API keys) when it isn't.
 pub fn effective_kind(agent: &Agent) -> Kind {
-    if agent.kind == Kind::Antigravity && find(Kind::Antigravity).is_none() && find(Kind::GeminiCli).is_some() {
+    if agent.kind == Kind::Antigravity
+        && find(Kind::Antigravity).is_none()
+        && find(Kind::GeminiCli).is_some()
+    {
         Kind::GeminiCli
     } else {
         agent.kind
@@ -162,7 +212,10 @@ fn is_executable(p: &Path) -> bool {
 
 fn command(path: &Path) -> Command {
     let mut cmd = Command::new(path);
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     // Node-based CLIs (Gemini, npm installs) start with `#!/usr/bin/env node`, and apps launched from
     // the Dock have a minimal PATH; putting the tool's own folder first lets it find its runtime.
     if let Some(dir) = path.parent() {
@@ -195,19 +248,263 @@ fn command(path: &Path) -> Command {
 async fn probe(path: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = command(path);
     cmd.args(args);
-    let out = tokio::time::timeout(PROBE_TIMEOUT, cmd.output()).await.ok()?.ok()?;
+    let out = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
     let mut s = String::from_utf8_lossy(&out.stdout).to_string();
     s.push_str(&String::from_utf8_lossy(&out.stderr));
     Some(s.trim().to_string())
 }
 
+/// Runs a short machine-readable command whose request is supplied on stdin.
+async fn probe_input(path: &Path, args: &[&str], input: &str) -> Option<String> {
+    let mut cmd = command(path);
+    cmd.args(args).stdin(Stdio::piped());
+    let mut child = cmd.spawn().ok()?;
+    let mut stdin = child.stdin.take()?;
+    stdin.write_all(input.as_bytes()).await.ok()?;
+    stdin.shutdown().await.ok()?;
+    drop(stdin);
+    let out = tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
+    let mut s = String::from_utf8_lossy(&out.stdout).to_string();
+    s.push_str(&String::from_utf8_lossy(&out.stderr));
+    Some(s.trim().to_string())
+}
+
+fn percent(n: f64) -> Option<u8> {
+    n.is_finite().then(|| n.clamp(0.0, 100.0).round() as u8)
+}
+
+fn from_windows(windows: Vec<UsageWindow>) -> Option<UsageStatus> {
+    let remaining_percent = windows.iter().map(|w| w.remaining_percent).min()?;
+    Some(UsageStatus {
+        remaining_percent,
+        windows,
+    })
+}
+
+fn window_from_used(label: impl Into<String>, used: f64) -> Option<UsageWindow> {
+    Some(UsageWindow {
+        label: label.into(),
+        remaining_percent: 100_u8.saturating_sub(percent(used)?),
+    })
+}
+
+fn codex_window(label: &str, v: &serde_json::Value) -> Option<UsageWindow> {
+    let used = v["usedPercent"].as_f64()?;
+    let label = match v["windowDurationMins"].as_u64() {
+        Some(300) => "5-hour limit".to_string(),
+        Some(10_080) => "Weekly limit".to_string(),
+        Some(minutes) if minutes % 1_440 == 0 => format!("{}-day limit", minutes / 1_440),
+        Some(minutes) if minutes % 60 == 0 => format!("{}-hour limit", minutes / 60),
+        _ => label.to_string(),
+    };
+    window_from_used(label, used)
+}
+
+fn codex_usage_from_line(line: &str) -> Option<UsageStatus> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v["id"].as_i64() != Some(2) {
+        return None;
+    }
+    let limits = &v["result"]["rateLimits"];
+    let mut windows = Vec::new();
+    if let Some(w) = codex_window("Primary limit", &limits["primary"]) {
+        windows.push(w);
+    }
+    if let Some(w) = codex_window("Secondary limit", &limits["secondary"]) {
+        windows.push(w);
+    }
+    if let Some(remaining) = limits["individualLimit"]["remainingPercent"]
+        .as_f64()
+        .and_then(percent)
+    {
+        windows.push(UsageWindow {
+            label: "Individual spend limit".into(),
+            remaining_percent: remaining,
+        });
+    }
+    from_windows(windows)
+}
+
+/// Codex exposes plan limits through its documented newline-delimited app-server protocol.
+async fn codex_usage(path: &Path) -> Option<UsageStatus> {
+    let mut cmd = command(path);
+    cmd.args(["app-server"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let mut stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    let mut lines = BufReader::new(stdout).lines();
+    let exchange = async {
+        stdin
+            .write_all(
+                b"{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"consilium\",\"version\":\"0.1.0\"}}}\n",
+            )
+            .await
+            .ok()?;
+        loop {
+            let line = lines.next_line().await.ok()??;
+            let v: serde_json::Value = serde_json::from_str(&line).ok()?;
+            if v["id"].as_i64() == Some(1) {
+                break;
+            }
+        }
+        stdin
+            .write_all(b"{\"method\":\"initialized\"}\n{\"id\":2,\"method\":\"account/rateLimits/read\"}\n")
+            .await
+            .ok()?;
+        loop {
+            let line = lines.next_line().await.ok()??;
+            if let Some(usage) = codex_usage_from_line(&line) {
+                break Some(usage);
+            }
+        }
+    };
+    let result = tokio::time::timeout(PROBE_TIMEOUT, exchange)
+        .await
+        .ok()
+        .flatten();
+    // `kill` also waits for the process to exit, so repeated refreshes cannot leave app-server
+    // children behind as zombies.
+    let _ = child.kill().await;
+    result
+}
+
+fn claude_usage_from_output(output: &str) -> Option<UsageStatus> {
+    for line in output.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let body = &v["response"]["response"];
+        if body["rate_limits_available"].as_bool() != Some(true) {
+            continue;
+        }
+        let limits = &body["rate_limits"];
+        let mut windows = Vec::new();
+        if let Some(rows) = limits["limits"].as_array() {
+            for row in rows {
+                // A scoped window only constrains the currently selected model when the CLI marks it active.
+                if !row["scope"].is_null() && row["is_active"].as_bool() != Some(true) {
+                    continue;
+                }
+                let Some(used) = row["percent"].as_f64() else {
+                    continue;
+                };
+                let kind = row["kind"].as_str().unwrap_or("Plan limit");
+                let label = match kind {
+                    "session" => "5-hour limit".to_string(),
+                    "weekly_all" => "Weekly limit".to_string(),
+                    "weekly_scoped" => {
+                        let model = row["scope"]["model"]["display_name"]
+                            .as_str()
+                            .unwrap_or("Model");
+                        format!("{model} weekly limit")
+                    }
+                    other => other.replace('_', " "),
+                };
+                if let Some(window) = window_from_used(label, used) {
+                    windows.push(window);
+                }
+            }
+        }
+        // Older CLIs have the named windows but not the unified limits array.
+        if windows.is_empty() {
+            for (key, label) in [("five_hour", "5-hour limit"), ("seven_day", "Weekly limit")] {
+                if let Some(used) = limits[key]["utilization"].as_f64() {
+                    if let Some(window) = window_from_used(label, used) {
+                        windows.push(window);
+                    }
+                }
+            }
+        }
+        if let Some(usage) = from_windows(windows) {
+            return Some(usage);
+        }
+    }
+    None
+}
+
+async fn claude_usage(path: &Path) -> Option<UsageStatus> {
+    let request = "{\"type\":\"control_request\",\"request_id\":\"consilium-usage\",\"request\":{\"subtype\":\"get_usage\",\"skip_behaviors\":true}}\n";
+    let output = probe_input(
+        path,
+        &[
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+        ],
+        request,
+    )
+    .await?;
+    claude_usage_from_output(&output)
+}
+
+fn antigravity_usage_from_output(output: &str) -> Option<UsageStatus> {
+    let start = output.find('{')?;
+    let end = output.rfind('}')? + 1;
+    let v: serde_json::Value = serde_json::from_str(&output[start..end]).ok()?;
+    let groups = v["command"]["data"]["groups"].as_array()?;
+    let group = groups.iter().find(|g| {
+        g["name"]
+            .as_str()
+            .is_some_and(|n| n.to_ascii_lowercase().contains("gemini"))
+    })?;
+    let mut windows = Vec::new();
+    for bucket in group["buckets"].as_array()? {
+        let Some(fraction) = bucket["remaining_fraction"].as_f64() else {
+            continue;
+        };
+        let Some(remaining_percent) = percent(fraction * 100.0) else {
+            continue;
+        };
+        let label = bucket["name"].as_str().unwrap_or("Plan limit").to_string();
+        windows.push(UsageWindow {
+            label,
+            remaining_percent,
+        });
+    }
+    from_windows(windows)
+}
+
+async fn usage(path: &Path, kind: Kind) -> Option<UsageStatus> {
+    match kind {
+        Kind::Codex => codex_usage(path).await,
+        Kind::ClaudeCode => claude_usage(path).await,
+        Kind::Antigravity => {
+            let output = probe(path, &["-p", "/usage", "--output-format", "json"]).await?;
+            antigravity_usage_from_output(&output)
+        }
+        // The legacy Gemini CLI does not expose subscription quota in supported machine output.
+        Kind::GeminiCli => None,
+    }
+}
+
 /// Gemini CLI records the chosen sign-in method in ~/.gemini/settings.json; for a Google account
 /// sign-in it also keeps a credentials file, whose presence (never its contents) is checked here.
 fn gemini_signed_in() -> bool {
-    let Some(home) = dirs::home_dir() else { return false };
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
     let dir = home.join(".gemini");
-    let Ok(text) = std::fs::read_to_string(dir.join("settings.json")) else { return false };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
+    let Ok(text) = std::fs::read_to_string(dir.join("settings.json")) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
     let method = v["security"]["auth"]["selectedType"]
         .as_str()
         .or_else(|| v["selectedAuthType"].as_str())
@@ -228,7 +525,11 @@ fn antigravity_signed_in() -> bool {
     [dirs::config_dir(), dirs::data_dir()]
         .into_iter()
         .flatten()
-        .any(|d| d.join("antigravity").join("credential-user-scope").is_file())
+        .any(|d| {
+            d.join("antigravity")
+                .join("credential-user-scope")
+                .is_file()
+        })
 }
 
 pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
@@ -271,19 +572,40 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
     };
     let Some(path) = find(kind) else { return info };
     info.path = Some(path.display().to_string());
-    info.version = probe(&path, &["--version"]).await.and_then(|v| v.lines().next().map(str::to_string));
-    let signed_in = match kind {
-        Kind::Codex => probe(&path, &["login", "status"]).await.map(|s| s.contains("Logged in")),
-        Kind::ClaudeCode => probe(&path, &["auth", "status"]).await.and_then(|s| {
-            serde_json::from_str::<serde_json::Value>(&s).ok().and_then(|v| v["loggedIn"].as_bool())
-        }),
-        Kind::GeminiCli => Some(gemini_signed_in()),
-        Kind::Antigravity => Some(antigravity_signed_in()),
+    let version_probe = probe(&path, &["--version"]);
+    let sign_in_probe = async {
+        match kind {
+            Kind::Codex => probe(&path, &["login", "status"])
+                .await
+                .map(|s| s.contains("Logged in")),
+            Kind::ClaudeCode => probe(&path, &["auth", "status"]).await.and_then(|s| {
+                serde_json::from_str::<serde_json::Value>(&s)
+                    .ok()
+                    .and_then(|v| v["loggedIn"].as_bool())
+            }),
+            Kind::GeminiCli => Some(gemini_signed_in()),
+            Kind::Antigravity => Some(antigravity_signed_in()),
+        }
     };
+    let (version, signed_in) = tokio::join!(version_probe, sign_in_probe);
+    info.version = version.and_then(|v| v.lines().next().map(str::to_string));
     info.signed_in = signed_in;
     info.available = signed_in == Some(true);
-    info.hint = if info.available { String::new() } else { login_hint.into() };
+    info.hint = if info.available {
+        String::new()
+    } else {
+        login_hint.into()
+    };
     info
+}
+
+/// Plan usage for one AI, or None when its CLI is missing or doesn't report it. Kept out of
+/// `status` because these probes start a full CLI session (several seconds each), and sign-in
+/// state shouldn't wait on them.
+pub async fn usage_of(agent: &Agent) -> Option<UsageStatus> {
+    let kind = effective_kind(agent);
+    let path = find(kind)?;
+    usage(&path, kind).await
 }
 
 /// Where and how an agent runs for one turn.
@@ -293,9 +615,22 @@ pub struct Plan {
     pub input: String,
 }
 
+/// One provider turn, including token accounting when the CLI reports it.
+pub struct AgentReply {
+    pub text: String,
+    pub usage: Option<TokenUsage>,
+}
+
 /// The exact command-line arguments for one turn. `workdir` is the project folder when the AI has
 /// access to one, otherwise an empty temporary folder; `access` is already "chat" in that case.
-pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, system: &str, prompt: &str) -> Plan {
+pub fn plan(
+    kind: Kind,
+    access: Access,
+    workdir: &Path,
+    reply_file: &Path,
+    system: &str,
+    prompt: &str,
+) -> Plan {
     let mut args: Vec<OsString> = Vec::new();
     let mut push = |a: &str| args.push(a.into());
     let input = match kind {
@@ -303,6 +638,7 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
             push("exec");
             push("--ephemeral");
             push("--skip-git-repo-check");
+            push("--json");
             match access {
                 Access::Chat | Access::Read => {
                     push("-s");
@@ -379,7 +715,14 @@ pub fn plan(kind: Kind, access: Access, workdir: &Path, reply_file: &Path, syste
         Kind::Antigravity => {
             // The conversation goes over stdin as one stream-json message, not as an argument:
             // transcripts can exceed Linux's 128 KB argument and Windows' 32 K command-line limits.
-            for a in ["--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", "0s"] {
+            for a in [
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--print-timeout",
+                "0s",
+            ] {
                 push(a);
             }
             match access {
@@ -416,9 +759,34 @@ pub async fn run(
     prompt: &str,
     cancel: &CancellationToken,
 ) -> Result<String, String> {
+    run_with_usage(agent, access, workspace, system, prompt, cancel)
+        .await
+        .map(|reply| reply.text)
+}
+
+/// The normal council turn path. Unlike `run`, this preserves the provider's token counts so they
+/// can be stored beside the reply. `run` remains the lightweight text-only helper for self-checks.
+pub async fn run_with_usage(
+    agent: &Agent,
+    access: Access,
+    workspace: Option<&Path>,
+    system: &str,
+    prompt: &str,
+    cancel: &CancellationToken,
+) -> Result<AgentReply, String> {
     let kind = effective_kind(agent);
     let path = find(kind).ok_or_else(|| format!("{} isn't installed", agent.name))?;
-    run_at(&path, kind, access, workspace, system, prompt, cancel, RUN_TIMEOUT).await
+    run_at_with_usage(
+        &path,
+        kind,
+        access,
+        workspace,
+        system,
+        prompt,
+        cancel,
+        RUN_TIMEOUT,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -432,6 +800,24 @@ pub async fn run_at(
     cancel: &CancellationToken,
     timeout: Duration,
 ) -> Result<String, String> {
+    run_at_with_usage(
+        path, kind, access, workspace, system, prompt, cancel, timeout,
+    )
+    .await
+    .map(|reply| reply.text)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_at_with_usage(
+    path: &Path,
+    kind: Kind,
+    access: Access,
+    workspace: Option<&Path>,
+    system: &str,
+    prompt: &str,
+    cancel: &CancellationToken,
+    timeout: Duration,
+) -> Result<AgentReply, String> {
     let work = std::env::temp_dir().join(format!("consilium-{}", uuid::Uuid::new_v4()));
     let empty = work.join("empty");
     std::fs::create_dir_all(&empty).map_err(|e| format!("couldn't create a work folder: {e}"))?;
@@ -454,10 +840,12 @@ async fn execute(
     plan: Plan,
     cancel: &CancellationToken,
     timeout: Duration,
-) -> Result<String, String> {
+) -> Result<AgentReply, String> {
     let mut cmd = command(path);
     cmd.current_dir(dir).stdin(Stdio::piped()).args(&plan.args);
-    let mut child = cmd.spawn().map_err(|e| format!("couldn't start {}: {e}", path.display()))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("couldn't start {}: {e}", path.display()))?;
     let pid = child.id();
     let mut stdin = child.stdin.take().expect("stdin is piped");
     let mut stdout = child.stdout.take().expect("stdout is piped");
@@ -495,6 +883,7 @@ async fn execute(
     let stdout = String::from_utf8_lossy(&out_task.await.unwrap_or_default()).to_string();
     let stderr = String::from_utf8_lossy(&err_task.await.unwrap_or_default()).to_string();
 
+    let usage = token_usage_from_output(kind, &stdout);
     let reply = match kind {
         Kind::Codex => std::fs::read_to_string(reply_file).unwrap_or_default(),
         Kind::ClaudeCode => match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
@@ -519,10 +908,105 @@ async fn execute(
         Kind::Antigravity => antigravity_reply(&stdout)?,
     };
     if !status.success() || reply.trim().is_empty() {
-        let detail = if stderr.trim().is_empty() { stdout } else { stderr };
-        return Err(format!("exit {}: {}", status.code().unwrap_or(-1), tail(&detail)));
+        let detail = if stderr.trim().is_empty() {
+            stdout
+        } else {
+            stderr
+        };
+        return Err(format!(
+            "exit {}: {}",
+            status.code().unwrap_or(-1),
+            tail(&detail)
+        ));
     }
-    Ok(reply.trim().to_string())
+    Ok(AgentReply {
+        text: reply.trim().to_string(),
+        usage,
+    })
+}
+
+fn json_u64(value: &serde_json::Value, key: &str) -> u64 {
+    value[key]
+        .as_u64()
+        .or_else(|| value[key].as_i64().and_then(|n| u64::try_from(n).ok()))
+        .unwrap_or(0)
+}
+
+fn token_usage_from_output(kind: Kind, stdout: &str) -> Option<TokenUsage> {
+    match kind {
+        Kind::Codex => stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find_map(|v| {
+                (v["type"] == "turn.completed").then(|| {
+                    let usage = &v["usage"];
+                    let input_tokens = json_u64(usage, "input_tokens");
+                    let output_tokens = json_u64(usage, "output_tokens");
+                    let parsed = TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                        cache_read_tokens: json_u64(usage, "cached_input_tokens"),
+                        total_tokens: json_u64(usage, "total_tokens")
+                            .max(input_tokens.saturating_add(output_tokens)),
+                        ..TokenUsage::default()
+                    };
+                    (parsed.total_tokens > 0).then_some(parsed)
+                })?
+            }),
+        Kind::ClaudeCode => {
+            let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+            let usage = &v["usage"];
+            let input_tokens = json_u64(usage, "input_tokens");
+            let output_tokens = json_u64(usage, "output_tokens");
+            let cache_read_tokens = json_u64(usage, "cache_read_input_tokens");
+            let cache_creation_tokens = json_u64(usage, "cache_creation_input_tokens");
+            let reported = json_u64(usage, "total_tokens");
+            let calculated = input_tokens
+                .saturating_add(output_tokens)
+                .saturating_add(cache_read_tokens)
+                .saturating_add(cache_creation_tokens);
+            (reported > 0 || calculated > 0).then_some(TokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                total_tokens: reported.max(calculated),
+                ..TokenUsage::default()
+            })
+        }
+        Kind::Antigravity => stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find_map(|v| {
+                if v["event"] != "result" {
+                    return None;
+                }
+                let usage = if v["result"]["usage"].is_object() {
+                    &v["result"]["usage"]
+                } else {
+                    &v["usage"]
+                };
+                let input_tokens = json_u64(usage, "input_tokens");
+                let output_tokens = json_u64(usage, "output_tokens");
+                let thinking_tokens = json_u64(usage, "thinking_tokens");
+                let cache_read_tokens = json_u64(usage, "cache_read_tokens");
+                let reported = json_u64(usage, "total_tokens");
+                let calculated = input_tokens
+                    .saturating_add(output_tokens)
+                    .saturating_add(thinking_tokens);
+                (reported > 0 || calculated > 0).then_some(TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    thinking_tokens,
+                    cache_read_tokens,
+                    total_tokens: reported.max(calculated),
+                    ..TokenUsage::default()
+                })
+            }),
+        // The fallback Gemini CLI's JSON token statistics have changed between releases. Do not
+        // guess at fields: record them only after a stable machine-readable schema is documented.
+        Kind::GeminiCli => None,
+    }
 }
 
 /// The reply from Antigravity's stream-json output: the final `result` event's response, or the
@@ -532,7 +1016,9 @@ fn antigravity_reply(stdout: &str) -> Result<String, String> {
     let mut streamed = String::new();
     let mut result = None;
     for line in stdout.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         if v["event"] == "step_update" {
             if let Some(t) = v["step_update"]["text_delta"].as_str() {
                 streamed.push_str(t);
@@ -543,13 +1029,27 @@ fn antigravity_reply(stdout: &str) -> Result<String, String> {
     }
     let Some(r) = result else { return Ok(streamed) };
     if r["status"] != "SUCCESS" {
-        let why = r["error"].as_str().filter(|e| !e.is_empty()).unwrap_or("no response");
-        return Err(tail(&format!("{} ({})", why, r["status"].as_str().unwrap_or("ERROR"))));
+        let why = r["error"]
+            .as_str()
+            .filter(|e| !e.is_empty())
+            .unwrap_or("no response");
+        return Err(tail(&format!(
+            "{} ({})",
+            why,
+            r["status"].as_str().unwrap_or("ERROR")
+        )));
     }
-    let text = r["response"].as_str().filter(|t| !t.trim().is_empty()).map(str::to_string).unwrap_or(streamed);
+    let text = r["response"]
+        .as_str()
+        .filter(|t| !t.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or(streamed);
     if text.trim().is_empty() {
         if let Some(denied) = r["denied_actions"].as_array().filter(|d| !d.is_empty()) {
-            let names: Vec<&str> = denied.iter().filter_map(|d| d["display_name"].as_str()).collect();
+            let names: Vec<&str> = denied
+                .iter()
+                .filter_map(|d| d["display_name"].as_str())
+                .collect();
             return Err(format!(
                 "Gemini tried to use a tool its access doesn't allow ({}) and wrote no reply. Ask again, or raise its access in Settings.",
                 names.join(", ")
@@ -599,42 +1099,144 @@ mod plan_tests {
     use super::*;
 
     fn args(kind: Kind, access: Access) -> Vec<String> {
-        plan(kind, access, Path::new("/ws"), Path::new("/r.txt"), "SYS", "P")
-            .args
-            .iter()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect()
+        plan(
+            kind,
+            access,
+            Path::new("/ws"),
+            Path::new("/r.txt"),
+            "SYS",
+            "P",
+        )
+        .args
+        .iter()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect()
     }
 
     fn has(v: &[String], pair: &[&str]) -> bool {
-        v.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b))
+        v.windows(pair.len())
+            .any(|w| w.iter().zip(pair).all(|(a, b)| a == b))
+    }
+
+    #[test]
+    fn codex_usage_uses_the_most_constrained_window() {
+        let line = r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":37,"windowDurationMins":300},"secondary":{"usedPercent":82,"windowDurationMins":10080}}}}"#;
+        let usage = codex_usage_from_line(line).unwrap();
+        assert_eq!(usage.remaining_percent, 18);
+        assert_eq!(
+            usage.windows,
+            vec![
+                UsageWindow {
+                    label: "5-hour limit".into(),
+                    remaining_percent: 63
+                },
+                UsageWindow {
+                    label: "Weekly limit".into(),
+                    remaining_percent: 18
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_usage_includes_only_the_active_model_scope() {
+        let output = r#"{"type":"control_response","response":{"response":{"rate_limits_available":true,"rate_limits":{"limits":[{"kind":"session","percent":22,"scope":null},{"kind":"weekly_all","percent":59,"scope":null},{"kind":"weekly_scoped","percent":100,"is_active":true,"scope":{"model":{"display_name":"Fable"}}},{"kind":"weekly_scoped","percent":90,"is_active":false,"scope":{"model":{"display_name":"Opus"}}}]}}}}"#;
+        let usage = claude_usage_from_output(output).unwrap();
+        assert_eq!(usage.remaining_percent, 0);
+        assert_eq!(usage.windows.len(), 3);
+        assert_eq!(usage.windows[2].label, "Fable weekly limit");
+    }
+
+    #[test]
+    fn antigravity_usage_ignores_the_third_party_model_pool() {
+        let output = r#"{"command":{"data":{"groups":[{"name":"Gemini Models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.61},{"name":"Five Hour Limit Remaining","remaining_fraction":0.83}]},{"name":"Claude and GPT models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.1}]}]}}}"#;
+        let usage = antigravity_usage_from_output(output).unwrap();
+        assert_eq!(usage.remaining_percent, 61);
+        assert_eq!(usage.windows.len(), 2);
+    }
+
+    #[test]
+    fn antigravity_usage_tolerates_stderr_output_around_json() {
+        let output = "info: checking CLI updates\n{\"command\":{\"data\":{\"groups\":[{\"name\":\"Gemini Models\",\"buckets\":[{\"name\":\"Weekly Limit Remaining\",\"remaining_fraction\":0.75}]}]}}}\nwarn: update available\n";
+        let usage = antigravity_usage_from_output(output).unwrap();
+        assert_eq!(usage.remaining_percent, 75);
+    }
+
+    #[test]
+    fn turn_token_counts_are_read_from_each_provider_schema() {
+        let codex = token_usage_from_output(
+            Kind::Codex,
+            "{\"type\":\"turn.started\"}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":120,\"cached_input_tokens\":80,\"output_tokens\":30}}",
+        )
+        .unwrap();
+        assert_eq!(codex.total_tokens, 150);
+        assert_eq!(codex.cache_read_tokens, 80);
+
+        let claude = token_usage_from_output(
+            Kind::ClaudeCode,
+            r#"{"type":"result","usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40}}"#,
+        )
+        .unwrap();
+        assert_eq!(claude.total_tokens, 100);
+        assert_eq!(claude.cache_creation_tokens, 20);
+
+        let antigravity = token_usage_from_output(
+            Kind::Antigravity,
+            r#"{"event":"result","result":{"usage":{"input_tokens":12,"output_tokens":5,"thinking_tokens":7,"cache_read_tokens":3,"total_tokens":24}}}"#,
+        )
+        .unwrap();
+        assert_eq!(antigravity.total_tokens, 24);
+        assert_eq!(antigravity.thinking_tokens, 7);
     }
 
     #[test]
     fn chat_access_turns_tools_off_everywhere() {
+        assert!(args(Kind::Codex, Access::Chat).contains(&"--json".to_string()));
         assert!(has(&args(Kind::Codex, Access::Chat), &["-s", "read-only"]));
         assert!(has(&args(Kind::ClaudeCode, Access::Chat), &["--tools", ""]));
-        assert!(has(&args(Kind::GeminiCli, Access::Chat), &["--approval-mode", "plan"]));
+        assert!(has(
+            &args(Kind::GeminiCli, Access::Chat),
+            &["--approval-mode", "plan"]
+        ));
     }
 
     #[test]
     fn edit_access_allows_file_edits_but_not_shell() {
-        assert!(has(&args(Kind::Codex, Access::Edit), &["-s", "workspace-write"]));
+        assert!(has(
+            &args(Kind::Codex, Access::Edit),
+            &["-s", "workspace-write"]
+        ));
         let c = args(Kind::ClaudeCode, Access::Edit);
         assert!(has(&c, &["--tools", "Read,Grep,Glob,Edit,Write"]));
         assert!(has(&c, &["--permission-mode", "acceptEdits"]));
         assert!(!c.iter().any(|a| a.contains("Bash")));
-        assert!(has(&args(Kind::GeminiCli, Access::Edit), &["--approval-mode", "auto_edit"]));
+        assert!(has(
+            &args(Kind::GeminiCli, Access::Edit),
+            &["--approval-mode", "auto_edit"]
+        ));
     }
 
     #[test]
     fn unrestricted_access_uses_each_tools_own_bypass_switch() {
-        assert!(args(Kind::Codex, Access::Unrestricted).contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
-        assert!(args(Kind::ClaudeCode, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(args(Kind::Antigravity, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(has(&args(Kind::GeminiCli, Access::Unrestricted), &["--approval-mode", "yolo"]));
-        for k in [Kind::Codex, Kind::ClaudeCode, Kind::Antigravity, Kind::GeminiCli] {
-            assert!(!args(k, Access::Edit).iter().any(|a| a.contains("dangerously") || a == "yolo"));
+        assert!(args(Kind::Codex, Access::Unrestricted)
+            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(args(Kind::ClaudeCode, Access::Unrestricted)
+            .contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args(Kind::Antigravity, Access::Unrestricted)
+            .contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(has(
+            &args(Kind::GeminiCli, Access::Unrestricted),
+            &["--approval-mode", "yolo"]
+        ));
+        for k in [
+            Kind::Codex,
+            Kind::ClaudeCode,
+            Kind::Antigravity,
+            Kind::GeminiCli,
+        ] {
+            assert!(!args(k, Access::Edit)
+                .iter()
+                .any(|a| a.contains("dangerously") || a == "yolo"));
         }
     }
 
@@ -650,15 +1252,34 @@ mod plan_tests {
 
     #[test]
     fn antigravity_sends_the_conversation_on_stdin_with_matching_modes() {
-        let p = plan(Kind::Antigravity, Access::Chat, Path::new("/ws"), Path::new("/r"), "SYS", "P");
-        let a: Vec<String> = p.args.iter().map(|x| x.to_string_lossy().to_string()).collect();
-        assert!(has(&a, &["--input-format", "stream-json"]) && has(&a, &["--output-format", "stream-json"]));
+        let p = plan(
+            Kind::Antigravity,
+            Access::Chat,
+            Path::new("/ws"),
+            Path::new("/r"),
+            "SYS",
+            "P",
+        );
+        let a: Vec<String> = p
+            .args
+            .iter()
+            .map(|x| x.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            has(&a, &["--input-format", "stream-json"])
+                && has(&a, &["--output-format", "stream-json"])
+        );
         assert!(has(&a, &["--mode", "plan"]) && has(&a, &["-p", ""]));
         let line: serde_json::Value = serde_json::from_str(p.input.trim()).unwrap();
         assert_eq!(line["event"], "user");
         assert_eq!(line["message"]["content"], "SYS\n\nP");
-        assert!(has(&args(Kind::Antigravity, Access::Edit), &["--mode", "accept-edits"]));
-        assert!(!args(Kind::Antigravity, Access::Own).iter().any(|x| x == "--mode"));
+        assert!(has(
+            &args(Kind::Antigravity, Access::Edit),
+            &["--mode", "accept-edits"]
+        ));
+        assert!(!args(Kind::Antigravity, Access::Own)
+            .iter()
+            .any(|x| x == "--mode"));
     }
 
     #[test]
@@ -671,14 +1292,31 @@ mod plan_tests {
         let e = antigravity_reply(blocked).unwrap_err();
         assert!(e.contains("Bash") && e.contains("access"), "{e}");
         let failed = r#"{"event":"result","result":{"status":"ERROR","response":"","error":"authentication failed or timed out"}}"#;
-        assert_eq!(antigravity_reply(failed).unwrap_err(), "authentication failed or timed out (ERROR)");
+        assert_eq!(
+            antigravity_reply(failed).unwrap_err(),
+            "authentication failed or timed out (ERROR)"
+        );
     }
 
     #[test]
     fn instructions_reach_every_tool() {
-        let p = plan(Kind::ClaudeCode, Access::Chat, Path::new("/ws"), Path::new("/r"), "SYS", "P");
+        let p = plan(
+            Kind::ClaudeCode,
+            Access::Chat,
+            Path::new("/ws"),
+            Path::new("/r"),
+            "SYS",
+            "P",
+        );
         assert!(p.args.iter().any(|a| a == "SYS") && p.input == "P");
-        let p = plan(Kind::GeminiCli, Access::Chat, Path::new("/ws"), Path::new("/r"), "SYS", "P");
+        let p = plan(
+            Kind::GeminiCli,
+            Access::Chat,
+            Path::new("/ws"),
+            Path::new("/r"),
+            "SYS",
+            "P",
+        );
         assert!(p.input.starts_with("SYS") && p.input.ends_with("P"));
     }
 }
@@ -698,8 +1336,24 @@ mod tests {
         p
     }
 
-    async fn go(p: &Path, kind: Kind, access: Access, ws: Option<&Path>, system: &str) -> Result<String, String> {
-        run_at(p, kind, access, ws, system, "convo", &CancellationToken::new(), RUN_TIMEOUT).await
+    async fn go(
+        p: &Path,
+        kind: Kind,
+        access: Access,
+        ws: Option<&Path>,
+        system: &str,
+    ) -> Result<String, String> {
+        run_at(
+            p,
+            kind,
+            access,
+            ws,
+            system,
+            "convo",
+            &CancellationToken::new(),
+            RUN_TIMEOUT,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -709,7 +1363,9 @@ mod tests {
 input=$(cat)
 printf 'cwd=%s files=%s first=%s' "$(basename "$PWD")" "$(ls -A | wc -l | tr -d ' ')" "$(printf '%s' "$input" | head -1)" > "$out""#,
         );
-        let r = go(&p, Kind::Codex, Access::Chat, None, "SYSTEM LINE").await.unwrap();
+        let r = go(&p, Kind::Codex, Access::Chat, None, "SYSTEM LINE")
+            .await
+            .unwrap();
         assert_eq!(r, "cwd=empty files=0 first=SYSTEM LINE");
     }
 
@@ -719,25 +1375,63 @@ printf 'cwd=%s files=%s first=%s' "$(basename "$PWD")" "$(ls -A | wc -l | tr -d 
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::write(ws.join("README.md"), "x").unwrap();
         let p = fake(r#"while [ "$1" != "-o" ]; do shift; done; cat >/dev/null; ls -A > "$2""#);
-        assert_eq!(go(&p, Kind::Codex, Access::Edit, Some(&ws), "s").await.unwrap(), "README.md");
-        assert!(go(&p, Kind::Codex, Access::Chat, Some(&ws), "s").await.is_err(), "chat access must not see the project");
+        assert_eq!(
+            go(&p, Kind::Codex, Access::Edit, Some(&ws), "s")
+                .await
+                .unwrap(),
+            "README.md"
+        );
+        assert!(
+            go(&p, Kind::Codex, Access::Chat, Some(&ws), "s")
+                .await
+                .is_err(),
+            "chat access must not see the project"
+        );
         std::fs::remove_dir_all(ws).unwrap();
     }
 
     #[tokio::test]
     async fn claude_reply_is_parsed_from_json_and_errors_are_reported() {
-        let p = fake(r#"cat >/dev/null; printf '{"type":"result","is_error":false,"result":"hello from claude"}'"#);
-        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap(), "hello from claude");
-        let p = fake(r#"cat >/dev/null; printf '{"type":"result","is_error":true,"result":"Not logged in"}'"#);
-        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err(), "Not logged in");
+        let p = fake(
+            r#"cat >/dev/null; printf '{"type":"result","is_error":false,"result":"hello from claude"}'"#,
+        );
+        assert_eq!(
+            go(&p, Kind::ClaudeCode, Access::Chat, None, "s")
+                .await
+                .unwrap(),
+            "hello from claude"
+        );
+        let p = fake(
+            r#"cat >/dev/null; printf '{"type":"result","is_error":true,"result":"Not logged in"}'"#,
+        );
+        assert_eq!(
+            go(&p, Kind::ClaudeCode, Access::Chat, None, "s")
+                .await
+                .unwrap_err(),
+            "Not logged in"
+        );
     }
 
     #[tokio::test]
     async fn gemini_reply_and_errors_are_parsed_from_json() {
-        let p = fake(r#"cat >/dev/null; printf '{"session_id":"x","response":"hello from gemini","stats":{}}'"#);
-        assert_eq!(go(&p, Kind::GeminiCli, Access::Chat, None, "s").await.unwrap(), "hello from gemini");
-        let p = fake(r#"cat >/dev/null; printf '{"session_id":"x","error":{"type":"Error","message":"Please set an Auth method","code":41}}'; exit 41"#);
-        assert_eq!(go(&p, Kind::GeminiCli, Access::Chat, None, "s").await.unwrap_err(), "Please set an Auth method");
+        let p = fake(
+            r#"cat >/dev/null; printf '{"session_id":"x","response":"hello from gemini","stats":{}}'"#,
+        );
+        assert_eq!(
+            go(&p, Kind::GeminiCli, Access::Chat, None, "s")
+                .await
+                .unwrap(),
+            "hello from gemini"
+        );
+        let p = fake(
+            r#"cat >/dev/null; printf '{"session_id":"x","error":{"type":"Error","message":"Please set an Auth method","code":41}}'; exit 41"#,
+        );
+        assert_eq!(
+            go(&p, Kind::GeminiCli, Access::Chat, None, "s")
+                .await
+                .unwrap_err(),
+            "Please set an Auth method"
+        );
     }
 
     #[tokio::test]
@@ -747,31 +1441,51 @@ printf 'cwd=%s files=%s first=%s' "$(basename "$PWD")" "$(ls -A | wc -l | tr -d 
 echo '{"event":"init","init":{"cwd":"x"}}'
 echo '{"event":"result","result":{"status":"SUCCESS","response":"hello from gemini","error":""}}'"#,
         );
-        assert_eq!(go(&p, Kind::Antigravity, Access::Chat, None, "s").await.unwrap(), "hello from gemini");
+        assert_eq!(
+            go(&p, Kind::Antigravity, Access::Chat, None, "s")
+                .await
+                .unwrap(),
+            "hello from gemini"
+        );
         let p = fake(
             r#"cat >/dev/null
 echo '{"event":"result","result":{"status":"ERROR","response":"","error":"authentication failed or timed out"}}'
 exit 1"#,
         );
         assert_eq!(
-            go(&p, Kind::Antigravity, Access::Chat, None, "s").await.unwrap_err(),
+            go(&p, Kind::Antigravity, Access::Chat, None, "s")
+                .await
+                .unwrap_err(),
             "authentication failed or timed out (ERROR)"
         );
     }
 
     #[tokio::test]
     async fn tool_folder_is_put_on_path_for_node_based_clis() {
-        let p = fake(r#"cat >/dev/null; printf '{"response":"%s"}' "$(echo "$PATH" | cut -d: -f1)""#);
+        let p =
+            fake(r#"cat >/dev/null; printf '{"response":"%s"}' "$(echo "$PATH" | cut -d: -f1)""#);
         let dir = p.parent().unwrap().display().to_string();
-        assert_eq!(go(&p, Kind::GeminiCli, Access::Chat, None, "s").await.unwrap(), dir);
+        assert_eq!(
+            go(&p, Kind::GeminiCli, Access::Chat, None, "s")
+                .await
+                .unwrap(),
+            dir
+        );
     }
 
     #[tokio::test]
     async fn arguments_are_passed_without_a_shell() {
         // A system prompt full of shell syntax must arrive as one literal argument.
-        let p = fake(r#"cat >/dev/null; for a in "$@"; do last="$a"; done; printf '{"result":"%s"}' "$last""#);
+        let p = fake(
+            r#"cat >/dev/null; for a in "$@"; do last="$a"; done; printf '{"result":"%s"}' "$last""#,
+        );
         let tricky = "x; touch /tmp/consilium-pwned $(id) `id`";
-        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, tricky).await.unwrap(), tricky);
+        assert_eq!(
+            go(&p, Kind::ClaudeCode, Access::Chat, None, tricky)
+                .await
+                .unwrap(),
+            tricky
+        );
         assert!(!Path::new("/tmp/consilium-pwned").exists());
     }
 
@@ -779,7 +1493,10 @@ exit 1"#,
     async fn stop_kills_the_whole_process_group() {
         let marker = std::env::temp_dir().join(format!("consilium-child-{}", uuid::Uuid::new_v4()));
         // The tool starts a grandchild that would create a file after 2 seconds.
-        let p = fake(&format!("(sleep 2; touch '{}') & sleep 30", marker.display()));
+        let p = fake(&format!(
+            "(sleep 2; touch '{}') & sleep 30",
+            marker.display()
+        ));
         let cancel = CancellationToken::new();
         let c2 = cancel.clone();
         tokio::spawn(async move {
@@ -787,7 +1504,17 @@ exit 1"#,
             c2.cancel();
         });
         let started = std::time::Instant::now();
-        let r = run_at(&p, Kind::Codex, Access::Chat, None, "s", "p", &cancel, RUN_TIMEOUT).await;
+        let r = run_at(
+            &p,
+            Kind::Codex,
+            Access::Chat,
+            None,
+            "s",
+            "p",
+            &cancel,
+            RUN_TIMEOUT,
+        )
+        .await;
         assert_eq!(r.unwrap_err(), "stopped");
         assert!(started.elapsed() < Duration::from_secs(3));
         tokio::time::sleep(Duration::from_millis(2500)).await;
@@ -797,14 +1524,26 @@ exit 1"#,
     #[tokio::test]
     async fn time_limit_applies() {
         let p = fake("sleep 30");
-        let r = run_at(&p, Kind::Codex, Access::Chat, None, "s", "p", &CancellationToken::new(), Duration::from_millis(500)).await;
+        let r = run_at(
+            &p,
+            Kind::Codex,
+            Access::Chat,
+            None,
+            "s",
+            "p",
+            &CancellationToken::new(),
+            Duration::from_millis(500),
+        )
+        .await;
         assert!(r.unwrap_err().contains("no answer within"));
     }
 
     #[tokio::test]
     async fn failures_report_the_tool_output() {
         let p = fake("cat >/dev/null; echo 'Error: not logged in' >&2; exit 3");
-        let e = go(&p, Kind::Codex, Access::Chat, None, "s").await.unwrap_err();
+        let e = go(&p, Kind::Codex, Access::Chat, None, "s")
+            .await
+            .unwrap_err();
         assert!(e.contains("exit 3") && e.contains("not logged in"), "{e}");
     }
 }

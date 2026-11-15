@@ -9,7 +9,8 @@ A connector provides:
 | Operation | Returns | Rules |
 | --- | --- | --- |
 | `status()` | installed?, version, signed in?, path, setup hint | Must not read, print or send credentials. Use the provider's own status command. |
-| `run(system, transcript, cancel)` | the reply text, or an error | Must honor `cancel` and the time limit by killing everything it started. No shell. No access to the person's files unless the person granted it for a project. |
+| `usage()` | applicable plan-limit windows, or unavailable | Use only provider-supported, machine-readable commands. Never estimate a plan percentage. |
+| `run(system, transcript, cancel)` | the reply text, provider-reported token counts when available, or an error | Must honor `cancel` and the time limit by killing everything it started. No shell. No access to the person's files unless the person granted it for a project. |
 | `setup(action)` | a fixed install or sign-in command | Shown to the person and run only after they confirm. |
 
 In v0.1 these live in `src-tauri/src/agents.rs` (`status`, `run`) and `src-tauri/src/setup.rs` (`step`), with one `Kind` per connector.

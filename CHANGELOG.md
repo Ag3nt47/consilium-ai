@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Show each AI's provider-reported plan allowance remaining from 0–100%, using the tightest active
+  quota window and exposing all reported windows in the meter details.
+- Refresh provider status concurrently and coalesce overlapping UI refreshes, reducing startup and
+  post-turn wait time without spending model quota.
+- Record provider-reported token counts on each AI reply and expose per-conversation and per-day
+  totals for the upcoming Usage panel.
+- Keep conversation navigation, settings and AI status visible at the native window's 760px minimum.
+- Update the direct `dirs` dependency to version 7 and refresh compatible Rust dependencies.
+
 ## 0.1.0
 
 First release.
@@ -14,7 +25,7 @@ First release.
 - Interrupt: send while an AI is answering to stop it and send your new message; switching Discuss off ends a running discussion.
 - The AIs' status is re-checked when the window regains focus, so a finished sign-in shows up without a restart.
 - Demo mode for screenshots and UI work in a plain browser, with invented data.
-- **+ Add AI**: add Gemini (Google's Gemini CLI, your Google sign-in), remove members, with install and sign-in steps in one place. AIs can propose a member with an `ADD_AI:` line; optionally let them add without asking.
+- **+ Add AI**: add Gemini (Google's Gemini CLI, your Google sign-in), remove members, with install and sign-in steps in one place. AIs can propose a member with an `ADD_AI:` line; the human approves every addition.
 - Project folders and per-AI access (Chat only, Read, Edit, Full); a **Full capacity** preset; build-mode teamwork instructions for the AIs.
 - Gemini runs through Google's Antigravity CLI (Google ended Gemini CLI access for personal accounts in June 2026); the Gemini CLI remains the fallback for company plans and API keys.
 - **self-check** in the Council panel: one tiny test message to every AI at once, with the result and time on each card.

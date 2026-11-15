@@ -10,7 +10,11 @@ pub const MAX_TRANSCRIPT_CHARS: usize = 120_000;
 pub fn label(sender: &str) -> String {
     match sender {
         "human" => "Human".into(),
-        s => AGENTS.iter().find(|a| a.id == s).map(|a| a.name.to_string()).unwrap_or_else(|| s.to_string()),
+        s => AGENTS
+            .iter()
+            .find(|a| a.id == s)
+            .map(|a| a.name.to_string())
+            .unwrap_or_else(|| s.to_string()),
     }
 }
 
@@ -86,7 +90,12 @@ re-read files before changing them. End your message with a short list of what y
 commands or use tools: answer in text, and say what you would check rather than guessing."
             .to_string(),
     });
-    if ctx.workspace.is_some() && matches!(ctx.access, Access::Edit | Access::Own | Access::Unrestricted) {
+    if ctx.workspace.is_some()
+        && matches!(
+            ctx.access,
+            Access::Edit | Access::Own | Access::Unrestricted
+        )
+    {
         s.push_str(
             "\n\nWhen the human asks the council to build or change something, work at full capacity as a team: \
 agree on a short plan, split the work between participants with @mentions so nobody duplicates effort, \
@@ -126,7 +135,8 @@ fn add_ai_hint(members: &[String]) -> String {
     }
     format!(
         "\n- To bring an AI that isn't a participant yet into the council, put a line ADD_AI: <name> in your \
-message. Consilium then installs and connects it; the human signs in to that AI's account. AIs not yet \
+message. Consilium presents the proposal to the human, who must approve the addition and sign in to \
+that AI's account before any transcript is shared with it. AIs not yet \
 in the council: {}. Never use ADD_AI for a current participant; @mention them instead.",
         outside.join(", ")
     )
@@ -138,7 +148,11 @@ pub fn transcript(events: &[Event], me: &str) -> String {
         .iter()
         .filter(|e| e.kind == "message")
         .map(|e| {
-            let who = if e.sender == me { format!("{} (you)", label(me)) } else { label(&e.sender) };
+            let who = if e.sender == me {
+                format!("{} (you)", label(me))
+            } else {
+                label(&e.sender)
+            };
             format!("[{who}] {}", e.text)
         })
         .collect();
@@ -151,16 +165,23 @@ pub fn transcript(events: &[Event], me: &str) -> String {
     }
     let mut out = String::from("CONVERSATION SO FAR\n\n");
     if dropped > 0 {
-        out.push_str(&format!("({dropped} earlier messages omitted for length)\n\n"));
+        out.push_str(&format!(
+            "({dropped} earlier messages omitted for length)\n\n"
+        ));
     }
     out.push_str(&parts.join("\n\n"));
-    out.push_str(&format!("\n\nEND OF CONVERSATION. Write your next message as {} now.", label(me)));
+    out.push_str(&format!(
+        "\n\nEND OF CONVERSATION. Write your next message as {} now.",
+        label(me)
+    ));
     out
 }
 
 /// True when a reply is just "PASS" (nothing to add in a discussion round).
 pub fn is_pass(text: &str) -> bool {
-    text.trim().trim_end_matches('.').eq_ignore_ascii_case("pass")
+    text.trim()
+        .trim_end_matches('.')
+        .eq_ignore_ascii_case("pass")
 }
 
 /// Agent ids mentioned with @, in order of appearance, without duplicates.
@@ -176,11 +197,17 @@ pub fn mentioned_agents(text: &str) -> Vec<String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == '@' && (i == 0 || !bytes[i - 1].is_alphanumeric()) {
-            let word: String = bytes[i + 1..].iter().take_while(|c| c.is_alphanumeric() || **c == '_').collect();
+            let word: String = bytes[i + 1..]
+                .iter()
+                .take_while(|c| c.is_alphanumeric() || **c == '_')
+                .collect();
             match word.as_str() {
                 "all" | "everyone" => AGENTS.iter().for_each(|a| push(a.id)),
                 w => {
-                    if let Some(a) = AGENTS.iter().find(|a| a.id == w || a.name.to_lowercase() == w) {
+                    if let Some(a) = AGENTS
+                        .iter()
+                        .find(|a| a.id == w || a.name.to_lowercase() == w)
+                    {
                         push(a.id)
                     }
                 }
@@ -209,12 +236,16 @@ mod tests {
             text: text.into(),
             requests: vec![],
             add_ai: vec![],
+            usage: None,
         }
     }
 
     #[test]
     fn transcript_tags_authors_and_marks_own_messages() {
-        let t = transcript(&[ev("human", "hi"), ev("gpt", "hello"), ev("claude", "hey")], "claude");
+        let t = transcript(
+            &[ev("human", "hi"), ev("gpt", "hello"), ev("claude", "hey")],
+            "claude",
+        );
         assert!(t.contains("[Human] hi"));
         assert!(t.contains("[ChatGPT] hello"));
         assert!(t.contains("[Claude (you)] hey"));
@@ -224,7 +255,10 @@ mod tests {
     #[test]
     fn transcript_drops_oldest_messages_first() {
         let big = "x".repeat(MAX_TRANSCRIPT_CHARS / 2);
-        let t = transcript(&[ev("human", &big), ev("gpt", &big), ev("human", "latest")], "gpt");
+        let t = transcript(
+            &[ev("human", &big), ev("gpt", &big), ev("human", "latest")],
+            "gpt",
+        );
         assert!(t.contains("latest"));
         assert!(t.contains("earlier messages omitted"));
         assert!(t.len() <= MAX_TRANSCRIPT_CHARS + 500);
@@ -252,7 +286,13 @@ mod tests {
     #[test]
     fn system_prompt_names_members_and_round_rules() {
         let m = members(&["gpt", "claude", "gemini"]);
-        let ctx = Context { members: &m, workspace: None, access: Access::Chat, memory: None, project_notes: None };
+        let ctx = Context {
+            members: &m,
+            workspace: None,
+            access: Access::Chat,
+            memory: None,
+            project_notes: None,
+        };
         let s = system("gpt", 2, 3, &ctx);
         assert!(s.contains("You are ChatGPT"));
         assert!(s.contains("Claude (@claude), Gemini (@gemini)"));
@@ -260,14 +300,57 @@ mod tests {
         assert!(s.contains("no tools"));
         assert!(!system("gpt", 1, 1, &ctx).contains("round"));
         let m = members(&["gpt", "claude"]);
-        let two = system("gpt", 1, 1, &Context { members: &m, workspace: None, access: Access::Chat, memory: None, project_notes: None });
+        let two = system(
+            "gpt",
+            1,
+            1,
+            &Context {
+                members: &m,
+                workspace: None,
+                access: Access::Chat,
+                memory: None,
+                project_notes: None,
+            },
+        );
         assert!(two.contains("The other participants are: the Human, and Claude (@claude)."));
-        assert!(two.contains("ADD_AI:") && two.contains("Gemini (@gemini)"), "lists AIs that can be added");
+        assert!(
+            two.contains("ADD_AI:") && two.contains("Gemini (@gemini)"),
+            "lists AIs that can be added"
+        );
+        assert!(
+            two.contains("human, who must approve"),
+            "participant additions require human approval"
+        );
         let all = members(&["gpt", "claude", "gemini"]);
-        let full = system("gpt", 1, 1, &Context { members: &all, workspace: None, access: Access::Chat, memory: None, project_notes: None });
-        assert!(!full.contains("ADD_AI"), "no ADD_AI hint once every AI is a participant");
+        let full = system(
+            "gpt",
+            1,
+            1,
+            &Context {
+                members: &all,
+                workspace: None,
+                access: Access::Chat,
+                memory: None,
+                project_notes: None,
+            },
+        );
+        assert!(
+            !full.contains("ADD_AI"),
+            "no ADD_AI hint once every AI is a participant"
+        );
         assert!(full.contains("@mention them: they answer next"));
-        let with = system("gpt", 1, 1, &Context { members: &all, workspace: None, access: Access::Chat, memory: Some("- Use Tauri 2"), project_notes: Some("Run cargo test") });
+        let with = system(
+            "gpt",
+            1,
+            1,
+            &Context {
+                members: &all,
+                workspace: None,
+                access: Access::Chat,
+                memory: Some("- Use Tauri 2"),
+                project_notes: Some("Run cargo test"),
+            },
+        );
         assert!(with.contains("COUNCIL MEMORY") && with.contains("Use Tauri 2"));
         assert!(with.contains("PROJECT NOTES") && with.contains("Run cargo test"));
         assert!(with.contains("REMEMBER:"));
@@ -276,11 +359,45 @@ mod tests {
     #[test]
     fn system_prompt_describes_workspace_access() {
         let m = members(&["gpt"]);
-        let edit = system("gpt", 1, 1, &Context { members: &m, workspace: Some("/p"), access: Access::Edit, memory: None, project_notes: None });
+        let edit = system(
+            "gpt",
+            1,
+            1,
+            &Context {
+                members: &m,
+                workspace: Some("/p"),
+                access: Access::Edit,
+                memory: None,
+                project_notes: None,
+            },
+        );
         assert!(edit.contains("may read and edit") && edit.contains("/p"));
         assert!(edit.contains("full capacity"));
-        assert!(!system("gpt", 1, 1, &Context { members: &m, workspace: None, access: Access::Edit, memory: None, project_notes: None }).contains("full capacity"));
-        let read = system("gpt", 1, 1, &Context { members: &m, workspace: Some("/p"), access: Access::Read, memory: None, project_notes: None });
+        assert!(!system(
+            "gpt",
+            1,
+            1,
+            &Context {
+                members: &m,
+                workspace: None,
+                access: Access::Edit,
+                memory: None,
+                project_notes: None
+            }
+        )
+        .contains("full capacity"));
+        let read = system(
+            "gpt",
+            1,
+            1,
+            &Context {
+                members: &m,
+                workspace: Some("/p"),
+                access: Access::Read,
+                memory: None,
+                project_notes: None,
+            },
+        );
         assert!(read.contains("cannot change files"));
     }
 }

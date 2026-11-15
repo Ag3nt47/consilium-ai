@@ -12,11 +12,11 @@ const THEMES = [
   { id: "retro84", name: "Retro '84", note: "Neon grid, scanlines, glow" },
 ] as const;
 
-type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; autoAddAi: boolean };
+type Prefs = { theme: string; effects: boolean; autoUpdate: boolean };
 const PREFS_KEY = "consilium.prefs";
 
 function loadPrefs(): Prefs {
-  const defaults: Prefs = { theme: "consilium", effects: true, autoUpdate: true, autoAddAi: false };
+  const defaults: Prefs = { theme: "consilium", effects: true, autoUpdate: true };
   if (!IN_APP) return { ...defaults, theme: demoTheme || defaults.theme, autoUpdate: false };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
@@ -99,6 +99,39 @@ function agentState(a: AgentInfo): "ready" | "signin" | "missing" {
   return a.available ? "ready" : a.path ? "signin" : "missing";
 }
 
+function UsageMeter({ agent }: { agent: AgentInfo }) {
+  const usage = agent.usage;
+  if (!usage) {
+    return agent.available ? (
+      <span className="usage-unavailable" title={`${agent.tool} did not report plan usage`}>
+        usage unavailable
+      </span>
+    ) : null;
+  }
+  const remaining = Math.max(0, Math.min(100, Math.round(usage.remaining_percent)));
+  const color = `hsl(${remaining * 1.2} 72% 46%)`;
+  const details = usage.windows.map((w) => `${w.label}: ${w.remaining_percent}% left`).join("\n");
+  return (
+    <div className="usage-meter" title={details}>
+      <div className="usage-label">
+        <span>usage left</span>
+        <b>{remaining}%</b>
+      </div>
+      <div
+        className="usage-track"
+        role="meter"
+        aria-label={`${agent.name} plan usage remaining`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={remaining}
+        aria-valuetext={`${remaining}% left. ${details}`}
+      >
+        <span style={{ width: `${remaining}%`, backgroundColor: color }} />
+      </div>
+    </div>
+  );
+}
+
 function AgentDot({ agent, onSetup, check }: { agent: AgentInfo; onSetup: (a: AgentInfo) => void; check?: CheckResult | "running" }) {
   const state = agentState(agent);
   const label = { ready: "Ready", signin: "Not signed in", missing: "Not installed" }[state];
@@ -122,6 +155,7 @@ function AgentDot({ agent, onSetup, check }: { agent: AgentInfo; onSetup: (a: Ag
               : `✗ ${check.detail.split("\n")[0].slice(0, 90)}`}
         </span>
       )}
+      <UsageMeter agent={agent} />
       <span className="agent-kind">
         {agent.tool}
         {agent.access !== "chat" && <span className="access-tag"> · {ACCESS_LEVELS.find((l) => l.id === agent.access)?.name}</span>}
@@ -156,11 +190,10 @@ export default function App() {
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [updateNote, setUpdateNote] = useState<string>("");
   const [toast, setToast] = useState<string | null>(null);
+  const [agentsRefreshing, setAgentsRefreshing] = useState(false);
   const currentRef = useRef<string | null>(null);
-  const agentsRef = useRef<AgentInfo[]>([]);
-  const prefsRef = useRef<Prefs>(prefs);
-  agentsRef.current = agents;
-  prefsRef.current = prefs;
+  const agentRefreshRef = useRef<Promise<void> | null>(null);
+  const usageRefreshRef = useRef(false);
   const endRef = useRef<HTMLDivElement>(null);
 
   currentRef.current = current;
@@ -172,8 +205,37 @@ export default function App() {
   }, [prefs]);
 
   const refreshAgents = useCallback(() => {
-    api.agents().then(setAgents).catch((e) => setError(String(e)));
-    api.getCouncil().then(setCouncil).catch(() => undefined);
+    // Focus, turn completion and the refresh button can all fire together. Share one request so
+    // the provider CLIs are never probed more than once at a time, and update both snapshots as a
+    // pair so access labels and council membership cannot briefly disagree.
+    if (agentRefreshRef.current) return agentRefreshRef.current;
+    setAgentsRefreshing(true);
+    const request = Promise.all([api.agents(), api.getCouncil()])
+      .then(([nextAgents, nextCouncil]) => {
+        // Keep the last known usage on screen until the fresh reading arrives.
+        setAgents((prev) =>
+          nextAgents.map((a) => ({ ...a, usage: prev.find((p) => p.id === a.id)?.usage ?? null })),
+        );
+        setCouncil(nextCouncil);
+        // Usage probes take several seconds; they update the meters when done without holding up
+        // sign-in state or the refresh spinner.
+        if (usageRefreshRef.current) return;
+        usageRefreshRef.current = true;
+        api
+          .usage()
+          .then((byId) => setAgents((prev) => prev.map((a) => ({ ...a, usage: byId[a.id] ?? null }))))
+          .catch(() => undefined)
+          .finally(() => {
+            usageRefreshRef.current = false;
+          });
+      })
+      .catch((e) => setError(`Couldn't refresh the council: ${e}`))
+      .finally(() => {
+        agentRefreshRef.current = null;
+        setAgentsRefreshing(false);
+      });
+    agentRefreshRef.current = request;
+    return request;
   }, []);
 
   const refreshList = useCallback(async () => {
@@ -195,16 +257,10 @@ export default function App() {
         setEvents((prev) => (prev.some((p) => p.id === e.id) ? prev : [...prev, e]));
       }
       refreshList();
-      // An AI asked to bring in another AI. With "Let the AIs add other AIs" on, do it now.
-      if (prefsRef.current.autoAddAi && e.add_ai?.length) {
-        for (const id of e.add_ai) {
-          const a = agentsRef.current.find((x) => x.id === id);
-          if (a && !a.member) bringIn(a, true);
-        }
-      }
     });
     const un2 = onTurn((t) => {
       if (t.conversation === currentRef.current) setTurn(t.state === "running" ? t : null);
+      if (t.state === "idle") refreshAgents();
     });
     // Coming back to the window (for example after signing in from the Setup terminal) re-checks
     // the AIs, at most once every 10 seconds.
@@ -345,30 +401,21 @@ export default function App() {
     }
   }
 
-  // Bring an AI into the council: install or sign in first if needed, then add it.
-  // `auto` skips the confirmation (the person turned on "Let the AIs add other AIs").
-  async function bringIn(a: AgentInfo, auto = false) {
+  // Bring an AI into the council: install or sign in first if needed, then ask the person to add it.
+  async function bringIn(a: AgentInfo) {
     const st = agentState(a);
     if (st !== "ready") {
       try {
         const title = await api.setup(a.id, st === "missing" ? "install" : "signin");
         setShowAddAi(true);
-        setToast(`${title}: finish in the terminal window; ${a.name} is added when it's ready`);
+        setToast(`${title}: finish in the terminal window, then approve adding ${a.name}`);
         setTimeout(() => setToast(null), 7000);
       } catch (e) {
         setError(String(e));
       }
       return;
     }
-    if (auto) {
-      await api.setMember(a.id, true);
-      setTargets((t) => (t.includes(a.id) ? t : [...t, a.id]));
-      refreshAgents();
-      setToast(`${a.name} joined the council (added at an AI's request)`);
-      setTimeout(() => setToast(null), 4000);
-    } else {
-      await addMember(a);
-    }
+    await addMember(a);
   }
 
   // Full capacity: a project folder for every conversation, every AI Unrestricted, everyone asked,
@@ -543,8 +590,13 @@ export default function App() {
           <div className="section-label">
             Council
             <span>
-              <button className="link" onClick={refreshAgents} title="Check the AIs' sign-in again">
-                refresh
+              <button
+                className="link"
+                onClick={refreshAgents}
+                disabled={agentsRefreshing}
+                title="Refresh sign-in and plan usage for every AI"
+              >
+                {agentsRefreshing ? "refreshing…" : "refresh"}
               </button>
               <button
                 className="link"
@@ -828,10 +880,6 @@ export default function App() {
                 </label>
               ))}
             </div>
-            <label className="toggle">
-              <input type="checkbox" checked={prefs.autoAddAi} onChange={(e) => setPrefs({ ...prefs, autoAddAi: e.target.checked })} />
-              Let the AIs add other AIs without asking me (you still sign in to each new AI's account yourself)
-            </label>
             <div className="row">
               <button className="btn ghost" onClick={fullCapacity}>
                 Full capacity
@@ -950,8 +998,8 @@ export default function App() {
               </div>
             ))}
             <div className="row end">
-              <button className="btn ghost" onClick={refreshAgents}>
-                Check again
+              <button className="btn ghost" onClick={refreshAgents} disabled={agentsRefreshing}>
+                {agentsRefreshing ? "Checking…" : "Check again"}
               </button>
               <button className="btn primary" onClick={() => setShowAddAi(false)}>
                 Done

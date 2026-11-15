@@ -9,13 +9,24 @@
 - Set up AIs button; daily release check (notify only)
 - Privacy gate, CodeQL, Dependabot, secret scanning; CI on macOS, Windows and Linux
 
-## v0.2: Shared Projects, then usage panel
+## v0.2: Shared Projects and usage
 
-Shared Projects comes first (see v0.3 notes below, moved up). Then a **Usage panel** per AI:
+Shared Projects comes first (see v0.3 notes below, moved up). Each council card now shows the
+provider-reported plan allowance remaining, from 0–100%:
 
-- Tokens used per turn, per conversation and per day, from each CLI's official machine-readable output (Codex `--json` `turn.completed.usage`; Claude Code JSON result `usage`).
+- The lowest applicable limit is the headline because it is the one that will stop the AI first;
+  hover the meter to see every reported window.
+- Codex uses `account/rateLimits/read`, Claude uses its `get_usage` control request, and Antigravity
+  uses headless `/usage`. These are read-only CLI operations and do not spend model quota.
+- If a connector or account type does not expose plan limits, the UI says *usage unavailable*;
+  Consilium never estimates a plan percentage.
+
+A larger **Usage panel** per AI remains planned:
+
+- The back end now records tokens per turn from each CLI's official machine-readable output (Codex
+  `--json` `turn.completed.usage`, Claude Code JSON result `usage`, and Antigravity stream-json
+  result `usage`) and exposes conversation/day totals. The Usage panel UI remains to be built.
 - A budget you set ("warn me at N tokens a day"), with a red `REQUEST:` before a Discuss run would exceed it.
-- Plan quota (% of your ChatGPT or Claude plan left) is shown as *Unavailable*: neither CLI exposes it in a supported output, and Consilium won't estimate it.
 
 ## v0.2: Voice Studio
 
@@ -43,4 +54,4 @@ A toggleable voice mode where you and both AIs talk:
 
 - Signed and notarized installers (needs Apple Developer and Windows code-signing certificates).
 - Auto-update with signature verification.
-- iOS and Android through Tauri's mobile targets; the UI is already responsive down to phone width.
+- iOS and Android through Tauri's mobile targets, including phone-width navigation and touch-first controls.

@@ -65,13 +65,51 @@ const TURN: &str = "consilium://turn";
 #[tauri::command]
 async fn agents_status(state: State<'_, AppState>) -> Result<Vec<agents::AgentInfo>, String> {
     let config = state.config.clone();
-    let mut out = Vec::new();
-    for a in agents::AGENTS.iter() {
-        out.push(agents::status(a, config.is_member(a.id), config.access(a.id)).await);
+    let mut tasks = tokio::task::JoinSet::new();
+    for agent in agents::AGENTS.iter() {
+        let member = config.is_member(agent.id);
+        let access = config.access(agent.id);
+        tasks.spawn(async move { agents::status(agent, member, access).await });
     }
-    // Members first, in council order.
+    let mut out = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        out.push(result.map_err(|e| format!("AI status check failed: {e}"))?);
+    }
+    // Members first, in council order; then everyone else in the fixed catalogue order, since the
+    // parallel checks above finish in whatever order they happen to.
     let order = config.get().members;
-    out.sort_by_key(|a| order.iter().position(|m| *m == a.id).unwrap_or(usize::MAX));
+    let catalogue = |id: &str| {
+        agents::AGENTS
+            .iter()
+            .position(|a| a.id == id)
+            .unwrap_or(usize::MAX)
+    };
+    out.sort_by_key(|a| {
+        (
+            order.iter().position(|m| *m == a.id).unwrap_or(usize::MAX),
+            catalogue(&a.id),
+        )
+    });
+    Ok(out)
+}
+
+/// Remaining plan usage for each council member that reports it, keyed by AI id. Separate from
+/// `agents_status` so the slow usage probes never delay sign-in state.
+#[tauri::command]
+async fn agents_usage(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, agents::UsageStatus>, String> {
+    let config = state.config.clone();
+    let mut tasks = tokio::task::JoinSet::new();
+    for agent in agents::AGENTS.iter().filter(|a| config.is_member(a.id)) {
+        tasks.spawn(async move { (agent.id.to_string(), agents::usage_of(agent).await) });
+    }
+    let mut out = HashMap::new();
+    while let Some(result) = tasks.join_next().await {
+        if let (id, Some(usage)) = result.map_err(|e| format!("Usage check failed: {e}"))? {
+            out.insert(id, usage);
+        }
+    }
     Ok(out)
 }
 
@@ -98,8 +136,14 @@ fn get_council(state: State<AppState>) -> config::Council {
 }
 
 #[tauri::command]
-fn set_default_workspace(state: State<AppState>, folder: Option<String>) -> Result<Option<String>, String> {
-    state.config.set_default_workspace(folder.as_deref()).map(|c| c.default_workspace)
+fn set_default_workspace(
+    state: State<AppState>,
+    folder: Option<String>,
+) -> Result<Option<String>, String> {
+    state
+        .config
+        .set_default_workspace(folder.as_deref())
+        .map(|c| c.default_workspace)
 }
 
 #[tauri::command]
@@ -118,7 +162,11 @@ fn set_memory(state: State<AppState>, text: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_workspace(state: State<AppState>, id: String, folder: Option<String>) -> Result<ConversationMeta, String> {
+fn set_workspace(
+    state: State<AppState>,
+    id: String,
+    folder: Option<String>,
+) -> Result<ConversationMeta, String> {
     state.store.set_workspace(&id, folder.as_deref())
 }
 
@@ -137,8 +185,23 @@ fn load_conversation(state: State<AppState>, id: String) -> Result<Vec<Event>, S
     state.store.load(&id)
 }
 
+/// Provider-reported token totals for the open conversation and across all conversations since
+/// local midnight. The front end supplies its local-day boundary because Rust has no UI timezone.
 #[tauri::command]
-fn rename_conversation(state: State<AppState>, id: String, title: String) -> Result<ConversationMeta, String> {
+fn token_usage_report(
+    state: State<AppState>,
+    id: String,
+    day_start: u64,
+) -> Result<store::TokenUsageReport, String> {
+    state.store.token_usage_report(&id, day_start)
+}
+
+#[tauri::command]
+fn rename_conversation(
+    state: State<AppState>,
+    id: String,
+    title: String,
+) -> Result<ConversationMeta, String> {
     state.store.rename(&id, &title)
 }
 
@@ -154,8 +217,17 @@ fn delete_conversation(state: State<AppState>, id: String) -> Result<(), String>
 fn export_markdown(state: State<AppState>, id: String) -> Result<String, String> {
     let meta = state.store.meta(&id)?;
     let mut md = format!("# {}\n\n", meta.title);
-    for e in state.store.load(&id)?.iter().filter(|e| e.kind == "message") {
-        md.push_str(&format!("**{}:**\n\n{}\n\n---\n\n", prompt::label(&e.sender), e.text));
+    for e in state
+        .store
+        .load(&id)?
+        .iter()
+        .filter(|e| e.kind == "message")
+    {
+        md.push_str(&format!(
+            "**{}:**\n\n{}\n\n---\n\n",
+            prompt::label(&e.sender),
+            e.text
+        ));
     }
     Ok(md)
 }
@@ -197,7 +269,10 @@ async fn send_message(
         }
     }
     let config = state.config.clone();
-    let mut targets: Vec<String> = targets.into_iter().filter(|t| config.is_member(t)).collect();
+    let mut targets: Vec<String> = targets
+        .into_iter()
+        .filter(|t| config.is_member(t))
+        .collect();
     for m in prompt::mentioned_agents(&text) {
         if config.is_member(&m) && !targets.contains(&m) {
             targets.push(m);
@@ -208,9 +283,13 @@ async fn send_message(
     let (event, token) = {
         let mut running = state.running.lock().unwrap();
         if running.contains_key(&id) {
-            return Err("the agents are still answering; press Stop, or send again to interrupt".into());
+            return Err(
+                "the agents are still answering; press Stop, or send again to interrupt".into(),
+            );
         }
-        let event = state.store.append(&id, "human", "message", targets.clone(), &text)?;
+        let event = state
+            .store
+            .append(&id, "human", "message", targets.clone(), &text)?;
         let _ = app.emit(EVENT, &event);
         if targets.is_empty() {
             return Ok(event);
@@ -243,7 +322,13 @@ fn start_turns(app: &AppHandle, state: &AppState, pending: Pending, token: Cance
         running.lock().unwrap().remove(&conv);
         let _ = app.emit(
             TURN,
-            TurnState { conversation: conv, state: "idle".into(), agent: None, round: 0, rounds: pending.rounds },
+            TurnState {
+                conversation: conv,
+                state: "idle".into(),
+                agent: None,
+                round: 0,
+                rounds: pending.rounds,
+            },
         );
     });
 }
@@ -265,9 +350,19 @@ fn resume_interrupted(app: &AppHandle, state: &AppState) {
             state.journal.finish(&p.conversation);
             continue;
         }
-        let _ = state.store.append(&p.conversation, "human", "system", vec![], "Consilium restarted; the council is carrying on where it left off.");
+        let _ = state.store.append(
+            &p.conversation,
+            "human",
+            "system",
+            vec![],
+            "Consilium restarted; the council is carrying on where it left off.",
+        );
         let token = CancellationToken::new();
-        state.running.lock().unwrap().insert(p.conversation.clone(), token.clone());
+        state
+            .running
+            .lock()
+            .unwrap()
+            .insert(p.conversation.clone(), token.clone());
         start_turns(app, state, p, token);
     }
 }
@@ -281,13 +376,21 @@ async fn run_turns(
     pending: &Pending,
     cancel: &CancellationToken,
 ) {
-    let (conv, targets, rounds) = (pending.conversation.as_str(), &pending.targets, pending.rounds);
+    let (conv, targets, rounds) = (
+        pending.conversation.as_str(),
+        &pending.targets,
+        pending.rounds,
+    );
     let members = config.get().members;
     for round in pending.round..=rounds {
         let mut passes = 0;
         let mut answered = 0;
         let mut asked_human = false;
-        let skip = if round == pending.round { pending.index } else { 0 };
+        let skip = if round == pending.round {
+            pending.index
+        } else {
+            0
+        };
         // Who answers this round: the addressed AIs, plus any a reply @mentions (see MAX_PULLED_IN).
         let mut queue: Vec<String> = targets.clone();
         let mut pulled_in = 0;
@@ -323,8 +426,14 @@ async fn run_turns(
                 .and_then(|m| m.workspace)
                 .or_else(|| config.get().default_workspace)
                 .filter(|w| std::path::Path::new(w).is_dir());
-            let access = if workspace.is_some() { config.access(agent.id) } else { Access::Chat };
-            let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w)));
+            let access = if workspace.is_some() {
+                config.access(agent.id)
+            } else {
+                Access::Chat
+            };
+            let notes = workspace
+                .as_deref()
+                .and_then(|w| memory::project_notes(std::path::Path::new(w)));
             let shared = memory.for_prompt();
             let ctx = prompt::Context {
                 members: &members,
@@ -336,13 +445,29 @@ async fn run_turns(
             let system = prompt::system(agent.id, round, rounds, &ctx);
             let transcript = prompt::transcript(&events, agent.id);
             let ws_path = workspace.as_ref().map(PathBuf::from);
-            let event = match agents::run(agent, access, ws_path.as_deref(), &system, &transcript, cancel).await {
-                Ok(reply) if rounds > 1 && prompt::is_pass(&reply) => {
+            let event = match agents::run_with_usage(
+                agent,
+                access,
+                ws_path.as_deref(),
+                &system,
+                &transcript,
+                cancel,
+            )
+            .await
+            {
+                Ok(reply) if rounds > 1 && prompt::is_pass(&reply.text) => {
                     passes += 1;
-                    store.append(conv, agent.id, "system", vec![], &format!("{} had nothing to add.", agent.name))
+                    store.append_with_usage(
+                        conv,
+                        agent.id,
+                        "system",
+                        vec![],
+                        &format!("{} had nothing to add.", agent.name),
+                        reply.usage,
+                    )
                 }
                 Ok(reply) => {
-                    let to = prompt::mentioned_agents(&reply);
+                    let to = prompt::mentioned_agents(&reply.text);
                     for m in &to {
                         if pulled_in < MAX_PULLED_IN
                             && m != agent.id
@@ -353,11 +478,18 @@ async fn run_turns(
                             pulled_in += 1;
                         }
                     }
-                    let ev = store.append(conv, agent.id, "message", to, &reply);
+                    let ev = store.append_with_usage(
+                        conv,
+                        agent.id,
+                        "message",
+                        to,
+                        &reply.text,
+                        reply.usage,
+                    );
                     if ev.as_ref().is_ok_and(|e| !e.requests.is_empty()) {
                         asked_human = true;
                     }
-                    let facts = memory::remember_lines(&reply);
+                    let facts = memory::remember_lines(&reply.text);
                     if !facts.is_empty() {
                         let date = today();
                         if let Ok(added) = memory.remember(agent.name, &date, &facts) {
@@ -365,8 +497,13 @@ async fn run_turns(
                                 if let Ok(e) = ev.as_ref() {
                                     let _ = app.emit(EVENT, e);
                                 }
-                                let note = format!("{} saved to council memory: {}", agent.name, added.join("; "));
-                                if let Ok(n) = store.append(conv, agent.id, "system", vec![], &note) {
+                                let note = format!(
+                                    "{} saved to council memory: {}",
+                                    agent.name,
+                                    added.join("; ")
+                                );
+                                if let Ok(n) = store.append(conv, agent.id, "system", vec![], &note)
+                                {
                                     let _ = app.emit(EVENT, &n);
                                 }
                             }
@@ -375,13 +512,25 @@ async fn run_turns(
                     ev
                 }
                 Err(why) if why == "stopped" => {
-                    let ev = store.append(conv, agent.id, "system", vec![], &format!("Stopped {}.", agent.name));
+                    let ev = store.append(
+                        conv,
+                        agent.id,
+                        "system",
+                        vec![],
+                        &format!("Stopped {}.", agent.name),
+                    );
                     if let Ok(e) = ev {
                         let _ = app.emit(EVENT, &e);
                     }
                     return;
                 }
-                Err(why) => store.append(conv, agent.id, "error", vec![], &format!("{} couldn't answer: {why}", agent.name)),
+                Err(why) => store.append(
+                    conv,
+                    agent.id,
+                    "error",
+                    vec![],
+                    &format!("{} couldn't answer: {why}", agent.name),
+                ),
             };
             if let Ok(e) = event {
                 let _ = app.emit(EVENT, &e);
@@ -441,7 +590,9 @@ async fn self_check(state: State<'_, AppState>) -> Result<Vec<CheckResult>, Stri
     let members = state.config.get().members;
     let mut tasks = Vec::new();
     for id in members {
-        let Some(agent) = agents::by_id(&id) else { continue };
+        let Some(agent) = agents::by_id(&id) else {
+            continue;
+        };
         tasks.push(tauri::async_runtime::spawn(async move {
             let system = "This is an automatic health check from Consilium, not a conversation. Don't use tools \
 or run commands. Reply with exactly the word OK and nothing else.";
@@ -532,6 +683,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             agents_status,
+            agents_usage,
             set_member,
             set_access,
             set_workspace,
@@ -544,6 +696,7 @@ pub fn run() {
             list_conversations,
             new_conversation,
             load_conversation,
+            token_usage_report,
             rename_conversation,
             delete_conversation,
             export_markdown,
