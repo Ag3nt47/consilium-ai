@@ -559,6 +559,7 @@ export default function App() {
   const [pressure, setPressure] = useState<SystemPressure | null>(null);
   const [staged, setStaged] = useState<StagedUpdate | null>(null);
   const [updating, setUpdating] = useState(false);
+  const [requestingStatus, setRequestingStatus] = useState(false);
 
   // Quick hover explanations for every control that has a title.
   useEffect(() => installHoverTips(), []);
@@ -822,6 +823,26 @@ export default function App() {
       setDraft(text);
       setPending(files);
       setError(String(e));
+    }
+  }
+
+  // Ask every council member, even ones not selected in the composer. During an active turn this
+  // joins the work without interrupting it; while idle it starts one short parallel status turn.
+  async function requestStatus() {
+    if (!current || !members.length || requestingStatus) return;
+    setRequestingStatus(true);
+    setError(null);
+    try {
+      await api.send(
+        current,
+        "Status request: Each AI, report only your own work now. Include what is done, what is in progress, any blocker, uncommitted changes, and your next step. Be concise and do not duplicate another AI's report.",
+        members.map((member) => member.id),
+        1,
+      );
+    } catch (e) {
+      setError(`Couldn't request status: ${e}`);
+    } finally {
+      setRequestingStatus(false);
     }
   }
 
@@ -1201,6 +1222,7 @@ export default function App() {
 
   const paletteCommands = useMemo(() => [
     { id: "new-conv", name: "New Conversation", hint: "Start a fresh topic", run: () => { newConversation(); } },
+    { id: "status", name: "Request Council Status", hint: "Ask every AI for its current work and next step", run: () => { requestStatus(); } },
     { id: "usage", name: "Show Token Usage", hint: "Conversation & daily totals", run: () => openUsage() },
     { id: "self-check", name: "Run Self-Check", hint: "Probe all active council models", run: () => runSelfCheck() },
     { id: "manage-ais", name: "Add / Remove AIs", hint: "Council membership", run: () => setShowAddAi(true) },
@@ -1220,7 +1242,7 @@ export default function App() {
     { id: "theme-slate", name: "Theme: Slate", hint: "Clean slate dark", run: () => setPrefs((p) => ({ ...p, theme: "slate" })) },
     { id: "theme-crt", name: "Theme: CRT", hint: "Green phosphor terminal", run: () => setPrefs((p) => ({ ...p, theme: "crt" })) },
     { id: "theme-retro84", name: "Theme: Retro '84", hint: "Neon grid, scanlines, glow", run: () => setPrefs((p) => ({ ...p, theme: "retro84" })) },
-  ], [discuss, openUsage]);
+  ], [current, discuss, members, openUsage, requestingStatus]);
 
   const filteredCommands = useMemo(() => {
     const q = paletteQuery.trim().toLowerCase();
@@ -1384,6 +1406,14 @@ export default function App() {
             </div>
           </div>
           <div className="topbar-actions">
+            <button
+              title="Ask every AI for a concise report of completed work, current work, blockers, uncommitted changes and next step"
+              className="btn ghost status-request"
+              onClick={requestStatus}
+              disabled={!current || !members.length || requestingStatus}
+            >
+              {requestingStatus ? "Requesting…" : "Status Request"}
+            </button>
             <button title="Copy the whole conversation to the clipboard as Markdown" className="btn ghost" onClick={exportCurrent} disabled={!events.length}>
               Copy as Markdown
             </button>

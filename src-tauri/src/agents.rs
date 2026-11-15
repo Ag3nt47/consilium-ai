@@ -1148,6 +1148,23 @@ async fn execute(
         _ = tokio::time::sleep(PIPE_GRACE) => {}
         _ = cancel.cancelled() => return Err("stopped".to_string()),
     }
+    if let Some(sink) = &activity {
+        while let Ok(chunk) = chunk_rx.try_recv() {
+            activity_output.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(end) = activity_output.find('\n') {
+                let line = activity_output[..end].trim_end_matches('\r').to_string();
+                activity_output.drain(..=end);
+                if let Some(signal) = activity_from_line(kind, &line) {
+                    sink(signal);
+                }
+            }
+        }
+        if !activity_output.trim().is_empty() {
+            if let Some(signal) = activity_from_line(kind, activity_output.trim()) {
+                sink(signal);
+            }
+        }
+    }
     let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap()).to_string();
     let stderr = String::from_utf8_lossy(&err_buf.lock().unwrap()).to_string();
 
