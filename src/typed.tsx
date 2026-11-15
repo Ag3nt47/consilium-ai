@@ -10,7 +10,7 @@ function reduceMotion(): boolean {
 /**
  * Text that types itself out when it changes. Only the part after what's already on screen is typed,
  * so "Claude: Reading · a.ts" → "Claude: Reading · b.ts" retypes just the file name. Each change finishes
- * within about a third of a second, so fast-changing activity never falls behind. With `enabled` off
+ * within about two thirds of a second, so fast-changing activity never falls behind. With `enabled` off
  * or reduced motion, the text simply changes.
  */
 export function TypedText({ text, enabled }: { text: string; enabled: boolean }) {
@@ -47,7 +47,7 @@ export function TypedText({ text, enabled }: { text: string; enabled: boolean })
       shownRef.current = text.slice(0, at);
       setShown(shownRef.current);
       if (at >= text.length) window.clearInterval(timer);
-    }, 16);
+    }, 32); // 32 ms a frame: half the speed of the first version, as asked.
     return () => {
       window.clearInterval(timer);
     };

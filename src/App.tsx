@@ -177,11 +177,11 @@ function extractTaskClaims(text: string, defaultAgent: string, agents: AgentInfo
 
   // Check multi-agent breakdown lines: e.g. "- **@claude:** <task>" or "@claude will handle <task>"
   for (const line of text.split("\n")) {
-    const multiMatch = /^\s*(?:-\s*)?(?:\*\*)?@([a-z0-9_-]+)(?:\*\*)?:?\s*(.+)$/i.exec(line);
+    const multiMatch = /^\s*(?:[-*]\s+)?(?:\*\*)?@([a-z0-9_-]+)(?:\*\*)?:?(?:\*\*)?\s*(.+)$/i.exec(line);
     if (multiMatch) {
       const targetId = multiMatch[1].toLowerCase();
       const targetAgent = agents.find((a) => a.id.toLowerCase() === targetId || a.name.toLowerCase() === targetId);
-      const desc = multiMatch[2].trim();
+      const desc = multiMatch[2].replace(/\*\*/g, "").trim();
       const assignsWork = /^(?:please\s+)?(?:take|taking|handle|own|implement|build|fix|review|work|proceed|connect|add|create|prepare|continue|finish|stage|commit|inspect|audit|monitor|capture|update|test)\b/i.test(desc);
       if (targetAgent && assignsWork) {
         const short = desc.slice(0, 160);
@@ -236,47 +236,6 @@ function ClaimedTask({ event, agents }: { event: ChatEvent; agents: AgentInfo[] 
           </em>
         </div>
       ))}
-    </div>
-  );
-}
-
-function taskObjective(text: string): string {
-  const first = text
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line && !/^\[(?:Persona|Role):/i.test(line));
-  if (!first) return "this request";
-  return first.length > 90 ? `${first.slice(0, 87)}…` : first;
-}
-
-function ActiveTasks({
-  ids,
-  objective,
-  agents,
-  activities,
-  typed = false,
-}: {
-  ids: string[];
-  objective: string;
-  agents: AgentInfo[];
-  activities: Record<string, AgentActivity>;
-  typed?: boolean;
-}) {
-  if (!ids.length) return null;
-  return (
-    <div className="active-tasks" aria-label="AIs working on this message">
-      {ids.map((id) => {
-        const activity = activities[id];
-        const detail = activity ? `${activity.label}${activity.detail ? ` · ${activity.detail}` : ""}` : "Initializing";
-        return (
-          <div key={id} className="task-pill" style={{ borderColor: taskColor(id) }} title={`${senderName(id, agents)}: ${detail}\nTask: ${objective}`}>
-            <span className="task-dot" style={{ backgroundColor: taskColor(id) }} />
-            <b>{senderName(id, agents)}</b>
-            <span><TypedText text={detail} enabled={typed} /></span>
-            <small>{objective}</small>
-          </div>
-        );
-      })}
     </div>
   );
 }
@@ -1065,10 +1024,6 @@ export default function App() {
       : `${thinkingNames.slice(0, -1).join(", ")} and ${thinkingNames[thinkingNames.length - 1]} are thinking`
     : null;
   const seenByMessage = useMemo(() => receiptsByMessage(events), [events]);
-  const latestHumanMessage = useMemo(
-    () => events.slice().reverse().find((event) => event.kind === "message" && event.sender === "human") ?? null,
-    [events],
-  );
   const readyIds = useMemo(() => new Set(agents.filter((a) => a.available).map((a) => a.id)), [agents]);
   const members = useMemo(() => agents.filter((a) => a.member), [agents]);
 
@@ -1819,9 +1774,6 @@ export default function App() {
                   </div>
                 )}
                 <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={e.sender === "human" ? undefined : decide} respond={e.sender === "human" ? undefined : respondToRequest} />
-                {e.sender === "human" && e.id === latestHumanMessage?.id && busy && (
-                  <ActiveTasks ids={thinkingIds} objective={taskObjective(e.text)} agents={agents} activities={activities} typed={typedActivity} />
-                )}
                 <ClaimedTask event={e} agents={agents} />
                 <SeenLine receipts={seenByMessage.get(e.id) ?? []} agents={agents} />
                 {e.add_ai?.filter((id) => agents.some((a) => a.id === id && !a.member)).map((id) => {
