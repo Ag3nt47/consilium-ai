@@ -9,12 +9,19 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Older turns are dropped first once the transcript passes this many characters.
+/// Once a transcript passes this budget, older turns become a compact digest and the newest
+/// portion remains verbatim. Keeping both inside one budget prevents long sessions from crowding
+/// out the current task while preserving decisions and requests from earlier turns.
 pub const MAX_TRANSCRIPT_CHARS: usize = 120_000;
+const MAX_TRANSCRIPT_SUMMARY_CHARS: usize = 16_000;
+const RECENT_TRANSCRIPT_CHARS: usize = MAX_TRANSCRIPT_CHARS - MAX_TRANSCRIPT_SUMMARY_CHARS;
+const MAX_SUMMARY_ENTRY_CHARS: usize = 420;
 /// Enough patch context to identify concurrent edits without spending the whole prompt on a diff.
 const MAX_WORKSPACE_DIFF_BYTES: usize = 12_000;
 const MAX_WORKSPACE_STATUS_BYTES: usize = 8_000;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+type TranscriptPart<'a> = (&'a Event, String);
 
 struct GitOutput {
     shown: String,
@@ -281,9 +288,10 @@ in the council: {}. Never use ADD_AI for a current participant; @mention them in
     )
 }
 
-/// Transcript entries, newest last, trimmed from the oldest end to fit.
-fn transcript_parts<'a>(events: &'a [Event], me: &str) -> (usize, Vec<(&'a Event, String)>) {
-    let mut parts: Vec<(&Event, String)> = events
+/// Transcript entries, newest last. Once the safety threshold is crossed, returns the older
+/// entries separately for condensation and keeps a generous recent window verbatim.
+fn transcript_parts<'a>(events: &'a [Event], me: &str) -> (Vec<TranscriptPart<'a>>, Vec<TranscriptPart<'a>>) {
+    let mut parts: Vec<TranscriptPart<'a>> = events
         .iter()
         .filter(|e| e.kind == "message" || (e.kind == "system" && e.sender == crate::council::CONSILIUM))
         .map(|e| {
@@ -292,13 +300,83 @@ fn transcript_parts<'a>(events: &'a [Event], me: &str) -> (usize, Vec<(&'a Event
         })
         .collect();
     let mut total: usize = parts.iter().map(|(_, p)| p.len() + 2).sum();
-    let mut dropped = 0;
-    while parts.len() > 1 && total > MAX_TRANSCRIPT_CHARS {
-        total -= parts[0].1.len() + 2;
-        parts.remove(0);
-        dropped += 1;
+    if total <= MAX_TRANSCRIPT_CHARS {
+        return (Vec::new(), parts);
     }
-    (dropped, parts)
+    let mut older = Vec::new();
+    while parts.len() > 1 && total > RECENT_TRANSCRIPT_CHARS {
+        total -= parts[0].1.len() + 2;
+        older.push(parts.remove(0));
+    }
+    (older, parts)
+}
+
+fn clipped(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let shown: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{}…", shown.trim_end())
+    } else {
+        shown
+    }
+}
+
+/// A local, deterministic digest of older turns. It intentionally avoids another provider call:
+/// context compression must still work offline, under rate limits, and on weaker hardware. The
+/// scoring keeps human intent and explicit decisions ahead of routine progress narration.
+fn transcript_digest(older: &[(&Event, String)]) -> String {
+    if older.is_empty() {
+        return String::new();
+    }
+    let mut candidates: Vec<(usize, u8, String)> = older
+        .iter()
+        .enumerate()
+        .map(|(index, (event, _))| {
+            let compact = event.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let lower = compact.to_ascii_lowercase();
+            let decisive = lower.contains("request:")
+                || lower.starts_with("approved:")
+                || lower.starts_with("denied:")
+                || lower.contains("remember:");
+            let outcome = [" decided ", " complete", " committed", " pushed", " blocked", " failed", " fixed", " next step"]
+                .iter()
+                .any(|needle| lower.contains(needle));
+            let score = u8::from(decisive) * 100 + u8::from(event.sender == "human") * 30 + u8::from(outcome) * 10;
+            let attachments = if event.attachments.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " [attached: {}]",
+                    event.attachments.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")
+                )
+            };
+            (
+                index,
+                score,
+                format!("- [{}] {}{}", label(&event.sender), clipped(&compact, MAX_SUMMARY_ENTRY_CHARS), attachments),
+            )
+        })
+        .collect();
+    // Prefer decisions, requests, human intent and concrete outcomes; within a tier, prefer the
+    // most recent entry. Restore chronological order before rendering.
+    candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    let header_reserve = 180;
+    let mut used = header_reserve;
+    let mut selected = Vec::new();
+    for (index, _, line) in candidates {
+        let cost = line.len() + 1;
+        if used + cost <= MAX_TRANSCRIPT_SUMMARY_CHARS {
+            used += cost;
+            selected.push((index, line));
+        }
+    }
+    selected.sort_by_key(|(index, _)| *index);
+    format!(
+        "EARLIER CONVERSATION DIGEST ({} messages condensed locally; {} key entries retained)\n{}",
+        older.len(),
+        selected.len(),
+        selected.into_iter().map(|(_, line)| line).collect::<Vec<_>>().join("\n")
+    )
 }
 
 /// Message ids actually included in this AI's bounded transcript.
@@ -311,12 +389,15 @@ pub fn visible_message_ids(events: &[Event], me: &str) -> Vec<String> {
         .collect()
 }
 
-/// The transcript as text, newest last, trimmed from the oldest end to fit.
+/// The transcript as text, newest last, with older turns condensed once the safety threshold is
+/// crossed. The latest window remains verbatim so current code, requests and corrections retain
+/// their exact wording.
 pub fn transcript(events: &[Event], me: &str) -> String {
-    let (dropped, parts) = transcript_parts(events, me);
+    let (older, parts) = transcript_parts(events, me);
     let mut out = String::from("CONVERSATION SO FAR\n\n");
-    if dropped > 0 {
-        out.push_str(&format!("({dropped} earlier messages omitted for length)\n\n"));
+    if !older.is_empty() {
+        out.push_str(&transcript_digest(&older));
+        out.push_str("\n\nRECENT MESSAGES (verbatim)\n\n");
     }
     out.push_str(&parts.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n\n"));
     out.push_str(&format!("\n\nEND OF CONVERSATION. Write your next message as {} now.", label(me)));
@@ -390,10 +471,11 @@ mod tests {
     }
 
     #[test]
-    fn transcript_drops_oldest_messages_first() {
+    fn transcript_condenses_oldest_messages_and_keeps_recent_messages_verbatim() {
         let big = "x".repeat(MAX_TRANSCRIPT_CHARS / 2);
         let mut old = ev("human", &big);
         old.id = "old".into();
+        old.text = format!("Approved: keep the safe design {big}");
         let mut middle = ev("gpt", &big);
         middle.id = "middle".into();
         let mut latest = ev("human", "latest");
@@ -401,9 +483,23 @@ mod tests {
         let events = [old, middle, latest];
         let t = transcript(&events, "gpt");
         assert!(t.contains("latest"));
-        assert!(t.contains("earlier messages omitted"));
+        assert!(t.contains("EARLIER CONVERSATION DIGEST"));
+        assert!(t.contains("Approved: keep the safe design"));
+        assert!(t.contains("RECENT MESSAGES (verbatim)"));
         assert!(t.len() <= MAX_TRANSCRIPT_CHARS + 500);
         assert_eq!(visible_message_ids(&events, "gpt"), vec!["latest"]);
+    }
+
+    #[test]
+    fn transcript_digest_prioritizes_decisions_and_human_intent() {
+        let noise = "routine progress ".repeat(900);
+        let mut events: Vec<Event> = (0..20).map(|_| ev("gpt", &noise)).collect();
+        events.insert(0, ev("human", "Approved: preserve this decision"));
+        events.push(ev("human", "the current task stays exact"));
+        let t = transcript(&events, "claude");
+        assert!(t.contains("Approved: preserve this decision"));
+        assert!(t.contains("the current task stays exact"));
+        assert!(t.len() <= MAX_TRANSCRIPT_CHARS + 500);
     }
 
     #[test]

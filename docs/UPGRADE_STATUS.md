@@ -14,7 +14,7 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Unbuffered streams | ✅ | CLIs run with stream-json/JSON output, read as it arrives |
 | Pre-flight auth check | ✅ | Add AI / setup checks each CLI's sign-in before use |
 | Devil's advocate in round 3+ | ✅ | Rotating reviewer |
-| Context sliding window (summarise long sessions) | ⏭ | Summarise old turns once a token threshold is crossed |
+| Context sliding window (summarise long sessions) | ✅ | Over 120k prompt characters, older turns become a bounded local digest prioritising human intent, REQUEST decisions and concrete outcomes; the newest 104k remain verbatim. Current file diffs are separately hashed and bounded |
 | File-state hashing / git diff in each turn | ✅ | Bounded, redacted status/diff snapshot with a hard Git subprocess timeout before each editable turn |
 | Destructive command sanitizer for Full capacity | ⏭ | Can only gate what Consilium itself runs; the CLIs execute their own commands, so the real guard is their own permission modes plus worktrees |
 | Secret redaction | ✅ | `redact.rs`, plus `check-secrets.mjs` before pushes |
