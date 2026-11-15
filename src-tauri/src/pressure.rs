@@ -16,7 +16,16 @@ pub struct SystemPressure {
     pub cpu_percent: u8,
     pub memory_percent: u8,
     pub cores: usize,
+    /// Installed physical memory, rounded down to MiB. Exposed so the UI can explain why it
+    /// selected a conservative profile without needing an OS-specific probe of its own.
+    pub total_memory_mb: u64,
     pub label: String,
+    /// Baseline chosen from portable CPU/RAM facts: "conservative", "balanced" or "performance".
+    pub hardware_profile: String,
+    /// Runtime policy after current load is considered: "eco", "balanced" or "full".
+    pub adaptive_mode: String,
+    /// Maximum number of local AI CLI processes Consilium starts at once on this machine.
+    pub recommended_parallel_agents: usize,
     /// Share of the whole machine (0-100) used by each AI's own CLI process and everything it started,
     /// keyed by agent id. AIs with no running process (idle, or API-based) are left out.
     #[serde(default)]
@@ -44,7 +53,8 @@ pub fn sample() -> SystemPressure {
     let percent = cpu_percent.max(memory_percent);
 
     let cores = host.cpus().len().max(1);
-    let mut p = from_parts(percent, cpu_percent, memory_percent, cores);
+    let total_memory_mb = host.total_memory() / (1024 * 1024);
+    let mut p = from_parts(percent, cpu_percent, memory_percent, cores, total_memory_mb);
     p.agents = per_agent(&host, cores);
     p
 }
@@ -108,14 +118,57 @@ fn bounded(value: f64) -> u8 {
     value.round().clamp(0.0, 100.0) as u8
 }
 
-fn from_parts(percent: u8, cpu_percent: u8, memory_percent: u8, cores: usize) -> SystemPressure {
+fn capacity(cores: usize, total_memory_mb: u64) -> (&'static str, usize) {
+    // These deliberately err on the cautious side. Provider CLIs are browser-class processes;
+    // starting three of them together on a 4-core/8-GiB computer can force the OS into swap.
+    if cores <= 2 || total_memory_mb <= 4 * 1024 {
+        ("conservative", 1)
+    } else if cores <= 4 || total_memory_mb <= 8 * 1024 {
+        ("balanced", 2)
+    } else {
+        ("performance", 3)
+    }
+}
+
+/// Baseline process limit used by the engine on macOS, Windows and Linux. An environment override
+/// is useful for managed workstations, but is bounded so a typo cannot create an unbounded fork.
+pub fn parallel_agent_limit() -> usize {
+    if let Ok(raw) = std::env::var("CONSILIUM_MAX_PARALLEL_AGENTS") {
+        if let Ok(value) = raw.parse::<usize>() {
+            return value.clamp(1, 8);
+        }
+    }
+    let host = System::new_all();
+    capacity(host.cpus().len().max(1), host.total_memory() / (1024 * 1024)).1
+}
+
+fn from_parts(percent: u8, cpu_percent: u8, memory_percent: u8, cores: usize, total_memory_mb: u64) -> SystemPressure {
     let label = match percent {
         90..=100 => "Saturated",
         70..=89 => "Heavy",
         40..=69 => "Moderate",
         _ => "Low",
     };
-    SystemPressure { percent, cpu_percent, memory_percent, cores, label: label.to_string(), agents: BTreeMap::new() }
+    let (hardware_profile, recommended_parallel_agents) = capacity(cores, total_memory_mb);
+    let adaptive_mode = if percent >= 90 || hardware_profile == "conservative" {
+        "eco"
+    } else if percent >= 70 || hardware_profile == "balanced" {
+        "balanced"
+    } else {
+        "full"
+    };
+    SystemPressure {
+        percent,
+        cpu_percent,
+        memory_percent,
+        cores,
+        total_memory_mb,
+        label: label.to_string(),
+        hardware_profile: hardware_profile.to_string(),
+        adaptive_mode: adaptive_mode.to_string(),
+        recommended_parallel_agents,
+        agents: BTreeMap::new(),
+    }
 }
 
 #[cfg(test)]
@@ -129,14 +182,16 @@ mod tests {
         assert!(p.cpu_percent <= 100);
         assert!(p.memory_percent <= 100);
         assert!(p.cores >= 1);
+        assert!(p.total_memory_mb > 0);
+        assert!((1..=8).contains(&p.recommended_parallel_agents));
         assert!(!p.label.is_empty());
     }
 
     #[test]
     fn the_busier_resource_sets_the_total_pressure() {
-        assert_eq!(from_parts(100, 100, 12, 8).percent, 100);
-        assert_eq!(from_parts(91, 20, 91, 8).label, "Saturated");
-        assert_eq!(from_parts(22, 22, 10, 8).label, "Low");
+        assert_eq!(from_parts(100, 100, 12, 8, 16_384).percent, 100);
+        assert_eq!(from_parts(91, 20, 91, 8, 16_384).label, "Saturated");
+        assert_eq!(from_parts(22, 22, 10, 8, 16_384).label, "Low");
     }
 
     #[test]
@@ -154,5 +209,15 @@ mod tests {
         assert_eq!(bounded(-1.0), 0);
         assert_eq!(bounded(42.6), 43);
         assert_eq!(bounded(140.0), 100);
+    }
+
+    #[test]
+    fn hardware_capacity_is_portable_and_conservative() {
+        assert_eq!(capacity(2, 32_768), ("conservative", 1));
+        assert_eq!(capacity(16, 4_096), ("conservative", 1));
+        assert_eq!(capacity(4, 8_192), ("balanced", 2));
+        assert_eq!(capacity(8, 16_384), ("performance", 3));
+        assert_eq!(from_parts(92, 92, 40, 12, 32_768).adaptive_mode, "eco");
+        assert_eq!(from_parts(30, 30, 20, 12, 32_768).adaptive_mode, "full");
     }
 }

@@ -172,7 +172,11 @@ export interface SystemPressure {
   cpu_percent: number;
   memory_percent: number;
   cores: number;
+  total_memory_mb: number;
   label: string;
+  hardware_profile: "conservative" | "balanced" | "performance";
+  adaptive_mode: "eco" | "balanced" | "full";
+  recommended_parallel_agents: number;
   /** Per-AI share of the PC (0-100), keyed by agent id; only AIs with a running process appear. */
   agents?: Record<string, number>;
 }

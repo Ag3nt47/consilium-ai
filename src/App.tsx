@@ -553,7 +553,7 @@ function ResourcePressureGauge({ pressure }: { pressure: SystemPressure | null }
   return (
     <div
       className="pc-pressure"
-      title={`Host System Pressure: ${pct}%\nCPU: ${pressure.cpu_percent}% (${pressure.cores} cores)\nMemory: ${pressure.memory_percent}%\nStatus: ${pressure.label}`}
+      title={`Host System Pressure: ${pct}%\nCPU: ${pressure.cpu_percent}% (${pressure.cores} cores)\nMemory: ${pressure.memory_percent}% of ${Math.max(1, Math.round(pressure.total_memory_mb / 1024))} GiB\nAdaptive mode: ${pressure.adaptive_mode}\nConcurrent AI limit: ${pressure.recommended_parallel_agents}\nStatus: ${pressure.label}`}
     >
       <div className="pc-pressure-header">
         <span className="pc-pressure-title">PC Pressure</span>
@@ -573,6 +573,10 @@ function ResourcePressureGauge({ pressure }: { pressure: SystemPressure | null }
         <span>CPU {pressure.cpu_percent}%</span>
         <span>RAM {pressure.memory_percent}%</span>
         <span className="pc-pressure-status" style={{ color }}>{pressure.label}</span>
+      </div>
+      <div className="pc-pressure-sub muted small" title="Consilium adjusts visual effects, polling and simultaneous AI processes for this PC">
+        <span>Auto {pressure.adaptive_mode}</span>
+        <span>max {pressure.recommended_parallel_agents} AI{pressure.recommended_parallel_agents === 1 ? "" : "s"}</span>
       </div>
     </div>
   );
@@ -693,6 +697,8 @@ export default function App() {
 
   currentRef.current = current;
 
+  const adaptiveMode = pressure?.adaptive_mode ?? "balanced";
+
   useEffect(() => {
     let mounted = true;
     const poll = async () => {
@@ -704,18 +710,22 @@ export default function App() {
       }
     };
     poll();
-    const interval = setInterval(poll, 2000);
+    const interval = setInterval(poll, adaptiveMode === "eco" ? 5000 : adaptiveMode === "full" ? 2000 : 3000);
     return () => {
       mounted = false;
       clearInterval(interval);
     };
-  }, []);
+  }, [adaptiveMode]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = prefs.theme;
     document.documentElement.dataset.effects = prefs.effects ? "on" : "off";
     savePrefs(prefs);
   }, [prefs]);
+
+  useEffect(() => {
+    document.documentElement.dataset.performance = adaptiveMode;
+  }, [adaptiveMode]);
 
   useEffect(() => {
     if (prefs.bingWallpaper) {
@@ -1201,7 +1211,10 @@ export default function App() {
       setDiscuss(true);
       setRounds((r) => Math.max(r, 4));
       refreshAgents();
-      setToast("Full capacity on: every AI is Unrestricted in the project folder.");
+      setToast(
+        `Full capacity on: every AI is Unrestricted. This PC will run at most ${pressure?.recommended_parallel_agents ?? 2} ` +
+          `AI${(pressure?.recommended_parallel_agents ?? 2) === 1 ? "" : "s"} at once.`,
+      );
       setTimeout(() => setToast(null), 5000);
     } catch (e) {
       setError(String(e));

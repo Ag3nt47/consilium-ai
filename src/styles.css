@@ -2385,3 +2385,64 @@ button.attachment {
 [data-effects="on"][data-theme="netrunner"] .msg {
   box-shadow: 0 0 0 1px #00ff6622, 0 0 14px #ff2bd614;
 }
+
+/* REQUESTs are decisions, not atmosphere. Keep them opaque, sharp, and placed above the scanline overlay (z-index 45) so no scanline stripes or blur can haze their wording or buttons. */
+[data-theme="netrunner"] .request {
+  position: relative;
+  z-index: 45;
+  background: #140007;
+  border: 2px solid #ff1f4b;
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.95), 0 0 0 1px #ff1f4b;
+  text-shadow: none !important;
+}
+
+[data-theme="netrunner"] .request * {
+  text-shadow: none !important;
+}
+
+[data-theme="netrunner"] .request-label {
+  color: #ff3366;
+  font-weight: 900;
+  letter-spacing: 0.6px;
+}
+
+[data-theme="netrunner"] .request-actions .approve {
+  background: #001f0a;
+  border: 1.5px solid #00ff66;
+  color: #00ff66;
+  font-weight: 800;
+  text-shadow: none !important;
+}
+
+[data-theme="netrunner"] .request-actions .deny {
+  background: #1f0009;
+  border: 1.5px solid #ff1f4b;
+  color: #ff3366;
+  font-weight: 800;
+  text-shadow: none !important;
+}
+
+/* Adaptive fail-forward mode: retain every control and message while dropping GPU-heavy polish.
+   The backend selects this only on constrained hardware or sustained high pressure. */
+[data-performance="eco"] *,
+[data-performance="eco"] *::before,
+[data-performance="eco"] *::after {
+  animation: none !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+[data-performance="eco"] .fx-scanlines {
+  display: none !important;
+}
+
+[data-performance="eco"] .topbar,
+[data-performance="eco"] .modal,
+[data-performance="eco"] .msg,
+[data-performance="eco"] .composer,
+[data-performance="eco"] .glass {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none;
+}

@@ -19,6 +19,7 @@ use crate::resume::{Journal, Pending};
 use crate::store::{self, Event, Store, TurnLock};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -102,6 +103,48 @@ struct Running {
     cursor: Arc<Mutex<u64>>,
 }
 
+/// One machine-wide local-AI slot. OS file locks are shared by the desktop app and terminal
+/// client and are released automatically after a crash, unlike an in-memory semaphore.
+struct AgentSlot {
+    _file: File,
+}
+
+fn try_agent_slot(dir: &std::path::Path, limit: usize) -> Result<Option<AgentSlot>, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("couldn't create the PC-capacity gate: {e}"))?;
+    for index in 0..limit {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(format!("{index}.lock")))
+            .map_err(|e| format!("couldn't open the PC-capacity gate: {e}"))?;
+        if file.try_lock().is_ok() {
+            return Ok(Some(AgentSlot { _file: file }));
+        }
+    }
+    Ok(None)
+}
+
+async fn wait_for_agent_slot(
+    dir: PathBuf,
+    limit: usize,
+    cancel: &CancellationToken,
+) -> Result<Option<AgentSlot>, String> {
+    loop {
+        match try_agent_slot(&dir, limit) {
+            Ok(Some(slot)) => return Ok(Some(slot)),
+            // If the safety gate itself is unavailable, fail forward: provider timeouts and Stop
+            // still work, and the user is not locked out of every AI by a filesystem problem.
+            Err(_) => return Ok(None),
+            Ok(None) => {}
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            _ = cancel.cancelled() => return Err("stopped".into()),
+        }
+    }
+}
+
 pub struct Engine {
     /// The data folder.
     pub data: PathBuf,
@@ -116,12 +159,16 @@ pub struct Engine {
     running: Mutex<HashMap<String, Running>>,
     /// Ids of the human messages sent from this process, to tell them from the other process's.
     mine: Mutex<HashSet<String>>,
+    /// Shared OS-lock folder and portable CPU/RAM-based limit for local provider CLIs.
+    agent_slot_dir: PathBuf,
+    agent_slot_limit: usize,
 }
 
 impl Engine {
     /// An engine on the data folder `data` (the same for the app and the terminal command).
     pub fn open(data: &std::path::Path, ui: Arc<dyn Ui>, spawn: Box<Spawn>) -> std::io::Result<Self> {
         crate::apiagent::init(data.join("api-keys.json"));
+        let agent_slot_limit = crate::pressure::parallel_agent_limit();
         Ok(Engine {
             data: data.to_path_buf(),
             store: Arc::new(Store::new(data.join("conversations"))?),
@@ -134,6 +181,8 @@ impl Engine {
             make_host: Box::new(|engine, pending| Arc::new(RealHost::new(engine, pending))),
             running: Mutex::new(HashMap::new()),
             mine: Mutex::new(HashSet::new()),
+            agent_slot_dir: data.join("agent-slots"),
+            agent_slot_limit,
         })
     }
 
@@ -585,6 +634,8 @@ struct RealHost {
     conversation: String,
     turn: String,
     rounds: u32,
+    agent_slot_dir: PathBuf,
+    agent_slot_limit: usize,
 }
 
 impl RealHost {
@@ -599,6 +650,8 @@ impl RealHost {
             conversation: pending.conversation.clone(),
             turn: pending.turn.clone(),
             rounds: pending.rounds,
+            agent_slot_dir: engine.agent_slot_dir.clone(),
+            agent_slot_limit: engine.agent_slot_limit,
         }
     }
 }
@@ -639,13 +692,18 @@ impl council::Host for RealHost {
         let ui = self.ui.clone();
         let conversation = self.conversation.clone();
         let id = agent.id.to_string();
+        let local_process = agents::api_provider(agents::effective_kind(agent)).is_none();
+        let initial_slot = local_process.then(|| try_agent_slot(&self.agent_slot_dir, self.agent_slot_limit));
+        let agent_slot_dir = self.agent_slot_dir.clone();
+        let agent_slot_limit = self.agent_slot_limit;
         let started_at = store::now_ms();
+        let waiting_for_capacity = matches!(initial_slot, Some(Ok(None)));
         ui.activity(&AgentActivity {
             conversation: conversation.clone(),
             agent: id.clone(),
             kind: "preparing".into(),
-            label: format!("Starting {}", agent.name),
-            detail: agent_tool_label(agent).into(),
+            label: if waiting_for_capacity { format!("Queuing {}", agent.name) } else { format!("Starting {}", agent.name) },
+            detail: if waiting_for_capacity { "Waiting for PC capacity".into() } else { agent_tool_label(agent).into() },
             started_at,
             updated_at: started_at,
         });
@@ -661,6 +719,13 @@ impl council::Host for RealHost {
             });
         });
         Box::pin(async move {
+            // Waiting is cancellation-aware, so Stop never hangs behind the capacity gate.
+            let permit = match initial_slot {
+                Some(Ok(Some(slot))) => Some(slot),
+                Some(Ok(None)) => wait_for_agent_slot(agent_slot_dir, agent_slot_limit, &cancel).await?,
+                // A gate error fails forward rather than disabling the council.
+                Some(Err(_)) | None => None,
+            };
             // Git can briefly touch many files in a large repository, so keep it off the async
             // executor and bound the wait. A slow/non-git folder must never delay the AI turn.
             if let Some(path) = state_path {
@@ -685,6 +750,7 @@ impl council::Host for RealHost {
                 Some(activity),
             )
             .await;
+            drop(permit);
             if let Some(model) = reply.as_ref().ok().and_then(|r| r.model.as_deref()) {
                 record_model(&data, agent.id, model);
             }

@@ -76,7 +76,7 @@ export function AgentVoiceMeter({ id, name, mode, status, detail }: { id: string
   const N = 10;
 
   useEffect(() => {
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches || document.documentElement.dataset.performance === "eco";
     const amp = mode === "speaking" ? 1 : mode === "working" ? 0.35 : mode === "queued" ? 0.15 : 0;
     const seed = [...id].reduce((h, c) => h + c.charCodeAt(0), 0);
     let raf = 0;
@@ -151,7 +151,7 @@ export function VoiceVisualizer({ speaker, active }: { speaker: "user" | "ai"; a
 
   useEffect(() => {
     if (!active) return;
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches || document.documentElement.dataset.performance === "eco";
     const data = new Uint8Array(BINS);
     const rgb = speaker === "user" ? "6, 182, 212" : "139, 92, 246";
     let id = 0;
