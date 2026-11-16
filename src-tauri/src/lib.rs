@@ -443,7 +443,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: in Settings, each linked computer's card now shows which AIs are working there and a one-line summary of its project folder, such as its branch and how many files changed. On Windows, the background git check no longer flashes a console window. If installing Codex or another npm tool on Windows fails because npm can't write to its download cache, the setup window now tries once more with a fresh cache, and it says plainly when an install failed instead of always saying Done.";
+const WHATS_NEW: &str = "What's new: when a conversation is first shared with a linked computer, its last 200 earlier messages now go across too, so a chat started before you linked the computers shows in full on both; messages already copied are not repeated. Linked computers can also connect over a direct cable between them, such as Ethernet, Thunderbolt or a Bluetooth network, not only through your router.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
