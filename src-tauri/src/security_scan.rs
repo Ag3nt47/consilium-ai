@@ -20,6 +20,9 @@ const MAX_INTERVAL_HOURS: u32 = 24 * 30;
 const IDLE_TICKS_REQUIRED: u8 = 5;
 const START_PRESSURE_LIMIT: u8 = 35;
 const STOP_PRESSURE_LIMIT: u8 = 75;
+/// Memory alone only blocks a scan near exhaustion: macOS and Windows keep most RAM in use as
+/// cache, so an ordinary 8 GB Mac sits at 60-70% and a 35% combined gate would never open.
+const MEMORY_LIMIT: u8 = 90;
 const RETRY_DELAY_MS: u64 = 15 * 60 * 1_000;
 /// GitHub release v3.0.2 standalone Python asset, reviewed and pinned on 2026-11-16.
 const ZERO_BREACH_SHA256: &str = "0b6df5f02c6b13256b735bfb55c1ef0a31ff0c762550910be9f66b4f5090dafb";
@@ -222,7 +225,7 @@ impl Scanner {
             runtime.paused_reason = "Paused while an AI is working.".into();
             return;
         }
-        let pressure = crate::pressure::sample().percent;
+        let pressure = scan_load(&crate::pressure::sample());
         if pressure > START_PRESSURE_LIMIT {
             runtime.idle_ticks = 0;
             runtime.paused_reason = format!("Waiting for lower system load ({pressure}%).");
@@ -336,7 +339,7 @@ impl Scanner {
                 }
             }
             let busy = !engine.running_ids().is_empty();
-            let pressure = crate::pressure::sample().percent;
+            let pressure = scan_load(&crate::pressure::sample());
             if busy || pressure >= STOP_PRESSURE_LIMIT {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -374,6 +377,15 @@ impl Scanner {
         let mut runtime = self.runtime.lock().unwrap_or_else(|p| p.into_inner());
         runtime.running = false;
         runtime.paused_reason.clear();
+    }
+}
+
+/// Load figure the scan gates use: processor use, unless memory is close to running out.
+fn scan_load(p: &crate::pressure::SystemPressure) -> u8 {
+    if p.memory_percent >= MEMORY_LIMIT {
+        p.memory_percent
+    } else {
+        p.cpu_percent
     }
 }
 
@@ -460,6 +472,16 @@ fn set_private_file(_path: &Path) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ordinary_memory_use_does_not_block_an_idle_scan() {
+        let mut p = crate::pressure::sample();
+        p.cpu_percent = 10;
+        p.memory_percent = 65;
+        assert_eq!(scan_load(&p), 10);
+        p.memory_percent = 95;
+        assert_eq!(scan_load(&p), 95);
+    }
+
     use super::*;
 
     #[test]

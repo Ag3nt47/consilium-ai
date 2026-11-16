@@ -443,7 +443,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: auto-continue rounds and failed-check notes now actually get the AIs working; before, an AI that had already answered treated them as nothing new and stopped, so Consilium looked busy with no AI acting. The note saying no other AI can answer now only appears when that is true. An AI out of usage only shows a back-at time when its own tool reported it, and a used-up weekly limit keeps it out until that reset instead of a guessed 30 minutes. Settings has an Update Now button on every system, greyed out until a new version is ready to install.";
+const WHATS_NEW: &str = "What's new: the background spyware check (Zero Breach) can now actually start. It waited for system load under 35%, but counted memory in use, which stays around 60 to 70% on an ordinary Mac, so it never ran. It now goes by processor load and only holds back for memory when it is nearly full. It still runs only after five quiet minutes and stops as soon as an AI starts working. This update should also be the first that keeps the macOS permissions you already granted.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
