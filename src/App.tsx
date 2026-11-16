@@ -535,17 +535,27 @@ function fileSize(bytes: number): string {
   return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : bytes >= 1024 ? `${Math.round(bytes / 1024)} KB` : `${bytes} B`;
 }
 
-/** The soonest reset among `windows` that is still ahead. */
-function nextReset(windows: UsageWindow[]): number | null {
+/** When this bar's usage limit resets. If the bar is at 0% (out of usage), it only resets when
+ * all exhausted windows (0% left) reset, so it picks the latest verified reset among the exhausted windows.
+ * If usage remains (> 0%), it shows the next window that replenishes (< 100% left). */
+function nextReset(windows: UsageWindow[], remainingPercent?: number): number | null {
   const now = Date.now();
-  const ahead = windows.map((w) => w.resets_at ?? 0).filter((t) => t > now);
+  if (remainingPercent === 0) {
+    const exhausted = windows.filter((w) => (w.remaining_percent ?? 0) === 0);
+    const targets = exhausted.length > 0 ? exhausted : windows;
+    const resets = targets.map((w) => w.resets_at ?? 0).filter((t) => t > now);
+    return resets.length > 0 ? Math.max(...resets) : null;
+  }
+  const used = windows.filter((w) => (w.remaining_percent ?? 100) < 100);
+  const targets = used.length > 0 ? used : windows;
+  const ahead = targets.map((w) => w.resets_at ?? 0).filter((t) => t > now);
   return ahead.length ? Math.min(...ahead) : null;
 }
 
 function UsageBar({ label, percent, windows, aria, note }: { label: string; percent: number; windows: UsageWindow[]; aria: string; note?: string }) {
   const remaining = Math.max(0, Math.min(100, Math.round(percent)));
   const color = `hsl(${remaining * 1.2} 72% 46%)`;
-  const reset = nextReset(windows);
+  const reset = nextReset(windows, remaining);
   const details = windows
     .map((w) => `${w.label}: ${w.remaining_percent}% left${w.resets_at ? `, resets ${resetTime(w.resets_at)}` : ""}`)
     .join("\n");
@@ -756,9 +766,9 @@ function AgentDot({
         <span className="agent-state">{label}</span>
       ) : state === "benched" ? (
         <span className="agent-state benched" title="It ran out of usage. The council carries on without it until its limit resets.">
-          {agent.reset_known
-            ? <>Out of usage · back {resetTime(agent.benched_until!)}</>
-            : <span title="Its own tool hasn't reported when its limit resets, so no time is shown. Consilium tries it again now and then.">Out of usage · reset time not reported</span>}
+          {agent.reset_known && agent.benched_until
+            ? <>Out of usage · back {resetTime(agent.benched_until)}</>
+            : <>Out of usage</>}
           {agent.id === "gpt" && forecast && forecast.chance_24h != null && (
             <span className="forecast-chance" title={`codex-reset.com forecast: ${forecast.chance_24h}% chance in 24h, ${forecast.chance_48h ?? "?"}% in 48h`}>
               {" "}· {forecast.chance_24h}% reset chance
