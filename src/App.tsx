@@ -2254,7 +2254,7 @@ export default function App() {
             ),
           )}
           {busy && (
-            <div className="thinking">
+            <div className={`thinking ${turn?.agent ? `from-${turn.agent}` : ""}`}>
               <span className="pulse" /> <TypedText text={thinking ?? "Working"} enabled={typedActivity} />
               {turn && turn.rounds > 1 ? ` · round ${turn.round} of ${turn.rounds}` : ""}
               <span className="cursor">▍</span>

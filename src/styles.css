@@ -77,7 +77,8 @@
 [data-theme="glass"] .modal,
 [data-theme="glass"] .topbar,
 [data-theme="glass"] .composer,
-[data-theme="glass"] .msg {
+[data-theme="glass"] .msg,
+[data-theme="glass"] .thinking {
   backdrop-filter: blur(25px);
   -webkit-backdrop-filter: blur(25px);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -934,19 +935,33 @@ pre {
 }
 
 .thinking {
+  width: fit-content;
+  max-width: min(820px, 92%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--sender, var(--accent));
+  border-radius: var(--radius);
+  padding: 8px 12px;
   color: var(--muted);
   font-size: 13px;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
+  align-self: flex-start;
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  animation: rise 0.18s ease-out;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
 .pulse {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--sender, var(--accent));
   animation: pulse 1.1s ease-in-out infinite;
+  flex-shrink: 0;
 }
 
 .cursor {
@@ -1213,7 +1228,8 @@ pre {
   text-shadow: 0 0 6px currentColor;
 }
 
-[data-effects="on"][data-theme="retro84"] .msg {
+[data-effects="on"][data-theme="retro84"] .msg,
+[data-effects="on"][data-theme="retro84"] .thinking {
   box-shadow: 0 0 0 1px #8b5cf622, 0 0 18px #8b5cf61a;
 }
 
@@ -2382,7 +2398,8 @@ button.attachment {
 
 [data-theme="netrunner"] .msg,
 [data-theme="netrunner"] .modal,
-[data-theme="netrunner"] .composer {
+[data-theme="netrunner"] .composer,
+[data-theme="netrunner"] .thinking {
   border-color: var(--border);
   box-shadow: inset 0 0 0 1px #00ff6610;
 }
@@ -2414,7 +2431,8 @@ button.attachment {
   text-shadow: 0 0 5px currentColor;
 }
 
-[data-effects="on"][data-theme="netrunner"] .msg {
+[data-effects="on"][data-theme="netrunner"] .msg,
+[data-effects="on"][data-theme="netrunner"] .thinking {
   box-shadow: 0 0 0 1px #00ff6622, 0 0 14px #ff2bd614;
 }
 
@@ -3198,7 +3216,8 @@ button.attachment {
   -webkit-backdrop-filter: none;
   border-color: transparent;
 }
-[data-theme="netrunner"] .main.has-wallpaper .msg {
+[data-theme="netrunner"] .main.has-wallpaper .msg,
+[data-theme="netrunner"] .main.has-wallpaper .thinking {
   background: rgba(0, 8, 3, 0.68);
   backdrop-filter: blur(14px) saturate(1.15);
   -webkit-backdrop-filter: blur(14px) saturate(1.15);
