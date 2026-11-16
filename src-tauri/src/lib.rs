@@ -25,6 +25,7 @@ mod runcmd;
 mod redact;
 mod resume;
 mod setup;
+mod signal_chat;
 mod signal_setup;
 mod security_scan;
 mod store;
@@ -759,6 +760,8 @@ pub fn run() {
             tauri::async_runtime::spawn(security.clone().watch(engine.clone()));
             // Reads each active project's GitHub checks and posts a note when they finish.
             tauri::async_runtime::spawn(ci::watch(engine.clone()));
+            // Carries the newest conversation to and from Signal once setup is verified.
+            signal_chat::run(engine.clone(), bridge::config_path(None));
             app.manage(AppState { engine, security });
             // Direct link to the user's other paired computers. Off until they pair or turn it on.
             let emitter = app.handle().clone();

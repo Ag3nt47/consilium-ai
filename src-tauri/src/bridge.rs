@@ -25,6 +25,25 @@ pub struct BridgeConfig {
     pub allowed_acis: Vec<String>,
     #[serde(default = "default_true")]
     pub auto_forward_decisions: bool,
+    /// Signal group IDs Consilium created on this account: the council chat and one per AI.
+    #[serde(default, skip_serializing_if = "SignalGroups::is_empty")]
+    pub groups: SignalGroups,
+}
+
+/// The Signal groups that carry the conversation: `main` reaches the whole council, and each
+/// entry in `agents` (agent id → group ID) reaches that one AI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignalGroups {
+    #[serde(default)]
+    pub main: String,
+    #[serde(default)]
+    pub agents: std::collections::BTreeMap<String, String>,
+}
+
+impl SignalGroups {
+    pub fn is_empty(&self) -> bool {
+        self.main.is_empty() && self.agents.is_empty()
+    }
 }
 
 fn default_endpoint() -> String {
@@ -43,6 +62,7 @@ impl Default for BridgeConfig {
             account: String::new(),
             allowed_acis: Vec::new(),
             auto_forward_decisions: true,
+            groups: SignalGroups::default(),
         }
     }
 }
@@ -467,6 +487,10 @@ pub fn apply_change(cfg: &BridgeConfig, ch: SetupChange) -> Result<BridgeConfig,
         return Err("Add the phone number linked to Signal before turning it on".into());
     }
     next.enabled = ch.enabled;
+    if next.account != cfg.account {
+        // The groups belong to the old account.
+        next.groups = SignalGroups::default();
+    }
     Ok(next)
 }
 
