@@ -389,6 +389,11 @@ pub struct SetupView {
     pub config_path: String,
 }
 
+/// Where signal-cli is installed, if it is.
+pub fn find_signal_cli() -> Option<PathBuf> {
+    find_tool("signal-cli")
+}
+
 fn find_tool(name: &str) -> Option<PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
     let mut dirs_: Vec<PathBuf> = std::env::var_os("PATH")

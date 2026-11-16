@@ -1,8 +1,9 @@
-import { OS, terminalName } from "./platform";
+import { terminalName } from "./platform";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, type ConnectorStatus, type MessagingSetup } from "./api";
+import QRCode from "qrcode";
+import { api, type ConnectorStatus, type MessagingSetup, type SignalSetupState } from "./api";
 
 const SIGNAL_CLI_GUIDE = "https://github.com/AsamK/signal-cli/wiki/Linking-other-devices-(Provisioning)";
 
@@ -91,6 +92,8 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
   const [forward, setForward] = useState(true);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [link, setLink] = useState<SignalSetupState | null>(null);
+  const [qr, setQr] = useState<string | null>(null);
 
   const fill = (c: MessagingSetup) => {
     setCfg(c);
@@ -147,6 +150,69 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
       setNote({ ok: true, text: "Saved on this computer." });
       setLive(await api.messagingStatus().catch(() => live));
       onChanged?.();
+    } catch (e) {
+      setNote({ ok: false, text: String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // In-app link: QR code, background start, then a Note to Self round trip.
+  const beginLink = async () => {
+    try {
+      setLink(await api.signalSetupBegin());
+    } catch (e) {
+      setNote({ ok: false, text: String(e) });
+    }
+  };
+
+  useEffect(() => {
+    api.signalSetupState().then(setLink).catch(() => {});
+  }, []);
+
+  const active = !!link && ["linking", "starting", "verifying"].includes(link.phase);
+  useEffect(() => {
+    if (!active) return;
+    const t = window.setInterval(() => {
+      api
+        .signalSetupState()
+        .then((s) => {
+          setLink(s);
+          if (s.phase === "verified") {
+            api.messagingConfig().then(fill).catch(() => {});
+            api.messagingStatus().then(setLive).catch(() => {});
+            onChanged?.();
+          }
+        })
+        .catch(() => {});
+    }, 1500);
+    return () => window.clearInterval(t);
+  }, [active]);
+
+  useEffect(() => {
+    const uri = link?.phase === "linking" ? link.link_uri : null;
+    if (!uri) return setQr(null);
+    QRCode.toDataURL(uri, { margin: 1, width: 240, errorCorrectionLevel: "M" })
+      .then(setQr)
+      .catch(() => setQr(null));
+  }, [link?.link_uri, link?.phase]);
+
+  // Saves just the phone number (Enter, leaving the box, or Save), then links automatically.
+  const saveNumber = async () => {
+    const a = account.trim();
+    if (!a || busy) return;
+    setBusy(true);
+    try {
+      const c = await api.messagingSave({
+        enabled,
+        account: a,
+        endpoint,
+        allowed_acis: acis.split(/[\s,]+/).filter(Boolean),
+        auto_forward_decisions: forward,
+      });
+      fill(c);
+      setNote({ ok: true, text: "Number saved on this computer." });
+      if (c.signal_cli) await beginLink();
     } catch (e) {
       setNote({ ok: false, text: String(e) });
     } finally {
@@ -231,31 +297,51 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
             placeholder={hasNumber ? cfg?.account_hint : "+15551234567"}
             value={account}
             onChange={(e) => setAccount(e.target.value)}
-            title="The phone number of your Signal account"
+            onKeyDown={(e) => e.key === "Enter" && saveNumber()}
+            onBlur={() => saveNumber()}
+            title="The phone number of your Signal account. Press Enter to save it"
           />
+          {account.trim() && (
+            <button title="Save this number on this computer" className="btn small-btn" disabled={busy} onClick={saveNumber}>
+              Save
+            </button>
+          )}
         </li>
-        <li>
+        <li className={link?.phase === "verified" || (signal?.state === "ok" && !active) ? "done" : ""}>
           <span>
             <b>Link this computer</b>
-            <small>Shows a QR code to scan. On your phone: Signal › Settings › Linked devices › Link new device. If connecting multiple paired computers, you only need to link one for the entire ecosystem.</small>
+            <small>
+              {link && link.phase !== "idle"
+                ? link.detail
+                : `Shows a QR code here to scan with your phone. This computer appears as "${link?.device_name ?? "Consilium"}". With several paired computers, link only one.`}
+            </small>
           </span>
-          <button title={`Open ${terminalName} with the link command${OS === "windows" ? "" : " and QR code"}`} className="btn small-btn" disabled={!installed} onClick={() => step("link")}>
-            Link
-          </button>
-        </li>
-        <li className={signal?.state === "ok" ? "done" : ""}>
-          <span>
-            <b>Start Signal for Consilium</b>
-            <small>Runs signal-cli in a {terminalName} window on this computer only. Keep that window open.</small>
-          </span>
-          <button
-            title={`Open ${terminalName} running signal-cli for Consilium; save your number first`}
-            className="btn small-btn"
-            disabled={!installed || !hasNumber}
-            onClick={() => step("start")}
-          >
-            Start
-          </button>
+          {!active && (
+            <button
+              title="Show a QR code to link this computer to your Signal account, then test it"
+              className="btn small-btn"
+              disabled={!installed || !hasNumber}
+              onClick={beginLink}
+            >
+              {link?.phase === "failed" ? "Try again" : link?.phase === "verified" ? "Link again" : "Show QR code"}
+            </button>
+          )}
+          {active && (
+            <button title="Stop linking" className="btn ghost small-btn" onClick={() => api.signalSetupCancel().then(() => setLink(null))}>
+              Cancel
+            </button>
+          )}
+          {qr && (
+            <div className="msg-qr">
+              <img src={qr} alt="Signal link QR code" width={240} height={240} />
+            </div>
+          )}
+          {link?.phase === "starting" && <div className="msg-qr-note">Starting Signal…</div>}
+          {link?.phase === "verifying" && link.code && (
+            <div className="msg-qr-note">
+              Open <b>Note to Self</b> in Signal on your phone and send <span className="msg-code">{link.code}</span>
+            </div>
+          )}
         </li>
       </ol>
 

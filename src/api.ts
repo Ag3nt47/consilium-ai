@@ -145,6 +145,15 @@ export interface CliInstall {
   note: string;
 }
 
+/** Progress of the in-app Signal setup. The full phone number is never included. */
+export interface SignalSetupState {
+  phase: "idle" | "linking" | "starting" | "verifying" | "verified" | "failed";
+  link_uri: string | null;
+  code: string | null;
+  detail: string;
+  device_name: string;
+}
+
 export interface MessagingSetup {
   enabled: boolean;
   endpoint: string;
@@ -358,6 +367,10 @@ const appApi = {
   messagingSave: (change: MessagingChange) => invoke<MessagingSetup>("messaging_save", { change }),
   /** Opens a terminal for one fixed setup step. */
   messagingSetup: (action: "install" | "link" | "start") => invoke<string>("messaging_setup", { action }),
+  /** Starts the in-app Signal setup: QR code, background start, then a Note to Self test. */
+  signalSetupBegin: () => invoke<SignalSetupState>("signal_setup_begin"),
+  signalSetupState: () => invoke<SignalSetupState>("signal_setup_state"),
+  signalSetupCancel: () => invoke<void>("signal_setup_cancel"),
   /** A newer build staged for Update Now, or null. */
   updateAvailable: () => invoke<StagedUpdate | null>("update_available"),
   /** Pauses the AIs, installs the staged build and relaunches; their turns resume afterwards. */

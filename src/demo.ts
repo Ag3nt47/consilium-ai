@@ -199,6 +199,9 @@ export const demoApi = {
     throw new Error("Not available in the browser preview");
   },
   messagingSetup: async () => "",
+  signalSetupBegin: async () => ({ phase: "linking" as const, link_uri: "sgnl://linkdevice?uuid=demo&pub_key=demo", code: null, detail: "On your phone: Signal › Settings › Linked devices › Link new device, then scan this code.", device_name: "Consilium (Demo-Mac)" }),
+  signalSetupState: async () => ({ phase: "idle" as const, link_uri: null, code: null, detail: "", device_name: "Consilium (Demo-Mac)" }),
+  signalSetupCancel: async () => {},
   systemPressure: async () => ({
     percent: 24,
     cpu_percent: 18,

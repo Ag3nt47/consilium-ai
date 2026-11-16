@@ -24,6 +24,7 @@ mod runcmd;
 mod redact;
 mod resume;
 mod setup;
+mod signal_setup;
 mod security_scan;
 mod store;
 mod toolbox;
@@ -592,6 +593,24 @@ fn messaging_setup(action: String) -> Result<String, String> {
     Ok(title.to_string())
 }
 
+/// Starts the in-app Signal setup: QR code, background daemon, then a Note to Self round trip.
+#[tauri::command]
+fn signal_setup_begin() -> Result<signal_setup::SetupState, String> {
+    signal_setup::begin(bridge::config_path(None))
+}
+
+/// Where the in-app Signal setup has got to.
+#[tauri::command]
+fn signal_setup_state() -> signal_setup::SetupState {
+    signal_setup::state()
+}
+
+/// Stops a Signal link in progress.
+#[tauri::command]
+fn signal_setup_cancel() {
+    signal_setup::cancel()
+}
+
 /// Samples host PC CPU and memory pressure (0-100%, green to red).
 #[tauri::command]
 fn system_pressure() -> pressure::SystemPressure {
@@ -709,6 +728,7 @@ pub fn run() {
         // Remembers the window's size, position, maximized and full-screen state across restarts.
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
+            signal_setup::autostart(bridge::config_path(None));
             let data = match data_override() {
                 Some(d) => d,
                 None => app.path().app_data_dir()?,
@@ -798,6 +818,9 @@ pub fn run() {
             messaging_config,
             messaging_save,
             messaging_setup,
+            signal_setup_begin,
+            signal_setup_state,
+            signal_setup_cancel,
             project_versions,
             ingest_repo,
             run_command,

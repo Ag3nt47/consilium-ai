@@ -3179,3 +3179,9 @@ button.attachment {
 .tool-state { font-size: 11px; opacity: .7; }
 .tool-state.on { color: var(--ok, #3fb950); opacity: 1; }
 .tool-cmd { display: block; margin-top: 4px; font-size: 11px; overflow-wrap: anywhere; opacity: .8; }
+
+/* In-app Signal link: QR code and the verification code. */
+.msg-qr { flex-basis: 100%; display: flex; justify-content: center; padding: 6px 0; }
+.msg-qr img { background: #fff; padding: 8px; border-radius: 10px; image-rendering: pixelated; }
+.msg-qr-note { flex-basis: 100%; font-size: 13px; text-align: center; }
+.msg-code { font-family: var(--mono, ui-monospace, monospace); font-size: 18px; font-weight: 700; letter-spacing: 3px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border); }
