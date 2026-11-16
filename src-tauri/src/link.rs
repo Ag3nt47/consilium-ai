@@ -403,7 +403,9 @@ impl Link {
         let mut line = serde_json::to_vec(packet).map_err(|e| e.to_string())?;
         line.push(b'\n');
         let mut options = std::fs::OpenOptions::new();
-        options.create(true).read(true).append(true);
+        // Use ordinary read/write access rather than append-only access: Windows denies
+        // `set_len` on an append-only handle when repairing an interrupted final record.
+        options.create(true).read(true).write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -411,6 +413,7 @@ impl Link {
         }
         let mut f = options.open(&self.0.inbox_path).map_err(|e| e.to_string())?;
         repair_partial_line(&mut f)?;
+        f.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
         f.write_all(&line).map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())
     }
