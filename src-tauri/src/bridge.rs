@@ -590,16 +590,18 @@ pub fn setup_command(action: &str, cfg: &BridgeConfig) -> Result<(&'static str, 
 /// Installs pinned, checksum-verified Java and signal-cli into the user's folder: no Homebrew,
 /// no admin password, no Terminal. See `signal_install.sh`.
 const SIGNAL_INSTALL_SCRIPT: &str = include_str!("signal_install.sh");
+/// The Windows equivalent, run with PowerShell. See `signal_install.ps1`.
+const SIGNAL_INSTALL_PS1: &str = include_str!("signal_install.ps1");
 
 fn install_root() -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(".local/share/consilium-signal")
 }
 
-/// One-click install. With Homebrew it opens Terminal as before; without it, it runs the
+/// One-click install on macOS, Linux and Windows. With Homebrew on macOS it opens Terminal; otherwise it runs the
 /// password-free install in the background and the panel follows `install_running`.
 pub fn start_install() -> Result<Option<&'static str>, String> {
-    if !cfg!(any(target_os = "macos", target_os = "linux")) {
-        return Err("One-click install is for macOS and Linux. On Windows, install Java 21 or newer and signal-cli from its GitHub releases page".into());
+    if cfg!(windows) && !cfg!(target_arch = "x86_64") {
+        return Err("One-click install on Windows needs a 64-bit Intel or AMD computer. Install Java 21 or newer and signal-cli from its GitHub releases page".into());
     }
     if cfg!(target_os = "macos") && find_tool("brew").is_some() {
         return Ok(None); // caller opens Terminal with `setup_command("install")`
@@ -607,8 +609,25 @@ pub fn start_install() -> Result<Option<&'static str>, String> {
     if install_root().join("installing").exists() {
         return Ok(Some("signal-cli is already installing"));
     }
-    std::process::Command::new("/bin/sh")
-        .args(["-c", SIGNAL_INSTALL_SCRIPT])
+    let mut cmd = if cfg!(windows) {
+        // Run from a file: passing a multi-line script through -Command mangles its quotes.
+        std::fs::create_dir_all(install_root()).map_err(|e| format!("couldn't prepare the install: {e}"))?;
+        let script = install_root().join("install.ps1");
+        std::fs::write(&script, SIGNAL_INSTALL_PS1).map_err(|e| format!("couldn't prepare the install: {e}"))?;
+        let mut c = std::process::Command::new("powershell.exe");
+        c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(&script);
+        c
+    } else {
+        let mut c = std::process::Command::new("/bin/sh");
+        c.args(["-c", SIGNAL_INSTALL_SCRIPT]);
+        c
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
