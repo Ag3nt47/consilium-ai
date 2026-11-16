@@ -749,15 +749,16 @@ function AgentDot({
           </span>
         )}
       </span>
-      {load !== undefined && (
-        <span
-          className="agent-load"
-          style={{ color: pressureColor(load) }}
-          title={`${agent.name}'s processes are using ${load}% of this PC (the busier of its CPU and memory share)`}
-        >
-          ▣ {load}%
-        </span>
-      )}
+      {/* Always present, at a fixed width, so the badge appearing or its digits changing
+          can't resize the name column and re-wrap the card. */}
+      <span
+        className="agent-load"
+        style={load !== undefined ? { color: pressureColor(load) } : { visibility: "hidden" }}
+        title={load !== undefined ? `${agent.name}'s processes are using ${load}% of this PC (the busier of its CPU and memory share)` : undefined}
+        aria-hidden={load === undefined}
+      >
+        {load !== undefined ? `▣ ${load}%` : ""}
+      </span>
       {isFrozen ? (
         <span className="agent-state" style={{ color: "var(--danger)" }} title="No output for a while; it may be stuck. Stop and resend if it doesn't recover.">Stalled</span>
       ) : isWorking ? (
@@ -819,20 +820,49 @@ function useSidebarFit(ref: { current: HTMLElement | null }) {
     const el = ref.current;
     if (!el) return;
     let frame = 0;
-    const fit = () => {
-      frame = 0;
+    let relax = 0;
+    let lastWidth = -1;
+    let lastHeight = -1;
+    const overflows = () => el.scrollHeight > el.clientHeight + 1;
+    // Full refit: the least compact level that fits. Used on window resizes and, throttled,
+    // once the content has been quiet for a while, so the sidebar can grow back.
+    const refit = () => {
       for (let level = 0; level <= SIDEBAR_FIT_MAX; level++) {
         el.dataset.fit = String(level);
-        if (el.scrollHeight <= el.clientHeight + 1) return;
+        if (!overflows()) return;
       }
     };
-    const schedule = () => { if (!frame) frame = requestAnimationFrame(fit); };
-    fit();
+    // Content changes (usage polls, Working…, load badges) only ever make the sidebar more
+    // compact straight away. Re-testing every lower level on each change made the council
+    // cards flip between levels, showing and hiding meters several times a second.
+    const tighten = () => {
+      let level = Number(el.dataset.fit ?? 0) || 0;
+      while (overflows() && level < SIDEBAR_FIT_MAX) el.dataset.fit = String(++level);
+    };
+    const run = () => {
+      frame = 0;
+      const resized = el.clientWidth !== lastWidth || el.clientHeight !== lastHeight;
+      lastWidth = el.clientWidth;
+      lastHeight = el.clientHeight;
+      if (resized) refit(); else tighten();
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(run);
+      // At most one full refit every 4 s, even while the content keeps changing.
+      if (!relax) relax = window.setTimeout(() => { relax = 0; refit(); }, 4000);
+    };
+    refit();
+    lastWidth = el.clientWidth;
+    lastHeight = el.clientHeight;
     const ro = new ResizeObserver(schedule);
     ro.observe(el);
     const mo = new MutationObserver(schedule);
     mo.observe(el, { childList: true, subtree: true, characterData: true });
-    return () => { ro.disconnect(); mo.disconnect(); if (frame) cancelAnimationFrame(frame); };
+    return () => {
+      ro.disconnect(); mo.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+      window.clearTimeout(relax);
+    };
   }, [ref]);
 }
 

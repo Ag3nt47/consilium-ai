@@ -1907,6 +1907,8 @@ button.attachment {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   margin-left: 4px;
+  min-width: 6ch;
+  text-align: right;
   transition: color 0.4s ease;
 }
 
