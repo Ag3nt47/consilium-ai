@@ -3154,3 +3154,13 @@ button.attachment {
 [data-theme="netrunner"] .main.has-wallpaper .topbar .btn {
   text-shadow: 0 0 4px #000, 0 0 8px #000;
 }
+
+/* Compact composer: tighter rows so the conversation gets more of the window. */
+.composer { padding: 6px 18px 10px; gap: 5px; }
+.composer-controls { gap: 6px; }
+.composer-controls .chip, .composer-controls .btn { padding-block: 2px; }
+.composer .persona-chips { margin: 0; gap: 5px; }
+.composer .persona-chips .chip { padding: 1px 9px; }
+.composer textarea { min-height: 44px; padding: 8px 10px; }
+.composer .send-buttons { gap: 4px; }
+.composer .send-buttons .btn { padding-block: 4px; }
