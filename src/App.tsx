@@ -909,16 +909,27 @@ export default function App() {
     api.uiLoaded().catch(() => undefined);
   }, []);
 
-  // A staged build is a file check, so polling it is cheap.
-  useEffect(() => {
-    const poll = () => {
-      api.updateAvailable().then(setStaged).catch(() => undefined);
-      api.uiUpdateAvailable().then(setStagedUi).catch(() => undefined);
-    };
-    poll();
-    const t = setInterval(poll, 15000);
-    return () => clearInterval(t);
+  // A staged build is a file check, so checking it is cheap. Check every few
+  // seconds, whenever the window comes back into view, and right after any new
+  // message, so the button appears as soon as an AI reports the update is ready.
+  const pollStaged = useCallback(() => {
+    api.updateAvailable().then(setStaged).catch(() => undefined);
+    api.uiUpdateAvailable().then(setStagedUi).catch(() => undefined);
   }, []);
+  useEffect(() => {
+    pollStaged();
+    const t = setInterval(pollStaged, 4000);
+    const onShow = () => {
+      if (document.visibilityState === "visible") pollStaged();
+    };
+    window.addEventListener("focus", pollStaged);
+    document.addEventListener("visibilitychange", onShow);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("focus", pollStaged);
+      document.removeEventListener("visibilitychange", onShow);
+    };
+  }, [pollStaged]);
 
   // Screen-only update: swap the page in place; the AIs' work carries on untouched.
   const applyUi = async () => {
@@ -1066,6 +1077,8 @@ export default function App() {
         }
       }
       refreshList();
+      // An AI saying an update is ready should light the button straight away.
+      if (e.kind === "message" && e.sender !== "human") pollStaged();
       // A note from Consilium (an AI ran out of usage, or is back) changes the AIs' status.
       if (e.sender === "consilium") refreshAgents();
     });
