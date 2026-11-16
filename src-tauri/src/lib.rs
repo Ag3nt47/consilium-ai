@@ -99,6 +99,7 @@ async fn agents_status(state: State<'_, AppState>) -> Result<Vec<agents::AgentIn
     while let Some(result) = tasks.join_next().await {
         let mut info = result.map_err(|e| format!("AI status check failed: {e}"))?;
         info.benched_until = state.engine.bench.until(&info.id, now);
+        info.reset_known = info.benched_until.is_some() && state.engine.bench.reset_known(&info.id);
         out.push(info);
     }
     sort_agents(&mut out, &config.get().members, |a| a.id.as_str());
@@ -442,7 +443,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: when your computers are linked in Settings, you can now answer a request or reply from either one. What you type in the copy of a conversation goes back to the computer that owns it, and only that computer's AIs answer. Linux copies installed from a .deb or .rpm package now update themselves too: Update Now installs the new package after the system's own password prompt. The ChatGPT card in the sidebar also shows the chance of an early usage reset.";
+const WHATS_NEW: &str = "What's new: auto-continue rounds and failed-check notes now actually get the AIs working; before, an AI that had already answered treated them as nothing new and stopped, so Consilium looked busy with no AI acting. The note saying no other AI can answer now only appears when that is true. An AI out of usage only shows a back-at time when its own tool reported it, and a used-up weekly limit keeps it out until that reset instead of a guessed 30 minutes. Settings has an Update Now button on every system, greyed out until a new version is ready to install.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs

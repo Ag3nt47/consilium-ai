@@ -5,7 +5,8 @@
 //! until the reset time (when the CLI says it) or a default cooldown has passed. A successful
 //! answer, or Retry in the UI, takes it off the bench early.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// How long an AI sits out when its CLI doesn't say when the limit resets.
@@ -17,15 +18,63 @@ const MAX_COOLDOWN_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 pub struct Bench {
     /// Agent id → time (ms since the epoch) its usage limit resets.
     until: Mutex<HashMap<String, u64>>,
+    /// Agents whose reset time came from the AI itself (its CLI's error or its usage reading),
+    /// not Consilium's default retry guess. Only these show a "back at" time.
+    known: Mutex<HashSet<String>>,
+    /// Consilium's data folder, whose usage.json says when each AI's plan limits reset.
+    data: Option<PathBuf>,
 }
 
 impl Bench {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn bench(&self, agent: &str, until_ms: u64) {
-        self.until.lock().unwrap().insert(agent.to_string(), until_ms);
+    /// A bench that also reads each AI's own usage reading, so an AI whose plan is used up until
+    /// a later reset (a weekly limit) isn't shown as back after the short default cooldown.
+    pub fn with_usage(data: PathBuf) -> Self {
+        Self { data: Some(data), ..Self::default() }
+    }
+
+    /// Bench `agent` until `until_ms`. `reported` says the time came from the AI's own error
+    /// message. Returns the reset time if it is verified, None if it is only Consilium's guess.
+    pub fn bench(&self, agent: &str, until_ms: u64, reported: bool) -> Option<u64> {
+        let now = crate::store::now_ms();
+        let later = self.data.as_ref().and_then(|d| exhausted_until(&crate::usage::load(d), agent, now));
+        let until = later.map_or(until_ms, |t| t.max(until_ms));
+        self.until.lock().unwrap().insert(agent.to_string(), until);
+        let known = reported || later.is_some();
+        let mut set = self.known.lock().unwrap();
+        if known {
+            set.insert(agent.to_string());
+        } else {
+            set.remove(agent);
+        }
+        known.then_some(until)
+    }
+
+    /// Whether the agent's reset time is verified by the AI itself.
+    pub fn reset_known(&self, agent: &str) -> bool {
+        self.known.lock().unwrap().contains(agent)
+    }
+
+    /// After a new usage reading: an AI already sitting out whose plan is used up until later
+    /// stays out until then; one whose reading shows usage left again is let back in.
+    pub fn update_from(&self, snapshot: &crate::usage::Snapshot, now: u64) {
+        let mut map = self.until.lock().unwrap();
+        for (agent, until) in map.iter_mut() {
+            match exhausted_until(snapshot, agent, now) {
+                Some(t) => {
+                    *until = (*until).max(t);
+                    self.known.lock().unwrap().insert(agent.clone());
+                }
+                None if snapshot.agents.get(agent).is_some_and(|u| plan_meter(u).0 > 0) && *until > now + DEFAULT_COOLDOWN_MS => {
+                    *until = now
+                }
+                None => {}
+            }
+        }
     }
 
     /// When the agent's limit resets, if it is still benched at `now`.
@@ -43,7 +92,33 @@ impl Bench {
 
     pub fn clear(&self, agent: &str) {
         self.until.lock().unwrap().remove(agent);
+        self.known.lock().unwrap().remove(agent);
     }
+}
+
+/// The meter that decides whether an AI can answer at all: its whole plan when the CLI reports
+/// one (a single model being used up doesn't stop it), otherwise the lowest limit.
+fn plan_meter(u: &crate::agents::UsageStatus) -> (u8, &[crate::agents::UsageWindow]) {
+    match &u.overall {
+        Some(o) => (o.remaining_percent, &o.windows),
+        None => (u.remaining_percent, &u.windows),
+    }
+}
+
+/// When an AI whose usage reading shows its plan used up (0% left) gets usage back: the latest
+/// reset among its used-up limits, capped at a week. None if it has usage left or no reset is known.
+pub fn exhausted_until(s: &crate::usage::Snapshot, agent: &str, now: u64) -> Option<u64> {
+    let (left, windows) = plan_meter(s.agents.get(agent)?);
+    if left > 0 {
+        return None;
+    }
+    windows
+        .iter()
+        .filter(|w| w.remaining_percent == 0)
+        .filter_map(|w| w.resets_at)
+        .filter(|&t| t > now)
+        .max()
+        .map(|t| t.min(now + MAX_COOLDOWN_MS))
 }
 
 /// If `error` says the AI is out of usage, when it resets (ms since the epoch); otherwise None.
@@ -72,6 +147,11 @@ pub fn usage_limit(error: &str, now: u64) -> Option<u64> {
     }
     let wait = reset_in_ms(&lower, now).unwrap_or(DEFAULT_COOLDOWN_MS).clamp(60_000, MAX_COOLDOWN_MS);
     Some(now + wait)
+}
+
+/// Whether `error` itself says when the limit resets (rather than Consilium guessing).
+pub fn reset_reported(error: &str, now: u64) -> bool {
+    reset_in_ms(&error.to_lowercase(), now).is_some()
 }
 
 /// "429" on its own (not inside a longer number), as in "HTTP 429" or "status: 429".
@@ -164,11 +244,46 @@ mod tests {
     #[test]
     fn bench_expires_and_clears() {
         let b = Bench::new();
-        b.bench("claude", NOW + 1000);
+        b.bench("claude", NOW + 1000, true);
         assert_eq!(b.until("claude", NOW), Some(NOW + 1000));
         assert_eq!(b.until("claude", NOW + 1000), None, "expired");
-        b.bench("gpt", NOW + 1000);
+        b.bench("gpt", NOW + 1000, true);
         b.clear("gpt");
         assert_eq!(b.until("gpt", NOW), None);
+    }
+
+    fn usage(overall_left: u8, weekly_left: u8, weekly_reset: u64) -> crate::usage::Snapshot {
+        use crate::agents::{UsageMeter, UsageStatus, UsageWindow};
+        let windows = vec![
+            UsageWindow { label: "5-hour limit".into(), remaining_percent: 100, resets_at: Some(NOW + 1_800_000) },
+            UsageWindow { label: "Weekly limit".into(), remaining_percent: weekly_left, resets_at: Some(weekly_reset) },
+        ];
+        let status = UsageStatus {
+            remaining_percent: 0,
+            windows: windows.clone(),
+            model: None,
+            overall: Some(UsageMeter { label: "ChatGPT".into(), remaining_percent: overall_left, windows, shared: false }),
+        };
+        let mut s = crate::usage::Snapshot::default();
+        s.agents.insert("gpt".into(), status);
+        s
+    }
+
+    #[test]
+    fn a_used_up_weekly_limit_keeps_an_ai_out_until_it_resets_not_the_short_cooldown() {
+        let friday = NOW + 3 * 86_400_000;
+        assert_eq!(exhausted_until(&usage(0, 0, friday), "gpt", NOW), Some(friday));
+        assert_eq!(exhausted_until(&usage(24, 24, friday), "gpt", NOW), None, "plan has usage left");
+        assert_eq!(exhausted_until(&usage(0, 0, friday), "claude", NOW), None, "no reading");
+
+        let b = Bench::new();
+        assert_eq!(b.bench("gpt", NOW + DEFAULT_COOLDOWN_MS, false), None, "a guessed cooldown isn't a verified time");
+        assert!(!b.reset_known("gpt"));
+        b.update_from(&usage(0, 0, friday), NOW);
+        assert_eq!(b.until("gpt", NOW), Some(friday));
+        assert!(b.reset_known("gpt"), "the weekly reset comes from the AI's own reading");
+        // Usage back early (an early reset): it's let back in.
+        b.update_from(&usage(100, 100, friday), NOW);
+        assert_eq!(b.until("gpt", NOW + 1), None);
     }
 }

@@ -175,7 +175,7 @@ impl Engine {
             config: Arc::new(Config::load(data.join("council.json"))),
             journal: Arc::new(Journal::load(data.join("turns.json"))),
             memory: Arc::new(Memory::new(data.join("memory.md"))),
-            bench: Arc::new(Bench::new()),
+            bench: Arc::new(Bench::with_usage(data.to_path_buf())),
             ui,
             spawn,
             make_host: Box::new(|engine, pending| Arc::new(RealHost::new(engine, pending))),
@@ -994,8 +994,9 @@ or run commands. Reply with exactly the word OK and nothing else.";
                     (true, reply.chars().take(80).collect())
                 }
                 Ok(Err(e)) => {
-                    if let Some(until) = bench::usage_limit(&e, store::now_ms()) {
-                        bench.bench(agent.id, until);
+                    let now = store::now_ms();
+                    if let Some(until) = bench::usage_limit(&e, now) {
+                        bench.bench(agent.id, until, bench::reset_reported(&e, now));
                     }
                     (false, e)
                 }

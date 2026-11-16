@@ -125,6 +125,8 @@ export interface AgentInfo {
   hint: string;
   /** When it ran out of usage: the time (ms since the epoch) its limit resets. */
   benched_until?: number | null;
+  /** Whether that time came from the AI's own tool, not Consilium's retry guess. */
+  reset_known?: boolean;
 }
 
 export interface UsageWindow {

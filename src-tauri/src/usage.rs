@@ -110,6 +110,7 @@ pub async fn refresh(engine: &Engine) -> Snapshot {
         None
     };
     save(&engine.data, &snapshot);
+    engine.bench.update_from(&snapshot, now_ms());
     snapshot
 }
 

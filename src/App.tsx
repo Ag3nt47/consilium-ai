@@ -756,7 +756,9 @@ function AgentDot({
         <span className="agent-state">{label}</span>
       ) : state === "benched" ? (
         <span className="agent-state benched" title="It ran out of usage. The council carries on without it until its limit resets.">
-          Out of usage · back {resetTime(agent.benched_until!)}
+          {agent.reset_known
+            ? <>Out of usage · back {resetTime(agent.benched_until!)}</>
+            : <span title="Its own tool hasn't reported when its limit resets, so no time is shown. Consilium tries it again now and then.">Out of usage · reset time not reported</span>}
           {agent.id === "gpt" && forecast && forecast.chance_24h != null && (
             <span className="forecast-chance" title={`codex-reset.com forecast: ${forecast.chance_24h}% chance in 24h, ${forecast.chance_48h ?? "?"}% in 48h`}>
               {" "}· {forecast.chance_24h}% reset chance
@@ -2774,13 +2776,27 @@ export default function App() {
               <button title="Check GitHub for a newer Consilium release now" className="btn ghost" onClick={checkNow}>
                 Check now
               </button>
+              <button
+                className="btn primary"
+                disabled={!staged || updating}
+                onClick={updateNow}
+                title={
+                  staged
+                    ? `Pause the AIs, install ${staged.version} (now ${staged.current}) and restart. Their work resumes after the restart.`
+                    : update
+                      ? `${update.latest} is on GitHub but hasn't finished downloading yet. This button lights up when it's ready to install.`
+                      : "You're on the newest version. This button lights up when a new one is ready to install."
+                }
+              >
+                {updating ? "Updating…" : staged ? `Update Now · ${staged.version}` : "Update Now"}
+              </button>
               <button title="Open the list of all Consilium releases on GitHub" className="link" onClick={() => openUrl(RELEASES_URL)}>
                 All releases
               </button>
               <span className="muted">{updateNote}</span>
             </div>
             <p className="muted small">
-              Updates are never installed automatically. Consilium only tells you when a new release exists.
+              A new version downloads in the background and is checked against GitHub's fingerprint; it's only installed when you click Update Now.
               Your conversations stay on this computer. CLI agents use their provider's existing sign-in;
               optional API-agent keys are saved locally and are never added to the conversation or returned to this UI.
             </p>

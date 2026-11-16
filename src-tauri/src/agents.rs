@@ -75,6 +75,9 @@ pub struct AgentInfo {
     pub hint: String,
     /// When it ran out of usage, the time (ms since the epoch) its limit resets.
     pub benched_until: Option<u64>,
+    /// Whether `benched_until` came from the AI itself (not Consilium's retry guess).
+    #[serde(default)]
+    pub reset_known: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -689,6 +692,7 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
         path: None,
         hint: install_hint.into(),
         benched_until: None,
+        reset_known: false,
     };
     let Some(path) = find(kind) else { return info };
     info.path = Some(path.display().to_string());
@@ -736,6 +740,7 @@ async fn api_status(agent: &Agent, provider: &crate::apiagent::Provider, member:
         path: None,
         hint: format!("Create an API key at {} and paste it here. It stays on this computer.", provider.key_page),
         benched_until: None,
+        reset_known: false,
     };
     if !crate::apiagent::has_key(agent.id, provider) {
         return info;

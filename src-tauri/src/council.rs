@@ -103,8 +103,14 @@ pub struct Progress {
     pub last: HashMap<String, u64>,
 }
 
+/// Whether `e` asks the council for a fresh round: the human's message, or a Consilium note
+/// addressed to the council (auto-continue, failed GitHub checks). Answers before it don't count.
+fn starts_turn(e: &Event) -> bool {
+    (e.sender == "human" && e.kind == "message") || (e.sender == CONSILIUM && e.kind == "system" && !e.to.is_empty())
+}
+
 pub fn progress(events: &[Event]) -> Progress {
-    let start = events.iter().rposition(|e| e.sender == "human" && e.kind == "message").map_or(0, |i| i + 1);
+    let start = events.iter().rposition(starts_turn).map_or(0, |i| i + 1);
     let mut p = Progress::default();
     for e in &events[start..] {
         if e.sender == "human" || e.sender == CONSILIUM {
@@ -139,7 +145,7 @@ impl Council {
         let events = store.load(&turn.conversation).unwrap_or_default();
         let done = progress(&events);
         let mut state = State::default();
-        for e in events.iter().filter(|e| e.kind == "message") {
+        for e in events.iter().filter(|e| e.kind == "message" || starts_turn(e)) {
             state.latest.insert(e.sender.clone(), e.seq);
         }
         state.answered = done.answered.clone();
@@ -430,15 +436,14 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
             Err(why) => {
                 let now = now_ms();
                 if let Some(until) = bench::usage_limit(&why, now) {
-                    s.bench.bench(&id, until);
+                    let when = match s.bench.bench(&id, until, bench::reset_reported(&why, now)) {
+                        Some(t) => format!("its limit resets in about {}", about(t.saturating_sub(now))),
+                        None => "it hasn't said when its limit resets".to_string(),
+                    };
                     note_as(
                         &s,
                         CONSILIUM,
-                        &format!(
-                            "{} ran out of usage (its limit resets in about {}); the council carries on without it.",
-                            agent.name,
-                            about(until - now)
-                        ),
+                        &format!("{} ran out of usage ({when}); the council carries on without it.", agent.name),
                     );
                 } else if let Ok(e) = s.store.append(&s.turn.conversation, &id, "error", vec![], &format!("{} couldn't answer: {why}", agent.name)) {
                     s.host.event(&e);
@@ -478,8 +483,13 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
                 if let Some(a) = pick {
                     st.live.insert(a.id.to_string());
                     st.joined.insert(a.id.to_string());
+                    Some(Some(a))
+                } else if s.turn.members.iter().filter(|m| **m != id).filter_map(|m| agents::by_id(m)).any(|a| s.bench.until(a.id, now).is_none() && s.host.installed(a)) {
+                    // Others could answer; they have already taken part in this turn.
+                    None
+                } else {
+                    Some(None)
                 }
-                Some(pick)
             } else {
                 None
             }
@@ -663,7 +673,7 @@ mod tests {
     async fn a_benched_ai_is_skipped_at_the_start_and_says_so() {
         let (store, c) = setup();
         let bench = Arc::new(Bench::new());
-        bench.bench("claude", now_ms() + 3_600_000);
+        bench.bench("claude", now_ms() + 3_600_000, true);
         let f = Arc::new(fake(|id, _, _| Ok(format!("{id} here"))));
         let ev = go(&store, &c, f.clone(), &["claude", "gpt"], 1, bench).await;
         assert_eq!(said(&ev), vec![("gpt".into(), "gpt here".into())]);
@@ -806,6 +816,10 @@ mod tests {
         assert!(p.passed.contains("claude"));
         assert!(!p.answered.contains_key(CONSILIUM));
         store.append(&c, "human", "message", vec![], "next").unwrap();
+        assert_eq!(progress(&store.load(&c).unwrap()), Progress::default());
+        // A Consilium note addressed to the council (auto-continue) starts a fresh round too.
+        store.append(&c, "gpt", "message", vec![], "b").unwrap();
+        store.append(&c, CONSILIUM, "system", vec!["gpt".into()], "Auto-continue").unwrap();
         assert_eq!(progress(&store.load(&c).unwrap()), Progress::default());
     }
 }
