@@ -442,7 +442,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: computers linked in Settings now copy each conversation's new messages to one another, as a conversation named for the computer it came from. An AI on the other computer shows with that computer's name, such as Claude (MacBook), so two copies of the same AI are never confused, and two computers with the same name get a short tag to tell them apart. Copied messages never run requests, tasks or saved notes, and never start a turn. If a linked computer sends more than 40 messages in a minute, copying from it pauses for that minute, so AIs caught in a loop can't flood the other computer.";
+const WHATS_NEW: &str = "What's new: pictures, documents and other files now travel through Signal both ways. A file you send from your phone arrives in the chat as your message, so every AI can see it, and files attached in the chat are sent to your Note to Self. Under Ask, an AI that runs out of usage is switched off and switched back on when its limit resets. Auto-continue starts another round by itself while tasks are still open, and pauses after 8 rounds, when a question is waiting for you, or when nothing changes; switch it off in Settings. On Windows, the one-click Signal Install button now shows, and Windows and Linux self-updates are checked against GitHub's fingerprint before they run.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs

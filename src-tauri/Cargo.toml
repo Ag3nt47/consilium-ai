@@ -1,6 +1,6 @@
 [package]
 name = "consilium"
-version = "0.3.28"
+version = "0.3.29"
 description = "A council of minds: several AIs and a human in one conversation"
 license = "MIT"
 edition = "2021"

@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "consilium"
-version = "0.3.28"
+version = "0.3.29"
 dependencies = [
  "chacha20poly1305",
  "dirs",
