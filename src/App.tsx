@@ -1252,6 +1252,30 @@ export default function App() {
     });
     knownMembers.current = ids;
   }, [agents, members]);
+
+  // An AI that runs out of usage is switched off under Ask, and switched back on when its limit
+  // resets, unless the human changed that chip themselves in the meantime.
+  const autoOff = useRef<Set<string>>(new Set());
+  const exhaustedKey = members.filter(isExhausted).map((m) => m.id).sort().join(",");
+  useEffect(() => {
+    const out = new Set(exhaustedKey ? exhaustedKey.split(",") : []);
+    setTargets((t) => {
+      let next = t;
+      for (const id of out) {
+        if (next.includes(id)) {
+          next = next.filter((x) => x !== id);
+          autoOff.current.add(id);
+        }
+      }
+      for (const id of [...autoOff.current]) {
+        if (out.has(id)) continue;
+        autoOff.current.delete(id);
+        if (members.some((m) => m.id === id) && !next.includes(id)) next = [...next, id];
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exhaustedKey]);
   const others = useMemo(() => agents.filter((a) => !a.member), [agents]);
 
   // Sending while the AIs are answering doesn't interrupt them: they read it and carry on. Stop interrupts.
@@ -1853,8 +1877,10 @@ export default function App() {
     for (const a of notReady) await setupAgent(a);
   }
 
-  const toggleTarget = (id: string) =>
+  const toggleTarget = (id: string) => {
+    autoOff.current.delete(id);
     setTargets((t) => (t.includes(id) ? t.filter((x) => x !== id) : [...t, id]));
+  };
 
   const paletteCommands = useMemo(() => [
     { id: "new-conv", name: "New Conversation", hint: "Start a fresh topic", run: () => { newConversation(); } },
@@ -2307,7 +2333,11 @@ export default function App() {
           <div className="composer-controls">
             <span className="section-label">Ask</span>
             {members.map((a) => (
-              <label key={a.id} className={`chip chip-${a.id} ${targets.includes(a.id) ? "on" : ""}`}>
+              <label
+                key={a.id}
+                className={`chip chip-${a.id} ${targets.includes(a.id) ? "on" : ""}${isExhausted(a) ? " chip-exhausted" : ""}`}
+                title={isExhausted(a) ? `${a.name} is out of usage, so it's switched off until its limit resets. Click to ask it anyway.` : undefined}
+              >
                 <input type="checkbox" checked={targets.includes(a.id)} onChange={() => toggleTarget(a.id)} />
                 {a.name}
                 {!readyIds.has(a.id) && <span className="chip-warn" title={a.hint}>!</span>}
