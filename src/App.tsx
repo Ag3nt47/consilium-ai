@@ -1854,8 +1854,9 @@ export default function App() {
             );
           })}
           </div>
-          <ResourcePressureGauge pressure={pressure} />
         </div>
+        <div className="sidebar-foot">
+        <ResourcePressureGauge pressure={pressure} />
         <div className="sidebar-actions">
           <button className="btn ghost" onClick={() => setShowAddAi(true)} title="Add or remove AIs">
             + Add AI
@@ -1874,6 +1875,7 @@ export default function App() {
           >
             Settings
           </button>
+        </div>
         </div>
       </aside>
 

@@ -3220,3 +3220,16 @@ button.attachment {
 .modal.confirm-modal { width: min(420px, 92vw); gap: 12px; }
 .confirm-modal p { margin: 0; line-height: 1.45; overflow-wrap: anywhere; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+
+/* Sidebar layout: the brand, New conversation and the footer (PC pressure, Add AI, Settings)
+   never move. The conversation list shrinks first, then the council list scrolls inside its
+   own box when the window is too short or there are five or more AIs. */
+.sidebar { overflow: hidden; }
+.sidebar .brand { flex-shrink: 0; }
+.conversations { flex: 0 3 auto; }
+.sidebar .agents { flex: 1 1 auto; min-height: 90px; display: flex; flex-direction: column; }
+.sidebar .agents > .section-label { flex-shrink: 0; }
+.agent-list { flex: 0 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+.agent-list.scrolls { padding-right: 3px; scrollbar-gutter: stable; }
+.sidebar-foot { flex-shrink: 0; margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
+.sidebar-actions .btn { white-space: nowrap; }
