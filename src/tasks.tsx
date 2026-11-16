@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { api, type TaskBoard, type TaskItem, type TaskOp } from "./api";
 
 const STATUS_LABEL: Record<TaskItem["status"], string> = {
@@ -23,7 +23,8 @@ export function TaskBoardPanel({
   people: { id: string; name: string }[];
 }) {
   const [board, setBoard] = useState<TaskBoard>({ tasks: [], next: 0 });
-  const [open, setOpen] = useState(true);
+  // Pinned open by a click; otherwise it opens while the pointer or keyboard focus is on it.
+  const [pinned, setPinned] = useState(false);
   const [title, setTitle] = useState("");
   const [error, setError] = useState("");
 
@@ -50,23 +51,48 @@ export function TaskBoardPanel({
   // Open work first, newest finished last.
   const order = { doing: 0, blocked: 1, todo: 2, done: 3 } as const;
   const tasks = [...board.tasks].sort((a, b) => order[a.status] - order[b.status] || a.id - b.id);
+  const current = tasks.find((t) => t.status === "doing") ?? tasks.find((t) => t.status === "blocked") ?? tasks.find((t) => t.status === "todo");
 
   return (
-    <div className="task-board">
-      <div className="section-label">
-        <button className="link task-board-toggle" onClick={() => setOpen(!open)} title="Show or hide the shared task checklist">
-          {open ? "▾" : "▸"} Tasks
-        </button>
-        <span title={`${done} of ${total} tasks done`}>
-          {total ? `${done}/${total} · ${pct}%` : "none yet"}
-        </span>
-      </div>
-      {total > 0 && (
-        <div className="task-progress" aria-hidden>
-          <div style={{ width: `${pct}%` }} />
+    <div
+      className={`task-float${pinned ? " pinned" : ""}`}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") setPinned(false);
+      }}
+    >
+      <button
+        className="task-chip"
+        onClick={() => setPinned(!pinned)}
+        aria-expanded={pinned}
+        title={pinned ? "Close the task checklist" : "Shared task checklist: hover to peek, click to keep it open"}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="5" y="4" width="14" height="17" rx="2" />
+          <rect x="9" y="2" width="6" height="4" rx="1" />
+          <path d="M9 12l2 2 4-4" />
+        </svg>
+        <span className="task-chip-count">{total ? `${pct}%` : "0"}</span>
+        {total > 0 && (
+          <span className="task-chip-ring" aria-hidden style={{ "--pct": `${pct}%` } as CSSProperties} />
+        )}
+      </button>
+      <div className="task-pop" role="dialog" aria-label="Shared task checklist">
+        <div className="task-pop-head">
+          <b>Tasks</b>
+          <span title={`${done} of ${total} tasks done`}>{total ? `${done} of ${total} done · ${pct}%` : "none yet"}</span>
         </div>
-      )}
-      {open && (
+        {total > 0 && (
+          <div className="task-progress" aria-hidden>
+            <div style={{ width: `${pct}%` }} />
+          </div>
+        )}
+        {current && (
+          <div className={`task-current ${current.status}`}>
+            <span className="task-current-label">{current.status === "doing" ? "Now" : current.status === "blocked" ? "Blocked" : "Next"}</span>
+            #{current.id} {current.title}
+            {current.owner ? <span className="task-current-owner"> · {nameOf(current.owner)}</span> : null}
+          </div>
+        )}
         <>
           <ul className="task-list">
             {tasks.map((t) => (
@@ -128,7 +154,7 @@ export function TaskBoardPanel({
           </form>
           {error && <div className="task-error">{error}</div>}
         </>
-      )}
+      </div>
     </div>
   );
 }

@@ -3142,9 +3142,23 @@ button.attachment {
 }
 
 /* Shared task checklist in the sidebar. */
-.task-board { margin-top: 10px; min-width: 0; }
-.task-board .section-label { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
-.task-board-toggle { font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; padding: 0; }
+/* Shared task checklist: a small clipboard at the top right of the chat. Hovering peeks at it,
+   clicking keeps it open, Esc closes it. */
+.task-float-anchor { position: relative; height: 0; z-index: 25; flex-shrink: 0; }
+.task-float { position: absolute; top: 8px; right: 22px; display: flex; flex-direction: column; align-items: flex-end; }
+.task-chip { position: relative; display: flex; align-items: center; gap: 5px; padding: 5px 9px; border-radius: 999px; border: 1px solid var(--border); background: color-mix(in srgb, var(--bg-2) 82%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); color: inherit; cursor: pointer; font-size: 11.5px; line-height: 1; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25); }
+.task-chip:hover, .task-float.pinned .task-chip { border-color: var(--accent); }
+.task-chip-count { font-variant-numeric: tabular-nums; opacity: 0.85; }
+.task-chip-ring { width: 12px; height: 12px; border-radius: 50%; background: conic-gradient(var(--accent) var(--pct), color-mix(in srgb, var(--accent) 20%, transparent) 0); }
+.task-pop { display: none; margin-top: 6px; width: min(300px, calc(100vw - 80px)); max-height: min(60vh, 460px); overflow-y: auto; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: color-mix(in srgb, var(--bg-2) 92%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); box-shadow: 0 10px 32px rgba(0, 0, 0, 0.4); overscroll-behavior: contain; }
+.task-float:hover .task-pop, .task-float:focus-within .task-pop, .task-float.pinned .task-pop { display: block; }
+.task-pop-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12px; }
+.task-pop-head span { font-size: 11px; opacity: 0.75; }
+.task-current { font-size: 12px; margin: 2px 0 8px; padding: 6px 8px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 12%, transparent); overflow-wrap: anywhere; }
+.task-current.blocked { background: color-mix(in srgb, #e5534b 14%, transparent); }
+.task-current-label { display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.75; margin-right: 6px; }
+.task-current-owner { opacity: 0.75; }
+.task-pop .task-list { max-height: none; overflow: visible; }
 .task-progress { height: 3px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 18%, transparent); margin: 2px 0 6px; overflow: hidden; }
 .task-progress > div { height: 100%; background: var(--accent); transition: width 0.3s ease; }
 .task-list { list-style: none; margin: 0; padding: 0; max-height: 30vh; overflow-y: auto; }
@@ -3170,7 +3184,8 @@ button.attachment {
 /* Sidebar: the conversation list keeps a usable share of the panel and scrolls on its own;
    the council list grows to four members and scrolls from the fifth. */
 .sidebar .btn.wide { flex-shrink: 0; font-size: clamp(12px, 1vw + 4px, 14px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.conversations { flex: 1 1 auto; min-height: min(140px, 20vh); max-height: 34vh; overscroll-behavior: contain; }
+.conversations { flex: 1 1 auto; min-height: min(72px, 12vh); max-height: 34vh; overscroll-behavior: contain; }
+.sidebar .agents, .sidebar .sidebar-actions { flex-shrink: 0; }
 .conv { font-size: clamp(12px, 0.9vw + 4px, 13.5px); }
 .agent-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .agent-list.scrolls { max-height: min(46vh, 480px); overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 3px; scrollbar-gutter: stable; }

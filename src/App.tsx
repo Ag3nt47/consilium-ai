@@ -1856,11 +1856,6 @@ export default function App() {
           </div>
           <ResourcePressureGauge pressure={pressure} />
         </div>
-        <TaskBoardPanel
-          conversation={current}
-          changeKey={events.length}
-          people={[{ id: "human", name: "You" }, ...members.map((m) => ({ id: m.id, name: m.name }))]}
-        />
         <div className="sidebar-actions">
           <button className="btn ghost" onClick={() => setShowAddAi(true)} title="Add or remove AIs">
             + Add AI
@@ -2030,6 +2025,13 @@ export default function App() {
             }}
           />
         )}
+        <div className="task-float-anchor">
+          <TaskBoardPanel
+            conversation={current}
+            changeKey={events.length}
+            people={[{ id: "human", name: "You" }, ...members.map((m) => ({ id: m.id, name: m.name }))]}
+          />
+        </div>
         <section className="messages">
           {!events.length && (
             <div className="empty">
