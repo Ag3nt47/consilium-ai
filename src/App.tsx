@@ -340,7 +340,7 @@ function pendingRequests(events: ChatEvent[], answered: Map<string, RequestResol
   if (afterSeq === null) return [];
   const out: string[] = [];
   for (const e of events) {
-    if (e.seq <= afterSeq || e.kind !== "message" || e.sender === "human") continue;
+    if (e.seq <= afterSeq || (e.kind !== "message" && e.kind !== "error") || e.sender === "human") continue;
     for (const [line, text] of e.text.split("\n").entries()) {
       if (!/^\s*REQUEST:\s*\S/i.test(text)) continue;
       const key = requestKey(e.id, line);
@@ -1869,7 +1869,12 @@ export default function App() {
                   );
                 })}
               </article>
-            ) : e.kind === "seen" ? null : (
+            ) : e.kind === "seen" ? null : e.kind === "error" && e.sender !== "human" && /^\s*REQUEST:\s*\S/im.test(e.text) ? (
+              // A blocked turn asking for approval (e.g. one elevated command) gets the same buttons as a message.
+              <div key={e.id} className={`note note-${e.kind}`}>
+                <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={decide} respond={respondToRequest} />
+              </div>
+            ) : (
               <div key={e.id} className={`note note-${e.kind}`}>
                 {e.text}
               </div>

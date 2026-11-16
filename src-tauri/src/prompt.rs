@@ -229,7 +229,7 @@ pub fn elevated_command_grants(events: &[Event], me: &str) -> Vec<String> {
     };
     let requested_by_me = events.iter().rev().any(|event| {
         event.seq < approval.seq
-            && event.kind == "message"
+            && matches!(event.kind.as_str(), "message" | "error")
             && event.sender == me
             && event.requests.iter().any(|candidate| candidate == request)
     });
@@ -741,6 +741,14 @@ mod tests {
         let mut later = ev("human", "also update the docs");
         later.seq = 3;
         assert!(elevated_command_grants(&[asked.clone(), approved.clone(), later], "gpt").is_empty());
+
+        // The emergency brake records a blocked turn as an "error" event; its REQUEST must still grant.
+        let mut blocked = asked.clone();
+        blocked.kind = "error".into();
+        assert_eq!(
+            elevated_command_grants(&[blocked, approved.clone()], "gpt"),
+            vec!["sudo apt-get install widget"]
+        );
 
         approved.text = format!("Approved: {request} --changed");
         assert!(elevated_command_grants(&[asked, approved], "gpt").is_empty());

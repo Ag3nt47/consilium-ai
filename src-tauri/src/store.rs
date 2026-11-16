@@ -427,7 +427,8 @@ impl Store {
             kind: kind.to_string(),
             to,
             text: text.to_string(),
-            requests: if kind == "message" { requests_in(text) } else { vec![] },
+            // An AI's blocked turn ("error") can carry a REQUEST, e.g. an elevated command awaiting approval.
+            requests: if kind == "message" || (kind == "error" && sender != "human") { requests_in(text) } else { vec![] },
             add_ai: if kind == "message" && sender != "human" { add_ai_in(text) } else { vec![] },
             seen,
             usage,
@@ -502,6 +503,19 @@ mod tests {
     fn temp_store() -> (Store, PathBuf) {
         let dir = std::env::temp_dir().join(format!("consilium-test-{}", uuid::Uuid::new_v4()));
         (Store::new(dir.clone()).unwrap(), dir)
+    }
+
+    #[test]
+    fn a_blocked_ai_turn_keeps_its_request_so_it_can_be_approved() {
+        let (store, dir) = temp_store();
+        let c = store.create("x").unwrap();
+        let blocked = store
+            .append(&c.id, "gpt", "error", vec![], "GPT couldn't answer: approval required.\nREQUEST: Run it? ELEVATED_COMMAND_JSON: \"sudo true\"")
+            .unwrap();
+        assert_eq!(blocked.requests, vec![r#"Run it? ELEVATED_COMMAND_JSON: "sudo true""#.to_string()]);
+        let mine = store.append(&c.id, "human", "error", vec![], "REQUEST: not an AI").unwrap();
+        assert!(mine.requests.is_empty());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
