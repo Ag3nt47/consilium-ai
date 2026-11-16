@@ -3001,3 +3001,108 @@ button.attachment {
   border-color: rgba(239, 68, 68, 0.4) !important;
 }
 
+
+/* ---------- Compact top bar: one slim row, title + project on the left, status and actions on the right ---------- */
+.topbar {
+  padding: 5px 16px;
+  gap: 10px;
+  flex-wrap: nowrap;
+  min-height: 0;
+}
+.topbar .title-block {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.topbar h1 {
+  font-size: 14.5px;
+  line-height: 1.2;
+  flex: 0 1 auto;
+  min-width: 120px;
+}
+.topbar .workspace {
+  flex-wrap: nowrap;
+  font-size: 11.5px;
+  min-width: 0;
+  flex: 0 100 auto;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.topbar .workspace .folder {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+  min-width: 0;
+}
+.topbar .workspace .folder::before {
+  content: "/ ";
+  color: var(--muted);
+  opacity: 0.6;
+}
+.topbar .workspace .link { font-size: 11px; display: none; }
+.topbar .workspace:hover .link,
+.topbar .workspace:focus-within .link,
+.topbar .workspace .folder ~ .link:only-of-type,
+.topbar .workspace > .link:first-child { display: inline; }
+.topbar-actions {
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+.topbar-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 4px;
+}
+.topbar .palette-key {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  opacity: 0.75;
+}
+.topbar .wallpaper-pill {
+  padding: 1px 6px;
+  max-width: none;
+}
+.topbar-actions .btn {
+  padding: 3px 9px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.topbar .msg-indicator,
+.topbar .link-indicator { max-width: 130px; }
+@media (max-width: 1250px) {
+  .topbar .msg-label,
+  .topbar .link-label { display: none; }
+  .topbar .msg-indicator,
+  .topbar .link-indicator { padding-right: 4px; }
+}
+@media (max-width: 1050px) {
+  .topbar .workspace { display: none; }
+  .topbar-actions .btn { padding: 3px 7px; font-size: 11.5px; }
+}
+@media (max-width: 860px) {
+  .topbar { flex-wrap: wrap; }
+}
+
+/* Netrunner keeps the daily wallpaper visible behind its grid, with a light, see-through top bar. */
+[data-effects="on"][data-theme="netrunner"] .main.has-wallpaper {
+  background:
+    repeating-linear-gradient(to right, #00ff6608 0 1px, #0000 1px 48px),
+    repeating-linear-gradient(to bottom, #00ff6606 0 1px, #0000 1px 48px),
+    var(--bing-wallpaper) center / cover no-repeat fixed,
+    #000;
+}
+[data-theme="netrunner"] .main.has-wallpaper .topbar {
+  background: rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(6px) saturate(1.1);
+  -webkit-backdrop-filter: blur(6px) saturate(1.1);
+  border-bottom-color: #13532a99;
+}
+[data-theme="netrunner"] .main.has-wallpaper .topbar h1,
+[data-theme="netrunner"] .main.has-wallpaper .topbar .btn {
+  text-shadow: 0 0 4px #000, 0 0 8px #000;
+}

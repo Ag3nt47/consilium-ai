@@ -1839,36 +1839,14 @@ export default function App() {
         )}
         <header className="topbar">
           <div className="title-block">
-            <MessagingIndicator />
-            <LinkIndicator />
-            {wallpaper && prefs.bingWallpaper && wallpaper.title && (
-              <span
-                className="wallpaper-pill"
-                title={wallpaper.copyright ? `${wallpaper.title} (${wallpaper.copyright})` : wallpaper.title}
-              >
-                🖼️ {wallpaper.title}
-              </span>
-            )}
             <h1 onDoubleClick={renameCurrent} title="Double-click to rename">
               {meta?.title ?? "Consilium"}
             </h1>
-            <button
-              className="link hover-faint"
-              onClick={() => {
-                setPaletteQuery("");
-                setPaletteIndex(0);
-                setShowPalette(true);
-              }}
-              title={`Open command palette (${paletteKeyWords})`}
-              style={{ fontSize: "11px", padding: "2px 7px", border: "1px solid var(--border)", borderRadius: "4px" }}
-            >
-              {paletteKey}
-            </button>
             <div className="workspace">
               {meta?.workspace ? (
                 <>
                   <span className="folder" title={meta.workspace}>
-                    Project: <b>{folderName(meta.workspace)}</b>
+                    <b>{folderName(meta.workspace)}</b>
                   </span>
                   <button title="Pick a different project folder for this conversation" className="link" onClick={chooseFolder}>change</button>
                   <button title="Stop using a project folder; the AIs only chat" className="link" onClick={clearFolder}>remove</button>
@@ -1876,7 +1854,7 @@ export default function App() {
               ) : council?.default_workspace ? (
                 <>
                   <span className="folder" title={council.default_workspace}>
-                    Project: <b>{folderName(council.default_workspace)}</b> (default)
+                    <b>{folderName(council.default_workspace)}</b> (default)
                   </span>
                   <button title="Pick a different project folder for this conversation" className="link" onClick={chooseFolder}>use another folder</button>
                 </>
@@ -1889,6 +1867,29 @@ export default function App() {
             </div>
           </div>
           <div className="topbar-actions">
+            <div className="topbar-status">
+              <MessagingIndicator />
+              <LinkIndicator />
+              {wallpaper && prefs.bingWallpaper && wallpaper.title && (
+                <span
+                  className="wallpaper-pill"
+                  title={wallpaper.copyright ? `${wallpaper.title} (${wallpaper.copyright})` : wallpaper.title}
+                >
+                  🖼️
+                </span>
+              )}
+              <button
+                className="link hover-faint palette-key"
+                onClick={() => {
+                  setPaletteQuery("");
+                  setPaletteIndex(0);
+                  setShowPalette(true);
+                }}
+                title={`Open command palette (${paletteKeyWords})`}
+              >
+                {paletteKey}
+              </button>
+            </div>
             <button
               title="Ask every AI for a concise report of completed work, current work, blockers, uncommitted changes and next step"
               className="btn ghost status-request"
@@ -1913,7 +1914,7 @@ export default function App() {
               Repos
             </button>
             <button title="Copy the whole conversation to the clipboard as Markdown" className="btn ghost" onClick={exportCurrent} disabled={!events.length}>
-              Copy as Markdown
+              Copy
             </button>
             <button title="Delete this conversation permanently" className="btn ghost danger" onClick={deleteCurrent}>
               Delete
