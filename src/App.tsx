@@ -1892,32 +1892,51 @@ export default function App() {
             </div>
             <button
               title="Ask every AI for a concise report of completed work, current work, blockers, uncommitted changes and next step"
-              className="btn ghost status-request"
+              className="btn ghost status-request compact-action"
               onClick={requestStatus}
               disabled={!current || !members.length || requestingStatus}
+              aria-label={requestingStatus ? "Requesting status from every AI" : "Request status from every AI"}
             >
-              {requestingStatus ? "Requesting…" : "Status Request"}
+              <span className="topbar-action-icon" aria-hidden="true">{requestingStatus ? "…" : "↻"}</span>
+              <span className="topbar-action-label">{requestingStatus ? "Requesting…" : "Status"}</span>
             </button>
             <button
               title="Open the audit log: every approval, request, update, council change, phone message and error, newest first"
-              className={`btn ghost ${auditOpen ? "on" : ""}`}
+              className={`btn ghost compact-action ${auditOpen ? "on" : ""}`}
               onClick={() => setAuditOpen((o) => !o)}
               disabled={!current}
+              aria-label="Open audit log"
             >
-              Audit Log
+              <span className="topbar-action-icon" aria-hidden="true">≡</span>
+              <span className="topbar-action-label">Audit</span>
             </button>
             <button
               title="Inspect a GitHub repo: a sandboxed copy that runs none of its code, then a report"
-              className={`btn ghost ${repoOpen ? "on" : ""}`}
+              className={`btn ghost compact-action ${repoOpen ? "on" : ""}`}
               onClick={() => setRepoOpen((o) => !o)}
+              aria-label="Inspect a GitHub repository"
             >
-              Repos
+              <span className="topbar-action-icon repo-icon" aria-hidden="true">&lt;/&gt;</span>
+              <span className="topbar-action-label">Repos</span>
             </button>
-            <button title="Copy the whole conversation to the clipboard as Markdown" className="btn ghost" onClick={exportCurrent} disabled={!events.length}>
-              Copy
+            <button
+              title="Copy the whole conversation to the clipboard as Markdown"
+              className="btn ghost compact-action"
+              onClick={exportCurrent}
+              disabled={!events.length}
+              aria-label="Copy conversation as Markdown"
+            >
+              <span className="topbar-action-icon" aria-hidden="true">⧉</span>
+              <span className="topbar-action-label">Copy</span>
             </button>
-            <button title="Delete this conversation permanently" className="btn ghost danger" onClick={deleteCurrent}>
-              Delete
+            <button
+              title="Delete this conversation permanently"
+              className="btn ghost danger compact-action"
+              onClick={deleteCurrent}
+              aria-label="Delete conversation permanently"
+            >
+              <span className="topbar-action-icon" aria-hidden="true">⌫</span>
+              <span className="topbar-action-label">Delete</span>
             </button>
           </div>
         </header>

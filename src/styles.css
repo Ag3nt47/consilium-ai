@@ -3004,23 +3004,24 @@ button.attachment {
 
 /* ---------- Compact top bar: one slim row, title + project on the left, status and actions on the right ---------- */
 .topbar {
-  padding: 5px 16px;
-  gap: 10px;
+  padding: 3px 10px;
+  gap: 6px;
   flex-wrap: nowrap;
   min-height: 0;
 }
 .topbar .title-block {
   flex-direction: row;
   align-items: center;
-  gap: 10px;
-  flex: 1 1 auto;
+  gap: 7px;
+  flex: 1 1 0;
   min-width: 0;
 }
 .topbar h1 {
-  font-size: 14.5px;
+  font-size: 14px;
   line-height: 1.2;
   flex: 0 1 auto;
-  min-width: 120px;
+  min-width: 0;
+  max-width: min(30vw, 280px);
 }
 .topbar .workspace {
   flex-wrap: nowrap;
@@ -3048,45 +3049,91 @@ button.attachment {
 .topbar .workspace > .link:first-child { display: inline; }
 .topbar-actions {
   flex-wrap: nowrap;
-  gap: 4px;
+  gap: 2px;
+  flex: 0 0 auto;
 }
 .topbar-status {
   display: flex;
   align-items: center;
-  gap: 5px;
-  margin-right: 4px;
+  gap: 2px;
+  margin-right: 1px;
 }
 .topbar .palette-key {
   font-size: 10.5px;
-  padding: 1px 6px;
+  width: 26px;
+  height: 24px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 4px;
   opacity: 0.75;
 }
 .topbar .wallpaper-pill {
-  padding: 1px 6px;
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   max-width: none;
 }
 .topbar-actions .btn {
-  padding: 3px 9px;
-  font-size: 12px;
+  padding: 2px 6px;
+  font-size: 11.5px;
   white-space: nowrap;
 }
+.topbar .compact-action {
+  display: inline-grid;
+  place-items: center;
+  width: 27px;
+  height: 24px;
+  min-width: 27px;
+  padding: 0;
+}
+.topbar-action-label { display: none; }
+.topbar-action-icon {
+  display: inline-grid;
+  place-items: center;
+  line-height: 1;
+  font-size: 14px;
+}
+.topbar-action-icon.repo-icon {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: -1px;
+}
 .topbar .msg-indicator,
-.topbar .link-indicator { max-width: 130px; }
-@media (max-width: 1250px) {
-  .topbar .msg-label,
-  .topbar .link-label { display: none; }
-  .topbar .msg-indicator,
-  .topbar .link-indicator { padding-right: 4px; }
+.topbar .link-indicator {
+  width: 24px;
+  height: 24px;
+  padding: 2px;
+  border-radius: 6px;
+}
+.topbar .msg-label,
+.topbar .link-label { display: none; }
+.topbar .msg-indicator,
+.topbar .link-indicator { justify-content: center; }
+.topbar .msg-mark,
+.topbar .link-mark {
+  width: 14px;
+  height: 14px;
+  font-size: 9px;
 }
 @media (max-width: 1050px) {
   .topbar .workspace { display: none; }
-  .topbar-actions .btn { padding: 3px 7px; font-size: 11.5px; }
 }
 @media (max-width: 860px) {
-  .topbar { flex-wrap: wrap; }
+  .topbar { flex-wrap: nowrap; }
+  .topbar h1 { max-width: 150px; }
+  .topbar-actions {
+    width: auto;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+  }
+  .topbar-actions .btn { flex: 0 0 auto; }
+  .topbar .wallpaper-pill { display: none; }
 }
+
+/* Keep the first conversation item close to the slim control strip. */
+.messages { padding-top: 10px; }
 
 /* Netrunner keeps the daily wallpaper visible behind its grid, with a light, see-through top bar. */
 [data-effects="on"][data-theme="netrunner"] .main.has-wallpaper {

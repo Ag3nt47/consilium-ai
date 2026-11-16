@@ -122,4 +122,5 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 | Adaptive support for older or weaker PCs | ✅ | Portable CPU/RAM profile caps local AI processes across the app and terminal; high pressure reduces polling and GPU-heavy visual effects |
 | Crash-safe fail-forward behavior | ✅ | OS-held AI slots release after crashes; a broken capacity gate does not lock the user out; Stop remains cancellation-aware while queued |
 | Clear Netrunner REQUEST callouts | ✅ | Opaque dark-red panel, brighter border/text and unblurred action buttons |
+| Compact conversation controls | ✅ | Messaging, peer-link, status, audit, repo, copy and delete controls fit in one slim icon row with tooltips and accessible labels; the chat starts directly below it without a narrow-window second row |
 | Disk & temporary artifact cleanup script | ✅ | `scripts/clean.mjs` (`npm run clean`, `npm run clean:all`, `./scripts/clean.sh`) scrubs idle build workspaces, logs, test artifacts and optional caches with dry-run previews; live turns, builds, updates and capacity locks are preserved |
