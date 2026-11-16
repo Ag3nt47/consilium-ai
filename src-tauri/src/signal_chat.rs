@@ -62,6 +62,82 @@ pub struct Incoming {
     pub origin: Origin,
     pub text: String,
     pub timestamp: u64,
+    /// Files sent with the message (pictures, documents), still on Signal's side.
+    pub files: Vec<RemoteFile>,
+    /// The Signal group it was sent in; None for Note to Self.
+    pub group: Option<String>,
+}
+
+/// A file attached to a phone message, fetched from signal-cli with `getAttachment`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFile {
+    pub id: String,
+    pub name: String,
+}
+
+/// Most files taken from one phone message.
+const MAX_FILES: usize = 10;
+
+/// A file name for a Signal attachment: its own name, or one made from its type.
+fn attachment_name(a: &Value, id: &str) -> String {
+    if let Some(n) = a.get("filename").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()) {
+        return n.to_string();
+    }
+    let ext = match a.get("contentType").and_then(Value::as_str).unwrap_or("") {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/heic" => "heic",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        "video/mp4" => "mp4",
+        "audio/aac" => "aac",
+        "audio/mpeg" => "mp3",
+        _ => "bin",
+    };
+    let short: String = id.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+    format!("signal-{short}.{ext}")
+}
+
+/// Decodes standard base64 (as signal-cli returns attachment data); None if it isn't valid.
+fn decode_base64(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' | b'\n' | b'\r' | b' ' => continue,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
+/// Downloads one attachment of a phone message from signal-cli.
+fn fetch_file(cfg: &BridgeConfig, group: Option<&str>, f: &RemoteFile) -> Result<Vec<u8>, String> {
+    let mut params = json!({"id": f.id});
+    match group {
+        Some(g) => params["groupId"] = json!(g),
+        None => params["recipient"] = json!(cfg.account),
+    }
+    let r = call(cfg, "getAttachment", params)?;
+    let data = r.get("data").and_then(Value::as_str).or_else(|| r.as_str()).ok_or("no data")?;
+    if data.len() as u64 > crate::attach::MAX_BYTES * 4 / 3 + 16 {
+        return Err("too large".into());
+    }
+    decode_base64(data).ok_or_else(|| "bad data".to_string())
 }
 
 /// Reads a daemon `receive` notification. Returns the human's own message when it was sent into
@@ -77,12 +153,26 @@ pub fn parse_incoming(v: &Value, account: &str, groups: &bridge::SignalGroups) -
         return None;
     }
     let sent = env.pointer("/syncMessage/sentMessage")?;
-    let text = sent.get("message").and_then(Value::as_str)?.trim();
-    if text.is_empty() {
+    let text = sent.get("message").and_then(Value::as_str).unwrap_or("").trim();
+    let files: Vec<RemoteFile> = sent
+        .get("attachments")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|a| {
+                    let id = a.get("id").and_then(Value::as_str)?.to_string();
+                    Some(RemoteFile { name: attachment_name(a, &id), id })
+                })
+                .take(MAX_FILES)
+                .collect()
+        })
+        .unwrap_or_default();
+    if text.is_empty() && files.is_empty() {
         return None;
     }
     let timestamp = sent.get("timestamp").and_then(Value::as_u64).unwrap_or(0);
-    let origin = match sent.pointer("/groupInfo/groupId").and_then(Value::as_str) {
+    let group = sent.pointer("/groupInfo/groupId").and_then(Value::as_str).map(String::from);
+    let origin = match group.as_deref() {
         Some(g) if !groups.main.is_empty() && g == groups.main => Origin::Council,
         Some(g) => Origin::Agent(groups.agents.iter().find(|(_, id)| id.as_str() == g)?.0.clone()),
         None => {
@@ -94,7 +184,7 @@ pub fn parse_incoming(v: &Value, account: &str, groups: &bridge::SignalGroups) -
             Origin::Council
         }
     };
-    Some(Incoming { origin, text: text.chars().take(8000).collect(), timestamp })
+    Some(Incoming { origin, text: text.chars().take(8000).collect(), timestamp, files, group })
 }
 
 /// REQUESTs in `events` not yet answered with "Approved:", "Denied:" or "Response to request:",
@@ -195,7 +285,16 @@ fn send_group(cfg: &BridgeConfig, group: &str, text: &str) -> Result<(), String>
 /// number, so its groups have no other member and a group send reaches nobody; Note to Self is
 /// the one chat Signal delivers to the human's phone.
 fn send_self(cfg: &BridgeConfig, text: &str) -> Result<(), String> {
-    call(cfg, "send", json!({"recipient": [cfg.account.clone()], "message": text})).map(|_| ())
+    send_self_files(cfg, text, &[])
+}
+
+/// Sends to Note to Self with files (pictures, documents) attached from Consilium's own copies.
+fn send_self_files(cfg: &BridgeConfig, text: &str, files: &[String]) -> Result<(), String> {
+    let mut params = json!({"recipient": [cfg.account.clone()], "message": text});
+    if !files.is_empty() {
+        params["attachments"] = json!(files);
+    }
+    call(cfg, "send", params).map(|_| ())
 }
 
 /// The Note to Self text for a reply, naming the private group when it answers one.
@@ -344,7 +443,7 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
         if !crate::link_answers_signal() {
             continue;
         }
-        let reply = deliver(engine, &mut out, msg);
+        let reply = deliver(engine, &cfg, &mut out, msg);
         if let Err(e) = send_self(&cfg, reply) {
             eprintln!("signal chat: couldn't acknowledge the phone message: {e}");
         }
@@ -353,7 +452,7 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
 
 /// Posts a phone message as the human's message in the newest conversation, and returns the
 /// ready-made notice that tells the phone what happened to it.
-fn deliver(engine: &Arc<Engine>, out: &mut Outbox, msg: Incoming) -> &'static str {
+fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Incoming) -> &'static str {
     let Some(conv) = engine.store.list().into_iter().find(|c| !crate::peer_sync::is_mirror(&c.id)) else {
         return notice::NO_CONVERSATION;
     };
@@ -384,7 +483,28 @@ fn deliver(engine: &Arc<Engine>, out: &mut Outbox, msg: Incoming) -> &'static st
     };
     let targets: Vec<String> = targets.into_iter().filter(|t| members.contains(t)).collect();
     let nobody = targets.is_empty();
-    match engine.send_via(&conv.id, &text, vec![], targets, 1, Some("Signal")) {
+    // Pictures and documents sent from the phone are saved into the conversation, so every AI
+    // sees them like files attached in the app.
+    let mut attachments = Vec::new();
+    let mut failed = 0;
+    for f in &msg.files {
+        match fetch_file(cfg, msg.group.as_deref(), f).and_then(|b| engine.attach_bytes(&conv.id, &f.name, &b)) {
+            Ok(a) => attachments.push(a),
+            Err(e) => {
+                eprintln!("signal chat: couldn't take {} from Signal: {e}", f.name);
+                failed += 1;
+            }
+        }
+    }
+    let mut text = text;
+    if failed > 0 {
+        text.push_str(&format!("\n\n({failed} file(s) sent from the phone couldn't be downloaded from Signal.)"));
+    }
+    let text = text.trim().to_string();
+    if text.is_empty() && attachments.is_empty() {
+        return notice::NOT_POSTED;
+    }
+    match engine.send_via(&conv.id, &text, attachments, targets, 1, Some("Signal")) {
         Ok(e) => {
             out.origins.insert(e.id.clone(), msg.origin);
             if out.origins.len() > 500 {
@@ -433,7 +553,25 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
             if e.sender == "human" {
                 last_human = Some(e);
             }
-            let Some(text) = outbound_text(e) else { continue };
+            // Files attached in the app (by you or an AI) go to the phone with the message; files
+            // that came from the phone aren't sent back.
+            let from_phone = e.via.as_deref().is_some_and(|v| v.eq_ignore_ascii_case("signal"));
+            let dir = engine.store.files_dir(&conv.id);
+            let files: Vec<String> = if from_phone {
+                vec![]
+            } else {
+                e.attachments
+                    .iter()
+                    .filter(|a| crate::attach::belongs(&dir, a) && std::path::Path::new(&a.path).is_file())
+                    .take(MAX_FILES)
+                    .map(|a| a.path.clone())
+                    .collect()
+            };
+            let text = match outbound_text(e) {
+                Some(t) => t,
+                None if !files.is_empty() && e.sender == "human" => format!("You: (sent {} file(s))", files.len()),
+                None => continue,
+            };
             // An AI answering a message sent from its own group answers there.
             let asked_privately = last_human
                 .and_then(|h| out.origins.get(&h.id))
@@ -441,7 +579,7 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
             let private_to = asked_privately
                 .then(|| crate::agents::by_id(&e.sender).map_or(e.sender.clone(), |a| a.name.to_string()));
             let formatted = self_text(&text, private_to.as_deref());
-            if let Err(err) = send_self(cfg, &formatted) {
+            if let Err(err) = send_self_files(cfg, &formatted, &files) {
                 eprintln!("signal chat: couldn't send to Signal: {err}");
             }
             let group = if asked_privately { cfg.groups.agents.get(&e.sender) } else { None };
@@ -476,12 +614,33 @@ mod tests {
         let main = sync(ACC, json!({"message": "hi all", "timestamp": 7, "groupInfo": {"groupId": "MAIN="}}));
         assert_eq!(
             parse_incoming(&main, ACC, &g),
-            Some(Incoming { origin: Origin::Council, text: "hi all".into(), timestamp: 7 })
+            Some(Incoming {
+                origin: Origin::Council,
+                text: "hi all".into(),
+                timestamp: 7,
+                files: vec![],
+                group: Some("MAIN=".into())
+            })
         );
         let own = sync(ACC, json!({"message": "just you", "timestamp": 8, "groupInfo": {"groupId": "CLAUDE="}}));
         assert_eq!(parse_incoming(&own, ACC, &g).unwrap().origin, Origin::Agent("claude".into()));
         let note = sync(ACC, json!({"message": "note", "destinationNumber": ACC}));
         assert_eq!(parse_incoming(&note, ACC, &g).unwrap().origin, Origin::Council);
+    }
+
+    #[test]
+    fn takes_files_sent_from_the_phone() {
+        let g = groups();
+        let pic = sync(ACC, json!({"timestamp": 9, "destinationNumber": ACC,
+            "attachments": [{"id": "abc123XYZ.jpg", "contentType": "image/jpeg"},
+                            {"id": "q2", "contentType": "application/pdf", "filename": "plan.pdf"}]}));
+        let m = parse_incoming(&pic, ACC, &g).expect("a picture with no text is still a message");
+        assert_eq!(m.text, "");
+        assert_eq!(m.group, None);
+        assert_eq!(m.files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["signal-abc123XY.jpg", "plan.pdf"]);
+        assert_eq!(decode_base64("aGVsbG8gd29ybGQ=").unwrap(), b"hello world");
+        assert_eq!(decode_base64("aGk").unwrap(), b"hi");
+        assert_eq!(decode_base64("a*b"), None);
     }
 
     #[test]
