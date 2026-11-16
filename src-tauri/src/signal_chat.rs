@@ -151,6 +151,21 @@ fn send_group(cfg: &BridgeConfig, group: &str, text: &str) -> Result<(), String>
     call(cfg, "send", json!({"groupId": group, "message": text})).map(|_| ())
 }
 
+/// Sends to the account's own Note to Self. Consilium runs as a linked device of the human's own
+/// number, so its groups have no other member and a group send reaches nobody; Note to Self is
+/// the one chat Signal delivers to the human's phone.
+fn send_self(cfg: &BridgeConfig, text: &str) -> Result<(), String> {
+    call(cfg, "send", json!({"recipient": [cfg.account.clone()], "message": text})).map(|_| ())
+}
+
+/// The Note to Self text for a reply, naming the private group when it answers one.
+pub fn self_text(text: &str, private_to: Option<&str>) -> String {
+    match private_to {
+        Some(name) => format!("(Consilium · {name}, private)\n{text}"),
+        None => text.to_string(),
+    }
+}
+
 fn create_group(cfg: &BridgeConfig, name: &str, description: &str) -> Result<String, String> {
     let r = call(cfg, "updateGroup", json!({"name": name, "description": description}))?;
     r.get("groupId").and_then(Value::as_str).map(String::from).ok_or_else(|| "signal-cli gave no group ID".into())
@@ -345,9 +360,9 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
         let asked_privately = last_human
             .and_then(|h| out.origins.get(&h.id))
             .is_some_and(|o| *o == Origin::Agent(e.sender.clone()));
-        let group = if asked_privately { cfg.groups.agents.get(&e.sender) } else { None };
-        let group = group.unwrap_or(&cfg.groups.main);
-        if let Err(err) = send_group(cfg, group, &text) {
+        let private_to = asked_privately
+            .then(|| crate::agents::by_id(&e.sender).map_or(e.sender.clone(), |a| a.name.to_string()));
+        if let Err(err) = send_self(cfg, &self_text(&text, private_to.as_deref())) {
             eprintln!("signal chat: couldn't send to Signal: {err}");
         }
     }
@@ -411,6 +426,12 @@ mod tests {
         .unwrap();
         e.requests = requests.into_iter().map(String::from).collect();
         e
+    }
+
+    #[test]
+    fn private_replies_name_their_group() {
+        assert_eq!(self_text("[Claude] hi", None), "[Claude] hi");
+        assert_eq!(self_text("[Claude] hi", Some("Claude")), "(Consilium · Claude, private)\n[Claude] hi");
     }
 
     #[test]
