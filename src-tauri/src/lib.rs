@@ -145,6 +145,23 @@ fn reset_forecast(state: State<AppState>) -> Option<usage::Forecast> {
     usage::load(&state.engine.data).forecast
 }
 
+/// "Always allow" on a REQUEST: saves the exact elevated/install command(s) it names, so every AI
+/// may run them on this computer from now on without asking again. Only the human's click reaches
+/// this; requests without a machine-readable command are refused.
+#[tauri::command]
+fn save_approval(state: State<AppState>, request: String) -> Result<config::Council, String> {
+    let grants = prompt::grants_in_request(request.trim());
+    if grants.is_empty() {
+        return Err("this request has no exact command to remember".into());
+    }
+    state.engine.config.save_grants(&grants)
+}
+
+#[tauri::command]
+fn forget_approval(state: State<AppState>, grant: String) -> Result<config::Council, String> {
+    state.engine.config.forget_grant(&grant)
+}
+
 #[tauri::command]
 fn set_reset_forecast(state: State<AppState>, on: bool) -> Result<(), String> {
     state.engine.config.set_reset_forecast(on).map(|_| ())
@@ -310,7 +327,7 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 /// Shown to the human and the AIs after an update to this version.
 const WHATS_NEW: &str = "What's new: the conversation header controls (messaging, pairing sync, status request, audit log, \
 repos, copy, delete) are condensed into a single ultra-compact icon row, pulling the chat box and conversation upward with minimal gap. \
-Also includes hardened peer-link retries and partial-line framing repairs for Mac and Windows sync.";
+Also includes hardened peer-link retries and partial-line framing repairs for Mac and Windows sync. Admin and install requests now have an Always allow button: the exact command is remembered on this computer so no AI has to ask for it again, and Settings → Saved approvals removes it.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -762,6 +779,8 @@ pub fn run() {
             install_cli,
             reset_forecast,
             set_reset_forecast,
+            save_approval,
+            forget_approval,
             attach_files,
             attach_data,
             open_attachment,

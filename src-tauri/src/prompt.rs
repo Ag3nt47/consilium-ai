@@ -244,6 +244,12 @@ pub fn elevated_command_grants(events: &[Event], me: &str) -> Vec<String> {
     if !requested_by_me {
         return Vec::new();
     }
+    grants_in_request(request)
+}
+
+/// The machine-readable grants an approval of `request` gives: the exact elevated command and/or
+/// the exact install command (marked with [`INSTALL_GRANT_PREFIX`]).
+pub fn grants_in_request(request: &str) -> Vec<String> {
     elevated_command_in_request(request)
         .into_iter()
         .chain(
@@ -251,6 +257,26 @@ pub fn elevated_command_grants(events: &[Event], me: &str) -> Vec<String> {
                 .map(|command| format!("{INSTALL_GRANT_PREFIX}{command}")),
         )
         .collect()
+}
+
+/// Prompt text listing the exact commands the human chose to always allow on this computer, so an
+/// AI runs them without asking again. Empty when there are none.
+pub fn saved_grants_note(grants: &[String]) -> String {
+    if grants.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "\n\nSaved approvals: the human chose \"Always allow\" for these exact commands on this computer. \
+You may run them without a new REQUEST, as written, character for character. Any other command, or any \
+change to one of these, still needs its own REQUEST.\n",
+    );
+    for grant in grants {
+        match grant.strip_prefix(INSTALL_GRANT_PREFIX) {
+            Some(command) => s.push_str(&format!("- install: {}\n", serde_json::to_string(command).unwrap_or_default())),
+            None => s.push_str(&format!("- elevated: {}\n", serde_json::to_string(grant).unwrap_or_default())),
+        }
+    }
+    s
 }
 
 pub fn system(me: &str, round: u32, rounds: u32, ctx: &Context) -> String {
@@ -782,6 +808,16 @@ mod tests {
 
         approved.text = format!("Approved: {request} --changed");
         assert!(elevated_command_grants(&[asked, approved], "gpt").is_empty());
+    }
+
+    #[test]
+    fn saved_grants_are_parsed_exactly_and_listed_for_the_ais() {
+        let request = r#"Install ripgrep? INSTALL_COMMAND_JSON: "cargo install ripgrep@14.1.1""#;
+        assert_eq!(grants_in_request(request), vec![format!("{INSTALL_GRANT_PREFIX}cargo install ripgrep@14.1.1")]);
+        assert!(grants_in_request("May I go ahead?").is_empty());
+        assert_eq!(saved_grants_note(&[]), "");
+        let note = saved_grants_note(&[format!("{INSTALL_GRANT_PREFIX}brew install jq"), "sudo true".into()]);
+        assert!(note.contains("- install: \"brew install jq\"") && note.contains("- elevated: \"sudo true\""));
     }
 
     #[test]

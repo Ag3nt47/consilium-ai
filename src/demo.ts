@@ -147,6 +147,8 @@ function stepState(step: number): { events: ChatEvent[]; thinking: string | null
 
 const state = stepState(demoStep);
 
+const demoCouncilForApprovals = { members: ["gpt", "claude", "gemini"], access: {}, default_workspace: null, default_access: "chat" as const, saved_grants: [] };
+
 export const demoApi = {
   agents: async () => agents,
   usage: async () => Object.fromEntries(agents.flatMap((a) => (a.usage ? [[a.id, a.usage]] : []))),
@@ -225,6 +227,8 @@ export const demoApi = {
   runCommand: async () => { throw new Error("Run works in the app, not the demo"); },
   pickFiles: async () => [],
   setResetForecast: async () => undefined,
+  saveApproval: async () => ({ ...demoCouncilForApprovals }),
+  forgetApproval: async () => ({ ...demoCouncilForApprovals }),
   cliStatus: async () => ({ installed: true, path: "~/.local/bin/consilium", command: "consilium chat", note: "" }),
   installCli: async () => ({ installed: true, path: "~/.local/bin/consilium", command: "consilium chat", note: "" }),
   selfCheck: async () => [

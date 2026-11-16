@@ -42,6 +42,10 @@ pub struct Council {
     /// human and the AIs). Off unless the person turns it on, since it asks a third-party site.
     #[serde(default)]
     pub reset_forecast: bool,
+    /// Exact elevated or install commands the human chose to always allow on this computer
+    /// (in the form `prompt::grants_in_request` returns). Every AI may run them without asking.
+    #[serde(default)]
+    pub saved_grants: Vec<String>,
 }
 
 impl Default for Council {
@@ -52,6 +56,7 @@ impl Default for Council {
             default_workspace: None,
             default_access: Access::Chat,
             reset_forecast: false,
+            saved_grants: Vec::new(),
         }
     }
 }
@@ -100,6 +105,30 @@ impl Config {
         let mut next = c.clone();
         next.default_access = access;
         next.access.clear();
+        self.save(&next)?;
+        *c = next.clone();
+        Ok(next)
+    }
+
+    /// Adds exact grants to the always-allowed list (duplicates ignored).
+    pub fn save_grants(&self, grants: &[String]) -> Result<Council, String> {
+        let mut c = self.current();
+        let mut next = c.clone();
+        for grant in grants {
+            if !next.saved_grants.contains(grant) {
+                next.saved_grants.push(grant.clone());
+            }
+        }
+        self.save(&next)?;
+        *c = next.clone();
+        Ok(next)
+    }
+
+    /// Removes one grant from the always-allowed list.
+    pub fn forget_grant(&self, grant: &str) -> Result<Council, String> {
+        let mut c = self.current();
+        let mut next = c.clone();
+        next.saved_grants.retain(|g| g != grant);
         self.save(&next)?;
         *c = next.clone();
         Ok(next)

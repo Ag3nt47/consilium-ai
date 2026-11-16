@@ -358,7 +358,7 @@ function requestElementId(key: string): string {
   return `request-${key}`;
 }
 
-type Decide = (key: string, request: string, requester: string, approved: boolean) => void;
+type Decide = (key: string, request: string, requester: string, approved: boolean, always?: boolean) => void;
 type Respond = (key: string, request: string, requester: string, response: string) => Promise<void>;
 
 /** Message text with REQUEST: lines shown as red request callouts, with decision controls when supplied. */
@@ -394,6 +394,7 @@ function MessageBody({ event, answered, deciding, decide, respond, commands }: {
                   answer={answered?.get(key)}
                   pending={deciding?.has(key)}
                   onDecide={(ok) => decide(key, m[1], event.sender, ok)}
+                  onAlways={hasExactCommand(m[1]) ? () => decide(key, m[1], event.sender, true, true) : undefined}
                   onRespond={(response) => respond?.(key, m[1], event.sender, response) ?? Promise.resolve()}
                 />
               )}
@@ -454,7 +455,12 @@ function CommandBox({ event, fence, index, actions }: { event: ChatEvent; fence:
   );
 }
 
-function RequestActions({ answer, pending, onDecide, onRespond }: { answer?: RequestResolution; pending?: boolean; onDecide: (approved: boolean) => void; onRespond: (response: string) => Promise<void> }) {
+/** True when a REQUEST names an exact admin or install command, which "Always allow" can save. */
+function hasExactCommand(request: string): boolean {
+  return /(ELEVATED|INSTALL)_COMMAND_JSON:\s*"/.test(request);
+}
+
+function RequestActions({ answer, pending, onDecide, onAlways, onRespond }: { answer?: RequestResolution; pending?: boolean; onDecide: (approved: boolean) => void; onAlways?: () => void; onRespond: (response: string) => Promise<void> }) {
   const [response, setResponse] = useState("");
   if (answer !== undefined) {
     const label = answer === "approved" ? "✓ Approved" : answer === "denied" ? "✕ Denied" : "↪ Responded";
@@ -474,6 +480,11 @@ function RequestActions({ answer, pending, onDecide, onRespond }: { answer?: Req
       <button title="Say yes: posts “Approved: …” to the council so the AI that asked can go ahead" type="button" className="btn small-btn approve" disabled={pending} onClick={() => onDecide(true)} aria-label="Approve this request">
         {pending ? "Sending…" : "Approve"}
       </button>
+      {onAlways && (
+        <button title="Approve, and remember this exact command on this computer so no AI has to ask for it again. Remove it any time in Settings → Saved approvals." type="button" className="btn small-btn approve always" disabled={pending} onClick={onAlways} aria-label="Approve and always allow this exact command">
+          Always allow
+        </button>
+      )}
       <button title="Say no: posts “Denied: …” to the council so the AI that asked won't do it" type="button" className="btn small-btn deny" disabled={pending} onClick={() => onDecide(false)} aria-label="Deny this request">
         Deny
       </button>
@@ -1340,11 +1351,12 @@ export default function App() {
   useEffect(() => () => speakerRef.current?.stop(), [current]);
 
   // Approve/Deny on a REQUEST callout sends the decision as the human's message, quoting the request.
-  async function decide(key: string, request: string, requester: string, approved: boolean) {
+  async function decide(key: string, request: string, requester: string, approved: boolean, always = false) {
     if (!current) return;
     setError(null);
     setDecidingRequests((pending) => new Set(pending).add(key));
     try {
+      if (always) setCouncil(await api.saveApproval(request));
       const selected = targets.filter((t) => members.some((m) => m.id === t));
       const to = members.some((m) => m.id === requester) ? [requester] : selected;
       await api.send(current, decisionText(request, approved), to, discuss ? rounds : 1);
@@ -2367,6 +2379,33 @@ export default function App() {
               </button>
               ; asks that site every 15 minutes at most)
             </label>
+            <div className="section-label">Saved approvals</div>
+            <p className="muted small">
+              Admin and install commands you chose to <b>Always allow</b>. Any AI may run these exact commands on this
+              computer without asking again; anything else still asks. Your computer still shows its own password prompt.
+            </p>
+            {(council?.saved_grants ?? []).length === 0 ? (
+              <p className="muted small">None yet.</p>
+            ) : (
+              <ul className="saved-grants">
+                {(council?.saved_grants ?? []).map((grant) => {
+                  const install = grant.startsWith("install\u0000");
+                  return (
+                    <li key={grant}>
+                      <span className="saved-grant-kind">{install ? "Install" : "Admin"}</span>
+                      <code>{install ? grant.slice("install\u0000".length) : grant}</code>
+                      <button
+                        title="Stop always allowing this command; the AIs will ask again"
+                        className="btn ghost small-btn"
+                        onClick={() => api.forgetApproval(grant).then(setCouncil).catch((e) => setError(`Couldn't remove it: ${e}`))}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
             <div className="section-label">Terminal</div>
             <p className="muted small">
               Talk to the council from a terminal too, in the same conversations: <code>consilium chat</code>, or{" "}

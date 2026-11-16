@@ -685,7 +685,17 @@ impl council::Host for RealHost {
             system.push_str(&usage);
         }
         let transcript = prompt::transcript(&events, agent.id);
-        let elevated_commands = prompt::elevated_command_grants(&events, agent.id);
+        let mut elevated_commands = prompt::elevated_command_grants(&events, agent.id);
+        // "Always allow" approvals saved on this computer apply to every AI, every turn.
+        let saved_grants = self.config.get().saved_grants;
+        if access == Access::Unrestricted || access == Access::Own {
+            system.push_str(&prompt::saved_grants_note(&saved_grants));
+            for grant in saved_grants {
+                if !elevated_commands.contains(&grant) {
+                    elevated_commands.push(grant);
+                }
+            }
+        }
         let files = crate::attach::files_for(&events, &self.store.files_dir(conv));
         let ws_path = workspace.map(PathBuf::from);
         let state_path = (access != Access::Chat).then(|| ws_path.clone()).flatten();

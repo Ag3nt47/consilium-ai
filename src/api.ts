@@ -58,6 +58,8 @@ export interface Council {
   default_access: Access;
   /** Show codex-reset.com's unofficial forecast of the next global Codex reset. */
   reset_forecast?: boolean;
+  /** Exact admin or install commands the human chose to always allow on this computer. */
+  saved_grants?: string[];
 }
 
 export const ACCESS_LEVELS: { id: Access; name: string; note: string }[] = [
@@ -293,6 +295,8 @@ const appApi = {
   /** The forecast of the next global Codex reset, when that setting is on. */
   resetForecast: () => invoke<ResetForecast | null>("reset_forecast"),
   setResetForecast: (on: boolean) => invoke<void>("set_reset_forecast", { on }),
+  saveApproval: (request: string) => invoke<Council>("save_approval", { request }),
+  forgetApproval: (grant: string) => invoke<Council>("forget_approval", { grant }),
   /** Whether the `consilium` terminal command is installed. */
   cliStatus: () => invoke<CliInstall>("cli_status"),
   installCli: () => invoke<CliInstall>("install_cli"),
