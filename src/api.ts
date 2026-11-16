@@ -183,6 +183,21 @@ export interface SystemPressure {
   agents?: Record<string, number>;
 }
 
+export interface SecurityScanStatus {
+  installed: boolean;
+  verified: boolean;
+  tool_path: string;
+  enabled: boolean;
+  interval_hours: number;
+  running: boolean;
+  last_started_ms: number;
+  last_finished_ms: number;
+  last_exit_code: number | null;
+  last_summary: string;
+  last_report: string | null;
+  paused_reason: string;
+}
+
 export interface TokenUsage {
   input_tokens: number;
   output_tokens: number;
@@ -321,6 +336,10 @@ const appApi = {
   setApiKey: (agent: string, key: string) => invoke<void>("set_api_key", { agent, key }),
   /** Samples host PC CPU and memory pressure (0-100%). */
   systemPressure: () => invoke<SystemPressure>("system_pressure"),
+  securityScanStatus: () => invoke<SecurityScanStatus>("security_scan_status"),
+  securityScanSave: (settings: { enabled: boolean; interval_hours: number }) =>
+    invoke<SecurityScanStatus>("security_scan_save", { settings }),
+  securityScanRun: () => invoke<SecurityScanStatus>("security_scan_run"),
   messagingStatus: () => invoke<ConnectorStatus[]>("messaging_status"),
   /** Messaging settings, phone number masked. */
   messagingConfig: () => invoke<MessagingSetup>("messaging_config"),

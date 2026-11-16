@@ -24,6 +24,7 @@ mod runcmd;
 mod redact;
 mod resume;
 mod setup;
+mod security_scan;
 mod store;
 mod toolbox;
 mod update;
@@ -53,6 +54,7 @@ fn data_override() -> Option<std::path::PathBuf> {
 
 struct AppState {
     engine: Arc<Engine>,
+    security: Arc<security_scan::Scanner>,
 }
 
 /// Shows what the engine does in the app's window.
@@ -590,6 +592,26 @@ fn system_pressure() -> pressure::SystemPressure {
     pressure::sample()
 }
 
+/// Read-only spyware scan scheduling. The external scanner is installed only after a separate,
+/// exact human approval; these commands merely configure and observe the adapter.
+#[tauri::command]
+fn security_scan_status(state: State<AppState>) -> security_scan::ScanStatus {
+    state.security.status()
+}
+
+#[tauri::command]
+fn security_scan_save(
+    state: State<AppState>,
+    settings: security_scan::ScanSettings,
+) -> Result<security_scan::ScanStatus, String> {
+    state.security.save_settings(settings)
+}
+
+#[tauri::command]
+fn security_scan_run(state: State<AppState>) -> Result<security_scan::ScanStatus, String> {
+    state.security.request_run()
+}
+
 /// Fetches today's Bing daily wallpaper and caches it locally, returning a base64 data URL.
 #[tauri::command]
 async fn get_daily_wallpaper() -> Result<Option<wallpaper::DailyWallpaper>, String> {
@@ -692,11 +714,13 @@ pub fn run() {
                 tauri::async_runtime::spawn(task);
             });
             let engine = Arc::new(Engine::open(&data, ui, spawn)?);
+            let security = security_scan::Scanner::open(&data);
             announce_update(&engine, &data);
             engine.resume_interrupted(None);
             // Keeps the window in step with the terminal command.
             tauri::async_runtime::spawn(engine.clone().watch(true));
-            app.manage(AppState { engine });
+            tauri::async_runtime::spawn(security.clone().watch(engine.clone()));
+            app.manage(AppState { engine, security });
             // Direct link to the user's other paired computers. Off until they pair or turn it on.
             let emitter = app.handle().clone();
             let handler: link::Handler = Arc::new(move |p: &peer_protocol::PeerPacket| {
@@ -761,6 +785,9 @@ pub fn run() {
             setup_agent,
             set_api_key,
             system_pressure,
+            security_scan_status,
+            security_scan_save,
+            security_scan_run,
             messaging_status,
             messaging_config,
             messaging_save,

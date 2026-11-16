@@ -38,6 +38,7 @@ import { installHoverTips } from "./tooltip";
 import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
 import { MessagingIndicator, MessagingSettings } from "./messaging";
 import { LinkIndicator, LinkSettings } from "./link";
+import { SecurityScanSettings } from "./security";
 import { ProjectVersions } from "./projects";
 import { RepoDrawer } from "./repo";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
@@ -2425,6 +2426,8 @@ export default function App() {
             <VoiceSettings agents={members.length ? members : agents} />
             <div className="section-label">Multi-Computer Sync (Mac &amp; Windows)</div>
             <LinkSettings />
+            <div className="section-label">Security scans</div>
+            <SecurityScanSettings />
             <div className="section-label">Updates</div>
             <label className="toggle">
               <input
