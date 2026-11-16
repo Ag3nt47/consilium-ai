@@ -304,10 +304,10 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: a Repos button (also in Cmd+K) inspects any public GitHub repo: Consilium \
-makes a private shallow copy that runs none of the repo's code, then reports its languages, size, licence, build files \
-and anything risky, and can hand that report to the council; plus the blue Request Update button beside Respond to \
-request.";
+const WHATS_NEW: &str = "What's new: Full-capacity turns now have an emergency brake for observable commands \
+that would broadly erase a project, reset uncommitted work, wipe a disk or shut down the computer. Consilium stops \
+the AI process tree and raises a REQUEST instead of letting the command continue. Provider-native permissions remain \
+the primary guard, with isolated worktrees still tracked as the next hardening step.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs

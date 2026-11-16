@@ -1,7 +1,7 @@
 {
   "name": "consilium",
   "private": true,
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "A council of minds: a desktop app where several AIs and a human work in one conversation.",
   "license": "MIT",
   "type": "module",
