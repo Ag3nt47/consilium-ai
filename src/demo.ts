@@ -269,6 +269,7 @@ export const demoApi = {
   runCommand: async () => { throw new Error("Run works in the app, not the demo"); },
   pickFiles: async () => [],
   setResetForecast: async () => undefined,
+  setAutoContinue: async () => undefined,
   tasksGet: async () => demoBoard,
   tasksApply: async (_id: string, op: { op: string; task?: string; title?: string; to?: string }) => {
     const num = Number((op.task ?? "").replace("#", ""));

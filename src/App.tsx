@@ -1748,6 +1748,15 @@ export default function App() {
     }
   }
 
+  async function toggleAutoContinue(on: boolean) {
+    try {
+      await api.setAutoContinue(on);
+      refreshAgents();
+    } catch (e) {
+      setError(`Couldn't change the setting: ${e}`);
+    }
+  }
+
   async function toggleForecast(on: boolean) {
     try {
       await api.setResetForecast(on);
@@ -2641,6 +2650,16 @@ export default function App() {
                 Save memory
               </button>
             </div>
+            <div className="section-label">Auto-continue</div>
+            <label className="toggle">
+              <input type="checkbox" checked={council?.auto_continue ?? true} onChange={(e) => toggleAutoContinue(e.target.checked)} />
+              Keep working through the task board without being told to continue
+            </label>
+            <p className="muted small">
+              When a turn ends with tasks still open, the AIs start another round 20 seconds later. It pauses after 8 rounds
+              on its own, after 2 rounds that change nothing on the board, while a request waits for your answer, and when
+              you press Stop. Any message from you starts it again.
+            </p>
             <div className="section-label">Usage</div>
             <p className="muted small">
               Each AI's card shows its current model's allowance left, with its whole plan underneath, and when they reset.

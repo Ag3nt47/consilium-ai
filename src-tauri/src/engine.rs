@@ -378,8 +378,12 @@ impl Engine {
             }
         }
         let cursor = *live.cursor.lock().unwrap();
+        let stopped = live.token.is_cancelled();
         drop(live);
         self.release(&conv, &pending.turn);
+        if !stopped {
+            self.schedule_auto_continue(&conv);
+        }
         // A message sent from the other process just before the lock was let go found it still
         // taken, so its sender left it to this process.
         let (late, last) = self.sent_elsewhere(&conv, cursor);
@@ -393,6 +397,37 @@ impl Engine {
         }
         if let Some(lock) = self.store.try_turn_lock(&conv) {
             self.begin(&mut running, Pending::new(&conv, targets, pending.rounds), Arc::new(lock), last);
+        }
+    }
+
+    /// After a turn ends, waits a little (so the human can step in), then starts another round if
+    /// the task board still has open work. See `autocontinue`.
+    fn schedule_auto_continue(self: &Arc<Self>, conv: &str) {
+        if !self.config.get().auto_continue {
+            return;
+        }
+        let engine = self.clone();
+        let conv = conv.to_string();
+        (self.spawn)(Box::pin(async move {
+            tokio::time::sleep(Duration::from_secs(crate::autocontinue::DELAY_SECS)).await;
+            engine.auto_continue(&conv);
+        }));
+    }
+
+    fn auto_continue(self: &Arc<Self>, conv: &str) {
+        if !self.config.get().auto_continue || self.busy(conv) {
+            return;
+        }
+        let events = self.store.load(conv).unwrap_or_default();
+        let board = crate::tasks::load(self.store.dir(), conv);
+        match crate::autocontinue::decide(&events, &board) {
+            crate::autocontinue::Decision::Continue(note) => {
+                let _ = self.note_for_council(conv, &note);
+            }
+            crate::autocontinue::Decision::Pause(note) => {
+                let _ = self.note(conv, &note);
+            }
+            crate::autocontinue::Decision::Stop => {}
         }
     }
 

@@ -96,6 +96,8 @@ export interface Council {
   reset_forecast?: boolean;
   /** Exact admin or install commands the human chose to always allow on this computer. */
   saved_grants?: string[];
+  /** Start another round automatically when a turn ends with tasks still open (on unless turned off). */
+  auto_continue?: boolean;
 }
 
 export const ACCESS_LEVELS: { id: Access; name: string; note: string }[] = [
@@ -357,6 +359,7 @@ const appApi = {
   /** The forecast of the next global Codex reset, when that setting is on. */
   resetForecast: () => invoke<ResetForecast | null>("reset_forecast"),
   setResetForecast: (on: boolean) => invoke<void>("set_reset_forecast", { on }),
+  setAutoContinue: (on: boolean) => invoke<void>("set_auto_continue", { on }),
   /** The conversation's shared task checklist. */
   tasksGet: (id: string) => invoke<TaskBoard>("tasks_get", { id }),
   /** A change by the human; Consilium also notes it in the chat. */

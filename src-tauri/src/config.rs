@@ -46,6 +46,13 @@ pub struct Council {
     /// (in the form `prompt::grants_in_request` returns). Every AI may run them without asking.
     #[serde(default)]
     pub saved_grants: Vec<String>,
+    /// Start another round on its own when a turn ends with tasks still open (see `autocontinue`).
+    #[serde(default = "yes")]
+    pub auto_continue: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Council {
@@ -57,6 +64,7 @@ impl Default for Council {
             default_access: Access::Chat,
             reset_forecast: false,
             saved_grants: Vec::new(),
+            auto_continue: true,
         }
     }
 }
@@ -188,6 +196,15 @@ impl Config {
         let mut c = self.current();
         let mut next = c.clone();
         next.reset_forecast = on;
+        self.save(&next)?;
+        *c = next.clone();
+        Ok(next)
+    }
+
+    pub fn set_auto_continue(&self, on: bool) -> Result<Council, String> {
+        let mut c = self.current();
+        let mut next = c.clone();
+        next.auto_continue = on;
         self.save(&next)?;
         *c = next.clone();
         Ok(next)

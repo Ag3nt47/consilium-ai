@@ -5,6 +5,7 @@
 mod agents;
 mod apiagent;
 mod attach;
+mod autocontinue;
 mod bench;
 mod ci;
 pub mod bridge;
@@ -194,6 +195,11 @@ fn tool_catalog() -> Vec<toolbox::CatalogEntry> {
 #[tauri::command]
 fn forget_approval(state: State<AppState>, grant: String) -> Result<config::Council, String> {
     state.engine.config.forget_grant(&grant)
+}
+
+#[tauri::command]
+fn set_auto_continue(state: State<AppState>, on: bool) -> Result<(), String> {
+    state.engine.config.set_auto_continue(on).map(|_| ())
 }
 
 #[tauri::command]
@@ -974,6 +980,7 @@ pub fn run() {
             install_cli,
             reset_forecast,
             set_reset_forecast,
+            set_auto_continue,
             save_approval,
             tool_catalog,
             forget_approval,
