@@ -842,6 +842,11 @@ async fn link_unpair(node_id: String) -> Result<link::LinkStatus, String> {
     Ok(l.status())
 }
 
+#[tauri::command]
+async fn link_test_peer(node_id: String) -> Result<link::PeerTestReport, String> {
+    the_link()?.test_peer(&node_id).await
+}
+
 /// Everything received from paired computers, oldest first, saved before it was acknowledged.
 #[tauri::command]
 async fn link_inbox() -> Result<Vec<peer_protocol::PeerPacket>, String> {
@@ -1004,6 +1009,7 @@ pub fn run() {
             link_pair_cancel,
             link_pair_join,
             link_unpair,
+            link_test_peer,
             link_inbox,
             link_send
         ])

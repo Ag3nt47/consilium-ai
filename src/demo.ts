@@ -358,6 +358,20 @@ export const demoApi = {
     peers: [],
     error: null,
   }),
+  linkTestPeer: async (nodeId: string) => ({
+    node_id: nodeId,
+    name: "Demo Peer",
+    connected: true,
+    active_route: "192.168.1.157:8470",
+    handshake_ok: true,
+    rtt_ms: 4,
+    routes: [
+      { addr: "192.168.1.157:8470", kind: "Gigabit / Wi-Fi LAN", reachable: true, rtt_ms: 4, status: "Reachable (4 ms)" },
+      { addr: "169.254.12.34:8470", kind: "Direct Cable / Bluetooth (Link-Local)", reachable: false, status: "Timed out" },
+    ],
+    queued_outgoing: 0,
+    summary: "✔ Handshake verified (4 ms via 192.168.1.157:8470) · Chats aligned (0 queued)",
+  }),
   linkInbox: async () => [],
   linkSend: async () => "demo-pkt-1",
 };

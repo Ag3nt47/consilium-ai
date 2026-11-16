@@ -2970,6 +2970,59 @@ button.attachment {
 .stat-item .status-val.offline {
   color: var(--muted);
 }
+.peer-test-report {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.test-header {
+  font-size: 11px;
+  font-weight: 600;
+}
+.test-summary-title {
+  color: #38bdf8;
+}
+.test-summary-text {
+  margin: 0;
+  color: var(--fg);
+}
+.test-routes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.test-route-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+}
+.test-route-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.route-kind-badge {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+}
+.test-route-status.reachable {
+  color: #4ade80;
+}
+.test-route-status.unreachable {
+  color: var(--muted);
+}
 .link-error {
   padding: 6px 10px;
   border: 1px solid rgba(239, 68, 68, 0.4);

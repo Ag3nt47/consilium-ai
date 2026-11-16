@@ -307,6 +307,26 @@ export type LinkPeer = {
   git: string | null;
 };
 
+export type RouteTest = {
+  addr: string;
+  kind: string;
+  reachable: boolean;
+  rtt_ms?: number;
+  status: string;
+};
+
+export type PeerTestReport = {
+  node_id: string;
+  name: string;
+  connected: boolean;
+  active_route: string | null;
+  handshake_ok: boolean;
+  rtt_ms: number | null;
+  routes: RouteTest[];
+  queued_outgoing: number;
+  summary: string;
+};
+
 export type LinkStatus = {
   enabled: boolean;
   node_id: string;
@@ -350,6 +370,7 @@ const appApi = {
   linkPairCancel: () => invoke<void>("link_pair_cancel"),
   linkPairJoin: (address: string, code: string) => invoke<LinkPeer>("link_pair_join", { address, code }),
   linkUnpair: (nodeId: string) => invoke<LinkStatus>("link_unpair", { nodeId }),
+  linkTestPeer: (nodeId: string) => invoke<PeerTestReport>("link_test_peer", { nodeId }),
   linkInbox: () => invoke<unknown[]>("link_inbox"),
   linkSend: (payload: unknown) => invoke<string>("link_send", { payload }),
   runCommand: (id: string, eventId: string, index: number) => invoke<ChatEvent>("run_command", { id, eventId, index }),

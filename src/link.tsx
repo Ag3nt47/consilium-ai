@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, type LinkPeer, type LinkStatus } from "./api";
+import { api, type LinkPeer, type LinkStatus, type PeerTestReport } from "./api";
 
 /** Topbar status light and button for multi-computer sync (Mac & Windows).
  *  Displays connection health, fastest active route, and opens the sync setup modal on click. */
@@ -505,6 +505,9 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
 }
 
 function PeerCard({ peer, onUnpair }: { peer: LinkPeer; onUnpair: () => void }) {
+  const [testing, setTesting] = useState(false);
+  const [testReport, setTestReport] = useState<PeerTestReport | null>(null);
+
   const isOnline = peer.connected;
   const statusClass = isOnline ? "online" : "offline";
   const statusText = isOnline ? "Connected" : "Disconnected";
@@ -515,8 +518,33 @@ function PeerCard({ peer, onUnpair }: { peer: LinkPeer; onUnpair: () => void }) 
       ? "Tailscale Mesh"
       : peer.route.includes("127.0.0.1")
       ? "Loopback"
+      : peer.route.includes("169.254.")
+      ? "Direct Cable / Bluetooth"
       : "Gigabit / Wi-Fi LAN"
     : null;
+
+  const runTest = async () => {
+    setTesting(true);
+    setTestReport(null);
+    try {
+      const res = await api.linkTestPeer(peer.node_id);
+      setTestReport(res);
+    } catch (e) {
+      setTestReport({
+        node_id: peer.node_id,
+        name: peer.name,
+        connected: false,
+        active_route: null,
+        handshake_ok: false,
+        rtt_ms: null,
+        routes: [],
+        queued_outgoing: peer.queued,
+        summary: `Test failed: ${e}`,
+      });
+    } finally {
+      setTesting(false);
+    }
+  };
 
   return (
     <div className={`peer-card ${statusClass}`}>
@@ -528,9 +556,19 @@ function PeerCard({ peer, onUnpair }: { peer: LinkPeer; onUnpair: () => void }) 
             <code className="peer-node-id">{peer.node_id.slice(0, 10)}…</code>
           </div>
         </div>
-        <button className="btn small ghost danger-hover" onClick={onUnpair} title="Unpair this computer">
-          Unpair
-        </button>
+        <div className="row align-center gap-sm">
+          <button
+            className="btn small"
+            onClick={runTest}
+            disabled={testing}
+            title="Verify mutual HMAC handshake, measure route latencies, and check chat alignment"
+          >
+            {testing ? "Testing Link…" : "Test Connection"}
+          </button>
+          <button className="btn small ghost danger-hover" onClick={onUnpair} title="Unpair this computer">
+            Unpair
+          </button>
+        </div>
       </div>
 
       <div className="peer-stats-grid">
@@ -559,6 +597,36 @@ function PeerCard({ peer, onUnpair }: { peer: LinkPeer; onUnpair: () => void }) 
           <span>{peer.git ?? "—"}</span>
         </div>
       </div>
+
+      {testReport && (
+        <div className="peer-test-report">
+          <div className="row between align-center test-header">
+            <span className="test-summary-title">
+              {testReport.handshake_ok ? "✔ Handshake & Sync Verified" : "⚠️ Handshake Warning"}
+            </span>
+            <button className="btn small ghost" onClick={() => setTestReport(null)}>
+              Dismiss
+            </button>
+          </div>
+          <p className="test-summary-text small">{testReport.summary}</p>
+          {testReport.routes.length > 0 && (
+            <div className="test-routes-list">
+              <span className="muted small">Network Routes & Failovers Tested:</span>
+              {testReport.routes.map((r) => (
+                <div key={r.addr} className="test-route-row">
+                  <div className="test-route-info">
+                    <code>{r.addr}</code>
+                    <span className="route-kind-badge">{r.kind}</span>
+                  </div>
+                  <span className={`test-route-status ${r.reachable ? "reachable" : "unreachable"}`}>
+                    {r.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
