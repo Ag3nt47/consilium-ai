@@ -3384,3 +3384,116 @@ button.attachment {
 
 /* An AI that is out of usage: its Ask chip is switched off and dimmed until its limit resets. */
 .chip.chip-exhausted { opacity: 0.5; text-decoration: line-through; }
+
+/* AI Branches & Worktrees drawer */
+.branches-drawer {
+  padding: 12px;
+  overflow-y: auto;
+}
+.branches-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+}
+.branch-card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg, rgba(255, 255, 255, 0.03));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.branch-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.branch-agent-badge {
+  font-weight: 600;
+  font-size: 13px;
+  margin-right: 6px;
+}
+.branch-repo-name {
+  font-size: 12px;
+  color: var(--muted);
+}
+.branch-name-tag {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--chip-bg, rgba(255, 255, 255, 0.06));
+}
+.branch-metrics {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.metric-pill {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.metric-pill.metric-ahead {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 500;
+}
+.metric-pill.metric-uncommitted {
+  color: #e09f3e;
+  border-color: #e09f3e;
+}
+.branch-commits {
+  margin-top: 4px;
+}
+.branch-commits ul {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.branch-commits li code {
+  font-size: 11px;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.branch-confirm-box {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-deep, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--border);
+  margin-top: 6px;
+}
+.confirm-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.danger-text {
+  color: #ff6b6b;
+}
+.empty-branches {
+  padding: 24px 12px;
+  text-align: center;
+}
+.success-notice {
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(46, 204, 113, 0.15);
+  border: 1px solid rgba(46, 204, 113, 0.3);
+  color: #2ecc71;
+  font-size: 12px;
+  margin-bottom: 8px;
+}

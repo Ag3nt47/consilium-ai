@@ -36,6 +36,7 @@ mod toolbox;
 mod update;
 mod usage;
 pub mod wallpaper;
+mod worktree;
 
 use config::Access;
 use engine::{Engine, TurnState};
@@ -201,6 +202,45 @@ fn forget_approval(state: State<AppState>, grant: String) -> Result<config::Coun
 #[tauri::command]
 fn set_auto_continue(state: State<AppState>, on: bool) -> Result<(), String> {
     state.engine.config.set_auto_continue(on).map(|_| ())
+}
+
+#[tauri::command]
+fn set_isolate_agents(state: State<AppState>, on: bool) -> Result<(), String> {
+    state.engine.config.set_isolate_agents(on).map(|_| ())
+}
+
+/// The project folder a conversation uses (its own, else the council default).
+fn workspace_for(state: &AppState, conversation: Option<String>) -> Result<std::path::PathBuf, String> {
+    conversation
+        .and_then(|c| state.engine.store.meta(&c).ok())
+        .and_then(|m| m.workspace)
+        .or_else(|| state.engine.config.get().default_workspace)
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| "no project folder is set".to_string())
+}
+
+/// Each AI's isolated copy of the project and what merging it would bring in.
+#[tauri::command]
+async fn agent_branches(state: State<'_, AppState>, conversation: Option<String>) -> Result<Vec<worktree::BranchInfo>, String> {
+    let ws = workspace_for(&state, conversation)?;
+    let data = state.engine.data.clone();
+    tokio::task::spawn_blocking(move || worktree::list(&data, &ws)).await.map_err(|e| e.to_string())
+}
+
+/// Merges an AI's branch into the person's checkout. The UI asks first.
+#[tauri::command]
+async fn merge_agent_branch(state: State<'_, AppState>, conversation: Option<String>, repo: String, agent: String) -> Result<String, String> {
+    let ws = workspace_for(&state, conversation)?;
+    tokio::task::spawn_blocking(move || worktree::merge(&ws, &repo, &agent)).await.map_err(|e| e.to_string())?
+}
+
+/// Deletes an AI's copy and branch, unmerged work included. The UI asks first.
+#[tauri::command]
+async fn discard_agent_branch(state: State<'_, AppState>, conversation: Option<String>, repo: String, agent: String) -> Result<(), String> {
+    let ws = workspace_for(&state, conversation)?;
+    let data = state.engine.data.clone();
+    tokio::task::spawn_blocking(move || worktree::discard(&data, &ws, &repo, &agent)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -995,6 +1035,10 @@ pub fn run() {
             reset_forecast,
             set_reset_forecast,
             set_auto_continue,
+            set_isolate_agents,
+            agent_branches,
+            merge_agent_branch,
+            discard_agent_branch,
             save_approval,
             tool_catalog,
             forget_approval,

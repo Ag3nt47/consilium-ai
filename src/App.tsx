@@ -43,6 +43,7 @@ import { ToolsSettings } from "./tools";
 import { CiBadge, ProjectVersions } from "./projects";
 import { TaskBoardPanel } from "./tasks";
 import { RepoDrawer } from "./repo";
+import { BranchesDrawer } from "./branches";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const THEMES = [
@@ -966,6 +967,7 @@ export default function App() {
   const [persona, setPersonaState] = useState(loadPersona);
   const [auditOpen, setAuditOpen] = useState(false);
   const [repoOpen, setRepoOpen] = useState(false);
+  const [branchesOpen, setBranchesOpen] = useState(false);
   const [wallpaper, setWallpaper] = useState<DailyWallpaper | null>(null);
   const setPersona = (id: string) => {
     setPersonaState(id);
@@ -1968,6 +1970,7 @@ export default function App() {
   const paletteCommands = useMemo(() => [
     { id: "new-conv", name: "New Conversation", hint: "Start a fresh topic", run: () => { newConversation(); } },
     { id: "status", name: "Request Council Status", hint: "Ask every AI for its current work and next step", run: () => { requestStatus(); } },
+    { id: "branches", name: "AI Branches & Worktrees", hint: "Review, merge or discard isolated copies made by Full-capacity AIs", run: () => setBranchesOpen(true) },
     { id: "repo", name: "Inspect a GitHub repo", hint: "Sandboxed clone and report: languages, licence, build files, risks", run: () => setRepoOpen(true) },
     { id: "audit", name: "Open Audit Log", hint: "Approvals, requests, updates and errors, newest first", run: () => setAuditOpen(true) },
     { id: "usage", name: "Show Token Usage", hint: "Conversation & daily totals", run: () => openUsage() },
@@ -2274,6 +2277,15 @@ export default function App() {
               <span className="topbar-action-label">Repos</span>
             </button>
             <button
+              title="Review, merge or discard isolated copies made by Full-capacity AIs"
+              className={`btn ghost compact-action ${branchesOpen ? "on" : ""}`}
+              onClick={() => setBranchesOpen((o) => !o)}
+              aria-label="AI Branches and Worktrees"
+            >
+              <span className="topbar-action-icon" aria-hidden="true">⑂</span>
+              <span className="topbar-action-label">Branches</span>
+            </button>
+            <button
               title="Copy the whole conversation to the clipboard as Markdown"
               className="btn ghost compact-action"
               onClick={exportCurrent}
@@ -2296,6 +2308,13 @@ export default function App() {
         </header>
 
         {auditOpen && <AuditDrawer events={events} names={agentNames} onClose={() => setAuditOpen(false)} />}
+        {branchesOpen && (
+          <BranchesDrawer
+            conversation={current}
+            agents={members}
+            onClose={() => setBranchesOpen(false)}
+          />
+        )}
         {repoOpen && (
           <RepoDrawer
             onClose={() => setRepoOpen(false)}
@@ -2704,6 +2723,20 @@ export default function App() {
               </button>
               <span className="muted small">Every AI becomes Unrestricted in the project folder, everyone is asked, and Discuss is on.</span>
             </div>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={council?.isolate_agents ?? false}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  api.setIsolateAgents(on).then(() => setCouncil((c) => (c ? { ...c, isolate_agents: on } : c))).catch((err) => setError(`Couldn't update setting: ${err}`));
+                }}
+              />
+              Isolated copies in Full capacity (separate git worktree on branch <code>consilium/&lt;id&gt;</code> for each AI)
+            </label>
+            <p className="muted small">
+              When on, Full-capacity AIs make changes in their own branch. Their edits don't touch your checkout until you review and merge them in the Branches panel.
+            </p>
             <div className="section-label">Council memory</div>
             <p className="muted small">
               Notes every AI receives in every conversation. They add to it with a REMEMBER: line; you can edit or clear it

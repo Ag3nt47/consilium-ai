@@ -98,6 +98,8 @@ export interface Council {
   saved_grants?: string[];
   /** Start another round automatically when a turn ends with tasks still open (on unless turned off). */
   auto_continue?: boolean;
+  /** Full-capacity AIs work in their own git worktree (branch `consilium/<id>`). */
+  isolate_agents?: boolean;
 }
 
 export const ACCESS_LEVELS: { id: Access; name: string; note: string }[] = [
@@ -387,6 +389,12 @@ const appApi = {
   resetForecast: () => invoke<ResetForecast | null>("reset_forecast"),
   setResetForecast: (on: boolean) => invoke<void>("set_reset_forecast", { on }),
   setAutoContinue: (on: boolean) => invoke<void>("set_auto_continue", { on }),
+  setIsolateAgents: (on: boolean) => invoke<void>("set_isolate_agents", { on }),
+  agentBranches: (conversation?: string) => invoke<AgentBranch[]>("agent_branches", { conversation }),
+  mergeAgentBranch: (repo: string, agent: string, conversation?: string) =>
+    invoke<string>("merge_agent_branch", { conversation, repo, agent }),
+  discardAgentBranch: (repo: string, agent: string, conversation?: string) =>
+    invoke<void>("discard_agent_branch", { conversation, repo, agent }),
   /** The conversation's shared task checklist. */
   tasksGet: (id: string) => invoke<TaskBoard>("tasks_get", { id }),
   /** A change by the human; Consilium also notes it in the chat. */
@@ -487,4 +495,19 @@ export function senderName(sender: Sender, agents: AgentInfo[], via?: string | n
   const name = agents.find((a) => a.id === sender)?.name ?? sender;
   // An AI from another linked computer is named for it, e.g. "Claude (MacBook)".
   return via ? `${name} (${via})` : name;
+}
+
+/** One AI's isolated copy of one repository (see `worktree.rs`). */
+export interface AgentBranch {
+  agent: string;
+  repo: string;
+  branch: string;
+  /** Commits a merge would bring in. */
+  ahead: number;
+  /** Commits on the person's checkout the copy doesn't have yet. */
+  behind: number;
+  /** Uncommitted files in the copy; not included in a merge. */
+  uncommitted: number;
+  /** "<short hash> <subject>", newest first, at most 20. */
+  commits: string[];
 }

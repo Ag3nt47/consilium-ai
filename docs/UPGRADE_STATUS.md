@@ -21,7 +21,7 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | File-state hashing / git diff in each turn | ✅ | Bounded, redacted status/diff snapshot with a hard Git subprocess timeout before each editable turn |
 | Destructive command sanitizer for Full capacity | 🔨 | Provider-native permission modes remain primary. An emergency brake now stops observable broad data-loss/disk/OS commands at the structured pre-execution stream boundary; provider ordering can change, so OS-enforced worktree isolation remains next |
 | Secret redaction | ✅ | `redact.rs`, plus `check-secrets.mjs` before pushes |
-| Git worktree per agent in Full capacity | ⏭ | `consilium/agent-<id>` branches, merged on approval |
+| Git worktree per agent in Full capacity | ✅ | With `isolate_agents` on in Settings, Full-capacity AIs work in isolated git worktrees on branch `consilium/<id>` (`src-tauri/src/worktree.rs`); shared Rust `target` (via parent `.cargo/config.toml`) and `node_modules` symlink; idle merged copies fast-forward; conflict-aborting merge; interactive Branches drawer (`src/branches.tsx`) and Settings toggle to review ahead/behind/uncommitted commits, merge into main, or discard |
 | Atomic memory appends | ✅ | `memory.rs` writes under a lock, size-capped |
 | Pre-commit lint/test before self-modification | ✅ | `.githooks/pre-commit`: secret scan, then `tsc` and `npm test` on an export of the staged index |
 | Rollback + oscillation circuit breaker | 🕓 | |

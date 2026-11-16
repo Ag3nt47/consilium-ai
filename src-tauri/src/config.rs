@@ -49,6 +49,10 @@ pub struct Council {
     /// Start another round on its own when a turn ends with tasks still open (see `autocontinue`).
     #[serde(default = "yes")]
     pub auto_continue: bool,
+    /// Full-capacity AIs work in their own copy of each git repository (a worktree on the
+    /// branch `consilium/<id>`) instead of the project folder; see `worktree`. Off by default.
+    #[serde(default)]
+    pub isolate_agents: bool,
 }
 
 fn yes() -> bool {
@@ -65,6 +69,7 @@ impl Default for Council {
             reset_forecast: false,
             saved_grants: Vec::new(),
             auto_continue: true,
+            isolate_agents: false,
         }
     }
 }
@@ -205,6 +210,15 @@ impl Config {
         let mut c = self.current();
         let mut next = c.clone();
         next.auto_continue = on;
+        self.save(&next)?;
+        *c = next.clone();
+        Ok(next)
+    }
+
+    pub fn set_isolate_agents(&self, on: bool) -> Result<Council, String> {
+        let mut c = self.current();
+        let mut next = c.clone();
+        next.isolate_agents = on;
         self.save(&next)?;
         *c = next.clone();
         Ok(next)
