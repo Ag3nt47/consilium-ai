@@ -307,11 +307,11 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: commands an AI suggests in a fenced shell block (bash, zsh, PowerShell or \
-Command Prompt) now appear in a command box with Run, Deny and Copy buttons. Run executes that exact command once in \
-the project folder and sends its output back to the AI that suggested it; admin commands use the computer's own \
-password or UAC prompt, so Consilium never sees a password. Deny tells the AI not to run it, and Copy puts the command \
-on the clipboard. Every other code block in the chat also gets a Copy button.";
+const WHATS_NEW: &str = "What's new: the Run button refuses a command block that was cut off before its closing \
+fence, and records a start receipt on disk before running, so a command can never run twice even if Consilium closes \
+mid-run. Under the hood, the engine for linking two computers (one-time 6-digit pairing code, encrypted connection on \
+port 8470, 3-second heartbeats, automatic reconnect and resend, best-route choice across cable, Wi-Fi and Tailscale) is \
+included but stays off until a pairing screen arrives.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
