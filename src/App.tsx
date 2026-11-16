@@ -616,11 +616,26 @@ function ApiKeyField({ agent, onSaved, onError }: { agent: AgentInfo; onSaved: (
 function UsageMeter({ agent, forecast }: { agent: AgentInfo; forecast?: ResetForecast | null }) {
   const usage = agent.usage;
   if (!usage) {
-    return agent.available ? (
-      <span className="usage-unavailable" title={`${agent.tool} did not report plan usage`}>
-        usage unavailable
-      </span>
-    ) : null;
+    return (
+      <div className="usage-meter">
+        {agent.available && (
+          <span className="usage-unavailable" title={`${agent.tool} did not report plan usage`}>
+            usage unavailable
+          </span>
+        )}
+        {forecast && (
+          <div className="usage-forecast" title={`Unofficial estimate${forecast.confidence ? `, ${forecast.confidence} confidence` : ""}. Not affiliated with OpenAI.`}>
+            {forecast.official
+              ? `Reset announced: ${forecast.official}`
+              : `Global reset: ${forecast.chance_24h ?? "?"}% chance in 24 h${forecast.chance_48h != null ? ` (${forecast.chance_48h}% in 48 h)` : ""}`}
+            {" · "}
+            <button title="Open codex-reset.com, the unofficial source of the reset forecast" className="link" onClick={() => openUrl(FORECAST_SITE)}>
+              codex-reset.com
+            </button>
+          </div>
+        )}
+      </div>
+    );
   }
   const { model, overall } = usage;
   return (
@@ -643,7 +658,7 @@ function UsageMeter({ agent, forecast }: { agent: AgentInfo; forecast?: ResetFor
         <div className="usage-forecast" title={`Unofficial estimate${forecast.confidence ? `, ${forecast.confidence} confidence` : ""}. Not affiliated with OpenAI.`}>
           {forecast.official
             ? `Reset announced: ${forecast.official}`
-            : `Global reset: ${forecast.chance_24h ?? "?"}% chance in 24 h`}
+            : `Global reset: ${forecast.chance_24h ?? "?"}% chance in 24 h${forecast.chance_48h != null ? ` (${forecast.chance_48h}% in 48 h)` : ""}`}
           {" · "}
           <button title="Open codex-reset.com, the unofficial source of the reset forecast" className="link" onClick={() => openUrl(FORECAST_SITE)}>
             data: codex-reset.com
@@ -711,6 +726,18 @@ function AgentDot({
             Exhausted
           </em>
         )}
+        {agent.id === "gpt" && forecast && forecast.chance_24h != null && (
+          <span
+            className="forecast-pill"
+            title={`codex-reset.com forecast: ${forecast.chance_24h}% chance in 24h, ${forecast.chance_48h ?? "?"}% in 48h (${forecast.confidence ?? "low"} confidence)`}
+            onClick={(e) => {
+              e.stopPropagation();
+              openUrl(FORECAST_SITE);
+            }}
+          >
+            ~{forecast.chance_24h}% reset
+          </span>
+        )}
       </span>
       {load !== undefined && (
         <span
@@ -729,7 +756,12 @@ function AgentDot({
         <span className="agent-state">{label}</span>
       ) : state === "benched" ? (
         <span className="agent-state benched" title="It ran out of usage. The council carries on without it until its limit resets.">
-          Out of usage · back {resetTime(agent.benched_until!)}{" "}
+          Out of usage · back {resetTime(agent.benched_until!)}
+          {agent.id === "gpt" && forecast && forecast.chance_24h != null && (
+            <span className="forecast-chance" title={`codex-reset.com forecast: ${forecast.chance_24h}% chance in 24h, ${forecast.chance_48h ?? "?"}% in 48h`}>
+              {" "}· {forecast.chance_24h}% reset chance
+            </span>
+          )}{" "}
           <button className="link setup-link" onClick={() => onRetry(agent)} title="Ask it again now, without waiting for the reset">
             Retry
           </button>
