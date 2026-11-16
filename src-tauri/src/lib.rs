@@ -434,7 +434,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: every message you send from Signal now gets an instant reply in your Note to Self, Message received, please wait for the AI response, so you know it arrived. If something goes wrong, such as no AI being able to answer or the message not reaching the chat, Signal tells you that instead, and it says when Consilium is back online after a restart. Consilium also no longer starts extra copies of Signal's background program on each launch; those stuck copies could stop messages getting through.";
+const WHATS_NEW: &str = "What's new: when several of your computers are linked to the same Signal number, only one of them now answers each message you send from your phone, so you no longer get duplicate replies. It is the computer you last typed on in Consilium; if you haven't used either, the same one is picked every time. This only applies while the computers are linked to each other in Settings; otherwise each answers as before.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -775,6 +775,12 @@ async fn get_daily_wallpaper() -> Result<Option<wallpaper::DailyWallpaper>, Stri
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 static LINK: std::sync::OnceLock<link::Link> = std::sync::OnceLock::new();
+
+/// Whether this computer should answer a phone message (see `link::answers_signal`). True if
+/// the link never started.
+pub fn link_answers_signal() -> bool {
+    LINK.get().is_none_or(|l| l.answers_signal())
+}
 
 fn the_link() -> Result<&'static link::Link, String> {
     LINK.get().ok_or_else(|| "the computer link couldn't start; see the log".to_string())

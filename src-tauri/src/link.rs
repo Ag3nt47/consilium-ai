@@ -50,6 +50,38 @@ const PAIR_TTL_MS: u64 = 5 * 60 * 1000;
 const PAIR_ATTEMPTS: u32 = 3;
 const LINE_LIMIT: usize = 3 * 1024 * 1024;
 const OUTBOX_LIMIT: usize = 2000;
+
+/// Whether this computer's Signal connection is running, shared with linked computers in each
+/// heartbeat so they can agree which one answers a phone message.
+static SIGNAL_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// When the human last sent a message from this computer's own window (ms since the epoch).
+static LOCAL_ACTIVE_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Records whether Signal is running on this computer.
+pub fn set_signal_on(on: bool) {
+    SIGNAL_ON.store(on, Ordering::SeqCst);
+}
+
+/// Records that the human just used this computer directly.
+pub fn note_local_activity() {
+    LOCAL_ACTIVE_MS.store(now_ms(), Ordering::SeqCst);
+}
+
+/// One computer that can answer Signal: (node ID, last time the human used it).
+pub type SignalCandidate<'a> = (&'a str, u64);
+
+/// Whether this computer should answer a phone message, given the other linked computers that
+/// are connected right now and running Signal. Every linked computer receives each message, so
+/// exactly one must answer: the one the human used most recently, and on a tie the lowest node
+/// ID. Every computer applies the same rule to the same heartbeat facts, so they agree.
+pub fn answers_signal(me: SignalCandidate, others: &[SignalCandidate]) -> bool {
+    others.iter().all(|&(id, active)| {
+        if id == me.0 {
+            return true;
+        }
+        me.1 > active || (me.1 == active && me.0 < id)
+    })
+}
 /// The higher node id dials too once its peer has been unreachable this long.
 const BACKUP_DIAL_AFTER_MS: u64 = 20_000;
 const PAIR_ID: &[u8] = b"consilium-link-pair-v1";
@@ -127,6 +159,9 @@ struct PeerState {
     last_seen_ms: u64,
     down_since_ms: u64,
     outbox: VecDeque<PeerPacket>,
+    /// From the peer's latest heartbeat: Signal is running there, and when it was last used.
+    signal_on: bool,
+    active_ms: u64,
 }
 
 struct Inner {
@@ -249,6 +284,23 @@ impl Link {
             state.tx = None;
             state.generation += 1;
         }
+    }
+
+    /// Whether this computer should answer the phone message that just arrived. True when the
+    /// link is off or no connected linked computer is running Signal.
+    pub fn answers_signal(&self) -> bool {
+        let cfg = self.0.cfg.lock().unwrap().clone();
+        if !cfg.enabled {
+            return true;
+        }
+        let peers = self.0.peers.lock().unwrap();
+        let fresh = now_ms().saturating_sub(DEAD_AFTER_MS);
+        let others: Vec<SignalCandidate> = peers
+            .iter()
+            .filter(|(_, s)| s.tx.is_some() && s.signal_on && s.last_seen_ms >= fresh)
+            .map(|(id, s)| (id.as_str(), s.active_ms))
+            .collect();
+        answers_signal((cfg.node_id.as_str(), LOCAL_ACTIVE_MS.load(Ordering::SeqCst)), &others)
     }
 
     pub fn status(&self) -> LinkStatus {
@@ -802,7 +854,7 @@ impl Link {
                     if !current(self) { break; }
                     let silent = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| now_ms().saturating_sub(s.last_seen_ms));
                     if silent > DEAD_AFTER_MS { break; }
-                    let ping = PeerPacket::signed(&me, now_ms(), PacketKind::Heartbeat, self.0.seq.fetch_add(1, Ordering::SeqCst), json!({ "ping": now_ms() }), &key);
+                    let ping = PeerPacket::signed(&me, now_ms(), PacketKind::Heartbeat, self.0.seq.fetch_add(1, Ordering::SeqCst), json!({ "ping": now_ms(), "signal": SIGNAL_ON.load(Ordering::SeqCst), "active": LOCAL_ACTIVE_MS.load(Ordering::SeqCst) }), &key);
                     if let Ok(line) = ping.and_then(|p| seal(&me, &key, &p)) {
                         if w.write_all(format!("{line}\n").as_bytes()).await.is_err() { break; }
                     }
@@ -821,7 +873,14 @@ impl Link {
 
     fn receive(&self, me: &str, key: &[u8], from: &str, packet: PeerPacket, tx: &mpsc::UnboundedSender<String>) {
         match packet.kind {
-            PacketKind::Heartbeat => {}
+            PacketKind::Heartbeat => {
+                if packet.payload.get("ping").is_some() {
+                    if let Some(s) = self.0.peers.lock().unwrap().get_mut(from) {
+                        s.signal_on = packet.payload.get("signal").and_then(Value::as_bool).unwrap_or(false);
+                        s.active_ms = packet.payload.get("active").and_then(Value::as_u64).unwrap_or(0);
+                    }
+                }
+            }
             PacketKind::Acknowledgement => {
                 if let Some(id) = packet.payload.get("ack").and_then(Value::as_str) {
                     let mut states = self.0.peers.lock().unwrap();
@@ -1145,6 +1204,26 @@ fn route_ip_allowed(ip: std::net::IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exactly_one_linked_computer_answers_signal() {
+        // Alone, or nobody else running Signal: answer.
+        assert!(answers_signal(("mac", 0), &[]));
+        // The computer used most recently answers; the other stays quiet.
+        assert!(answers_signal(("pc", 200), &[("mac", 100)]));
+        assert!(!answers_signal(("mac", 100), &[("pc", 200)]));
+        // A tie goes to the lower node ID, so both sides agree.
+        assert!(answers_signal(("a", 5), &[("b", 5)]));
+        assert!(!answers_signal(("b", 5), &[("a", 5)]));
+        // Three computers: only the newest answers.
+        let all = [("a", 1u64), ("b", 9), ("c", 4)];
+        let winners: Vec<&str> = all
+            .iter()
+            .filter(|me| answers_signal(**me, &all))
+            .map(|me| me.0)
+            .collect();
+        assert_eq!(winners, vec!["b"]);
+    }
 
     fn free_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()

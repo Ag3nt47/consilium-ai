@@ -274,6 +274,7 @@ struct Outbox {
 }
 
 fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), String> {
+    crate::link::set_signal_on(false);
     let cfg = BridgeConfig::load(cfg_path)?;
     if !cfg.enabled || !bridge::valid_account(&cfg.account) || cfg.allowed_acis.is_empty() {
         // Not set up, switched off, or the setup's round trip hasn't been verified yet.
@@ -285,6 +286,15 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
     // Short, so AI replies go out to the phone within a quarter of a second.
     s.set_read_timeout(Some(Duration::from_millis(250))).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(s);
+    crate::link::set_signal_on(true);
+    // Whatever way the session ends, linked computers stop counting on this one.
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            crate::link::set_signal_on(false);
+        }
+    }
+    let _off = Off;
     let mut seen: VecDeque<u64> = VecDeque::new();
     let mut seen_set: HashSet<u64> = HashSet::new();
     let mut out = Outbox { cursors: HashMap::new(), origins: HashMap::new() };
@@ -329,6 +339,10 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
                     seen_set.remove(&old);
                 }
             }
+        }
+        // Every linked computer receives each phone message; only one of them answers it.
+        if !crate::link_answers_signal() {
+            continue;
         }
         let reply = deliver(engine, &mut out, msg);
         if let Err(e) = send_self(&cfg, reply) {

@@ -227,6 +227,10 @@ impl Engine {
         rounds: u32,
         via: Option<&str>,
     ) -> Result<Event, String> {
+        if via.is_none() {
+            // The human is at this computer, so it should be the one that answers Signal.
+            crate::link::note_local_activity();
+        }
         let dir = self.store.files_dir(id);
         if let Some(a) = attachments.iter().find(|a| !crate::attach::belongs(&dir, a)) {
             return Err(format!("{} isn't one of this conversation's attachments", a.name));
