@@ -798,7 +798,29 @@ impl council::Host for RealHost {
             }
         }
         let files = crate::attach::files_for(&events, &self.store.files_dir(conv));
-        let ws_path = workspace.map(PathBuf::from);
+        let mut ws_path = workspace.map(PathBuf::from);
+        // Full capacity with isolated copies on: the AI works in its own worktree of each repo.
+        // A copy that can't be prepared fails safe: the AI is held to Edit access in the real
+        // folder rather than running unrestricted where isolation was asked for.
+        let mut access = access;
+        if access == Access::Unrestricted && self.config.get().isolate_agents {
+            if let Some(ws) = ws_path.clone() {
+                match crate::worktree::prepare(&self.data, &ws, agent.id) {
+                    Ok(Some(iso)) => {
+                        system.push_str("\n\n");
+                        system.push_str(&iso.note);
+                        ws_path = Some(iso.dir);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        access = Access::Edit;
+                        system.push_str(&format!(
+                            "\n\nYour isolated copy couldn't be prepared ({e}), so this turn has Edit access in the project folder instead of Full capacity."
+                        ));
+                    }
+                }
+            }
+        }
         let state_path = (access != Access::Chat).then(|| ws_path.clone()).flatten();
         let data = self.data.clone();
         let ui = self.ui.clone();
