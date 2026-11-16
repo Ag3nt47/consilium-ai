@@ -169,7 +169,31 @@ pub fn windows_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &
 }
 
 /// Downloads and stages a release binary into `<data>/update/next`.
-pub async fn stage_from_url(data: &Path, version: &str, url: &str) -> Result<(), String> {
+/// Release downloads are only taken from this project's own GitHub releases.
+const RELEASE_PREFIX: &str = "https://github.com/Ag3nt47/consilium-ai/releases/download/";
+
+/// Checks a release download before anything is fetched: it must be one of this project's
+/// GitHub release files, the version must be a plain version number, and GitHub's published
+/// SHA-256 (`sha256:<64 hex>`) must be supplied so the file can be checked after download.
+fn check_release_download(version: &str, url: &str, digest: &str) -> Result<String, String> {
+    let path = url.strip_prefix(RELEASE_PREFIX).ok_or("update downloads must come from Consilium's own GitHub releases")?;
+    if path.contains("..") || path.contains('?') || path.contains('#') || path.split('/').count() != 2 {
+        return Err("the update download address is not a release file".into());
+    }
+    let v = version.trim_start_matches(['v', 'V']);
+    if v.is_empty() || !v.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return Err("the update version is not a version number".into());
+    }
+    let hex = digest.strip_prefix("sha256:").unwrap_or("").to_ascii_lowercase();
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("GitHub gave no checksum for this update, so it was not downloaded".into());
+    }
+    Ok(hex)
+}
+
+pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let want = check_release_download(version, url, digest)?;
     let client = reqwest::Client::builder()
         .user_agent("Consilium-Updater")
         .build()
@@ -179,6 +203,10 @@ pub async fn stage_from_url(data: &Path, version: &str, url: &str) -> Result<(),
         return Err(format!("download returned HTTP {}", resp.status()));
     }
     let bytes = resp.bytes().await.map_err(|e| format!("read failed: {e}"))?;
+    let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    if got != want {
+        return Err("the downloaded update didn't match GitHub's checksum, so it was thrown away".into());
+    }
     let next_dir = staged_dir(data);
     let tmp_dir = data.join("update").join("tmp_download");
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -336,5 +364,16 @@ mod tests {
         );
         assert!(setup.contains("Start-Process -FilePath 'C:\\Users\\O''Neil\\AppData\\Roaming\\c\\update\\next\\Consilium-Windows-Setup.exe' -ArgumentList '/S' -Wait"));
         assert!(setup.trim_end().ends_with(r"Start-Process -FilePath 'C:\Users\O''Neil\AppData\Local\Consilium\Consilium.exe'"));
+    }
+
+    #[test]
+    fn release_downloads_are_checked() {
+        let url = "https://github.com/Ag3nt47/consilium-ai/releases/download/v0.3.28/Consilium-Windows-Setup.exe";
+        let d = format!("sha256:{}", "a".repeat(64));
+        assert_eq!(check_release_download("v0.3.28", url, &d).unwrap(), "a".repeat(64));
+        assert!(check_release_download("v0.3.28", url, "").is_err());
+        assert!(check_release_download("v0.3.28", "https://evil.example/x.exe", &d).is_err());
+        assert!(check_release_download("v0.3.28", "https://github.com/Ag3nt47/consilium-ai/releases/download/v1/../../x/y.exe", &d).is_err());
+        assert!(check_release_download("0.3.28; rm", url, &d).is_err());
     }
 }

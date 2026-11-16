@@ -477,9 +477,9 @@ fn update_available() -> Option<update::Staged> {
 
 /// Stages a release update downloaded from GitHub into `<data>/update/next`.
 #[tauri::command]
-async fn stage_release_update(version: String, url: String) -> Result<(), String> {
+async fn stage_release_update(version: String, url: String, digest: Option<String>) -> Result<(), String> {
     let data = data_dir().ok_or("can't find Consilium's data folder")?;
-    update::stage_from_url(&data, &version, &url).await
+    update::stage_from_url(&data, &version, &url, digest.as_deref().unwrap_or("")).await
 }
 
 /// Update Now: tells every conversation with AIs at work that the app is updating, starts the

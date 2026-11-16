@@ -1,7 +1,9 @@
 // Checks GitHub Releases for a newer Consilium at most once a day (or when asked).
-// It only notifies: nothing is downloaded or installed automatically. Offline or rate-limited
+// On Windows and Linux a newer release's installer is downloaded in the background and checked
+// against GitHub's published SHA-256; it only installs when the person clicks Update Now. Offline or rate-limited
 // checks fail quietly. Only the public releases API is contacted, with no identifying data.
 import { getVersion } from "@tauri-apps/api/app";
+import { OS } from "./platform";
 import { api } from "./api";
 
 export const REPO = "Ag3nt47/consilium-ai";
@@ -75,16 +77,16 @@ export async function checkForUpdate(force = false): Promise<UpdateInfo | null> 
       if (Array.isArray(r.assets) && compareVersions(latest.latest, current) > 0) {
         const asset = r.assets.find((a: Record<string, unknown>) => {
           const name = String(a.name || "").toLowerCase();
-          if (navigator.userAgent.includes("Windows") || navigator.platform?.includes("Win")) {
-            return name.endsWith("-setup.exe") || name.endsWith(".exe");
+          if (OS === "windows") {
+            return name.endsWith("-setup.exe");
           }
-          if (navigator.userAgent.includes("Linux") || navigator.platform?.includes("Linux")) {
+          if (OS === "linux") {
             return name.endsWith(".appimage");
           }
           return false;
         });
-        if (asset && typeof asset.browser_download_url === "string") {
-          api.stageReleaseUpdate(latest.latest, asset.browser_download_url).catch(() => undefined);
+        if (asset && typeof asset.browser_download_url === "string" && typeof asset.digest === "string") {
+          api.stageReleaseUpdate(latest.latest, asset.browser_download_url, asset.digest).catch(() => undefined);
         }
       }
     } else {

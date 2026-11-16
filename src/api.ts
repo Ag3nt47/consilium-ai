@@ -409,7 +409,8 @@ const appApi = {
   /** Pauses the AIs, installs the staged build and relaunches; their turns resume afterwards. */
   updateNow: () => invoke<void>("update_now"),
   /** Downloads and stages a release binary into `<data>/update/next`. */
-  stageReleaseUpdate: (version: string, url: string) => invoke<void>("stage_release_update", { version, url }),
+  stageReleaseUpdate: (version: string, url: string, digest: string) =>
+    invoke<void>("stage_release_update", { version, url, digest }),
   /** A screen-only update that applies without a restart, or null. */
   uiUpdateAvailable: () => invoke<{ version: string } | null>("ui_update_available"),
   /** Makes the staged screen live; reload the page afterwards. */
