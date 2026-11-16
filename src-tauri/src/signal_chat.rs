@@ -229,7 +229,8 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
     let members = engine.config.get().members;
     let cfg = ensure_groups(cfg_path, &members)?;
     let s = TcpStream::connect_timeout(&addr(&cfg)?, Duration::from_secs(5)).map_err(|e| e.to_string())?;
-    s.set_read_timeout(Some(Duration::from_secs(1))).map_err(|e| e.to_string())?;
+    // Short, so AI replies go out to the phone within a quarter of a second.
+    s.set_read_timeout(Some(Duration::from_millis(250))).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(s);
     let mut seen: VecDeque<u64> = VecDeque::new();
     let mut seen_set: HashSet<u64> = HashSet::new();

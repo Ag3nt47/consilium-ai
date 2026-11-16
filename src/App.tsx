@@ -1827,6 +1827,7 @@ export default function App() {
               </button>
             </span>
           </div>
+          <div className={`agent-list${members.length >= 5 ? " scrolls" : ""}`}>
           {members.map((a) => {
             const isWorking = busy && (turn?.agents?.includes(a.id) ?? (turn?.agent === a.id));
             const activity = activities[a.id];
@@ -1851,6 +1852,7 @@ export default function App() {
               />
             );
           })}
+          </div>
           <ResourcePressureGauge pressure={pressure} />
         </div>
         <TaskBoardPanel

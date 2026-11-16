@@ -2548,7 +2548,8 @@ exit 1"#,
         let p = fake(r#"cat >/dev/null; (sleep 30) & printf '{"result":"done"}'"#);
         let started = std::time::Instant::now();
         assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap(), "done");
-        assert!(started.elapsed() < Duration::from_secs(10));
+        // Well under the 30 seconds a hang would take; GitHub's busy Mac runners need the slack.
+        assert!(started.elapsed() < Duration::from_secs(20));
     }
 
     #[tokio::test]

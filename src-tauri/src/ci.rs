@@ -292,6 +292,12 @@ you don't need to poll `gh run list` yourself, only to look at a failure's detai
     out
 }
 
+/// What the council is asked when a commit's checks fail.
+pub const FIX_ASK: &str = "Council: please fix this. Agree among yourselves who takes it (claim it \
+with a TASK: line so the others don't duplicate it), read the failing job's log with \
+`gh run view <id> --log-failed`, fix the cause or a flaky test, run the tests, commit and push to \
+main. Everyone else: only review, and don't push while the fix is in progress.";
+
 /// The note posted when a commit's checks finish, or None if there's nothing new to say.
 /// `last` is the (commit, state) last announced for this project.
 pub fn transition_note(last: Option<&(String, String)>, s: &CiStatus) -> Option<String> {
@@ -355,8 +361,14 @@ pub async fn watch(engine: std::sync::Arc<crate::engine::Engine>) {
                     }
                     if !quiet {
                         if let Some(note) = transition_note(snapshot.get(&key), &s) {
-                            for c in &convs {
-                                let _ = e.note(c, &note);
+                            // On a failure, the most recently used conversation for this project
+                            // also asks its AIs to fix it; the others just get the note.
+                            for (i, c) in convs.iter().enumerate() {
+                                if s.state == "fail" && i == 0 {
+                                    let _ = e.note_for_council(c, &format!("{note}\n\n{FIX_ASK}"));
+                                } else {
+                                    let _ = e.note(c, &note);
+                                }
                             }
                         }
                     }

@@ -529,6 +529,23 @@ don't repeat changes that are already made.",
         }
     }
 
+    /// A note from Consilium that also asks the council to act on it: posted like `note`, then,
+    /// if nobody is answering in this conversation right now, it starts one round for every
+    /// member. Used when GitHub's checks fail, so the AIs pick up the fix without being asked.
+    /// When a turn is already running the note is only posted; the AIs read it in that turn.
+    pub fn note_for_council(self: &Arc<Self>, conversation: &str, text: &str) -> Result<Event, String> {
+        let members = self.config.get().members;
+        let mut running = self.running.lock().unwrap();
+        let e = self.store.append(conversation, council::CONSILIUM, "system", members.clone(), text)?;
+        self.ui.event(&e);
+        if members.is_empty() || running.contains_key(conversation) {
+            return Ok(e);
+        }
+        let Some(lock) = self.store.try_turn_lock(conversation) else { return Ok(e) };
+        self.begin(&mut running, Pending::new(conversation, members, 1), Arc::new(lock), e.seq);
+        Ok(e)
+    }
+
     /// A note from Consilium itself, which the human and the AIs see.
     pub fn note(&self, conversation: &str, text: &str) -> Result<Event, String> {
         let e = self.store.append(conversation, council::CONSILIUM, "system", vec![], text)?;
