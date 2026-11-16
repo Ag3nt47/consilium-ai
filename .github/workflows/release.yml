@@ -49,7 +49,15 @@ jobs:
               --title "Consilium $tag" \
               --notes "See CHANGELOG.md. Installers are not yet code-signed; see README > Install."
           fi
-          id="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate -q ".[] | select(.tag_name==\"$tag\") | .id" | head -1)"
+          # A just-created draft can take a few seconds to appear, so wait for it rather than
+          # silently skipping the build (which left 0.3.23 as an empty draft).
+          id=""
+          for _ in $(seq 1 12); do
+            id="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json databaseId -q .databaseId 2>/dev/null || true)"
+            [ -n "$id" ] && break
+            sleep 5
+          done
+          if [ -z "$id" ]; then echo "::error::Could not find the release for $tag"; exit 1; fi
           { echo "tag=$tag"; echo "sha=$SHA"; echo "id=$id"; } >> "$GITHUB_OUTPUT"
 
   build:
