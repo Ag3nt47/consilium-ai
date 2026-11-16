@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 /** Themes that show the AIs' live activity as if a terminal were typing it out. */
-export const TYPED_THEMES = new Set(["retro84", "netrunner", "crt", "cyber"]);
+export const TYPED_THEMES = new Set(["retro84", "netrunner"]);
 
 function reduceMotion(): boolean {
   return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);

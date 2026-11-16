@@ -46,11 +46,7 @@ import { RepoDrawer } from "./repo";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const THEMES = [
-  { id: "consilium", name: "Consilium", note: "Indigo, ivory and gold" },
   { id: "glass", name: "visionOS Glass", note: "Frosted translucent glass, ambient glow" },
-  { id: "cyber", name: "Cyber", note: "From the UI Design Bundle" },
-  { id: "slate", name: "Slate", note: "From the UI Design Bundle" },
-  { id: "crt", name: "CRT", note: "Green phosphor terminal" },
   { id: "retro84", name: "Retro '84", note: "Neon grid, scanlines, glow" },
   { id: "netrunner", name: "Netrunner", note: "Black, neon green, cyberpunk (default)" },
 ] as const;
@@ -72,6 +68,8 @@ const PROVIDER_PORTALS: Record<string, { account: string; accountLabel: string; 
   },
 };
 
+const knownTheme = (id: string | null | undefined) => THEMES.some((t) => t.id === id);
+
 type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean };
 const PREFS_KEY = "consilium.prefs";
 const REQUEST_FLOOR_KEY = "consilium.request-floor.v2";
@@ -79,10 +77,12 @@ const REQUEST_FLOOR_KEY = "consilium.request-floor.v2";
 function loadPrefs(): Prefs {
   // New installs start in Netrunner; anyone who has already picked a theme keeps it.
   const defaults: Prefs = { theme: "netrunner", effects: true, autoUpdate: true, bingWallpaper: true };
-  // Demo mode (README screenshots) keeps the Consilium look unless ?theme= says otherwise.
-  if (!IN_APP) return { ...defaults, theme: demoTheme || "consilium", autoUpdate: false };
+  // Demo mode (README screenshots) uses Netrunner unless ?theme= says otherwise.
+  if (!IN_APP) return { ...defaults, theme: knownTheme(demoTheme) ? demoTheme! : "netrunner", autoUpdate: false };
   try {
-    return { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
+    const saved: Prefs = { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
+    // Themes that were removed (Consilium, Cyber, Slate, CRT) fall back to Netrunner.
+    return knownTheme(saved.theme) ? saved : { ...saved, theme: defaults.theme };
   } catch {
     return defaults;
   }
@@ -1495,9 +1495,14 @@ export default function App() {
     }
   }
 
-  async function deleteCurrent() {
+  // Deleting asks first in an in-app dialog (confirm() isn't reliably shown in the app window).
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  function deleteCurrent() {
+    if (current && meta) setConfirmDelete(true);
+  }
+  async function deleteConfirmed() {
+    setConfirmDelete(false);
     if (!current || !meta) return;
-    if (!confirm(`Delete "${meta.title}"? This can't be undone.`)) return;
     try {
       await api.remove(current);
       const list = await refreshList();
@@ -1758,10 +1763,6 @@ export default function App() {
     { id: "full-capacity", name: "Full Capacity Mode", hint: "Enable unrestricted file & shell access", run: () => fullCapacity() },
     { id: "discuss", name: discuss ? "Disable Discuss Mode" : "Enable Discuss Mode", hint: "Multi-round debate", run: () => toggleDiscuss(!discuss) },
     { id: "theme-glass", name: "Theme: visionOS Glass", hint: "Frosted translucent glass", run: () => setPrefs((p) => ({ ...p, theme: "glass" })) },
-    { id: "theme-consilium", name: "Theme: Consilium", hint: "Indigo and ivory", run: () => setPrefs((p) => ({ ...p, theme: "consilium" })) },
-    { id: "theme-cyber", name: "Theme: Cyber", hint: "Cyberpunk blue-teal", run: () => setPrefs((p) => ({ ...p, theme: "cyber" })) },
-    { id: "theme-slate", name: "Theme: Slate", hint: "Clean slate dark", run: () => setPrefs((p) => ({ ...p, theme: "slate" })) },
-    { id: "theme-crt", name: "Theme: CRT", hint: "Green phosphor terminal", run: () => setPrefs((p) => ({ ...p, theme: "crt" })) },
     { id: "theme-retro84", name: "Theme: Retro '84", hint: "Neon grid, scanlines, glow", run: () => setPrefs((p) => ({ ...p, theme: "retro84" })) },
     { id: "theme-netrunner", name: "Theme: Netrunner", hint: "Black, neon green, cyberpunk", run: () => setPrefs((p) => ({ ...p, theme: "netrunner" })) },
   ], [current, discuss, members, openUsage, requestingStatus]);
@@ -2331,6 +2332,7 @@ export default function App() {
                 </button>
               ))}
             </div>
+            <p className="theme-hint">You can create your own theme by asking the AIs.</p>
             <label className="toggle">
               <input type="checkbox" checked={prefs.effects} onChange={(e) => setPrefs({ ...prefs, effects: e.target.checked })} />
               Visual effects (scanlines, glow and animation in neon themes)
@@ -2645,6 +2647,33 @@ export default function App() {
           </div>
         </div>
       )}
+      {confirmDelete && meta && (
+        <div className="modal-backdrop" onClick={() => setConfirmDelete(false)}>
+          <div
+            className="modal confirm-modal"
+            role="alertdialog"
+            aria-labelledby="confirm-delete-title"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setConfirmDelete(false);
+            }}
+          >
+            <h2 id="confirm-delete-title">Delete this conversation?</h2>
+            <p>
+              <strong>{meta.title}</strong> and all of its messages will be deleted permanently. This can't be undone.
+            </p>
+            <div className="confirm-actions">
+              <button className="btn" autoFocus onClick={() => setConfirmDelete(false)} title="Keep the conversation">
+                Cancel
+              </button>
+              <button className="btn danger" onClick={deleteConfirmed} title="Delete the conversation permanently">
+                Delete permanently
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showUsage && (
         <div className="modal-backdrop" onClick={() => setShowUsage(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>

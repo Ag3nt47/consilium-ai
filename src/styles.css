@@ -1,8 +1,6 @@
-/* Consilium themes. Cyber, Slate and CRT values come from the Palamedes design tokens in
-   Ag3nt47/UI-Design-Bundle (MIT); see THIRD_PARTY_NOTICES.md. No remote fonts are loaded. */
+/* Consilium themes: Netrunner, visionOS Glass and Retro '84. No remote fonts are loaded. */
 
-:root,
-[data-theme="consilium"] {
+:root {
   --bg: #120f24;
   --bg-2: #1a1533;
   --panel: #1d1838;
@@ -25,66 +23,6 @@
   --brand-font: Georgia, "Times New Roman", serif;
   --glow: none;
   color-scheme: dark;
-}
-
-[data-theme="cyber"] {
-  --bg: #0a0e14;
-  --bg-2: #0c1119;
-  --panel: #101722;
-  --panel-raised: #172130;
-  --border: #263345;
-  --text: #d6e2f0;
-  --muted: #8798af;
-  --accent: #36aaff;
-  --accent-text: #04111d;
-  --accent-soft: #36aaff17;
-  --c-human: #d6e2f0;
-  --c-gpt: #69d4aa;
-  --c-claude: #ffb967;
-  --danger: #ff8f8f;
-  --request: #ff5c5c;
-}
-
-[data-theme="slate"] {
-  --bg: #070e1c;
-  --bg-2: #0a1324;
-  --panel: #101b2e;
-  --panel-raised: #1b2b43;
-  --border: #2d405c;
-  --text: #e6eef8;
-  --muted: #8ea2bd;
-  --accent: #62bef7;
-  --accent-text: #041321;
-  --accent-soft: #62bef716;
-  --c-human: #e6eef8;
-  --c-gpt: #4cddb1;
-  --c-claude: #fb923c;
-  --danger: #ff8f8f;
-  --request: #ff5c5c;
-  --radius: 8px;
-}
-
-[data-theme="crt"] {
-  --bg: #000a03;
-  --bg-2: #01100a;
-  --panel: #04150b;
-  --panel-raised: #082112;
-  --border: #1a492b;
-  --text: #a9edbb;
-  --muted: #6f9b7b;
-  --accent: #76ed8b;
-  --accent-text: #001a06;
-  --accent-soft: #76ed8b12;
-  --c-human: #a9edbb;
-  --c-gpt: #76ed8b;
-  --c-claude: #e6f28c;
-  --danger: #ff7b6b;
-  --request: #ff5a4a;
-  --radius: 3px;
-  --radius-sm: 2px;
-  --font: var(--mono);
-  --brand-font: var(--mono);
-  --glow: 0 0 6px #76ed8b55;
 }
 
 [data-theme="retro84"] {
@@ -1188,24 +1126,8 @@ pre {
   margin-bottom: 6px;
 }
 
-[data-preview="consilium"] .swatch {
-  background: linear-gradient(120deg, #17142d 0 45%, #f1eadb 45% 70%, #d8ae5a 70%);
-}
-
 [data-preview="glass"] .swatch {
   background: linear-gradient(120deg, #0b0d14 0 40%, rgba(94, 158, 255, 0.7) 40% 70%, rgba(255, 255, 255, 0.8) 70%);
-}
-
-[data-preview="cyber"] .swatch {
-  background: linear-gradient(120deg, #0a0e14 0 45%, #36aaff 45% 70%, #69d4aa 70%);
-}
-
-[data-preview="slate"] .swatch {
-  background: linear-gradient(120deg, #070e1c 0 45%, #62bef7 45% 70%, #fb923c 70%);
-}
-
-[data-preview="crt"] .swatch {
-  background: linear-gradient(120deg, #000a03 0 45%, #76ed8b 45% 70%, #a9edbb 70%);
 }
 
 [data-preview="retro84"] .swatch {
@@ -1255,8 +1177,7 @@ pre {
   display: none;
 }
 
-[data-effects="on"][data-theme="retro84"] .fx-scanlines,
-[data-effects="on"][data-theme="crt"] .fx-scanlines {
+[data-effects="on"][data-theme="retro84"] .fx-scanlines {
   display: block;
   position: fixed;
   inset: 0;
@@ -1286,10 +1207,6 @@ pre {
 
 [data-effects="on"][data-theme="retro84"] .msg {
   box-shadow: 0 0 0 1px #8b5cf622, 0 0 18px #8b5cf61a;
-}
-
-[data-effects="on"][data-theme="crt"] .body {
-  text-shadow: 0 0 4px #76ed8b55;
 }
 
 [data-effects="off"] *,
@@ -1443,10 +1360,6 @@ pre {
 
 :root {
   --c-gemini: #7aa7ff;
-}
-
-[data-theme="crt"] {
-  --c-gemini: #b8f5c6;
 }
 
 [data-theme="retro84"] {
@@ -2646,29 +2559,11 @@ button.attachment {
   text-shadow: 0 0 6px var(--accent);
 }
 
-[data-effects="on"][data-theme="crt"] .thinking .typed {
-  color: var(--text);
-  text-shadow: 0 0 5px rgba(44, 252, 103, 0.5);
-}
-[data-effects="on"][data-theme="crt"] .thinking .cursor {
-  color: var(--accent);
-  text-shadow: 0 0 8px var(--accent);
-}
-
 [data-effects="on"][data-theme="retro84"] .thinking .typed {
   color: var(--text);
   text-shadow: 0 0 6px rgba(255, 51, 153, 0.5);
 }
 [data-effects="on"][data-theme="retro84"] .thinking .cursor {
-  color: var(--accent);
-  text-shadow: 0 0 8px var(--accent);
-}
-
-[data-effects="on"][data-theme="cyber"] .thinking .typed {
-  color: var(--text);
-  text-shadow: 0 0 5px rgba(0, 212, 255, 0.5);
-}
-[data-effects="on"][data-theme="cyber"] .thinking .cursor {
   color: var(--accent);
   text-shadow: 0 0 8px var(--accent);
 }
@@ -3032,7 +2927,6 @@ button.attachment {
   border-color: rgba(239, 68, 68, 0.4) !important;
 }
 
-
 /* ---------- Compact top bar: one slim row, title + project on the left, status and actions on the right ---------- */
 .topbar {
   padding: 3px 10px;
@@ -3291,3 +3185,15 @@ button.attachment {
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
 }
+
+.theme-hint {
+  margin: 6px 0 10px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--muted);
+}
+
+/* Delete-conversation confirmation */
+.modal.confirm-modal { width: min(420px, 92vw); gap: 12px; }
+.confirm-modal p { margin: 0; line-height: 1.45; overflow-wrap: anywhere; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
