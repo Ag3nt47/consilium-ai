@@ -28,9 +28,11 @@ const CATALOG: &[(&str, &str, &str, &str)] = &[
         "anonrouter",
         "https://anonrouter.ai",
         "privacy router (\"VPN for AI\") that relays requests to AI model APIs without exposing the caller; \
-use it when the human wants AI or web traffic kept private. No package name has been verified yet: confirm \
-the official SDK or CLI from anonrouter.ai before requesting an install, and never send keys or the human's \
-details to it without approval",
+use it when the human wants AI traffic kept private. Python SDK: PyPI `anonrouter-confidential` (published \
+by AnonRouter, source github.com/anonrouter/anonrouter-sdk); check for it with `pip3 show anonrouter-confidential` \
+(it has no CLI, so the status here reads not installed) and install with \
+`pip3 install --user anonrouter-confidential==0.1.3.post1`. Never send keys or the human's details to it \
+without approval",
     ),
     (
         "Zero Breach Toolkit",
