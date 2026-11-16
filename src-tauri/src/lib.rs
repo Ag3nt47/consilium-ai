@@ -16,6 +16,7 @@ mod link;
 mod liveui;
 mod memory;
 pub mod peer_protocol;
+mod peer_sync;
 mod pressure;
 mod projects;
 mod prompt;
@@ -67,6 +68,7 @@ struct Window(AppHandle);
 impl engine::Ui for Window {
     fn event(&self, e: &Event) {
         let _ = self.0.emit(EVENT, e);
+        peer_sync::share(e);
     }
     fn turn(&self, t: TurnState) {
         let _ = self.0.emit(TURN, t);
@@ -782,6 +784,10 @@ pub fn link_answers_signal() -> bool {
     LINK.get().is_none_or(|l| l.answers_signal())
 }
 
+pub(crate) fn link_handle() -> Option<&'static link::Link> {
+    LINK.get()
+}
+
 fn the_link() -> Result<&'static link::Link, String> {
     LINK.get().ok_or_else(|| "the computer link couldn't start; see the log".to_string())
 }
@@ -874,6 +880,10 @@ pub fn run() {
             // Direct link to the user's other paired computers. Off until they pair or turn it on.
             let emitter = app.handle().clone();
             let handler: link::Handler = Arc::new(move |p: &peer_protocol::PeerPacket| {
+                // Chat from another computer goes into its mirror conversation, then the window.
+                if let Some(e) = peer_sync::receive(p) {
+                    let _ = emitter.emit(EVENT, &e);
+                }
                 emitter.emit("link-packet", p).map_err(|e| e.to_string())
             });
             match link::Link::open(&data.join("link"), link::PORT, handler) {
@@ -886,6 +896,7 @@ pub fn run() {
                 }
                 Err(e) => eprintln!("link: {e}"),
             }
+            peer_sync::init(app.state::<AppState>().engine.store.clone(), &data.join("link"));
             // Falls back to the built-in page if an instantly applied one never starts.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {

@@ -383,7 +383,7 @@ impl Store {
         attachments: Vec<crate::attach::Attachment>,
         via: Option<&str>,
     ) -> Result<Event, String> {
-        self.append_full(id, "human", "message", to, text, None, attachments, vec![], via.map(String::from))
+        self.append_full(id, "human", "message", to, text, None, attachments, vec![], via.map(String::from), false)
     }
 
     pub fn append_with_usage(
@@ -395,12 +395,26 @@ impl Store {
         text: &str,
         usage: Option<TokenUsage>,
     ) -> Result<Event, String> {
-        self.append_full(id, sender, kind, to, text, usage, vec![], vec![], None)
+        self.append_full(id, sender, kind, to, text, usage, vec![], vec![], None, false)
+    }
+
+    /// A message copied from a linked computer. Its REQUEST lines get no buttons here: the
+    /// computer it came from owns that turn.
+    pub fn append_imported(
+        &self,
+        id: &str,
+        sender: &str,
+        kind: &str,
+        to: Vec<String>,
+        text: &str,
+        via: Option<String>,
+    ) -> Result<Event, String> {
+        self.append_full(id, sender, kind, to, text, None, vec![], vec![], via, true)
     }
 
     /// Records the messages that were handed to an AI in one compact, hidden receipt event.
     pub fn append_seen(&self, id: &str, sender: &str, seen: Vec<String>) -> Result<Event, String> {
-        self.append_full(id, sender, "seen", vec![], "", None, vec![], seen, None)
+        self.append_full(id, sender, "seen", vec![], "", None, vec![], seen, None, false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -415,6 +429,7 @@ impl Store {
         attachments: Vec<crate::attach::Attachment>,
         seen: Vec<String>,
         via: Option<String>,
+        foreign: bool,
     ) -> Result<Event, String> {
         Self::check(id)?;
         // Everything in a conversation is sent to every AI's provider, so secrets are masked first.
@@ -445,8 +460,10 @@ impl Store {
             to,
             text: text.to_string(),
             // An AI's blocked turn ("error") can carry a REQUEST, e.g. an elevated command awaiting approval.
-            requests: if kind == "message" || (kind == "error" && sender != "human") { requests_in(text) } else { vec![] },
-            add_ai: if kind == "message" && sender != "human" { add_ai_in(text) } else { vec![] },
+            requests: if foreign {
+                vec![]
+            } else if kind == "message" || (kind == "error" && sender != "human") { requests_in(text) } else { vec![] },
+            add_ai: if kind == "message" && sender != "human" && !foreign { add_ai_in(text) } else { vec![] },
             seen,
             usage,
             attachments,

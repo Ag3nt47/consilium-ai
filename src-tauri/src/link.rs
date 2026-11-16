@@ -435,6 +435,15 @@ impl Link {
 
     /// Packets received from paired computers, oldest first, each id once. Durable: written
     /// before the sender was told it arrived.
+    pub fn has_peers(&self) -> bool {
+        !self.0.cfg.lock().unwrap().peers.is_empty()
+    }
+
+    /// The paired computer's name, for labelling what it sent.
+    pub fn peer_name(&self, node_id: &str) -> String {
+        self.peer(node_id).map(|p| p.name).filter(|n| !n.is_empty()).unwrap_or_else(|| "linked computer".into())
+    }
+
     pub fn inbox(&self) -> Vec<PeerPacket> {
         let text = std::fs::read_to_string(&self.0.inbox_path).unwrap_or_default();
         let mut seen = std::collections::HashSet::new();

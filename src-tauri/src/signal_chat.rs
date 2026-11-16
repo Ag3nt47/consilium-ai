@@ -354,7 +354,9 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
 /// Posts a phone message as the human's message in the newest conversation, and returns the
 /// ready-made notice that tells the phone what happened to it.
 fn deliver(engine: &Arc<Engine>, out: &mut Outbox, msg: Incoming) -> &'static str {
-    let Some(conv) = engine.store.list().into_iter().next() else { return notice::NO_CONVERSATION };
+    let Some(conv) = engine.store.list().into_iter().find(|c| !crate::peer_sync::is_mirror(&c.id)) else {
+        return notice::NO_CONVERSATION;
+    };
     let members = engine.config.get().members;
     let events = engine.store.load(&conv.id).unwrap_or_default();
     let recent = &events[events.len().saturating_sub(400)..];
@@ -412,7 +414,7 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
     if convs.is_empty() {
         return;
     }
-    for conv in convs.into_iter().take(10) {
+    for conv in convs.into_iter().filter(|c| !crate::peer_sync::is_mirror(&c.id)).take(10) {
         let events = engine.store.load(&conv.id).unwrap_or_default();
         let newest = events.last().map_or(0, |e| e.seq);
         let cursor = match out.cursors.get(&conv.id) {
