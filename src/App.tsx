@@ -517,6 +517,15 @@ function agentState(a: AgentInfo): "ready" | "signin" | "missing" | "benched" {
   return a.available ? "ready" : a.path ? "signin" : "missing";
 }
 
+/** Out of usage: benched by Consilium, or its whole-plan allowance reads 0%. A model at 0%
+ *  whose plan still has room isn't exhausted, since the AI can switch model. */
+function isExhausted(a: AgentInfo): boolean {
+  if (agentState(a) === "benched") return true;
+  const u = a.usage;
+  if (!u) return false;
+  return (u.overall?.remaining_percent ?? u.remaining_percent) <= 0;
+}
+
 function attachmentIcon(kind: string): string {
   return kind === "image" ? "🖼" : kind === "pdf" ? "📕" : kind === "text" ? "📄" : "📎";
 }
@@ -684,7 +693,7 @@ function AgentDot({
     : { ready: "Ready", signin: "Not signed in", missing: "Not installed", benched: "Out of usage" }[state];
   return (
     <div
-      className={`agent agent-${agent.id}`}
+      className={`agent agent-${agent.id}${isExhausted(agent) ? " agent-exhausted" : ""}`}
       title={
         isFrozen
           ? "Stalled: no provider activity for 25 seconds"
@@ -694,7 +703,14 @@ function AgentDot({
       }
     >
       <span className={`dot ${dotClass}`} />
-      <span className="agent-name">{agent.name}</span>
+      <span className="agent-name">
+        {agent.name}
+        {isExhausted(agent) && (
+          <em className="agent-exhausted-tag" title="This AI has used all of its plan allowance. It sits out until its limit resets.">
+            Exhausted
+          </em>
+        )}
+      </span>
       {load !== undefined && (
         <span
           className="agent-load"

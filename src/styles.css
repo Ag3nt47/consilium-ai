@@ -468,6 +468,20 @@ code {
   color: #f2b84b;
 }
 
+/* An AI with no usage left: red outline and a small italic "Exhausted" beside its name. */
+.agent.agent-exhausted {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px var(--danger) inset;
+}
+
+.agent-exhausted-tag {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  font-style: italic;
+  color: var(--danger);
+}
+
 /* ---------- buttons ---------- */
 .btn {
   border: 1px solid var(--border);
