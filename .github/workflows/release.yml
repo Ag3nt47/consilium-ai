@@ -120,7 +120,8 @@ jobs:
             macOS)   copy '*.dmg' Consilium-macOS.dmg ;;
             Windows) copy '*-setup.exe' Consilium-Windows-Setup.exe ;;
             Linux)   copy '*.AppImage' Consilium-Linux-x86_64.AppImage
-                     copy '*.deb' Consilium-Linux-amd64.deb ;;
+                     copy '*.deb' Consilium-Linux-amd64.deb
+                     copy '*.rpm' Consilium-Linux-x86_64.rpm ;;
           esac
           gh release upload "$TAG" oneclick/* --clobber --repo "$GITHUB_REPOSITORY"
 

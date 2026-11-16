@@ -4,7 +4,7 @@
 //! a half-copied build is never offered:
 //! - macOS: `update/Consilium.app`, whose Info.plist holds the version.
 //! - Windows and Linux: `update/next/` holding the new program (`consilium.exe`, or `consilium`
-//!   plus `Consilium.AppImage` on Linux) and a `VERSION` file.
+//!   plus `Consilium.AppImage`, `Consilium.deb` or `Consilium.rpm` on Linux) and a `VERSION` file.
 //!
 //! The window polls `staged`, and Update Now hands the swap to a small detached helper (`sh` on
 //! macOS and Linux, PowerShell on Windows): it waits for this process to exit, renames the staged
@@ -91,7 +91,15 @@ fn swap_paths(data: &Path, exe: &Path, appimage: Option<&Path>) -> Result<(PathB
                 (dir.join("consilium.exe"), exe.to_path_buf())
             }
         }
-        None => (dir.join("consilium"), exe.to_path_buf()),
+        None => {
+            for pkg in ["Consilium.deb", "Consilium.rpm"] {
+                if dir.join(pkg).is_file() {
+                    // The package manager replaces the system-wide install; no write check here.
+                    return Ok((dir.join(pkg), exe.to_path_buf()));
+                }
+            }
+            (dir.join("consilium"), exe.to_path_buf())
+        }
     };
     if !staged.is_file() {
         return Err(format!("the staged build has no {}", staged.file_name().unwrap_or_default().to_string_lossy()));
@@ -144,6 +152,54 @@ pub fn linux_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &Pa
          rm -rf {l}\n\
          nohup {t} >/dev/null 2>&1 &\n"
     )
+}
+
+/// The Linux helper for a .deb or .rpm install: after the app exits, the system's package
+/// manager installs the staged package through pkexec, which shows the system's own password
+/// prompt. If it is cancelled or fails, the old install is untouched and is reopened.
+pub fn linux_package_script(pid: u32, staged: &Path, target: &Path, leftover: &Path) -> String {
+    let (s, t, l) = (quote(staged), quote(target), quote(leftover));
+    let install = if staged.extension().and_then(|e| e.to_str()) == Some("rpm") {
+        format!("if command -v dnf >/dev/null; then pkexec dnf install -y {s}; elif command -v zypper >/dev/null; then pkexec zypper --non-interactive install --allow-unsigned-rpm {s}; else pkexec rpm -U {s}; fi")
+    } else {
+        format!("pkexec apt-get install -y {s} || pkexec dpkg -i {s}")
+    };
+    format!(
+        "for i in $(seq 1 60); do kill -0 {pid} 2>/dev/null || break; sleep 0.5; done\n\
+         kill -9 {pid} 2>/dev/null; sleep 0.3\n\
+         {install}\n\
+         rm -rf {l}\n\
+         nohup {t} >/dev/null 2>&1 &\n"
+    )
+}
+
+/// How this Linux copy was installed: "deb" or "rpm" when the running program belongs to a
+/// system package, otherwise None (an AppImage or a copied program file).
+pub fn linux_package_kind() -> Option<&'static str> {
+    if !cfg!(target_os = "linux") || std::env::var_os("APPIMAGE").is_some() {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    if !exe.starts_with("/usr") {
+        return None;
+    }
+    let owns = |tool: &str, arg: &str| {
+        std::process::Command::new(tool)
+            .arg(arg)
+            .arg(&exe)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if owns("dpkg", "-S") {
+        Some("deb")
+    } else if owns("rpm", "-qf") {
+        Some("rpm")
+    } else {
+        None
+    }
 }
 
 /// The Windows helper. A running .exe can be renamed but not overwritten, so the same
@@ -215,7 +271,11 @@ pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str)
     let filename = if cfg!(windows) {
         "Consilium-Windows-Setup.exe"
     } else if cfg!(target_os = "linux") {
-        "Consilium.AppImage"
+        match url.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+            Some("deb") => "Consilium.deb",
+            Some("rpm") => "Consilium.rpm",
+            _ => "Consilium.AppImage",
+        }
     } else {
         "update.bin"
     };
@@ -257,7 +317,13 @@ pub fn start_install(data: &Path) -> Result<Staged, String> {
                 .arg(windows_helper_script(pid, &staged, &target, &staged_dir(data)));
         } else {
             cmd = Command::new("/bin/sh");
-            cmd.arg("-c").arg(linux_helper_script(pid, &staged, &target, &staged_dir(data)));
+            let pkg = matches!(staged.extension().and_then(|e| e.to_str()), Some("deb" | "rpm"));
+            let script = if pkg {
+                linux_package_script(pid, &staged, &target, &staged_dir(data))
+            } else {
+                linux_helper_script(pid, &staged, &target, &staged_dir(data))
+            };
+            cmd.arg("-c").arg(script);
         }
     }
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -332,6 +398,16 @@ mod tests {
         let (s, t) = swap_paths(&dir, &exe, None).unwrap();
         assert_eq!((s, t), (staged_dir(&dir).join(name), exe));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn linux_package_helper_uses_the_package_manager() {
+        let deb = linux_package_script(7, Path::new("/d/next/Consilium.deb"), Path::new("/usr/bin/consilium"), Path::new("/d/next"));
+        assert!(deb.contains("pkexec apt-get install -y '/d/next/Consilium.deb'"));
+        assert!(deb.contains("nohup '/usr/bin/consilium'"));
+        let rpm = linux_package_script(7, Path::new("/d/next/Consilium.rpm"), Path::new("/usr/bin/consilium"), Path::new("/d/next"));
+        assert!(rpm.contains("pkexec dnf install -y '/d/next/Consilium.rpm'"));
+        assert!(!rpm.contains("apt-get"));
     }
 
     #[test]

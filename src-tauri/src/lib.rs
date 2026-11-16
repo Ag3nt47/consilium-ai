@@ -488,6 +488,13 @@ async fn stage_release_update(version: String, url: String, digest: Option<Strin
     update::stage_from_url(&data, &version, &url, digest.as_deref().unwrap_or("")).await
 }
 
+/// "deb" or "rpm" when this Linux copy came from a system package, so the update check
+/// downloads the matching package instead of the AppImage.
+#[tauri::command]
+fn linux_package_kind() -> Option<&'static str> {
+    update::linux_package_kind()
+}
+
 /// Update Now: tells every conversation with AIs at work that the app is updating, starts the
 /// installer and quits. The cut-off turns resume after the relaunch, like after any restart.
 #[tauri::command]
@@ -971,6 +978,7 @@ pub fn run() {
             update_available,
             update_now,
             stage_release_update,
+            linux_package_kind,
             ui_update_available,
             ui_update_apply,
             ui_loaded,

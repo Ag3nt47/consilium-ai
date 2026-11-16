@@ -75,13 +75,14 @@ export async function checkForUpdate(force = false): Promise<UpdateInfo | null> 
       };
       writeCache({ lastCheck: Date.now(), etag: res.headers.get("ETag") || undefined, latest });
       if (Array.isArray(r.assets) && compareVersions(latest.latest, current) > 0) {
+        const pkg = OS === "linux" ? await api.linuxPackageKind().catch(() => null) : null;
         const asset = r.assets.find((a: Record<string, unknown>) => {
           const name = String(a.name || "").toLowerCase();
           if (OS === "windows") {
             return name.endsWith("-setup.exe");
           }
           if (OS === "linux") {
-            return name.endsWith(".appimage");
+            return name.endsWith(pkg ? `.${pkg}` : ".appimage");
           }
           return false;
         });
