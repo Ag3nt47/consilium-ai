@@ -334,9 +334,10 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: the conversation header controls (messaging, pairing sync, status request, audit log, \
-repos, copy, delete) are condensed into a single ultra-compact icon row, pulling the chat box and conversation upward with minimal gap. \
-Also includes hardened peer-link retries and partial-line framing repairs for Mac and Windows sync. Admin and install requests now have an Always allow button: the exact command is remembered on this computer so no AI has to ask for it again, and Settings → Saved approvals removes it.";
+const WHATS_NEW: &str = "What's new: Signal setup now happens inside Consilium. The phone number saves when you \
+press Enter or leave the box, then a QR code appears right in the panel to scan from Signal › Linked devices. \
+After linking, Signal starts in the background (and again on every launch), Consilium sends a code to your \
+Note to Self chat, and setup finishes when you send that code back from your phone.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
