@@ -203,7 +203,18 @@ fn set_reset_forecast(state: State<AppState>, on: bool) -> Result<(), String> {
 /// member receives the conversations it is addressed in.
 #[tauri::command]
 fn set_member(state: State<AppState>, agent: String, member: bool) -> Result<(), String> {
-    state.engine.config.set_member(&agent, member).map(|_| ())
+    let e = &state.engine;
+    let joined = member && !e.config.get().members.contains(&agent);
+    e.config.set_member(&agent, member)?;
+    // A new AI: tell the council in the most recently used conversation, and, if no reset
+    // forecast is known for it, ask one AI to look for one on the web.
+    if joined {
+        if let (Some(a), Some(c)) = (agents::by_id(&agent), e.store.list().into_iter().next()) {
+            let text = usage::join_note(&agent, a.name);
+            let _ = if usage::forecast_source(&agent).is_some() { e.note(&c.id, &text) } else { e.note_for_council(&c.id, &text) };
+        }
+    }
+    Ok(())
 }
 
 /// Lets an AI that ran out of usage be asked again now, without waiting for its reset time.

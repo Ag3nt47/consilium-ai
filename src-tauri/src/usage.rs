@@ -44,6 +44,34 @@ pub struct Forecast {
     pub fetched_at: u64,
 }
 
+/// Public forecasts of an unscheduled, provider-wide usage reset, by AI id, where one is known to
+/// exist. Each AI's own reset times already come from its CLI; these are the extra "an early reset
+/// may come" estimates. Only Codex (ChatGPT) has one so far, from codex-reset.com.
+pub fn forecast_source(agent: &str) -> Option<&'static str> {
+    match agent {
+        "gpt" => Some(FORECAST_SITE),
+        _ => None,
+    }
+}
+
+/// The note posted when an AI joins the council. For an AI with no known reset forecast it asks
+/// the council to check once on the web, so a forecast is used if one exists.
+pub fn join_note(agent: &str, name: &str) -> String {
+    match forecast_source(agent) {
+        Some(site) => format!(
+            "{name} joined the council. Its plan usage and reset times come from its own CLI, and {site} \
+forecasts the next early, provider-wide reset."
+        ),
+        None => format!(
+            "{name} joined the council. Its plan usage and reset times come from its own CLI where it reports \
+them. One AI that can search the web, please run one quick search for a public forecast or tracker of \
+early, provider-wide usage resets for {name} (like codex-reset.com is for Codex), and say what you find in \
+one or two sentences. If a reliable one exists, save it with a REMEMBER: line naming the site; if not, say \
+so plainly. The others don't need to search."
+        ),
+    }
+}
+
 pub fn load(data: &Path) -> Snapshot {
     std::fs::read_to_string(data.join("usage.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
@@ -282,6 +310,13 @@ mod tests {
         assert!(text.contains("overall: 41% left"), "{text}");
         assert!(!text.contains("codex-reset"), "no forecast unless it's on");
         assert_eq!(for_prompt(&Snapshot::default(), &members, "gpt", now), None);
+    }
+
+    #[test]
+    fn a_new_ai_without_a_known_forecast_asks_for_one_search() {
+        assert!(join_note("gpt", "ChatGPT").contains("codex-reset.com"));
+        let n = join_note("gemini", "Gemini");
+        assert!(n.contains("quick search") && n.contains("REMEMBER:"));
     }
 
     #[test]
