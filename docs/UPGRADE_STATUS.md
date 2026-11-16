@@ -98,8 +98,8 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 | Item | Status | Notes |
 |---|---|---|
 | Wired/LAN TCP link, JSON-lines framing, static port 8470 | ⏭ | Tokio TCP in a new `link.rs`; one JSON object per line, 1 MB line cap, packet `{id, node_id, timestamp, type, seq, payload}` |
-| Pairing and authentication | ⏭ | Not in the document but required before any socket opens: one-time pairing code, per-peer key, every frame authenticated (HMAC) and replay-checked; unpaired peers are dropped. Off until the human pairs two machines |
-| Dedup ledger (`sync_ledger`) | ⏭ | Persistent processed-packet IDs so channel switches and reconnects never ingest twice or echo between machines. JSON/append log instead of SQLite unless SQLite is already linked |
+| Pairing and authentication | 🔨 | `peer_protocol.rs` now defines the versioned packet schema, payload hashing, HMAC-SHA256 authentication, strict peer/freshness/size validation and excludes hidden model reasoning from the protocol. Pairing UI and key exchange are still next |
+| Dedup ledger (`sync_ledger`) | 🔨 | `peer_protocol.rs` durably records authenticated packet IDs before dispatch, syncs each append, bounds and atomically compacts the ledger, and prevents replay across restarts. Network dispatch integration is still next |
 | 3 s heartbeat, 2 s reconnect with backoff | ⏭ | Never blocks the UI; link status dot per peer |
 | Automatic discovery (mDNS/Bonjour) + manual IP fallback | ⏭ | `_consilium._tcp` advertisement; manual host:port in Settings |
 | Wireless: Wi-Fi LAN / Tailscale | ⏭ | Same TCP link over any reachable address; Tailscale IPs accepted as peers |

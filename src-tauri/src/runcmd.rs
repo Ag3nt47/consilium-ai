@@ -423,8 +423,9 @@ mod tests {
 
     #[test]
     fn runs_once_and_only_ai_blocks() {
-        let ai = ev("e1", "claude", "```bash\necho hi\n```");
-        let human = ev("h1", "human", "```bash\necho hi\n```");
+        let lang = if cfg!(windows) { "powershell" } else { "bash" };
+        let ai = ev("e1", "claude", &format!("```{lang}\necho hi\n```"));
+        let human = ev("h1", "human", &format!("```{lang}\necho hi\n```"));
         let events = vec![ai.clone(), human];
         assert!(take(&events, "h1", 0).is_err());
         assert!(take(&events, "e1", 1).is_err());
@@ -435,7 +436,7 @@ mod tests {
         }
         let done = ev("h2", "human", &format!("Denied command\n{}", reference("e1", 0)));
         assert!(take(&[ai, done], "e1", 0).is_err());
-        let cut = ev("e2", "claude", "```bash\nrm -rf build\nmake");
+        let cut = ev("e2", "claude", &format!("```{lang}\nrm -rf build\nmake"));
         assert!(take(&[cut], "e2", 0).unwrap_err().contains("never closed"), "a cut-off block can't run");
     }
 

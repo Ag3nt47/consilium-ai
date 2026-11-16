@@ -13,6 +13,7 @@ mod council;
 mod engine;
 mod liveui;
 mod memory;
+pub mod peer_protocol;
 mod pressure;
 mod projects;
 mod prompt;

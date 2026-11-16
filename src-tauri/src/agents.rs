@@ -1134,71 +1134,89 @@ async fn execute(
     let mut recent_output = String::new();
     let mut activity_output = String::new();
     let mut watch_output = true;
+
+    let mut check_stream = |line: &str| -> Result<(), String> {
+        if matches!(access, Access::Own | Access::Unrestricted) {
+            if let Some(command) = streamed_command(kind, line) {
+                if elevated_command(&command) {
+                    if let Some(index) = elevated_commands
+                        .iter()
+                        .position(|grant| grant.trim() == command.trim())
+                    {
+                        // Each grant is consumed before execution and exists only for this turn.
+                        elevated_commands.remove(index);
+                    } else {
+                        let scrubbed = crate::redact::scrub(&command);
+                        if scrubbed != command {
+                            return Err(
+                                "administrator approval refused: the command contains a credential-like value. Remove the secret and ask again; never place credentials in commands or REQUESTs."
+                                    .into(),
+                            );
+                        }
+                        let encoded =
+                            serde_json::to_string(command.trim()).unwrap_or_else(|_| "\"\"".into());
+                        return Err(format!(
+                            "administrator approval required for {}.\nREQUEST: Approve one elevated command on {} for the stated task, using the normal visible OS authentication prompt? ELEVATED_COMMAND_JSON: {}",
+                            tool_name(kind),
+                            std::env::consts::OS,
+                            encoded,
+                        ));
+                    }
+                }
+                if destructive_command(&command) {
+                    return Err(format!(
+                        "safety stop: blocked a high-risk command from {}: {}\nREQUEST: Review the command and run it yourself only if its destructive effect is intended.",
+                        tool_name(kind),
+                        safe_activity_detail(&command),
+                    ));
+                }
+            }
+        }
+        if let Some(signal) = activity_from_line(kind, line) {
+            if let Some(sink) = &activity {
+                sink(signal);
+            }
+        }
+        Ok(())
+    };
+
+    let mut process_chunk = |chunk: &[u8]| -> Result<(), String> {
+        recent_output.push_str(&String::from_utf8_lossy(chunk));
+        keep_tail(&mut recent_output, 8_192);
+        if activity.is_some() || matches!(access, Access::Own | Access::Unrestricted) {
+            activity_output.push_str(&String::from_utf8_lossy(chunk));
+            while let Some(end) = activity_output.find('\n') {
+                let line = activity_output[..end].trim_end_matches('\r').to_string();
+                activity_output.drain(..=end);
+                check_stream(&line)?;
+            }
+            keep_tail(&mut activity_output, 32_768);
+        }
+        if let Some(line) = interactive_prompt(&recent_output) {
+            return Err(format!(
+                "{} is waiting for interactive input: {line}\nREQUEST: Open {} in a terminal, complete the prompt, then press Retry in Consilium.",
+                tool_name(kind),
+                path.display(),
+            ));
+        }
+        Ok(())
+    };
+
     let outcome = 'watch: loop {
         tokio::select! {
-            status = child.wait() => break Ok(status),
+            biased;
+            _ = cancel.cancelled() => break Err("stopped".to_string()),
+            _ = &mut deadline => break Err(format!("no answer within {} seconds", timeout.as_secs())),
             chunk = chunk_rx.recv(), if watch_output => {
                 let Some(chunk) = chunk else {
                     watch_output = false;
                     continue;
                 };
-                recent_output.push_str(&String::from_utf8_lossy(&chunk));
-                keep_tail(&mut recent_output, 8_192);
-                if activity.is_some() || matches!(access, Access::Own | Access::Unrestricted) {
-                    activity_output.push_str(&String::from_utf8_lossy(&chunk));
-                    while let Some(end) = activity_output.find('\n') {
-                        let line = activity_output[..end].trim_end_matches('\r').to_string();
-                        activity_output.drain(..=end);
-                        if matches!(access, Access::Own | Access::Unrestricted) {
-                            if let Some(command) = streamed_command(kind, &line) {
-                                if elevated_command(&command) {
-                                    if let Some(index) = elevated_commands.iter().position(|grant| grant.trim() == command.trim()) {
-                                        // Each grant is consumed before execution and exists only for this turn.
-                                        elevated_commands.remove(index);
-                                    } else {
-                                        let scrubbed = crate::redact::scrub(&command);
-                                        if scrubbed != command {
-                                            break 'watch Err(
-                                                "administrator approval refused: the command contains a credential-like value. Remove the secret and ask again; never place credentials in commands or REQUESTs."
-                                                    .into(),
-                                            );
-                                        }
-                                        let encoded = serde_json::to_string(command.trim()).unwrap_or_else(|_| "\"\"".into());
-                                        break 'watch Err(format!(
-                                            "administrator approval required for {}.\nREQUEST: Approve one elevated command on {} for the stated task, using the normal visible OS authentication prompt? ELEVATED_COMMAND_JSON: {}",
-                                            tool_name(kind),
-                                            std::env::consts::OS,
-                                            encoded,
-                                        ));
-                                    }
-                                }
-                                if destructive_command(&command) {
-                                break 'watch Err(format!(
-                                    "safety stop: blocked a high-risk command from {}: {}\nREQUEST: Review the command and run it yourself only if its destructive effect is intended.",
-                                    tool_name(kind),
-                                    safe_activity_detail(&command),
-                                ));
-                                }
-                            }
-                        }
-                        if let Some(signal) = activity_from_line(kind, &line) {
-                            if let Some(sink) = &activity {
-                                sink(signal);
-                            }
-                        }
-                    }
-                    keep_tail(&mut activity_output, 32_768);
-                }
-                if let Some(line) = interactive_prompt(&recent_output) {
-                    break Err(format!(
-                        "{} is waiting for interactive input: {line}\nREQUEST: Open {} in a terminal, complete the prompt, then press Retry in Consilium.",
-                        tool_name(kind),
-                        path.display(),
-                    ));
+                if let Err(why) = process_chunk(&chunk) {
+                    break 'watch Err(why);
                 }
             }
-            _ = cancel.cancelled() => break Err("stopped".to_string()),
-            _ = &mut deadline => break Err(format!("no answer within {} seconds", timeout.as_secs())),
+            status = child.wait() => break Ok(status),
         }
     };
     let status = match outcome {
@@ -1224,21 +1242,18 @@ async fn execute(
         _ = tokio::time::sleep(PIPE_GRACE) => {}
         _ = cancel.cancelled() => return Err("stopped".to_string()),
     }
-    if let Some(sink) = &activity {
-        while let Ok(chunk) = chunk_rx.try_recv() {
-            activity_output.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(end) = activity_output.find('\n') {
-                let line = activity_output[..end].trim_end_matches('\r').to_string();
-                activity_output.drain(..=end);
-                if let Some(signal) = activity_from_line(kind, &line) {
-                    sink(signal);
-                }
-            }
+    while let Ok(chunk) = chunk_rx.try_recv() {
+        if let Err(why) = process_chunk(&chunk) {
+            kill_tree(pid, &mut child).await;
+            return Err(why);
         }
-        if !activity_output.trim().is_empty() {
-            if let Some(signal) = activity_from_line(kind, activity_output.trim()) {
-                sink(signal);
-            }
+    }
+    if !activity_output.trim().is_empty() {
+        let line = activity_output.trim().to_string();
+        activity_output.clear();
+        if let Err(why) = check_stream(&line) {
+            kill_tree(pid, &mut child).await;
+            return Err(why);
         }
     }
     let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap()).to_string();
