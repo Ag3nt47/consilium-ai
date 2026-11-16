@@ -3132,8 +3132,9 @@ button.attachment {
   .topbar .wallpaper-pill { display: none; }
 }
 
-/* Keep the first conversation item close to the slim control strip. */
-.messages { padding-top: 10px; }
+/* Keep the conversation and messages card close to the slim control strip. */
+.messages { padding-top: 6px; }
+.main.has-wallpaper .messages { margin-top: 2px; }
 
 /* Netrunner keeps the daily wallpaper visible behind its grid, with a light, see-through top bar. */
 [data-effects="on"][data-theme="netrunner"] .main.has-wallpaper {
