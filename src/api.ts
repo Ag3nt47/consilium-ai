@@ -16,6 +16,31 @@ export interface CatalogTool {
 
 export const IN_APP = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/** One item on the conversation's shared task checklist. */
+export interface TaskItem {
+  id: number;
+  title: string;
+  owner?: string | null;
+  status: "todo" | "doing" | "blocked" | "done";
+  note?: string | null;
+  by: string;
+  updated: number;
+}
+
+export interface TaskBoard {
+  tasks: TaskItem[];
+  next: number;
+}
+
+export type TaskOp =
+  | { op: "add"; title: string; owner?: string }
+  | { op: "take"; task: string }
+  | { op: "done"; task: string }
+  | { op: "block"; task: string; note?: string }
+  | { op: "hand"; task: string; to: string }
+  | { op: "reopen"; task: string }
+  | { op: "drop"; task: string };
+
 export type Sender = "human" | "gpt" | "claude" | string;
 
 export interface ChatEvent {
@@ -328,6 +353,10 @@ const appApi = {
   /** The forecast of the next global Codex reset, when that setting is on. */
   resetForecast: () => invoke<ResetForecast | null>("reset_forecast"),
   setResetForecast: (on: boolean) => invoke<void>("set_reset_forecast", { on }),
+  /** The conversation's shared task checklist. */
+  tasksGet: (id: string) => invoke<TaskBoard>("tasks_get", { id }),
+  /** A change by the human; Consilium also notes it in the chat. */
+  tasksApply: (id: string, op: TaskOp) => invoke<TaskBoard>("tasks_apply", { id, op }),
   saveApproval: (request: string) => invoke<Council>("save_approval", { request }),
   forgetApproval: (grant: string) => invoke<Council>("forget_approval", { grant }),
   /** Settings → Tools: not-bundled tools the AIs know about, with install state and pinned commands. */

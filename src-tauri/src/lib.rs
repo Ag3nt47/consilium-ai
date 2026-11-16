@@ -29,6 +29,7 @@ mod signal_chat;
 mod signal_setup;
 mod security_scan;
 mod store;
+mod tasks;
 mod toolbox;
 mod update;
 mod usage;
@@ -284,6 +285,28 @@ fn set_voice(state: State<AppState>, id: String, on: bool) -> Result<Event, Stri
     state.engine.note(&id, text)
 }
 
+/// The conversation's shared task board.
+#[tauri::command]
+fn tasks_get(state: State<AppState>, id: String) -> Result<tasks::Board, String> {
+    if !store::valid_id(&id) {
+        return Err("Unknown conversation.".into());
+    }
+    Ok(tasks::load(state.engine.store.dir(), &id))
+}
+
+/// A change the human made to the task board; Consilium notes it in the conversation.
+#[tauri::command]
+fn tasks_apply(state: State<AppState>, id: String, op: tasks::Op) -> Result<tasks::Board, String> {
+    if !store::valid_id(&id) {
+        return Err("Unknown conversation.".into());
+    }
+    let dir = state.engine.store.dir();
+    if let Some(note) = tasks::apply(dir, &id, "human", &[op])? {
+        state.engine.note(&id, &note)?;
+    }
+    Ok(tasks::load(dir, &id))
+}
+
 #[tauri::command]
 fn export_markdown(state: State<AppState>, id: String) -> Result<String, String> {
     let meta = state.engine.store.meta(&id)?;
@@ -336,10 +359,11 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: a CI light in the title bar, beside the versions tab, shows whether \
-GitHub's checks pass (green), fail (red) or are still running (amber) on the project's newest commit; click it to \
-open the run. Consilium reads the checks itself about once a minute, tells every AI the result in its prompt, and \
-posts a note here when a commit's checks pass or fail, so the AIs no longer need to keep checking GitHub.";
+const WHATS_NEW: &str = "What's new: Signal now carries the conversation both ways. Messages you send in \
+the Consilium group (or Note to Self) arrive here, a group per AI reaches only that AI, replying Approve or Deny answers \
+a single waiting request, and replies go back to the group they came from. The sidebar has a shared task checklist: \
+AIs take, finish, hand off and block tasks with TASK: lines, you can tick, assign and add tasks, and Consilium posts \
+who did what with overall progress. Click the conversation title to rename it; AIs can rename it with a TITLE: line.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -802,6 +826,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            tasks_get,
+            tasks_apply,
             agents_status,
             agents_usage,
             set_member,

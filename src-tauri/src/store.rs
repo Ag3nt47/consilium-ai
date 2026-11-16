@@ -326,6 +326,7 @@ impl Store {
         let _ = fs::remove_file(self.append_lock_path(id));
         let _ = fs::remove_file(self.stop_path(id));
         let _ = fs::remove_dir_all(self.files_dir(id));
+        let _ = fs::remove_file(self.dir.join(format!("{id}.tasks.json")));
         Ok(())
     }
 

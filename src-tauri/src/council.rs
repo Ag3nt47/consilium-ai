@@ -42,6 +42,10 @@ pub trait Host: Send + Sync + 'static {
     fn installed(&self, agent: &'static Agent) -> bool;
     /// Saves an answer's REMEMBER: lines to council memory; returns the note to show, if any.
     fn remember(&self, agent: &'static Agent, reply: &str) -> Option<String>;
+    /// Applies an answer's TASK: lines to the conversation's task board; returns the note to show.
+    fn tasks(&self, _agent: &'static Agent, _reply: &str) -> Option<String> {
+        None
+    }
 }
 
 pub struct Turn {
@@ -373,6 +377,9 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                 s.host.event(&ev);
                 if let Some(note) = s.host.remember(agent, &reply.text) {
                     note_as(&s, &id, &note);
+                }
+                if let Some(note) = s.host.tasks(agent, &reply.text) {
+                    note_as(&s, CONSILIUM, &note);
                 }
                 let mut start = Vec::new();
                 {

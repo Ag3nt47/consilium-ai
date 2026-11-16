@@ -684,6 +684,8 @@ impl council::Host for RealHost {
         if let Some(usage) = crate::usage::for_prompt(&crate::usage::load(&self.data), &members, agent.id, store::now_ms()) {
             system.push_str(&usage);
         }
+        // The conversation's shared task board, and how to change it.
+        system.push_str(&crate::tasks::for_prompt(&crate::tasks::load(self.store.dir(), conv)));
         // The projects' GitHub checks, as last read by the background watcher.
         if let Some(w) = workspace.as_deref() {
             system.push_str(&crate::ci::for_prompt(std::path::Path::new(w)));
@@ -807,6 +809,24 @@ impl council::Host for RealHost {
         }
         let added = self.memory.remember(agent.name, &today(), &facts).ok()?;
         (!added.is_empty()).then(|| format!("{} saved to council memory: {}", agent.name, added.join("; ")))
+    }
+
+    fn tasks(&self, agent: &'static Agent, reply: &str) -> Option<String> {
+        let ops = crate::tasks::task_lines(reply);
+        let mut notes: Vec<String> = crate::tasks::apply(self.store.dir(), &self.conversation, agent.id, &ops)
+            .ok()
+            .flatten()
+            .into_iter()
+            .collect();
+        if let Some(title) = crate::tasks::title_line(reply) {
+            let before = self.store.meta(&self.conversation).map(|m| m.title).unwrap_or_default();
+            if let Ok(meta) = self.store.rename(&self.conversation, &title) {
+                if meta.title != before {
+                    notes.push(format!("{} renamed the conversation to \u{201c}{}\u{201d}.", agent.name, meta.title));
+                }
+            }
+        }
+        (!notes.is_empty()).then(|| notes.join("\n"))
     }
 }
 

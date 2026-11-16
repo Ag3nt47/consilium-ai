@@ -3238,3 +3238,29 @@ button.attachment {
   .agent-exhausted-tag { display: block; margin-left: 0; }
   .usage-label small { display: none; }
 }
+
+/* Shared task checklist in the sidebar. */
+.task-board { margin-top: 10px; min-width: 0; }
+.task-board .section-label { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.task-board-toggle { font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; padding: 0; }
+.task-progress { height: 3px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 18%, transparent); margin: 2px 0 6px; overflow: hidden; }
+.task-progress > div { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+.task-list { list-style: none; margin: 0; padding: 0; max-height: 30vh; overflow-y: auto; }
+.task-item { display: flex; align-items: flex-start; gap: 6px; padding: 3px 0; font-size: 12px; min-width: 0; }
+.task-item input[type="checkbox"] { margin-top: 2px; flex: none; }
+.task-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.task-title { overflow-wrap: anywhere; }
+.task-item.done .task-title { text-decoration: line-through; opacity: 0.6; }
+.task-meta { font-size: 10.5px; opacity: 0.7; display: flex; align-items: center; gap: 4px; }
+.task-item.blocked .task-meta { color: #e5534b; opacity: 1; }
+.task-meta .task-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.task-assign { flex: none; width: 26px; font-size: 11px; padding: 0; background: transparent; color: inherit; border: none; cursor: pointer; opacity: 0.6; }
+.task-assign:hover { opacity: 1; }
+.task-add input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 4px 6px; margin-top: 4px; }
+.task-error { color: #e5534b; font-size: 11px; }
+
+/* Click-to-rename conversation title. */
+.topbar h1 { cursor: text; }
+.title-pencil { font-size: 11px; opacity: 0; margin-left: 5px; transition: opacity 0.15s; }
+.topbar h1:hover .title-pencil { opacity: 0.6; }
+.title-edit { font: inherit; font-size: 14px; font-weight: 600; min-width: 120px; max-width: min(30vw, 280px); flex: 0 1 auto; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--accent); background: transparent; color: inherit; }

@@ -5,7 +5,7 @@
 //
 // `step` (0-5) picks a moment in the scripted conversation; `setup=1` shows the first-run setup
 // state; `settings=1` opens Settings. Nothing here touches the network or real conversations.
-import type { AgentInfo, ChatEvent, Conversation, TurnState } from "./api";
+import type { AgentInfo, ChatEvent, Conversation, TaskBoard, TurnState } from "./api";
 
 const params = new URLSearchParams(location.search);
 export const demoStep = Math.max(0, Math.min(5, Number(params.get("step") ?? 5)));
@@ -147,6 +147,16 @@ function stepState(step: number): { events: ChatEvent[]; thinking: string | null
 
 const state = stepState(demoStep);
 
+const demoBoard: TaskBoard = {
+  next: 4,
+  tasks: [
+    { id: 1, title: "Task board in the sidebar", owner: "claude", status: "done", by: "claude", updated: 0 },
+    { id: 2, title: "Signal REQUEST relay", owner: "gemini", status: "doing", by: "gemini", updated: 0 },
+    { id: 3, title: "Pairing timeout and route limits", owner: "claude", status: "blocked", note: "waiting for 0.3.21", by: "claude", updated: 0 },
+    { id: 4, title: "Security review of link.rs", owner: null, status: "todo", by: "human", updated: 0 },
+  ],
+};
+
 const demoCouncilForApprovals = { members: ["gpt", "claude", "gemini"], access: {}, default_workspace: null, default_access: "chat" as const, saved_grants: [] };
 
 export const demoApi = {
@@ -258,6 +268,17 @@ export const demoApi = {
   runCommand: async () => { throw new Error("Run works in the app, not the demo"); },
   pickFiles: async () => [],
   setResetForecast: async () => undefined,
+  tasksGet: async () => demoBoard,
+  tasksApply: async (_id: string, op: { op: string; task?: string; title?: string; to?: string }) => {
+    const num = Number((op.task ?? "").replace("#", ""));
+    const t = demoBoard.tasks.find((x) => x.id === num);
+    if (op.op === "add" && op.title) demoBoard.tasks.push({ id: ++demoBoard.next, title: op.title, owner: null, status: "todo", by: "human", updated: Date.now() });
+    if (t && op.op === "done") t.status = "done";
+    if (t && op.op === "reopen") t.status = t.owner ? "doing" : "todo";
+    if (t && op.op === "hand" && op.to) Object.assign(t, { owner: op.to, status: "doing" });
+    if (t && op.op === "drop") demoBoard.tasks = demoBoard.tasks.filter((x) => x !== t);
+    return { ...demoBoard, tasks: [...demoBoard.tasks] };
+  },
   saveApproval: async () => ({ ...demoCouncilForApprovals }),
   forgetApproval: async () => ({ ...demoCouncilForApprovals }),
   toolCatalog: async () => [

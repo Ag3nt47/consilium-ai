@@ -41,6 +41,7 @@ import { LinkIndicator, LinkSettings } from "./link";
 import { SecurityScanSettings } from "./security";
 import { ToolsSettings } from "./tools";
 import { CiBadge, ProjectVersions } from "./projects";
+import { TaskBoardPanel } from "./tasks";
 import { RepoDrawer } from "./repo";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
@@ -1507,12 +1508,20 @@ export default function App() {
     }
   }
 
-  async function renameCurrent() {
-    if (!current || !meta) return;
-    const title = prompt("Rename conversation", meta.title);
-    if (title && title.trim()) {
+  // Renaming happens in place: the title turns into a text box (prompt() shows nothing in the app window).
+  const [titleDraft, setTitleDraft] = useState<string | null>(null);
+  function renameCurrent() {
+    if (current && meta) setTitleDraft(meta.title);
+  }
+  async function saveTitle() {
+    const title = titleDraft?.trim();
+    setTitleDraft(null);
+    if (!current || !meta || !title || title === meta.title) return;
+    try {
       await api.rename(current, title);
       refreshList();
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -1844,6 +1853,11 @@ export default function App() {
           })}
           <ResourcePressureGauge pressure={pressure} />
         </div>
+        <TaskBoardPanel
+          conversation={current}
+          changeKey={events.length}
+          people={[{ id: "human", name: "You" }, ...members.map((m) => ({ id: m.id, name: m.name }))]}
+        />
         <div className="sidebar-actions">
           <button className="btn ghost" onClick={() => setShowAddAi(true)} title="Add or remove AIs">
             + Add AI
@@ -1882,9 +1896,27 @@ export default function App() {
         )}
         <header className="topbar">
           <div className="title-block">
-            <h1 onDoubleClick={renameCurrent} title="Double-click to rename">
-              {meta?.title ?? "Consilium"}
-            </h1>
+            {titleDraft !== null ? (
+              <input
+                className="title-edit"
+                autoFocus
+                value={titleDraft}
+                maxLength={60}
+                aria-label="Conversation title"
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onFocus={(e) => e.target.select()}
+                onBlur={saveTitle}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.currentTarget.blur();
+                  if (e.key === "Escape") setTitleDraft(null);
+                }}
+              />
+            ) : (
+              <h1 onClick={renameCurrent} title="Click to rename this conversation. The AIs can rename it too.">
+                {meta?.title ?? "Consilium"}
+                {meta && <span className="title-pencil" aria-hidden>✎</span>}
+              </h1>
+            )}
             <div className="workspace">
               {meta?.workspace ? (
                 <>
