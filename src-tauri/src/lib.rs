@@ -159,6 +159,12 @@ fn save_approval(state: State<AppState>, request: String) -> Result<config::Coun
     state.engine.config.save_grants(&grants)
 }
 
+/// Settings → Tools: the catalog of not-bundled tools, with install state and pinned commands.
+#[tauri::command]
+fn tool_catalog() -> Vec<toolbox::CatalogEntry> {
+    toolbox::catalog(data_dir().as_deref())
+}
+
 #[tauri::command]
 fn forget_approval(state: State<AppState>, grant: String) -> Result<config::Council, String> {
     state.engine.config.forget_grant(&grant)
@@ -807,6 +813,7 @@ pub fn run() {
             reset_forecast,
             set_reset_forecast,
             save_approval,
+            tool_catalog,
             forget_approval,
             attach_files,
             attach_data,

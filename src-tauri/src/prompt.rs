@@ -247,6 +247,16 @@ pub fn elevated_command_grants(events: &[Event], me: &str) -> Vec<String> {
     grants_in_request(request)
 }
 
+/// The install the human asked for from Settings → Tools, when the newest human message is that
+/// request, is addressed to `me`, and names exactly the catalog's pinned command for the tool.
+pub fn catalog_install_grant(events: &[Event], me: &str, data: &std::path::Path) -> Option<String> {
+    let newest = events.iter().rev().find(|event| event.kind == "message" && event.sender == "human")?;
+    if !newest.to.iter().any(|target| target == me) {
+        return None;
+    }
+    crate::toolbox::catalog_install_grant(&newest.text, Some(data))
+}
+
 /// The machine-readable grants an approval of `request` gives: the exact elevated command and/or
 /// the exact install command (marked with [`INSTALL_GRANT_PREFIX`]).
 pub fn grants_in_request(request: &str) -> Vec<String> {
@@ -775,6 +785,27 @@ mod tests {
         assert!(terminal_capability("windows", Access::Edit).is_none());
         assert!(terminal_capability("linux", Access::Read).is_none());
         assert!(terminal_capability("macos", Access::Chat).is_none());
+    }
+
+    #[test]
+    fn catalog_install_goes_only_to_the_addressed_ai_on_the_newest_message() {
+        let data = std::path::Path::new("/tmp/consilium-data");
+        let text = format!(
+            "{} REA. INSTALL_COMMAND_JSON: \"npm install --global --ignore-scripts rea-agents@6.9.0\"",
+            crate::toolbox::CATALOG_INSTALL_PREFIX
+        );
+        let mut click = ev("human", &text);
+        click.seq = 1;
+        click.to = vec!["claude".into()];
+        assert!(catalog_install_grant(&[click.clone()], "claude", data).is_some());
+        assert!(catalog_install_grant(&[click.clone()], "gpt", data).is_none());
+        let mut later = ev("human", "thanks");
+        later.seq = 2;
+        later.to = vec!["claude".into()];
+        assert!(catalog_install_grant(&[click.clone(), later], "claude", data).is_none());
+        let mut forged = ev("gpt", &text);
+        forged.to = vec!["claude".into()];
+        assert!(catalog_install_grant(&[forged], "claude", data).is_none());
     }
 
     #[test]

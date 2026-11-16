@@ -6,7 +6,7 @@
 //! recognises system-wide installs, describes the package managers present on this host, and
 //! tells the AIs how to ask.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const INSTALL_COMMAND_MARKER: &str = "INSTALL_COMMAND_JSON:";
 
@@ -19,56 +19,157 @@ fn known_tools(os: &str) -> &'static [&'static str] {
     }
 }
 
-/// Tools the human wants Consilium to know about but not ship: listed to every AI with shell
-/// access so it can recognise when one fits and ask to install it. Nothing here is downloaded.
-/// (name, binary to look for, source, what it is for and how to install it)
-const CATALOG: &[(&str, &str, &str, &str)] = &[
-    (
-        "AnonRouter",
-        "anonrouter",
-        "https://anonrouter.ai",
-        "privacy router (\"VPN for AI\") that relays requests to AI model APIs without exposing the caller; \
+/// One tool the human wants Consilium to know about but not ship. Listed to every AI with shell
+/// access, and on the Settings → Tools page, so it can be installed on request. Nothing here is
+/// downloaded until the human approves the exact install command.
+struct CatalogTool {
+    name: &'static str,
+    /// What to look for to tell whether it is installed: a program on the search path, or a file
+    /// under Consilium's data folder (prefixed `data:`). Empty when it can't be detected cheaply.
+    detect: &'static str,
+    source: &'static str,
+    about: &'static str,
+}
+
+const CATALOG: &[CatalogTool] = &[
+    CatalogTool {
+        name: "AnonRouter",
+        detect: "",
+        source: "https://anonrouter.ai",
+        about: "privacy router (\"VPN for AI\") that relays requests to AI model APIs without exposing the caller; \
 use it when the human wants AI traffic kept private. Python SDK: PyPI `anonrouter-confidential` (published \
-by AnonRouter, source github.com/anonrouter/anonrouter-sdk); check for it with `pip3 show anonrouter-confidential` \
-(it has no CLI, so the status here reads not installed) and install with \
-`pip3 install --user anonrouter-confidential==0.1.3.post1`. Never send keys or the human's details to it \
-without approval",
-    ),
-    (
-        "Zero Breach Toolkit",
-        "zero-breach",
-        "https://github.com/interplains/Zero-Breach-Toolkit",
-        "offline spyware and compromise scanner for macOS, Windows and Linux; run it only when the computer is \
-idle, and pause it while AIs or builds are busy",
-    ),
-    (
-        "Ghidra",
-        "ghidraRun",
-        "https://github.com/NationalSecurityAgency/ghidra",
-        "decompiler REA uses for compiled native programs; request it only when a task needs native analysis",
-    ),
-    (
-        "JADX",
-        "jadx",
-        "https://github.com/skylot/jadx",
-        "Android APK and DEX decompiler REA uses; request it only when a task needs Android analysis",
-    ),
+by AnonRouter, source github.com/anonrouter/anonrouter-sdk); needs Python 3.10 or newer; check for it with \
+`pip3 show anonrouter-confidential` (it has no CLI, so the status here reads unknown). Never send keys or the \
+human's details to it without approval",
+    },
+    CatalogTool {
+        name: "Zero Breach Toolkit",
+        detect: "data:security/zero-breach/zero-breach-toolkit.py",
+        source: "https://github.com/interplains/Zero-Breach-Toolkit",
+        about: "offline spyware and compromise scanner for macOS, Windows and Linux; Consilium's Security scans \
+run its pinned v3.0.2 standalone script only when the computer is idle",
+    },
+    CatalogTool {
+        name: "REA (Reverse Engineer Anything)",
+        detect: "rea",
+        source: "https://github.com/morluto/rea",
+        about: "reverse-engineering MCP server for finished programs, Electron/JavaScript apps, web pages and \
+packaged files; not for ordinary source code in a repo",
+    },
+    CatalogTool {
+        name: "Ghidra",
+        detect: "ghidraRun",
+        source: "https://github.com/NationalSecurityAgency/ghidra",
+        about: "decompiler REA uses for compiled native programs; needs a Java runtime; request it only when a \
+task needs native analysis",
+    },
+    CatalogTool {
+        name: "JADX",
+        detect: "jadx",
+        source: "https://github.com/skylot/jadx",
+        about: "Android APK and DEX decompiler REA uses; request it only when a task needs Android analysis",
+    },
 ];
 
-fn catalog_note(dirs_: &[PathBuf]) -> String {
+/// The exact, pinned install command for a catalog tool on `os`, when one is known. Tools without
+/// one are installed by asking an AI to find the right command and REQUEST it.
+fn install_for(name: &str, os: &str, data: Option<&Path>) -> Option<String> {
+    let windows = os == "windows";
+    match name {
+        "AnonRouter" => Some(format!(
+            "{} install --user anonrouter-confidential==0.1.3.post1",
+            if windows { "pip" } else { "pip3" }
+        )),
+        "REA (Reverse Engineer Anything)" => Some("npm install --global --ignore-scripts rea-agents@6.9.0".into()),
+        "Zero Breach Toolkit" => {
+            let target = data?.join("security").join("zero-breach").join("zero-breach-toolkit.py");
+            let target = target.to_str()?;
+            if target.contains('"') {
+                return None;
+            }
+            Some(format!(
+                "{} -fL --create-dirs -o \"{target}\" \
+https://github.com/interplains/Zero-Breach-Toolkit/releases/download/v3.0.2/zero-breach-toolkit.py",
+                if windows { "curl.exe" } else { "curl" }
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// A catalog tool as the Settings → Tools page shows it.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct CatalogEntry {
+    pub name: String,
+    pub source: String,
+    pub about: String,
+    /// Where it was found; `None` when not installed or not detectable.
+    pub installed: Option<String>,
+    /// Whether `installed` could be determined at all.
+    pub detectable: bool,
+    pub install_command: Option<String>,
+}
+
+fn detect(tool: &CatalogTool, dirs_: &[PathBuf], data: Option<&Path>) -> Option<PathBuf> {
+    match tool.detect.strip_prefix("data:") {
+        Some(rel) => data.map(|d| d.join(rel)).filter(|p| p.is_file()),
+        None if tool.detect.is_empty() => None,
+        None => present(tool.detect, dirs_),
+    }
+}
+
+/// Every catalog tool with its install state and pinned install command on this computer.
+pub fn catalog(data: Option<&Path>) -> Vec<CatalogEntry> {
+    let dirs_ = search_dirs();
+    let os = std::env::consts::OS;
+    CATALOG
+        .iter()
+        .map(|tool| CatalogEntry {
+            name: tool.name.into(),
+            source: tool.source.into(),
+            about: tool.about.into(),
+            installed: detect(tool, &dirs_, data).map(|p| p.display().to_string()),
+            detectable: !tool.detect.is_empty(),
+            install_command: install_for(tool.name, os, data),
+        })
+        .collect()
+}
+
+/// Prefix of the message the Tools page's Install button sends. A newest human message in this
+/// form grants the addressed AI that one install, but only when the command is exactly the
+/// catalog's pinned command for that tool on this computer.
+pub const CATALOG_INSTALL_PREFIX: &str = "Install from the tool catalog:";
+
+/// The install grant a human catalog-install message gives, if its command is a catalog command.
+pub fn catalog_install_grant(text: &str, data: Option<&Path>) -> Option<String> {
+    let rest = text.trim().strip_prefix(CATALOG_INSTALL_PREFIX)?;
+    let (_, encoded) = rest.rsplit_once(INSTALL_COMMAND_MARKER)?;
+    let command: String = serde_json::from_str(encoded.trim()).ok()?;
+    catalog(data)
+        .into_iter()
+        .any(|entry| entry.install_command.as_deref() == Some(command.as_str()))
+        .then_some(command)
+}
+
+fn catalog_note(dirs_: &[PathBuf], data: Option<&Path>) -> String {
+    let os = std::env::consts::OS;
     let lines: Vec<String> = CATALOG
         .iter()
-        .map(|(name, bin, source, about)| {
-            let state = match present(bin, dirs_) {
+        .map(|tool| {
+            let state = match detect(tool, dirs_, data) {
                 Some(path) => format!("installed at {}", path.display()),
+                None if tool.detect.is_empty() => "install state unknown".to_string(),
                 None => "not installed".to_string(),
             };
-            format!("- {name} ({source}, {state}): {about}.")
+            let install = install_for(tool.name, os, data)
+                .map(|c| format!(" Install command: `{c}`."))
+                .unwrap_or_default();
+            format!("- {} ({}, {state}): {}.{install}", tool.name, tool.source, tool.about)
         })
         .collect();
     format!(
         "\nCatalog of tools the human has asked Consilium to know about (not bundled; request an install with \
-INSTALL_COMMAND_JSON when a task calls for one):\n{}",
+INSTALL_COMMAND_JSON when a task calls for one; the human can also install them from Settings → Tools):\n{}",
         lines.join("\n")
     )
 }
@@ -142,7 +243,7 @@ scripts. Consilium blocks an unapproved install and lets the approved command ru
 human's `Approved:`. After installing, verify the tool runs and record it with a REMEMBER: line (name, source, \
 path). If an install needs administrator rights, use the elevated-command request instead.\n\
 Package managers and tools on this {os} host: {have}.{missing}{catalog}",
-        catalog = catalog_note(&search_dirs())
+        catalog = catalog_note(&search_dirs(), crate::data_dir().as_deref())
     )
 }
 
@@ -292,5 +393,19 @@ mod tests {
         assert!(text.contains("without asking"));
         assert!(text.contains("AnonRouter (https://anonrouter.ai"));
         assert!(text.contains("not bundled"));
+    }
+
+    #[test]
+    fn catalog_install_grants_only_the_pinned_command() {
+        let data = PathBuf::from("/tmp/consilium-data");
+        let rea = "npm install --global --ignore-scripts rea-agents@6.9.0";
+        let msg = |c: &str| format!("{CATALOG_INSTALL_PREFIX} REA. {INSTALL_COMMAND_MARKER} {}", serde_json::to_string(c).unwrap());
+        assert_eq!(catalog_install_grant(&msg(rea), Some(&data)).as_deref(), Some(rea));
+        assert!(catalog_install_grant(&msg("npm install --global rea-agents"), Some(&data)).is_none());
+        assert!(catalog_install_grant(&format!("please {}", msg(rea)), Some(&data)).is_none());
+        let zb = catalog(Some(&data)).into_iter().find(|e| e.name == "Zero Breach Toolkit").unwrap();
+        let cmd = zb.install_command.unwrap();
+        assert!(cmd.contains("v3.0.2/zero-breach-toolkit.py") && cmd.contains("zero-breach-toolkit.py\""));
+        assert!(!zb.detectable || zb.installed.is_none());
     }
 }

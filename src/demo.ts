@@ -257,6 +257,11 @@ export const demoApi = {
   setResetForecast: async () => undefined,
   saveApproval: async () => ({ ...demoCouncilForApprovals }),
   forgetApproval: async () => ({ ...demoCouncilForApprovals }),
+  toolCatalog: async () => [
+    { name: "AnonRouter", source: "https://anonrouter.ai", about: "privacy router for AI model APIs", installed: null, detectable: false, install_command: "pip3 install --user anonrouter-confidential==0.1.3.post1" },
+    { name: "REA (Reverse Engineer Anything)", source: "https://github.com/morluto/rea", about: "reverse-engineering MCP server", installed: "/usr/local/bin/rea", detectable: true, install_command: "npm install --global --ignore-scripts rea-agents@6.9.0" },
+    { name: "Ghidra", source: "https://github.com/NationalSecurityAgency/ghidra", about: "decompiler REA uses for native programs", installed: null, detectable: true, install_command: null },
+  ],
   cliStatus: async () => ({ installed: true, path: "~/.local/bin/consilium", command: "consilium chat", note: "" }),
   installCli: async () => ({ installed: true, path: "~/.local/bin/consilium", command: "consilium chat", note: "" }),
   selfCheck: async () => [

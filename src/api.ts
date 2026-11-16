@@ -5,6 +5,15 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { demoApi } from "./demo";
 
 /** True inside the Consilium app; false in an ordinary browser, where the demo data is shown. */
+export interface CatalogTool {
+  name: string;
+  source: string;
+  about: string;
+  installed: string | null;
+  detectable: boolean;
+  install_command: string | null;
+}
+
 export const IN_APP = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export type Sender = "human" | "gpt" | "claude" | string;
@@ -312,6 +321,8 @@ const appApi = {
   setResetForecast: (on: boolean) => invoke<void>("set_reset_forecast", { on }),
   saveApproval: (request: string) => invoke<Council>("save_approval", { request }),
   forgetApproval: (grant: string) => invoke<Council>("forget_approval", { grant }),
+  /** Settings → Tools: not-bundled tools the AIs know about, with install state and pinned commands. */
+  toolCatalog: () => invoke<CatalogTool[]>("tool_catalog"),
   /** Whether the `consilium` terminal command is installed. */
   cliStatus: () => invoke<CliInstall>("cli_status"),
   installCli: () => invoke<CliInstall>("install_cli"),

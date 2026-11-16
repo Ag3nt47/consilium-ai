@@ -3170,3 +3170,12 @@ button.attachment {
 .saved-grants li { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .saved-grants code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .saved-grant-kind { font-size: 11px; opacity: 0.7; min-width: 44px; }
+
+/* Settings → Tools */
+.tool-list { list-style: none; margin: 6px 0; padding: 0; display: grid; gap: 8px; }
+.tool-list li { padding: 8px 10px; border: 1px solid var(--border, rgba(255,255,255,.12)); border-radius: 8px; }
+.tool-head { display: flex; align-items: center; gap: 8px; }
+.tool-head b { flex: 1; min-width: 0; }
+.tool-state { font-size: 11px; opacity: .7; }
+.tool-state.on { color: var(--ok, #3fb950); opacity: 1; }
+.tool-cmd { display: block; margin-top: 4px; font-size: 11px; overflow-wrap: anywhere; opacity: .8; }

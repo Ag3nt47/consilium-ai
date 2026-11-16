@@ -39,6 +39,7 @@ import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from
 import { MessagingIndicator, MessagingSettings } from "./messaging";
 import { LinkIndicator, LinkSettings } from "./link";
 import { SecurityScanSettings } from "./security";
+import { ToolsSettings } from "./tools";
 import { ProjectVersions } from "./projects";
 import { RepoDrawer } from "./repo";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
@@ -2407,6 +2408,14 @@ export default function App() {
                 })}
               </ul>
             )}
+            <div className="section-label">Tools</div>
+            <ToolsSettings
+              ais={members.map((a) => ({ id: a.id, name: a.name }))}
+              onSend={async (text, to) => {
+                if (!current) throw new Error("open a conversation first");
+                await api.send(current, text, [to], 1);
+              }}
+            />
             <div className="section-label">Terminal</div>
             <p className="muted small">
               Talk to the council from a terminal too, in the same conversations: <code>consilium chat</code>, or{" "}

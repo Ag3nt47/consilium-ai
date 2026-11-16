@@ -686,6 +686,10 @@ impl council::Host for RealHost {
         }
         let transcript = prompt::transcript(&events, agent.id);
         let mut elevated_commands = prompt::elevated_command_grants(&events, agent.id);
+        // The Tools page's Install button: one pinned catalog install for the AI it was sent to.
+        if let Some(command) = prompt::catalog_install_grant(&events, agent.id, &self.data) {
+            elevated_commands.push(format!("{}{command}", prompt::INSTALL_GRANT_PREFIX));
+        }
         // "Always allow" approvals saved on this computer apply to every AI, every turn.
         let saved_grants = self.config.get().saved_grants;
         if access == Access::Unrestricted || access == Access::Own {
