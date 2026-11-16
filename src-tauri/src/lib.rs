@@ -902,7 +902,7 @@ pub fn run() {
                 }
                 Err(e) => eprintln!("link: {e}"),
             }
-            peer_sync::init(app.state::<AppState>().engine.store.clone(), &data.join("link"));
+            peer_sync::init(app.state::<AppState>().engine.clone(), &data.join("link"));
             // Falls back to the built-in page if an instantly applied one never starts.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {

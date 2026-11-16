@@ -448,6 +448,11 @@ impl Link {
         Ok(first_id)
     }
 
+    /// This computer's id among the linked computers.
+    pub fn node_id(&self) -> String {
+        self.0.cfg.lock().unwrap().node_id.clone()
+    }
+
     pub fn has_peers(&self) -> bool {
         !self.0.cfg.lock().unwrap().peers.is_empty()
     }

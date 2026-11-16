@@ -4,8 +4,9 @@
 //! The receiver files it in a mirror conversation of its own, titled "<title> (<computer>)",
 //! so the two councils never answer the same message: the computer the message was typed on
 //! owns the turn. Mirrors are never sent back, which keeps two computers from echoing forever.
-//! Imported AI messages carry no REQUEST buttons yet; answering requests from another computer
-//! is the next step.
+//! What the human types in a mirror (an answer to a REQUEST, or anything else) is not answered
+//! here: it goes back to the computer that owns the conversation, which records it as
+//! "You (<this computer>)" and runs the turn, so requests can be answered from either computer.
 //!
 //! Fail-safes, because AIs on two computers may both be working:
 //! - Each AI from another computer is named "<AI> (<computer>)", e.g. "Claude (MacBook)", on
@@ -50,6 +51,12 @@ pub struct Sync {
     recent: Mutex<(HashSet<String>, VecDeque<String>)>,
     /// Per computer: send times of recently accepted messages, and when it was last paused.
     rate: Mutex<HashMap<String, (VecDeque<u64>, u64)>>,
+    /// This computer's node id, to pick out replies meant for it.
+    me: Mutex<String>,
+    /// Messages typed in a mirror here, as (mirror, text): already shown, so the owner's copy
+    /// coming back is skipped once.
+    sent: Mutex<Vec<(String, String)>>,
+    relay: OnceLock<Relay>,
 }
 
 /// Why an incoming message was turned away.
@@ -75,7 +82,15 @@ struct Shared {
     text: String,
     #[serde(default)]
     via: Option<String>,
+    /// Set when the human typed this in a mirror: the node id of the computer that owns
+    /// `conversation`, which is its own id there. Every other computer ignores it.
+    #[serde(default)]
+    owner: Option<String>,
 }
+
+/// Records a message typed in a mirror in the owner's conversation and runs its turn:
+/// (conversation, text, targets, sending computer's name).
+type Relay = Box<dyn Fn(&str, &str, Vec<String>, &str) -> Result<Event, String> + Send + std::marker::Sync>;
 
 impl Sync {
     pub fn new(store: Arc<Store>, link_dir: &Path) -> Self {
@@ -87,6 +102,9 @@ impl Sync {
             mirrors: Mutex::new(mirrors),
             recent: Mutex::new((HashSet::new(), VecDeque::new())),
             rate: Mutex::new(HashMap::new()),
+            me: Mutex::new(String::new()),
+            sent: Mutex::new(Vec::new()),
+            relay: OnceLock::new(),
         }
     }
 
@@ -110,6 +128,61 @@ impl Sync {
 
     fn is_mirror(&self, conversation: &str) -> bool {
         self.mirrors.lock().unwrap().map.values().any(|v| v == conversation)
+    }
+
+    /// The owning computer's node id and its conversation id, if `conversation` is a mirror.
+    fn origin(&self, conversation: &str) -> Option<(String, String)> {
+        let m = self.mirrors.lock().unwrap();
+        let key = m.map.iter().find(|(_, v)| *v == conversation)?.0;
+        key.split_once('/').map(|(n, c)| (n.to_string(), c.to_string()))
+    }
+
+    /// Shows the human's `text` in `mirror` and returns it with the packet that carries it to
+    /// the owning computer. Nothing runs here.
+    fn reply(&self, mirror: &str, text: &str, targets: &[String]) -> Result<(Event, Value), String> {
+        let (owner, conversation) = self.origin(mirror).ok_or("this isn't another computer's conversation")?;
+        let event = self.store.append_imported(mirror, "human", "message", targets.to_vec(), text, None)?;
+        self.sent.lock().unwrap().push((mirror.to_string(), text.to_string()));
+        let payload = serde_json::to_value(Shared {
+            conversation,
+            title: String::new(),
+            id: event.id.clone(),
+            sender: "human".into(),
+            kind: "message".into(),
+            to: targets.to_vec(),
+            text: text.to_string(),
+            via: None,
+            owner: Some(owner),
+        })
+        .map_err(|e| e.to_string())?;
+        Ok((event, payload))
+    }
+
+    /// Hands a reply typed on `computer` to this computer's own conversation.
+    fn take_reply(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
+        let mut m = self.mirrors.lock().unwrap();
+        if m.filed.contains(&packet.id) {
+            return Ok(None);
+        }
+        if shared.owner.as_deref() != Some(self.me.lock().unwrap().as_str()) {
+            return Ok(None);
+        }
+        let valid = shared.sender == "human"
+            && !m.map.values().any(|v| *v == shared.conversation)
+            && self.store.meta(&shared.conversation).is_ok()
+            && !shared.text.trim().is_empty()
+            && shared.text.chars().count() <= MAX_TEXT;
+        // Recorded before acting, so a crash can't make the same answer count twice.
+        m.filed.insert(packet.id.clone());
+        self.save(&m)?;
+        drop(m);
+        if !valid || self.admit(&packet.node_id, packet.timestamp_ms) != Verdict::Accept {
+            return Ok(None);
+        }
+        match self.relay.get() {
+            Some(relay) => relay(&shared.conversation, shared.text.trim(), shared.to, computer).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// The payload to send for `e`, or None if it shouldn't leave this computer.
@@ -139,6 +212,7 @@ impl Sync {
             to: e.to.clone(),
             text: e.text.clone(),
             via: e.via.clone(),
+            owner: None,
         })
         .ok()
     }
@@ -150,6 +224,9 @@ impl Sync {
             return Ok(None);
         }
         let shared: Shared = serde_json::from_value(packet.payload.clone()).map_err(|e| e.to_string())?;
+        if shared.owner.is_some() {
+            return self.take_reply(packet, shared, computer);
+        }
         if shared.kind != "message" || !crate::store::valid_id(&shared.conversation) || !known_sender(&shared.sender) {
             return Ok(None);
         }
@@ -180,6 +257,16 @@ impl Sync {
                 self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None)?;
             }
             return Ok(None);
+        }
+        // The human's own reply typed here, coming back from the owner: already shown.
+        if shared.sender == "human" {
+            let mut sent = self.sent.lock().unwrap();
+            if let Some(i) = sent.iter().position(|(c, t)| *c == local && *t == shared.text.trim()) {
+                sent.remove(i);
+                m.filed.insert(packet.id.clone());
+                self.save(&m)?;
+                return Ok(None);
+            }
         }
         // A human message shows as "You (<computer>)", or "You (Signal)" if it came by phone.
         // An AI shows as "<AI> (<computer>)", so it's never taken for this computer's own AI.
@@ -212,9 +299,16 @@ fn known_sender(sender: &str) -> bool {
     sender == "human" || crate::agents::AGENTS.iter().any(|a| a.id == sender)
 }
 
-/// Starts syncing with `store`. Call once, after the link has opened.
-pub fn init(store: Arc<Store>, link_dir: &Path) {
-    let _ = SYNC.set(Sync::new(store, link_dir));
+/// Starts syncing with `engine`'s store. Call once, after the link has opened.
+pub fn init(engine: Arc<crate::engine::Engine>, link_dir: &Path) {
+    let s = Sync::new(engine.store.clone(), link_dir);
+    if let Some(link) = crate::link_handle() {
+        *s.me.lock().unwrap() = link.node_id();
+    }
+    let _ = s.relay.set(Box::new(move |conversation: &str, text: &str, targets: Vec<String>, computer: &str| {
+        engine.send_via(conversation, text, vec![], targets, 1, Some(computer))
+    }));
+    let _ = SYNC.set(s);
     // Files anything saved in the inbox but not filed before the last quit or crash.
     if let Some((s, link)) = SYNC.get().zip(crate::link_handle()) {
         for p in link.inbox() {
@@ -239,6 +333,21 @@ pub fn share(e: &Event) {
     if let Some(payload) = s.outgoing(e) {
         let _ = link.send(PacketKind::Chat, payload);
     }
+}
+
+/// Sends what the human typed in the mirror `conversation` to the computer that owns it, and
+/// returns it as shown here. That computer answers; this one never runs a turn in a mirror.
+pub fn reply(conversation: &str, text: &str, targets: &[String]) -> Result<Event, String> {
+    let s = SYNC.get().ok_or("linking isn't running")?;
+    let link = crate::link_handle().filter(|l| l.enabled() && l.has_peers());
+    let Some(link) = link else {
+        return Err("This conversation belongs to another computer, which isn't linked right now. \
+                    Turn linking on in Settings, or answer on that computer."
+            .into());
+    };
+    let (event, payload) = s.reply(conversation, text, targets)?;
+    link.send(PacketKind::Chat, payload)?;
+    Ok(event)
 }
 
 /// Files a packet that just arrived from a paired computer.
@@ -281,7 +390,6 @@ mod tests {
         let filed = b.file(&p, "MacBook").unwrap().expect("filed");
         assert_eq!(b.store.meta(&filed.conversation).unwrap().title, "Plans (MacBook)");
         assert_eq!(filed.via.as_deref(), Some("MacBook"));
-        assert!(filed.requests.is_empty(), "no Approve buttons for another computer's requests");
         assert!(b.file(&p, "MacBook").unwrap().is_none(), "a re-read packet is filed once");
 
         let reply = a.store.append(&conv.id, "claude", "message", vec![], "hi").unwrap();
@@ -292,6 +400,42 @@ mod tests {
 
         let note = a.store.append(&conv.id, "system", "system", vec![], "note").unwrap();
         assert!(a.outgoing(&note).is_none(), "status notes stay local");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_answer_typed_in_a_mirror_runs_on_the_owner_and_shows_once() {
+        let root = std::env::temp_dir().join(format!("peer-sync-reply-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        *a.me.lock().unwrap() = "node-a".into();
+        *b.me.lock().unwrap() = "node-b".into();
+        let store = a.store.clone();
+        let _ = a.relay.set(Box::new(move |c: &str, t: &str, to: Vec<String>, pc: &str| {
+            store.append_with_attachments_via(c, to, t, vec![], Some(pc))
+        }));
+
+        let conv = a.store.create("Plans").unwrap();
+        let ask = a.store.append(&conv.id, "claude", "message", vec![], "REQUEST: May I build?").unwrap();
+        let mirror = b.file(&packet("node-a", "p1", a.outgoing(&ask).unwrap()), "MacBook").unwrap().unwrap();
+
+        assert_eq!(mirror.requests, vec!["May I build?".to_string()], "requests keep their buttons in the mirror");
+        let (shown, payload) = b.reply(&mirror.conversation, "Approved: May I build?", &["claude".into()]).unwrap();
+        assert_eq!(shown.sender, "human");
+        assert!(b.outgoing(&shown).is_none(), "the reply travels only as the addressed packet");
+
+        let theirs = PeerPacket { node_id: "node-b".into(), ..packet("node-b", "r1", payload.clone()) };
+        let elsewhere = Sync::new(Arc::new(Store::new(root.join("c3")).unwrap()), &root.join("c3l"));
+        *elsewhere.me.lock().unwrap() = "node-c".into();
+        assert!(elsewhere.file(&theirs, "PC").unwrap().is_none(), "a third computer ignores it");
+
+        let taken = a.file(&theirs, "PC").unwrap().expect("the owner records it");
+        assert_eq!((taken.conversation.as_str(), taken.via.as_deref()), (conv.id.as_str(), Some("PC")));
+        assert!(a.file(&theirs, "PC").unwrap().is_none(), "an answer counts once");
+
+        let back = b.file(&packet("node-a", "p2", a.outgoing(&taken).unwrap()), "MacBook").unwrap();
+        assert!(back.is_none(), "the human's own reply isn't shown twice in the mirror");
         let _ = std::fs::remove_dir_all(&root);
     }
 
