@@ -94,6 +94,7 @@ not complete the phase.
 |---|---|---|
 | macOS / Windows / Linux feature parity | ✅ | Update Now, orphan cleanup, Signal setup and platform-specific shortcuts/installers use native paths on all three |
 | Approval-gated native terminal capability | ✅ | Every Full/Own CLI agent receives OS-specific PowerShell/cmd or Unix-shell guidance. Administrator/root elevation requires a fresh exact-command REQUEST, is single-use, keeps UAC/sudo authentication in the OS, and forbids password capture or piping |
+| In-chat command boxes with Run / Deny / Copy | ✅ | Fenced bash/zsh/PowerShell/cmd blocks from an AI get Run, Deny and Copy; Run reads the command from the stored message (never the screen), runs it once in the project folder with a 10-minute limit, uses the OS password/UAC prompt for admin lines, and returns the output to the suggesting AI. Every code block gets Copy |
 | Adaptive support for older or weaker PCs | ✅ | Portable CPU/RAM profile caps local AI processes across the app and terminal; high pressure reduces polling and GPU-heavy visual effects |
 | Crash-safe fail-forward behavior | ✅ | OS-held AI slots release after crashes; a broken capacity gate does not lock the user out; Stop remains cancellation-aware while queued |
 | Clear Netrunner REQUEST callouts | ✅ | Opaque dark-red panel, brighter border/text and unblurred action buttons |

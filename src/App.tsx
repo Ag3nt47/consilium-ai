@@ -1,4 +1,5 @@
 import { TypedText, TYPED_THEMES } from "./typed";
+import { fencedBlocks, shellName, needsAdmin, handledCommands, deniedText, type Fence } from "./commands";
 import { dictationHint, paletteKey, paletteKeyWords } from "./platform";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -359,12 +360,19 @@ type Decide = (key: string, request: string, requester: string, approved: boolea
 type Respond = (key: string, request: string, requester: string, response: string) => Promise<void>;
 
 /** Message text with REQUEST: lines shown as red request callouts, with decision controls when supplied. */
-function MessageBody({ event, answered, deciding, decide, respond }: { event: ChatEvent; answered?: Map<string, RequestResolution>; deciding?: Set<string>; decide?: Decide; respond?: Respond }) {
+function MessageBody({ event, answered, deciding, decide, respond, commands }: { event: ChatEvent; answered?: Map<string, RequestResolution>; deciding?: Set<string>; decide?: Decide; respond?: Respond; commands?: CommandActions }) {
   const text = event.text;
   const lines = text.split("\n");
+  const fences = fencedBlocks(text);
+  const fenceAt = new Map(fences.map((f, index) => [f.start, index]));
+  const inside = new Set(fences.flatMap((f) => Array.from({ length: f.end - f.start }, (_, k) => f.start + 1 + k)));
   return (
     <div className="body">
       {lines.map((line, i) => {
+        const fi = fenceAt.get(i);
+        if (fi !== undefined) return <CommandBox key={i} event={event} fence={fences[fi]} index={fi} actions={event.sender === "human" ? undefined : commands} />;
+        if (inside.has(i)) return null;
+        if (/^\s*\(command ref [^\s#)]+#\d+\)\s*$/.test(line)) return null;
         const add = /^\s*ADD_AI:\s*(.*)$/i.exec(line);
         if (add && add[1].trim()) {
           return (
@@ -392,6 +400,54 @@ function MessageBody({ event, answered, deciding, decide, respond }: { event: Ch
         }
         return <div key={i} className={line.trim() ? "line" : "gap"}><Inline text={line} /></div>;
       })}
+    </div>
+  );
+}
+
+type CommandActions = {
+  handled: Map<string, "ran" | "denied">;
+  running: Set<string>;
+  run: (eventId: string, index: number) => void;
+  deny: (eventId: string, index: number, sender: string) => void;
+};
+
+/** A fenced code block. Shell blocks from an AI get Run and Deny; every block gets Copy. */
+function CommandBox({ event, fence, index, actions }: { event: ChatEvent; fence: Fence; index: number; actions?: CommandActions }) {
+  const [copied, setCopied] = useState(false);
+  const shell = shellName(fence.lang);
+  const key = `${event.id}#${index}`;
+  const state = actions?.handled.get(key);
+  const running = actions?.running.has(key);
+  const copy = () => {
+    void navigator.clipboard.writeText(fence.code).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    });
+  };
+  return (
+    <div className={`command-box${shell ? " shell" : ""}`}>
+      <div className="command-head">
+        <span className="command-lang">{shell ?? (fence.lang || "code")}{shell && needsAdmin(fence.code) ? " · admin" : ""}</span>
+        <span className="command-actions">
+          {shell && actions && (state ? (
+            <span className={`request-answer ${state === "ran" ? "approved" : "denied"}`}>{state === "ran" ? "✓ Ran" : "✕ Denied"}</span>
+          ) : (
+            <>
+              <button type="button" className="btn small-btn approve" disabled={running} onClick={() => actions.run(event.id, index)}
+                title={needsAdmin(fence.code) ? "Run this now. Your computer asks for your password itself; Consilium never sees it. The output goes back to the AI that suggested it." : "Run this now in the project folder. The output goes back to the AI that suggested it."}>
+                {running ? "Running…" : "Run"}
+              </button>
+              <button type="button" className="btn small-btn deny" disabled={running} onClick={() => actions.deny(event.id, index, event.sender)} title="Don't run it, and tell the AI that suggested it">
+                Deny
+              </button>
+            </>
+          ))}
+          <button type="button" className="btn small-btn copy" onClick={copy} title="Copy the command to paste into your own terminal">
+            {copied ? "✓ Copied" : "Copy"}
+          </button>
+        </span>
+      </div>
+      <pre><code>{fence.code}</code></pre>
     </div>
   );
 }
@@ -1274,6 +1330,33 @@ export default function App() {
       });
     }
   }
+  // Run on a command box: the engine reads the command from the stored message, runs it once and
+  // sends the output to the AI that suggested it. Deny tells that AI not to run it.
+  const [runningCommands, setRunningCommands] = useState<Set<string>>(() => new Set());
+  const ranCommands = useMemo(() => handledCommands(events), [events]);
+  const commandActions = useMemo(() => ({
+    handled: ranCommands,
+    running: runningCommands,
+    run: (eventId: string, index: number) => {
+      if (!current) return;
+      const key = `${eventId}#${index}`;
+      setError(null);
+      setRunningCommands((r) => new Set(r).add(key));
+      api.runCommand(current, eventId, index)
+        .catch((e) => setError(String(e)))
+        .finally(() => setRunningCommands((r) => {
+          const next = new Set(r);
+          next.delete(key);
+          return next;
+        }));
+    },
+    deny: (eventId: string, index: number, sender: string) => {
+      if (!current) return;
+      setError(null);
+      const to = members.some((m) => m.id === sender) ? [sender] : [];
+      api.send(current, deniedText(senderName(sender, agents), eventId, index), to, 1).catch((e) => setError(String(e)));
+    },
+  }), [ranCommands, runningCommands, current, members, agents]);
   const answered = useMemo(() => answeredRequests(events), [events]);
   const unanswered = useMemo(() => pendingRequests(events, answered, requestFloor), [events, answered, requestFloor]);
   const typedActivity = TYPED_THEMES.has(prefs.theme);
@@ -1852,7 +1935,7 @@ export default function App() {
                     ))}
                   </div>
                 )}
-                <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={e.sender === "human" ? undefined : decide} respond={e.sender === "human" ? undefined : respondToRequest} />
+                <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={e.sender === "human" ? undefined : decide} respond={e.sender === "human" ? undefined : respondToRequest} commands={commandActions} />
                 {e.sender === "human" && e.id === latestHumanMessage?.id && busy && (
                   <TaskOwnership ids={thinkingIds} objective={taskObjective(e.text)} agents={agents} />
                 )}
@@ -1873,7 +1956,7 @@ export default function App() {
             ) : e.kind === "seen" ? null : e.kind === "error" && e.sender !== "human" && /^\s*REQUEST:\s*\S/im.test(e.text) ? (
               // A blocked turn asking for approval (e.g. one elevated command) gets the same buttons as a message.
               <div key={e.id} className={`note note-${e.kind}`}>
-                <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={decide} respond={respondToRequest} />
+                <MessageBody event={e} answered={answered} deciding={decidingRequests} decide={decide} respond={respondToRequest} commands={commandActions} />
               </div>
             ) : (
               <div key={e.id} className={`note note-${e.kind}`}>

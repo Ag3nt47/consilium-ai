@@ -307,6 +307,13 @@ commands or use tools: answer in text, and say what you would check rather than 
         s.push_str("\n\n");
         s.push_str(&capability);
     }
+    s.push_str(
+        "\n\nCommand boxes: when you want the human to run a command, put it alone in a fenced block tagged with its \
+shell (```bash, ```zsh, ```powershell or ```cmd). Consilium shows it with Run, Deny and Copy buttons; Run executes it \
+once in the project folder with no terminal to type into, and the output comes back to you as the human's message. \
+Use `sudo` lines (macOS/Linux) or `Start-Process -Verb RunAs` (Windows) when admin rights are needed: the computer \
+shows its own password prompt. Use other tags (```text, ```rust …) for anything that shouldn't be run.",
+    );
     if ctx.workspace.is_some() && matches!(ctx.access, Access::Edit | Access::Own | Access::Unrestricted) {
         s.push_str(
             "\n\nWhen the human asks the council to build or change something, work at full capacity as a team: \

@@ -2649,3 +2649,61 @@ button.attachment {
 .repo-report h4 { margin: 8px 0 4px; }
 .repo-langs, .repo-risks { margin: 4px 0 8px; padding-left: 16px; font-size: 12px; }
 .repo-risks li { color: #ffb347; }
+
+/* Command boxes: fenced code in messages, with Run / Deny / Copy on AI-suggested shell commands. */
+.command-box {
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 85%, black);
+  overflow: hidden;
+}
+.command-box.shell {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.command-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8em;
+  color: var(--muted);
+}
+.command-lang {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-transform: lowercase;
+}
+.command-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.command-actions .approve {
+  border-color: #2f9e5b;
+  color: #5fd08a;
+}
+.command-actions .deny {
+  border-color: var(--request);
+  color: var(--request);
+}
+.command-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+.command-box pre {
+  margin: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  line-height: 1.45;
+  white-space: pre;
+  color: var(--text);
+}
+[data-theme="netrunner"] .command-box {
+  border-radius: 0;
+  background: #000;
+  text-shadow: none;
+}

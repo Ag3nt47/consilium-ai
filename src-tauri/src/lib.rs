@@ -18,6 +18,7 @@ mod projects;
 mod prompt;
 mod reaper;
 mod repo;
+mod runcmd;
 mod redact;
 mod resume;
 mod setup;
@@ -304,11 +305,11 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: every CLI-backed AI in Full or Own access receives the native terminal \
-capability for Windows, macOS or Linux. PowerShell, Command Prompt and Unix shells remain available for ordinary \
-work, while administrator/root elevation needs a fresh exact-command REQUEST. The grant targets the requesting AI, \
-lasts for one turn, is consumed once, keeps UAC/sudo authentication in the operating system and rejects credentials \
-inside commands. Request App Update now also requires the tested update to be pushed to main before staging.";
+const WHATS_NEW: &str = "What's new: commands an AI suggests in a fenced shell block (bash, zsh, PowerShell or \
+Command Prompt) now appear in a command box with Run, Deny and Copy buttons. Run executes that exact command once in \
+the project folder and sends its output back to the AI that suggested it; admin commands use the computer's own \
+password or UAC prompt, so Consilium never sees a password. Deny tells the AI not to run it, and Copy puts the command \
+on the clipboard. Every other code block in the chat also gets a Copy button.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -463,6 +464,31 @@ fn set_api_key(agent: String, key: String) -> Result<(), String> {
         return Err(format!("{} signs in through its own app, not a key", a.name));
     }
     apiagent::set_key(a.id, &key)
+}
+
+/// Runs block `index` of AI message `event_id` (the human clicked Run on its command box), then
+/// sends the output to that AI as the human's message. The command text is read from the stored
+/// message, never taken from the screen, and each block runs at most once.
+#[tauri::command]
+async fn run_command(state: State<'_, AppState>, id: String, event_id: String, index: usize) -> Result<Event, String> {
+    let engine = state.engine.clone();
+    let events = engine.store.load(&id)?;
+    let (event, block, guard) = runcmd::take(&events, &event_id, index)?;
+    let cwd = engine
+        .store
+        .meta(&id)
+        .ok()
+        .and_then(|m| m.workspace)
+        .or_else(|| engine.config.get().default_workspace)
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(dirs::home_dir)
+        .ok_or("no folder to run the command in")?;
+    let scratch = engine.data.join("run");
+    let outcome = runcmd::run(&block, &cwd, &scratch).await?;
+    drop(guard);
+    let text = runcmd::report(&prompt::label(&event.sender), &event_id, index, &outcome);
+    engine.send_with(&id, &text, Vec::new(), vec![event.sender.clone()], 1)
 }
 
 /// Clones a public GitHub repo into a private folder (running none of its code) and inspects it.
@@ -644,6 +670,7 @@ pub fn run() {
             messaging_setup,
             project_versions,
             ingest_repo,
+            run_command,
             update_available,
             update_now,
             ui_update_available,

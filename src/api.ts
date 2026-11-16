@@ -245,6 +245,8 @@ const appApi = {
   /** Saves pasted file contents (a screenshot, say) for the next message. */
   attachData: (id: string, name: string, data: number[]) => invoke<Attachment>("attach_data", { id, name, data }),
   openAttachment: (id: string, attachment: Attachment) => invoke<void>("open_attachment", { id, attachment }),
+  /** Runs command box `index` of AI message `eventId` once; its output goes to that AI as your message. */
+  runCommand: (id: string, eventId: string, index: number) => invoke<ChatEvent>("run_command", { id, eventId, index }),
   /** Shows the system file picker; returns the chosen files. */
   pickFiles: async (): Promise<string[]> => {
     const r = await openDialog({ multiple: true, directory: false, title: "Attach files" });
