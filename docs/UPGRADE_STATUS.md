@@ -1,7 +1,7 @@
 # Upgrade documents: status
 
-This is the canonical backlog for every requirement in the two Word documents the human attached
-on 2026-11-15: **Consilium Upgrade Overhaul.docx** and **2nd consilium update.docx**. These documents
+This is the canonical backlog for every requirement in the three Word documents the human attached
+on 2026-11-15: **Consilium Upgrade Overhaul.docx**, **2nd consilium update.docx** and **3rd update.docx**. These documents
 are requested product scope, not optional inspiration. The council must prefer unfinished items
 marked **in progress** or **next** when **Request App Update** starts new work, then later document
 items, the roadmap, open bugs, and newly noticed improvements. Update this file in the same commit
@@ -87,6 +87,28 @@ not complete the phase.
 | Quick-summon hotkey, clipboard/screenshot capture, Whisper, Ollama + HUD | 🕓 | |
 | Obsidian search, secrets vault, fix-drafting watchdog, widget dock | 🕓 | |
 | Consensus tribunal | ✅ | Discuss mode |
+
+## Document 3: Multi-computer link (3rd update)
+
+Goal: Consilium on the human's Mac and Windows PC find each other, stay linked and keep conversations,
+REQUEST decisions and project state in sync, choosing the best working channel automatically and
+switching channels without losing or duplicating messages. The document's Python/PySide6/asyncio code
+is translated to Consilium's Rust/Tauri engine; the protocol requirements are kept as written.
+
+| Item | Status | Notes |
+|---|---|---|
+| Wired/LAN TCP link, JSON-lines framing, static port 8470 | ⏭ | Tokio TCP in a new `link.rs`; one JSON object per line, 1 MB line cap, packet `{id, node_id, timestamp, type, seq, payload}` |
+| Pairing and authentication | ⏭ | Not in the document but required before any socket opens: one-time pairing code, per-peer key, every frame authenticated (HMAC) and replay-checked; unpaired peers are dropped. Off until the human pairs two machines |
+| Dedup ledger (`sync_ledger`) | ⏭ | Persistent processed-packet IDs so channel switches and reconnects never ingest twice or echo between machines. JSON/append log instead of SQLite unless SQLite is already linked |
+| 3 s heartbeat, 2 s reconnect with backoff | ⏭ | Never blocks the UI; link status dot per peer |
+| Automatic discovery (mDNS/Bonjour) + manual IP fallback | ⏭ | `_consilium._tcp` advertisement; manual host:port in Settings |
+| Wireless: Wi-Fi LAN / Tailscale | ⏭ | Same TCP link over any reachable address; Tailscale IPs accepted as peers |
+| Auto-choose best channel and seamless failover | ⏭ | Ranked: wired LAN → Wi-Fi LAN → Tailscale → Bluetooth → Signal relay. Probe all, use the lowest-latency healthy one, resend unacknowledged packets on the next channel |
+| What syncs | ⏭ | Chat messages, REQUEST decisions (applied once, on the machine that owns the turn), AI activity, project git state summary. No file contents or secrets in the first release |
+| Bluetooth BLE/RFCOMM fallback | 🕓 | Rust BLE (`btleplug`) is central-only on macOS/Windows, so a Mac↔PC GATT server needs native per-OS code; built after the TCP link proves out, with MTU chunking + reassembly as specified |
+| Phone bots (Telegram/Matrix) as out-of-band control | 🕓 | Shares the Signal receiver's safeguards (allowlist, replay, freshness); Telegram row in Document 2 |
+| Cloud AI apps → local (Custom GPT Actions, Claude MCP via tunnel) | 🕓 | Exposes this computer to the internet; needs the human's explicit approval, an authenticated Cloudflare/Tailscale Funnel tunnel, an allowlisted command set and no shell access |
+| "UI integration" (PySide6 signals) | ⏭ | Becomes Tauri events into the existing message queue, status LEDs in the council sidebar |
 
 ## Reliability and portability added during the upgrade
 
