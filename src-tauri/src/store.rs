@@ -460,9 +460,8 @@ impl Store {
             to,
             text: text.to_string(),
             // An AI's blocked turn ("error") can carry a REQUEST, e.g. an elevated command awaiting approval.
-            requests: if foreign {
-                vec![]
-            } else if kind == "message" || (kind == "error" && sender != "human") { requests_in(text) } else { vec![] },
+            // Kept on copies from another computer too: answering one there sends the answer back.
+            requests: if kind == "message" || (kind == "error" && sender != "human") { requests_in(text) } else { vec![] },
             add_ai: if kind == "message" && sender != "human" && !foreign { add_ai_in(text) } else { vec![] },
             seen,
             usage,

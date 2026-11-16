@@ -227,6 +227,19 @@ impl Engine {
         rounds: u32,
         via: Option<&str>,
     ) -> Result<Event, String> {
+        if crate::peer_sync::is_mirror(id) {
+            // Another computer owns this conversation: it records the message and answers.
+            if !attachments.is_empty() {
+                return Err("Files can't be sent into another computer's conversation yet; attach them on that computer.".into());
+            }
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("the message is empty".into());
+            }
+            let event = crate::peer_sync::reply(id, text, &targets)?;
+            self.ui.event(&event);
+            return Ok(event);
+        }
         if via.is_none() {
             // The human is at this computer, so it should be the one that answers Signal.
             crate::link::note_local_activity();

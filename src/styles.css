@@ -422,6 +422,33 @@ code {
   color: var(--danger);
 }
 
+.forecast-pill {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 500;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.forecast-pill:hover {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.agent.agent-exhausted .forecast-pill {
+  background: color-mix(in srgb, #e67e22 20%, transparent);
+  color: #e67e22;
+}
+
+.forecast-chance {
+  color: #e67e22;
+  font-weight: 500;
+}
+
 /* ---------- buttons ---------- */
 .btn {
   border: 1px solid var(--border);
@@ -3157,6 +3184,7 @@ button.attachment {
   .agent-state,
   .agent > .setup-link { grid-column: 2 / -1; justify-self: start; text-align: left; }
   .agent-exhausted-tag { display: block; margin-left: 0; }
+  .forecast-pill { display: block; margin-left: 0; margin-top: 2px; width: fit-content; }
   .usage-label small { display: none; }
 }
 
@@ -3272,7 +3300,7 @@ button.attachment {
 .conv { flex-shrink: 0; }
 @media (max-height: 760px) {
   .brand-tagline { display: none; }
-  .usage-forecast, .usage-label small { display: none; }
+  .usage-label small { display: none; }
   .agent { padding: 4px 8px; }
   .agent-kind { display: none; }
   .pc-pressure-sub { display: none; }
@@ -3284,7 +3312,6 @@ button.attachment {
    Level 4 is the last resort: the council list scrolls in its own box instead of being cut off. */
 .sidebar[data-fit="1"], .sidebar[data-fit="2"], .sidebar[data-fit="3"], .sidebar[data-fit="4"] { gap: 6px; padding-top: 8px; padding-bottom: 8px; }
 .sidebar:not([data-fit="0"]) .brand-tagline,
-.sidebar:not([data-fit="0"]) .usage-forecast,
 .sidebar:not([data-fit="0"]) .usage-label small,
 .sidebar:not([data-fit="0"]) .agent-kind { display: none; }
 .sidebar:not([data-fit="0"]) .agent { padding: 4px 8px; }
@@ -3293,6 +3320,7 @@ button.attachment {
 .sidebar[data-fit="2"] .pc-pressure-sub, .sidebar[data-fit="3"] .pc-pressure-sub, .sidebar[data-fit="4"] .pc-pressure-sub { display: none; }
 .sidebar[data-fit="2"] .usage-row + .usage-row, .sidebar[data-fit="3"] .usage-row + .usage-row, .sidebar[data-fit="4"] .usage-row + .usage-row { display: none; }
 .sidebar[data-fit="2"] .brand-icon, .sidebar[data-fit="3"] .brand-icon, .sidebar[data-fit="4"] .brand-icon { width: 24px; height: 24px; }
+.sidebar[data-fit="3"] .usage-forecast, .sidebar[data-fit="4"] .usage-forecast { display: none; }
 .sidebar[data-fit="3"] .usage-meter, .sidebar[data-fit="3"] .usage-unavailable,
 .sidebar[data-fit="4"] .usage-meter, .sidebar[data-fit="4"] .usage-unavailable { display: none; }
 .sidebar[data-fit="3"] .agent, .sidebar[data-fit="4"] .agent { padding: 3px 8px; }
