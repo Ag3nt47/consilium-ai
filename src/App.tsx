@@ -1799,7 +1799,7 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="agents">
+        <div className={`agents${members.length >= 5 ? " many" : ""}`}>
           <div className="section-label">
             Council
             <span>

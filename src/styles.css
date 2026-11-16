@@ -3233,3 +3233,28 @@ button.attachment {
 .agent-list.scrolls { padding-right: 3px; scrollbar-gutter: stable; }
 .sidebar-foot { flex-shrink: 0; margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
 .sidebar-actions .btn { white-space: nowrap; }
+
+/* Up to four AIs the council never scrolls: its cards keep their full height and the
+   conversation list gives up the room instead (down to a couple of rows), and on short
+   windows the cards get more compact. From the fifth AI the list scrolls in its own box. */
+.sidebar .agents:not(.many) { flex: 0 0 auto; min-height: 0; }
+.agent-list:not(.scrolls) { flex: none; overflow: visible; }
+.conversations { min-height: min(56px, 8vh); }
+@media (max-height: 820px) {
+  .sidebar { gap: 8px; padding-top: 10px; padding-bottom: 10px; }
+  .brand { padding-bottom: 2px; }
+  .brand-icon { width: 30px; height: 30px; }
+  .agents { padding-top: 8px; gap: 4px; }
+  .agent-list { gap: 4px; }
+  .agent { padding: 5px 9px; }
+  .sidebar-foot { gap: 6px; }
+}
+.conv { flex-shrink: 0; }
+@media (max-height: 760px) {
+  .brand-tagline { display: none; }
+  .usage-forecast, .usage-label small { display: none; }
+  .agent { padding: 4px 8px; }
+  .agent-kind { display: none; }
+  .pc-pressure-sub { display: none; }
+  .sidebar-foot { gap: 4px; }
+}
