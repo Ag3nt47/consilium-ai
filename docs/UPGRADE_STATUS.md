@@ -78,6 +78,7 @@ not complete the phase.
 | Instant screen-only updates | ✅ | 0.3.5; hardened in 0.3.6 |
 | Signal phone bridge, phone Approve/Deny | 🔨 | Adapter in `bridge.rs` (Gemini); not yet connected to the app |
 | Voice visualizer, bars + orb, cyan/violet | ✅ | 0.3.6. AI side is an animation: system speech has no audio samples |
+| Distinct AI voices and reliable speaker handoff | ✅ | Per-AI system voice picker and preview in Settings; a WebKit completion watchdog clears a stuck speaker and returns control to the next AI or human microphone |
 | Daily Bing wallpaper with frosted layer, off switch | ✅ | 0.3.7. Cached in ~/.config/consilium/wallpapers, base64 data-URL, off switch in Settings |
 | Wallpaper refresh across midnight or system wake | 🕓 | Preserve the current cached image on failure; refresh asynchronously without blocking startup |
 | Audit log drawer | ✅ | Applied instantly on 0.3.6 without restarting |

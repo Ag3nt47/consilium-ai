@@ -37,7 +37,7 @@ A larger **Usage panel** now shows per-agent conversation and daily token totals
 A toggleable voice mode now reads AI replies aloud and, where the WebView supports it, sends the
 human's transcribed speech after a pause. macOS Dictation is the local fallback. Future extensions:
 
-- A distinct, configurable voice for each participant.
+- A distinct, configurable installed voice for each participant. ✅
 - A central live workspace showing the current file, code selection, proposed diff, command, test result or task status.
 - One merged explanation panel in which every segment keeps its speaker's color (ChatGPT green, Claude amber, you ivory).
 - Visible mic state, interrupt-to-stop, and transcripts that land in the normal conversation log.

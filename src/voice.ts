@@ -169,13 +169,26 @@ export class Speaker {
     this.utterance = u;
     synth.speak(u);
     // Advance if the synthesiser has been silent for two checks in a row without telling us.
+    // Give slow-loading voices time to start first, and also bound a WebKit `speaking` flag that
+    // itself gets stuck true after the audio has ended.
     const started = Date.now();
+    const words = item.text.trim().split(/\s+/).length;
+    const hardLimit = Math.min(90_000, Math.max(15_000, words * 750 + 10_000));
+    let heardSpeaking = false;
     let quiet = 0;
     this.watchdog = window.setInterval(() => {
       if (gen !== this.gen) return this.clearWatchdog();
-      const silent = !synth.speaking && !synth.pending;
-      quiet = silent ? quiet + 1 : 0;
-      if ((quiet >= 2 && Date.now() - started > 1000) || Date.now() - started > 10 * 60_000) done();
+      const elapsed = Date.now() - started;
+      if (synth.speaking || synth.pending) {
+        heardSpeaking = true;
+        quiet = 0;
+      } else if (heardSpeaking || elapsed > 3_000) {
+        quiet++;
+      }
+      if (quiet >= 2 || elapsed > hardLimit) {
+        if (elapsed > hardLimit) synth.cancel();
+        done();
+      }
     }, 500);
   }
 
