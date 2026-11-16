@@ -485,6 +485,9 @@ async fn run_command(state: State<'_, AppState>, id: String, event_id: String, i
         .or_else(dirs::home_dir)
         .ok_or("no folder to run the command in")?;
     let scratch = engine.data.join("run");
+    runcmd::check(&block)?;
+    // Durable receipt before anything starts: a crash mid-run can't lead to a second run.
+    runcmd::mark_started(&engine.data.join("run-started"), &id, &event_id, index)?;
     let outcome = runcmd::run(&block, &cwd, &scratch).await?;
     drop(guard);
     let text = runcmd::report(&prompt::label(&event.sender), &event_id, index, &outcome);

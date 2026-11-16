@@ -2,7 +2,7 @@
 // The block positions here must match `fenced_blocks` in src-tauri/src/runcmd.rs, because Run
 // sends only the message id and the block's position; the engine reads the command itself.
 
-export type Fence = { lang: string; code: string; start: number; end: number };
+export type Fence = { lang: string; code: string; start: number; end: number; closed: boolean };
 
 /** Every fenced block in `text`, in order, with the line range it covers (end inclusive). */
 export function fencedBlocks(text: string): Fence[] {
@@ -16,7 +16,7 @@ export function fencedBlocks(text: string): Fence[] {
       return;
     }
     if (t === "```") {
-      out.push({ lang: open.lang, code: open.body.join("\n"), start: open.start, end: i });
+      out.push({ lang: open.lang, code: open.body.join("\n"), start: open.start, end: i, closed: true });
       open = null;
     } else {
       open.body.push(line);
@@ -24,7 +24,7 @@ export function fencedBlocks(text: string): Fence[] {
   });
   if (open) {
     const o = open as { lang: string; body: string[]; start: number };
-    out.push({ lang: o.lang, code: o.body.join("\n"), start: o.start, end: lines.length - 1 });
+    out.push({ lang: o.lang, code: o.body.join("\n"), start: o.start, end: lines.length - 1, closed: false });
   }
   return out;
 }

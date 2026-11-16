@@ -370,7 +370,7 @@ function MessageBody({ event, answered, deciding, decide, respond, commands }: {
     <div className="body">
       {lines.map((line, i) => {
         const fi = fenceAt.get(i);
-        if (fi !== undefined) return <CommandBox key={i} event={event} fence={fences[fi]} index={fi} actions={event.sender === "human" ? undefined : commands} />;
+        if (fi !== undefined) return <CommandBox key={i} event={event} fence={fences[fi]} index={fi} actions={event.sender === "human" || !fences[fi].closed ? undefined : commands} />;
         if (inside.has(i)) return null;
         if (/^\s*\(command ref [^\s#)]+#\d+\)\s*$/.test(line)) return null;
         const add = /^\s*ADD_AI:\s*(.*)$/i.exec(line);

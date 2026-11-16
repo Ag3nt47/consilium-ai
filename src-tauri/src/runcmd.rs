@@ -30,6 +30,9 @@ const MAX_OUTPUT: usize = 12_000;
 pub struct Block {
     pub lang: String,
     pub code: String,
+    /// False when the message ended before the closing fence (a cut-off reply). Such a block is
+    /// still listed, so later positions don't shift, but it can never be run.
+    pub closed: bool,
 }
 
 /// Every fenced block in `text`, in order. Must match `fencedBlocks` in `src/commands.ts`.
@@ -47,7 +50,7 @@ pub fn fenced_blocks(text: &str) -> Vec<Block> {
             }
             Some((lang, mut body)) => {
                 if t == "```" {
-                    out.push(Block { lang, code: body.join("\n") });
+                    out.push(Block { lang, code: body.join("\n"), closed: true });
                 } else {
                     body.push(line);
                     open = Some((lang, body));
@@ -56,7 +59,7 @@ pub fn fenced_blocks(text: &str) -> Vec<Block> {
         }
     }
     if let Some((lang, body)) = open {
-        out.push(Block { lang, code: body.join("\n") });
+        out.push(Block { lang, code: body.join("\n"), closed: false });
     }
     out
 }
@@ -210,6 +213,7 @@ pub struct Outcome {
 /// Blocks currently running, so a double click can't start one twice.
 static RUNNING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
+#[derive(Debug)]
 pub struct RunGuard(String);
 impl Drop for RunGuard {
     fn drop(&mut self) {
@@ -225,8 +229,11 @@ fn claim(key: &str) -> Option<RunGuard> {
     set.insert(key.to_string()).then(|| RunGuard(key.to_string()))
 }
 
-/// Runs `block` in `cwd` and collects its output.
-pub async fn run(block: &Block, cwd: &Path, scratch: &Path) -> Result<Outcome, String> {
+/// Everything that can refuse a block before anything starts.
+pub fn check(block: &Block) -> Result<(), String> {
+    if !block.closed {
+        return Err("this command box was never closed (the message may have been cut off), so it can't be run".into());
+    }
     let shell = shell_for(&block.lang).ok_or("only shell commands can be run")?;
     if block.code.trim().is_empty() {
         return Err("the command box is empty".into());
@@ -234,6 +241,34 @@ pub async fn run(block: &Block, cwd: &Path, scratch: &Path) -> Result<Outcome, S
     if let Some(why) = refuse(&block.code) {
         return Err(format!("Consilium won't run this command: {why}"));
     }
+    plan(shell, &block.code, std::env::consts::OS).map(|_| ())
+}
+
+fn receipt_path(dir: &Path, conversation: &str, event_id: &str, index: usize) -> PathBuf {
+    let safe = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>();
+    dir.join(format!("{}_{}_{index}", safe(conversation), safe(event_id)))
+}
+
+/// Records on disk, before the command starts, that this block was started. Fails if it already
+/// was, so a crash or restart mid-run can never lead to the same command running a second time.
+pub fn mark_started(dir: &Path, conversation: &str, event_id: &str, index: usize) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("couldn't record the run: {e}"))?;
+    let path = receipt_path(dir, conversation, event_id, index);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            "this command was already started once (Consilium may have closed while it ran), so it won't run again; copy it to run it yourself".to_string()
+        } else {
+            format!("couldn't record the run: {e}")
+        }
+    })?;
+    use std::io::Write;
+    f.write_all(b"started").and_then(|_| f.sync_all()).map_err(|e| format!("couldn't record the run: {e}"))
+}
+
+/// Runs `block` in `cwd` and collects its output.
+pub async fn run(block: &Block, cwd: &Path, scratch: &Path) -> Result<Outcome, String> {
+    check(block)?;
+    let shell = shell_for(&block.lang).ok_or("only shell commands can be run")?;
     let plan = plan(shell, &block.code, std::env::consts::OS)?;
     std::fs::create_dir_all(scratch).map_err(|e| format!("couldn't prepare the command: {e}"))?;
     #[cfg(unix)]
@@ -334,6 +369,7 @@ pub fn take(events: &[Event], event_id: &str, index: usize) -> Result<(Event, Bl
         return Err("only commands an AI suggested can be run from here".into());
     }
     let block = fenced_blocks(&event.text).into_iter().nth(index).ok_or("that command box isn't in the message")?;
+    check(&block)?;
     if handled(events, event_id, index) {
         return Err("this command was already run or denied".into());
     }
@@ -357,9 +393,9 @@ mod tests {
         let text = "Try:\n```bash\nls -la\necho hi\n```\nthen\n```PowerShell extra\nGet-Date\n```\n```\nraw";
         let b = fenced_blocks(text);
         assert_eq!(b.len(), 3);
-        assert_eq!(b[0], Block { lang: "bash".into(), code: "ls -la\necho hi".into() });
+        assert_eq!(b[0], Block { lang: "bash".into(), code: "ls -la\necho hi".into(), closed: true });
         assert_eq!(b[1].lang, "powershell");
-        assert_eq!(b[2], Block { lang: "".into(), code: "raw".into() });
+        assert_eq!(b[2], Block { lang: "".into(), code: "raw".into(), closed: false });
         assert_eq!(shell_for("ps1"), Some(Shell::Pwsh));
         assert_eq!(shell_for("text"), None);
     }
@@ -399,6 +435,22 @@ mod tests {
         }
         let done = ev("h2", "human", &format!("Denied command\n{}", reference("e1", 0)));
         assert!(take(&[ai, done], "e1", 0).is_err());
+        let cut = ev("e2", "claude", "```bash\nrm -rf build\nmake");
+        assert!(take(&[cut], "e2", 0).unwrap_err().contains("never closed"), "a cut-off block can't run");
+    }
+
+    #[test]
+    fn a_started_command_never_starts_again() {
+        let dir = std::env::temp_dir().join(format!("runcmd-receipt-{}", uuid::Uuid::new_v4()));
+        mark_started(&dir, "conv", "e1", 0).unwrap();
+        // Same block again, as after a crash and restart: refused.
+        assert!(mark_started(&dir, "conv", "e1", 0).unwrap_err().contains("already started"));
+        // Other blocks and conversations are unaffected; odd characters can't escape the folder.
+        mark_started(&dir, "conv", "e1", 1).unwrap();
+        mark_started(&dir, "other", "e1", 0).unwrap();
+        mark_started(&dir, "../x", "e/1", 0).unwrap();
+        assert!(dir.join("x_e1_0").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
@@ -406,7 +458,7 @@ mod tests {
     async fn runs_a_command_and_reports_it() {
         let dir = std::env::temp_dir().join(format!("runcmd-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let block = Block { lang: "sh".into(), code: "echo out\necho err >&2\nexit 3".into() };
+        let block = Block { lang: "sh".into(), code: "echo out\necho err >&2\nexit 3".into(), closed: true };
         let o = run(&block, &dir, &dir.join("scratch")).await.unwrap();
         assert_eq!(o.code, Some(3));
         assert!(o.output.contains("out") && o.output.contains("err"));
