@@ -367,6 +367,11 @@ fn update_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     for id in state.engine.running_ids() {
         let _ = state.engine.note(&id, &note);
     }
+    // Save the window's size and full-screen state now, so the relaunch opens the same way.
+    {
+        use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+        let _ = app.save_window_state(StateFlags::all());
+    }
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -651,6 +656,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Remembers the window's size, position, maximized and full-screen state across restarts.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
             let data = match data_override() {
                 Some(d) => d,
