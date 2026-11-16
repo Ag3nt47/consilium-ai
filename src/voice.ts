@@ -124,6 +124,7 @@ export class Speaker {
   private utterance: SpeechSynthesisUtterance | null = null;
   private gen = 0;
   private watchdog: number | undefined;
+  private paused = false;
   constructor(private onPlayback: (state: VoicePlaybackState) => void) {}
 
   private report() {
@@ -157,6 +158,7 @@ export class Speaker {
       return;
     }
     this.current = { agent: item.agent, name: item.name };
+    this.paused = false;
     this.report();
     const u = new SpeechSynthesisUtterance(item.text);
     const v = voiceFor(item.agent);
@@ -171,13 +173,19 @@ export class Speaker {
     // Advance if the synthesiser has been silent for two checks in a row without telling us.
     // Give slow-loading voices time to start first, and also bound a WebKit `speaking` flag that
     // itself gets stuck true after the audio has ended.
-    const started = Date.now();
+    let started = Date.now();
     const words = item.text.trim().split(/\s+/).length;
     const hardLimit = Math.min(90_000, Math.max(15_000, words * 750 + 10_000));
     let heardSpeaking = false;
     let quiet = 0;
     this.watchdog = window.setInterval(() => {
       if (gen !== this.gen) return this.clearWatchdog();
+      // Paused for a possible interruption: the clock stops so the reply isn't cut short.
+      if (this.paused) {
+        started += 500;
+        quiet = 0;
+        return;
+      }
       const elapsed = Date.now() - started;
       if (synth.speaking || synth.pending) {
         heardSpeaking = true;
@@ -192,10 +200,34 @@ export class Speaker {
     }, 500);
   }
 
+  /** The text being read aloud now, so the listener can tell the AI's own voice from the human's. */
+  get speakingText(): string {
+    return this.utterance?.text ?? "";
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  /** Holds the reply mid-sentence while the human may be interrupting. */
+  pause() {
+    if (!this.current || this.paused || !synth) return;
+    this.paused = true;
+    synth.pause();
+  }
+
+  /** Carries on reading where `pause` stopped. */
+  resume() {
+    if (!this.paused || !synth) return;
+    this.paused = false;
+    synth.resume();
+  }
+
   /** Stops the reply being read now and moves on to the next one. */
   skip() {
     if (!this.current) return;
     this.gen++; // the cancelled utterance's end event must not advance twice
+    this.paused = false;
     synth?.cancel();
     this.next();
   }
@@ -203,6 +235,7 @@ export class Speaker {
   /** Stops speaking and drops everything queued. */
   stop() {
     this.clearWatchdog();
+    this.paused = false;
     this.gen++;
     this.queue = [];
     synth?.cancel();
@@ -296,4 +329,67 @@ export class Listener {
       /* not running */
     }
   }
+}
+
+/** How long a reply stays paused for a possible interruption before reading carries on. */
+export const RESUME_AFTER_MS = 5000;
+
+const words = (t: string) => t.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean);
+
+/**
+ * Whether `heard` is most likely the microphone picking up the AI's own voice from the speakers:
+ * most of its words appear in the text being read aloud.
+ */
+export function isEcho(heard: string, spoken: string): boolean {
+  const h = words(heard);
+  if (!h.length) return true;
+  const s = new Set(words(spoken));
+  const matched = h.filter((w) => s.has(w)).length;
+  return matched / h.length >= 0.6;
+}
+
+/** Whether speech heard while a reply is being read counts as the human starting to interrupt. */
+export function startsInterrupt(heard: string, spoken: string): boolean {
+  return words(heard).length >= 2 && !isEcho(heard, spoken);
+}
+
+export type VoiceCommand =
+  | { kind: "action"; action: "settings" | "palette" | "audit" | "usage" | "status" | "new" | "text-chat" | "add-ai" }
+  | { kind: "theme"; theme: "netrunner" | "glass" | "retro84" }
+  | { kind: "speech"; action: "stop" | "skip" }
+  | { kind: "open-app"; app: string }
+  | { kind: "computer"; instruction: string };
+
+const WAKE = /^\s*(?:hey\s+|ok(?:ay)?\s+)?(?:consilium|council|computer)\b[\s,.:!-]*/i;
+
+/**
+ * Reads a spoken command. Commands start with "Consilium" (or "Computer"), so ordinary speech is
+ * never mistaken for one: "Consilium, open settings", "Computer, open Safari". Returns null for
+ * anything else, which goes to the AIs as a normal message.
+ */
+export function parseVoiceCommand(text: string): VoiceCommand | null {
+  const m = text.match(WAKE);
+  if (!m) return null;
+  const rest = text.slice(m[0].length).replace(/[.!?]+$/, "").trim();
+  if (!rest) return null;
+  const r = rest.toLowerCase();
+  const has = (re: RegExp) => re.test(r);
+  if (has(/^(stop|be quiet|quiet|silence|stop (talking|reading))$/)) return { kind: "speech", action: "stop" };
+  if (has(/^(skip|next)( (this|it|reply|one))?$/)) return { kind: "speech", action: "skip" };
+  if (has(/^(open |show |go to )?(the )?settings$/)) return { kind: "action", action: "settings" };
+  if (has(/^(open |show )?(the )?(command palette|commands|command menu)$/)) return { kind: "action", action: "palette" };
+  if (has(/^(open |show )?(the )?audit( log)?$/)) return { kind: "action", action: "audit" };
+  if (has(/^(open |show )?(the )?(token )?usage$/)) return { kind: "action", action: "usage" };
+  if (has(/^(request |get )?(council )?status( report)?$/)) return { kind: "action", action: "status" };
+  if (has(/^(start a |open a |make a )?new (conversation|chat)$/)) return { kind: "action", action: "new" };
+  if (has(/^(add|manage) (an? )?(ai|ais)$/)) return { kind: "action", action: "add-ai" };
+  if (has(/^(switch to |go to )?text( chat)?$|^(stop|end|turn off) voice( chat)?$/)) return { kind: "action", action: "text-chat" };
+  const theme = r.match(/^(?:switch to |use |change to )?(?:the )?(?:theme )?(netrunner|glass|vision ?os(?: glass)?|retro(?: 84| eighty[- ]four)?)(?: theme)?$/);
+  if (theme) {
+    const t = theme[1];
+    return { kind: "theme", theme: t.startsWith("retro") ? "retro84" : t === "netrunner" ? "netrunner" : "glass" };
+  }
+  const open = rest.match(/^(?:open|launch|start|run)\s+(?:the\s+)?(?:app\s+|application\s+|program\s+)?([A-Za-z0-9][A-Za-z0-9 .+-]{0,59})$/i);
+  if (open) return { kind: "open-app", app: open[1].replace(/\s+(?:app|application)$/i, "").trim() };
+  return { kind: "computer", instruction: rest };
 }

@@ -78,6 +78,7 @@ not complete the phase.
 | Instant screen-only updates | ✅ | 0.3.5; hardened in 0.3.6 |
 | Signal phone bridge, phone Approve/Deny | 🔨 | `signal_chat.rs`: a "Consilium" group plus one group per AI, created on the linked account; the human's messages there (or in Note to Self) become their message in the newest conversation, Approve/Deny answers a single pending REQUEST, and AI replies and Consilium notes go back to the group they were asked from. Groups were created on the real account; the two-way loop hasn't been seen in the running app yet |
 | Voice visualizer, bars + orb, cyan/violet | ✅ | 0.3.6. AI side is an animation: system speech has no audio samples |
+| Voice interrupt with 5-second resume; spoken "Consilium, …" commands, programs opened only after a click | 🟡 | 0.3.22. Not yet tried with a real microphone and speakers |
 | Distinct AI voices and reliable speaker handoff | ✅ | Per-AI system voice picker and preview in Settings; a WebKit completion watchdog clears a stuck speaker and returns control to the next AI or human microphone |
 | Daily Bing wallpaper with frosted layer, off switch | ✅ | 0.3.7. Cached in ~/.config/consilium/wallpapers, base64 data-URL, off switch in Settings |
 | Wallpaper refresh across midnight or system wake | 🕓 | Preserve the current cached image on failure; refresh asynchronously without blocking startup |

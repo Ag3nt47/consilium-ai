@@ -265,6 +265,7 @@ export const demoApi = {
   attachFiles: async () => [],
   attachData: async (_id: string, name: string) => ({ name, path: name, kind: "image", size: 1 }),
   openAttachment: async () => undefined,
+  openApp: async () => undefined,
   runCommand: async () => { throw new Error("Run works in the app, not the demo"); },
   pickFiles: async () => [],
   setResetForecast: async () => undefined,

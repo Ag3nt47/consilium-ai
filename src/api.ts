@@ -330,6 +330,8 @@ const appApi = {
   /** Saves pasted file contents (a screenshot, say) for the next message. */
   attachData: (id: string, name: string, data: number[]) => invoke<Attachment>("attach_data", { id, name, data }),
   openAttachment: (id: string, attachment: Attachment) => invoke<void>("open_attachment", { id, attachment }),
+  /** Opens an installed app by name, after the human confirms a spoken "open <app>". */
+  openApp: (name: string) => invoke<void>("open_app", { name }),
   /** Runs command box `index` of AI message `eventId` once; its output goes to that AI as your message. */
   linkStatus: () => invoke<LinkStatus>("link_status"),
   linkSetEnabled: (on: boolean) => invoke<LinkStatus>("link_set_enabled", { on }),

@@ -113,6 +113,26 @@ fn sort_agents<T>(items: &mut [T], members: &[String], id: impl Fn(&T) -> &str) 
 }
 
 #[cfg(test)]
+mod open_app_tests {
+    use super::valid_app_name;
+
+    #[test]
+    fn app_names_cannot_carry_flags_paths_or_shell_syntax() {
+        assert!(valid_app_name("Safari"));
+        assert!(valid_app_name("Visual Studio Code"));
+        assert!(valid_app_name("Notepad++"));
+        assert!(!valid_app_name(""));
+        assert!(!valid_app_name("-n Safari"));
+        assert!(!valid_app_name("/bin/sh"));
+        assert!(!valid_app_name("Safari; rm -rf ~"));
+        assert!(!valid_app_name("x' -Verb RunAs"));
+        assert!(!valid_app_name("calc & del"));
+        assert!(!valid_app_name("x$(id)"));
+        assert!(!valid_app_name(&"a".repeat(61)));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn agents_sort_members_first_then_catalogue_order() {
@@ -358,12 +378,56 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
     app.opener().open_path(&attachment.path, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Whether `name` is safe to pass to the system's app launcher: letters, digits, spaces and a few
+/// punctuation marks only, so it can't carry flags, paths, quotes or shell syntax.
+fn valid_app_name(name: &str) -> bool {
+    let n = name.trim();
+    !n.is_empty()
+        && n.len() <= 60
+        && n.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && n.chars().all(|c| c.is_ascii_alphanumeric() || " .+-".contains(c))
+}
+
+/// Opens an installed app by name. Called only after the human confirms a spoken "open <app>" in
+/// Consilium's own dialog.
+#[tauri::command]
+fn open_app(name: String) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if !valid_app_name(&name) {
+        return Err("that isn't an app name Consilium can open".into());
+    }
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.args(["-a", &name]);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("powershell");
+        c.args(["-NoProfile", "-Command", "Start-Process", "-FilePath", &format!("'{name}'")]);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("gtk-launch");
+        c.arg(name.to_lowercase().replace(' ', "-"));
+        c
+    };
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("couldn't open {name}: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: Signal now carries the conversation both ways. Messages you send in \
-the Consilium group (or Note to Self) arrive here, a group per AI reaches only that AI, replying Approve or Deny answers \
-a single waiting request, and replies go back to the group they came from. The sidebar has a shared task checklist: \
-AIs take, finish, hand off and block tasks with TASK: lines, you can tick, assign and add tasks, and Consilium posts \
-who did what with overall progress. Click the conversation title to rename it; AIs can rename it with a TITLE: line.";
+const WHATS_NEW: &str = "What's new: in voice chat you can talk over a reply to interrupt it. The reply pauses \
+while you speak; if you go on to say something it stops and your message is sent, and if you say nothing for five \
+seconds it carries on. Spoken commands start with Consilium, such as Consilium, open settings, Consilium, stop, \
+Consilium, switch to Retro 84, or Consilium, open Safari. Opening a program always needs a click to confirm, and \
+any other request to control the computer goes to the AIs, who must ask for your approval first.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -884,6 +948,7 @@ pub fn run() {
             attach_files,
             attach_data,
             open_attachment,
+            open_app,
             get_daily_wallpaper,
             link_status,
             link_set_enabled,

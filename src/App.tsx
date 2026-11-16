@@ -30,7 +30,7 @@ import {
   type TurnState,
   type UsageWindow,
 } from "./api";
-import { canListen, canSpeak, Listener, Speaker, voiceOn } from "./voice";
+import { canListen, canSpeak, isEcho, Listener, parseVoiceCommand, RESUME_AFTER_MS, Speaker, startsInterrupt, voiceOn } from "./voice";
 import { VoiceSettings } from "./voicesettings";
 import { AgentVoiceMeter, VoiceVisualizer } from "./visualizer";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
@@ -891,6 +891,12 @@ export default function App() {
     setSpeakQueue(playback.queued.map((item) => item.agent));
   });
   const sendTextRef = useRef<(text: string) => void>(() => undefined);
+  // Voice interrupting: a reply pauses when the human starts talking over it, and carries on
+  // after RESUME_AFTER_MS if nothing more is said. Spoken "Consilium, …" commands run here.
+  const [interrupting, setInterrupting] = useState(false);
+  const resumeTimer = useRef<number | undefined>(undefined);
+  const voiceCommandRef = useRef<(text: string) => boolean>(() => false);
+  const [openAppAsk, setOpenAppAsk] = useState<string | null>(null);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [turnStartTime, setTurnStartTime] = useState<number | null>(null);
@@ -1365,16 +1371,63 @@ export default function App() {
     }
   }
 
-  // Listen while voice chat is on, except while a reply is being read aloud (so the AIs don't hear themselves).
+  // Listen the whole time voice chat is on, including while a reply is read aloud, so the human can
+  // talk over it. Speech that matches the reply being read is the AI's own voice from the speakers
+  // and is ignored. Anything else pauses the reply; if a message follows, the reading stops and the
+  // message is sent, and if nothing does within five seconds, the reply carries on.
   useEffect(() => {
-    if (!voice || speaking || !canListen) return;
-    const l = new Listener(setHeard, (t) => sendTextRef.current(t), (m) => setError(m));
+    if (!voice || !canListen) return;
+    const sp = speakerRef.current!;
+    const clearResume = () => {
+      window.clearTimeout(resumeTimer.current);
+      resumeTimer.current = undefined;
+    };
+    const armResume = () => {
+      clearResume();
+      resumeTimer.current = window.setTimeout(() => {
+        resumeTimer.current = undefined;
+        sp.resume();
+        setInterrupting(false);
+        setHeard("");
+      }, RESUME_AFTER_MS);
+    };
+    const l = new Listener(
+      (t) => {
+        const spoken = sp.speakingText;
+        if (spoken) {
+          if (!sp.isPaused && !startsInterrupt(t, spoken)) return;
+          if (!sp.isPaused) {
+            sp.pause();
+            setInterrupting(true);
+          }
+          armResume();
+        }
+        setHeard(t);
+      },
+      (t) => {
+        const spoken = sp.speakingText;
+        if (spoken) {
+          if (!sp.isPaused || isEcho(t, spoken)) return;
+          clearResume();
+          setInterrupting(false);
+        }
+        setHeard("");
+        if (voiceCommandRef.current(t)) return;
+        // A real interruption: stop reading. The replies stay in the chat.
+        if (spoken) sp.stop();
+        sendTextRef.current(t);
+      },
+      (m) => setError(m),
+    );
     l.start();
     return () => {
       l.stop();
+      clearResume();
+      sp.resume();
+      setInterrupting(false);
       setHeard("");
     };
-  }, [voice, speaking, current]);
+  }, [voice, current]);
 
   // Leaving voice chat or the conversation stops any speech.
   useEffect(() => {
@@ -1766,6 +1819,59 @@ export default function App() {
     { id: "theme-retro84", name: "Theme: Retro '84", hint: "Neon grid, scanlines, glow", run: () => setPrefs((p) => ({ ...p, theme: "retro84" })) },
     { id: "theme-netrunner", name: "Theme: Netrunner", hint: "Black, neon green, cyberpunk", run: () => setPrefs((p) => ({ ...p, theme: "netrunner" })) },
   ], [current, discuss, members, openUsage, requestingStatus]);
+
+  // Spoken commands: "Consilium, open settings", "Computer, open Safari", "Consilium, stop".
+  // Returns false for ordinary speech, which goes to the AIs as a message.
+  voiceCommandRef.current = (text: string) => {
+    const cmd = parseVoiceCommand(text);
+    if (!cmd) return false;
+    const sp = speakerRef.current;
+    const run = (id: string) => paletteCommands.find((c) => c.id === id)?.run();
+    switch (cmd.kind) {
+      case "speech":
+        if (cmd.action === "skip") sp?.skip();
+        else sp?.stop();
+        return true;
+      case "action": {
+        const ids = { settings: "settings", audit: "audit", usage: "usage", status: "status", new: "new-conv", "add-ai": "manage-ais" } as const;
+        if (cmd.action === "palette") {
+          setPaletteQuery("");
+          setPaletteIndex(0);
+          setShowPalette(true);
+        } else if (cmd.action === "text-chat") {
+          sp?.stop();
+          switchVoice(false);
+          return true;
+        } else run(ids[cmd.action]);
+        break;
+      }
+      case "theme":
+        run(`theme-${cmd.theme}`);
+        break;
+      case "open-app":
+        // Opening a program needs a click on Consilium's own confirmation, never voice alone.
+        setOpenAppAsk(cmd.app);
+        break;
+      case "computer":
+        sendTextRef.current(
+          `Voice command: ${cmd.instruction}. Before doing anything that changes this computer or controls another program, ask me with a REQUEST: line and wait for my approval.`,
+        );
+        break;
+    }
+    sp?.resume();
+    return true;
+  };
+
+  async function confirmOpenApp() {
+    const name = openAppAsk;
+    setOpenAppAsk(null);
+    if (!name) return;
+    try {
+      await api.openApp(name);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   const filteredCommands = useMemo(() => {
     const q = paletteQuery.trim().toLowerCase();
@@ -2228,8 +2334,12 @@ export default function App() {
           )}
           {voice && (
             <div className={`voice-bar ${speaking ? "voice-speaking" : "voice-listening"}`}>
-              {!speaking && <VoiceVisualizer speaker="user" active={voice} />}
-              {speaking ? (
+              {(!speaking || interrupting) && <VoiceVisualizer speaker="user" active={voice} />}
+              {speaking && interrupting ? (
+                <span className="voice-heard">
+                  {heard || "Paused. Listening…"} <em>(reading carries on in 5 seconds if you say nothing)</em>
+                </span>
+              ) : speaking ? (
                 <>
                   <span>Reading {speakingAgent ? `${senderName(speakingAgent, agents)}’s` : "the"} reply aloud…</span>
                   <button title="Stop reading this reply aloud and move on to the next" className="btn small" onClick={() => speakerRef.current?.skip()}>
@@ -2237,7 +2347,7 @@ export default function App() {
                   </button>
                 </>
               ) : canListen ? (
-                <span className="voice-heard">{heard || "Listening… speak, and your message is sent when you pause."}</span>
+                <span className="voice-heard">{heard || "Listening… speak, and your message is sent when you pause. Talk over a reply to interrupt it. Commands start with “Consilium”, like “Consilium, open settings”."}</span>
               ) : (
                 <span>
                   Speech recognition isn't available in this window. {dictationHint}, then Enter to send.
@@ -2646,6 +2756,30 @@ export default function App() {
               </button>
               <button title="Close Add AI" className="btn primary" onClick={() => setShowAddAi(false)}>
                 Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {openAppAsk && (
+        <div className="modal-backdrop" onClick={() => setOpenAppAsk(null)}>
+          <div
+            className="modal confirm-modal"
+            role="alertdialog"
+            aria-labelledby="confirm-open-app-title"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setOpenAppAsk(null);
+            }}
+          >
+            <h2 id="confirm-open-app-title">Open {openAppAsk}?</h2>
+            <p>You asked by voice to open <strong>{openAppAsk}</strong>. Voice alone can't open programs, so please confirm.</p>
+            <div className="confirm-actions">
+              <button className="btn" autoFocus onClick={() => setOpenAppAsk(null)} title="Don't open it">
+                Cancel
+              </button>
+              <button className="btn primary" onClick={confirmOpenApp} title={`Open ${openAppAsk}`}>
+                Open {openAppAsk}
               </button>
             </div>
           </div>
