@@ -312,7 +312,7 @@ function answeredRequests(events: ChatEvent[]): Map<string, RequestResolution> {
   const out = new Map<string, RequestResolution>();
   const waiting = new Map<string, string[]>();
   for (const e of events) {
-    if (e.kind !== "message") continue;
+    if (e.kind !== "message" && e.kind !== "error") continue;
     if (e.sender !== "human") {
       for (const [line, text] of e.text.split("\n").entries()) {
         const request = /^\s*REQUEST:\s*(.+)$/i.exec(text)?.[1].trim();
@@ -321,6 +321,7 @@ function answeredRequests(events: ChatEvent[]): Map<string, RequestResolution> {
       }
       continue;
     }
+    if (e.kind !== "message") continue;
     const answer = /^(Approved|Denied|Response to request):\s*([^\n]+)(?:\n[\s\S]*)?$/i.exec(e.text.trim());
     if (!answer) continue;
     const request = answer[2].trim();
