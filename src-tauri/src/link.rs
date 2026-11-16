@@ -6,9 +6,12 @@
 //! * Transport: TCP on port 8470, one JSON object per line. After pairing every frame is sealed
 //!   with ChaCha20-Poly1305 and every packet is an HMAC-authenticated `PeerPacket`; sessions start
 //!   with a fresh challenge in both directions, so a recorded session can't be replayed.
-//! * Delivery: incoming packets go through the crash-safe `ReplayLedger` before dispatch and are
-//!   acknowledged only after dispatch, so nothing is taken in twice. Unacknowledged outgoing
-//!   packets stay queued and are re-sent, re-stamped, on reconnect.
+//! * Delivery: incoming packets go through the crash-safe `ReplayLedger`, are appended (fsynced)
+//!   to `inbox.jsonl` and only then acknowledged, so nothing is lost or taken in twice.
+//!   Unacknowledged outgoing packets are kept in `outbox.json`, survive a restart, and are
+//!   re-sent, re-stamped, on reconnect.
+//! * A whole pairing handshake must finish within `PAIR_TIMEOUT`, so a stalled stranger can't hold
+//!   the code. Learned routes are limited to private-LAN / Tailscale addresses on the link port.
 //! * Health: a heartbeat every 3 s; a silent link is dropped after 10 s and redialled from 2 s,
 //!   backing off to 30 s.
 //! * Routes: each side advertises every local address (cable, Wi-Fi, Tailscale). The dialler tries
@@ -24,6 +27,7 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::collections::{HashMap, VecDeque};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,6 +45,7 @@ const RETRY_MIN: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const PAIR_TIMEOUT: Duration = Duration::from_secs(10);
 const PAIR_TTL_MS: u64 = 5 * 60 * 1000;
 const PAIR_ATTEMPTS: u32 = 3;
 const LINE_LIMIT: usize = 3 * 1024 * 1024;
@@ -126,8 +131,11 @@ struct PeerState {
 
 struct Inner {
     cfg_path: PathBuf,
+    outbox_path: PathBuf,
+    inbox_path: PathBuf,
     cfg: Mutex<LinkConfig>,
     ledger: ReplayLedger,
+    inbox_write: Mutex<()>,
     pending: Mutex<Option<Pending>>,
     peers: Mutex<HashMap<String, PeerState>>,
     handler: Handler,
@@ -156,12 +164,26 @@ impl Link {
             cfg.name = computer_name();
         }
         write_private(&cfg_path, &serde_json::to_vec_pretty(&cfg).map_err(|e| e.to_string())?)?;
+        let outbox_path = dir.join("outbox.json");
+        let saved: HashMap<String, Vec<PeerPacket>> = match std::fs::read(&outbox_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("outbox.json: {e}"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => return Err(format!("outbox.json: {e}")),
+        };
+        let peers = saved
+            .into_iter()
+            .filter(|(id, _)| cfg.peers.iter().any(|p| &p.node_id == id))
+            .map(|(id, q)| (id, PeerState { outbox: q.into_iter().collect(), ..Default::default() }))
+            .collect();
         Ok(Link(Arc::new(Inner {
+            outbox_path,
+            inbox_path: dir.join("inbox.jsonl"),
             ledger: ReplayLedger::new(dir.join("sync_ledger.jsonl")),
+            inbox_write: Mutex::new(()),
             cfg_path,
             cfg: Mutex::new(cfg),
             pending: Mutex::new(None),
-            peers: Mutex::new(HashMap::new()),
+            peers: Mutex::new(peers),
             handler,
             port,
             seq: AtomicU64::new(now_ms()),
@@ -305,10 +327,11 @@ impl Link {
         let mut cfg = self.0.cfg.lock().unwrap();
         cfg.peers.retain(|p| p.node_id != node_id);
         self.save(&cfg)?;
-        if let Some(mut s) = self.0.peers.lock().unwrap().remove(node_id) {
+        let mut states = self.0.peers.lock().unwrap();
+        if let Some(mut s) = states.remove(node_id) {
             s.tx = None;
         }
-        Ok(())
+        self.persist_outbox(&states)
     }
 
     /// Queues a packet for every paired computer; it is delivered now if connected, otherwise
@@ -322,25 +345,74 @@ impl Link {
             return Err("no paired computers".into());
         }
         let seq = self.0.seq.fetch_add(1, Ordering::SeqCst);
-        let mut first_id = String::new();
+        let mut prepared = Vec::with_capacity(peers.len());
         for peer in &peers {
             let key = peer_key(peer)?;
             let packet = PeerPacket::signed(&me, now_ms(), kind, seq, payload.clone(), &key)?;
-            if first_id.is_empty() {
-                first_id = packet.id.clone();
-            }
             let line = seal(&me, &key, &packet)?;
-            let mut states = self.0.peers.lock().unwrap();
-            let state = states.entry(peer.node_id.clone()).or_default();
-            if state.outbox.len() >= OUTBOX_LIMIT {
-                state.outbox.pop_front();
+            prepared.push((peer.node_id.clone(), packet, line));
+        }
+        let first_id = prepared.first().map(|(_, packet, _)| packet.id.clone()).unwrap_or_default();
+        let mut states = self.0.peers.lock().unwrap();
+        if let Some((id, _)) = prepared.iter().find_map(|(id, _, _)| {
+            let queued = states.get(id).map_or(0, |state| state.outbox.len());
+            (queued >= OUTBOX_LIMIT).then_some((id, queued))
+        }) {
+            return Err(format!("the reliable queue for {id} is full; reconnect or unpair it before sending more"));
+        }
+        for (id, packet, _) in &prepared {
+            states.entry(id.clone()).or_default().outbox.push_back(packet.clone());
+        }
+        // Saved before it goes on the wire, so a restart can't lose a queued message. Roll the
+        // in-memory admission back if the durable write fails; the caller can then retry safely.
+        if let Err(e) = self.persist_outbox(&states) {
+            for (id, packet, _) in &prepared {
+                if let Some(state) = states.get_mut(id) {
+                    state.outbox.retain(|queued| queued.id != packet.id);
+                }
             }
-            state.outbox.push_back(packet);
-            if let Some(tx) = &state.tx {
+            return Err(e);
+        }
+        for (id, _, line) in prepared {
+            if let Some(tx) = states.get(&id).and_then(|s| s.tx.as_ref()) {
                 let _ = tx.send(line);
             }
         }
         Ok(first_id)
+    }
+
+    /// Packets received from paired computers, oldest first, each id once. Durable: written
+    /// before the sender was told it arrived.
+    pub fn inbox(&self) -> Vec<PeerPacket> {
+        let text = std::fs::read_to_string(&self.0.inbox_path).unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        text.lines()
+            .filter_map(|l| serde_json::from_str::<PeerPacket>(l).ok())
+            .filter(|p| seen.insert(p.id.clone()))
+            .collect()
+    }
+
+    fn persist_outbox(&self, states: &HashMap<String, PeerState>) -> Result<(), String> {
+        let q: HashMap<&String, Vec<&PeerPacket>> =
+            states.iter().filter(|(_, s)| !s.outbox.is_empty()).map(|(id, s)| (id, s.outbox.iter().collect())).collect();
+        write_private(&self.0.outbox_path, &serde_json::to_vec(&q).map_err(|e| e.to_string())?)
+    }
+
+    fn append_inbox(&self, packet: &PeerPacket) -> Result<(), String> {
+        let _writing = self.0.inbox_write.lock().unwrap();
+        let mut line = serde_json::to_vec(packet).map_err(|e| e.to_string())?;
+        line.push(b'\n');
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).read(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut f = options.open(&self.0.inbox_path).map_err(|e| e.to_string())?;
+        repair_partial_line(&mut f)?;
+        f.write_all(&line).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())
     }
 
     // ---- internals ----------------------------------------------------------------------------
@@ -441,7 +513,7 @@ impl Link {
             p.busy = true;
             p.code.clone()
         };
-        let result = async {
+        let handshake = async {
             let (my_id, my_name) = self.me();
             let (state, mine) = Spake2::<Ed25519Group>::start_symmetric(
                 &Password::new(code.as_bytes()),
@@ -469,8 +541,11 @@ impl Link {
                 name: clean_name(&their_name),
                 addrs: vec![SocketAddr::new(from.ip(), their_port).to_string()],
             })
-        }
-        .await;
+        };
+        // The whole exchange is bounded, so a connection that stalls halfway can't hold the code.
+        let result = tokio::time::timeout(PAIR_TIMEOUT, handshake)
+            .await
+            .unwrap_or_else(|_| Err("pairing timed out".into()));
         let mut pending = self.0.pending.lock().unwrap();
         match result {
             Ok(peer) => {
@@ -542,15 +617,22 @@ impl Link {
     }
 
     fn learn_addrs(&self, node_id: &str, hello: &Value, observed: Option<SocketAddr>) {
+        // Only the link port and any port the user paired through, on private-LAN or Tailscale
+        // addresses: a paired computer can't point this one at arbitrary hosts or services.
+        let mut ports = vec![PORT, self.0.port];
+        if let Some(p) = self.0.cfg.lock().unwrap().peers.iter().find(|p| p.node_id == node_id) {
+            ports.extend(p.addrs.iter().filter_map(|a| a.parse::<SocketAddr>().ok()).map(|a| a.port()));
+        }
+        let ok = |a: &SocketAddr| ports.contains(&a.port()) && route_ip_allowed(a.ip());
         let mut addrs: Vec<String> = hello
             .get("addrs")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).filter_map(|s| s.parse::<SocketAddr>().ok()).map(|s| s.to_string()).take(8).collect())
+            .map(|a| a.iter().filter_map(Value::as_str).filter_map(|s| s.parse::<SocketAddr>().ok()).filter(|a| ok(a)).map(|s| s.to_string()).take(8).collect())
             .unwrap_or_default();
         if let (Some(obs), Some(first)) = (observed, addrs.first().and_then(|a| a.parse::<SocketAddr>().ok())) {
-            let seen = SocketAddr::new(obs.ip(), first.port()).to_string();
-            if !addrs.contains(&seen) {
-                addrs.insert(0, seen);
+            let seen = SocketAddr::new(obs.ip(), first.port());
+            if ok(&seen) && !addrs.contains(&seen.to_string()) {
+                addrs.insert(0, seen.to_string());
             }
         }
         if addrs.is_empty() {
@@ -739,8 +821,13 @@ impl Link {
             PacketKind::Heartbeat => {}
             PacketKind::Acknowledgement => {
                 if let Some(id) = packet.payload.get("ack").and_then(Value::as_str) {
-                    if let Some(s) = self.0.peers.lock().unwrap().get_mut(from) {
+                    let mut states = self.0.peers.lock().unwrap();
+                    if let Some(s) = states.get_mut(from) {
+                        let before = s.outbox.len();
                         s.outbox.retain(|p| p.id != id);
+                        if s.outbox.len() != before {
+                            let _ = self.persist_outbox(&states);
+                        }
                     }
                 }
             }
@@ -750,9 +837,14 @@ impl Link {
                     Ok(_) => true,
                     Err(_) => return,
                 };
-                // Not acknowledged on failure: the sender keeps it queued and retries.
-                if deliver && ((self.0.handler)(&packet).is_err() || self.0.ledger.commit(&packet).is_err()) {
+                // Stored durably before the ack; on failure the sender keeps it queued and retries.
+                // A crash between storing and committing stores it again, which `inbox` dedupes.
+                if deliver && (self.append_inbox(&packet).is_err() || self.0.ledger.commit(&packet).is_err()) {
                     return;
+                }
+                if deliver {
+                    // Only a notification now: the packet is already safe in the inbox.
+                    let _ = (self.0.handler)(&packet);
                 }
                 let ack = PeerPacket::signed(me, now_ms(), PacketKind::Acknowledgement, self.0.seq.fetch_add(1, Ordering::SeqCst), json!({ "ack": packet.id }), key);
                 if let Ok(line) = ack.and_then(|p| seal(me, key, &p)) {
@@ -951,15 +1043,72 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+/// Opens a file readable only by this user from the moment it exists.
+fn open_private(path: &Path, append: bool) -> Result<std::fs::File, String> {
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true);
+    if append {
+        o.append(true);
+    } else {
+        o.write(true).truncate(true);
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
     }
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    o.open(path).map_err(|e| e.to_string())
+}
+
+/// Atomic, fsynced, 0600 write.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut f = open_private(&tmp, false)?;
+    f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
+    drop(f);
+    crate::store::replace_file(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// A power loss can leave the final JSONL record partially written. Remove only that incomplete
+/// tail before appending the sender's retry; complete earlier records remain untouched.
+fn repair_partial_line(file: &mut std::fs::File) -> Result<(), String> {
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    if len == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(-1)).map_err(|e| e.to_string())?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last).map_err(|e| e.to_string())?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+
+    let mut end = len;
+    let mut chunk = [0u8; 8192];
+    while end > 0 {
+        let start = end.saturating_sub(chunk.len() as u64);
+        let size = (end - start) as usize;
+        file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+        file.read_exact(&mut chunk[..size]).map_err(|e| e.to_string())?;
+        if let Some(index) = chunk[..size].iter().rposition(|&byte| byte == b'\n') {
+            file.set_len(start + index as u64 + 1).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        end = start;
+    }
+    file.set_len(0).map_err(|e| e.to_string())
+}
+
+/// Private LAN (10/8, 172.16/12, 192.168/16), Tailscale/CGNAT (100.64/10), IPv6 unique-local,
+/// or loopback. Public, link-local, multicast and unspecified addresses are refused.
+fn route_ip_allowed(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private() || v4.is_loopback() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+    }
 }
 
 #[cfg(test)]
@@ -1009,6 +1158,7 @@ mod tests {
         let id = joiner.send(PacketKind::Chat, json!({ "text": "hello from the PC" })).unwrap();
         assert!(wait_for(|| host_got.lock().unwrap().len() == 1).await);
         assert_eq!(host_got.lock().unwrap()[0].id, id);
+        assert_eq!(host.inbox().len(), 1, "stored durably");
         assert!(wait_for(|| joiner.status().peers[0].queued == 0).await, "acknowledged");
 
         // Drop the session; a re-sent duplicate is acknowledged but not delivered twice.
@@ -1019,6 +1169,7 @@ mod tests {
         joiner.start();
         assert!(wait_for(|| joiner.status().peers[0].connected && joiner.status().peers[0].queued == 0).await, "reconnects and drains");
         assert_eq!(host_got.lock().unwrap().len(), 1);
+        assert_eq!(host.inbox().len(), 1);
         host.stop();
         joiner.stop();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1055,5 +1206,58 @@ mod tests {
         assert!(open(&from, &key, &n, &bad).is_err());
         assert_eq!(with_port("192.168.1.5", PORT), "192.168.1.5:8470");
         assert_eq!(with_port("pc.local:9000", PORT), "pc.local:9000");
+    }
+
+    #[test]
+    fn routes_are_limited_to_private_networks() {
+        for ok in ["192.168.1.5", "10.0.0.2", "172.20.1.1", "100.101.102.103", "127.0.0.1", "fd7a:115c::1"] {
+            assert!(route_ip_allowed(ok.parse().unwrap()), "{ok}");
+        }
+        for bad in ["8.8.8.8", "169.254.1.1", "100.128.0.1", "0.0.0.0", "224.0.0.1", "2001:db8::1"] {
+            assert!(!route_ip_allowed(bad.parse().unwrap()), "{bad}");
+        }
+    }
+
+    #[test]
+    fn inbox_repairs_an_interrupted_final_record() {
+        let dir = std::env::temp_dir().join(format!("link-test-{}", uuid::Uuid::new_v4()));
+        let (link, _) = node(&dir, "inbox-repair");
+        let key = [9u8; 32];
+        let first = PeerPacket::signed("node-peer", now_ms(), PacketKind::Chat, 1, json!({"text": "one"}), &key).unwrap();
+        let second = PeerPacket::signed("node-peer", now_ms(), PacketKind::Chat, 2, json!({"text": "two"}), &key).unwrap();
+        link.append_inbox(&first).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&link.0.inbox_path).unwrap().write_all(b"{\"cut_off\"").unwrap();
+        link.append_inbox(&second).unwrap();
+        assert_eq!(link.inbox(), vec![first, second]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stalled_pairing_releases_the_code_and_queue_survives_restart() {
+        let dir = std::env::temp_dir().join(format!("link-test-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let code = host.begin_pairing().unwrap();
+        // A stranger starts pairing, then goes silent.
+        let mut stall = TcpStream::connect(("127.0.0.1", host.0.port)).await.unwrap();
+        let (_, mine) = Spake2::<Ed25519Group>::start_symmetric(&Password::new(b"000000"), &Identity::new(PAIR_ID));
+        let start = serde_json::to_string(&Wire::PairStart { node_id: "node-stranger00000000".into(), name: "x".into(), port: 1, spake: hex(&mine) }).unwrap();
+        stall.write_all(format!("{start}\n").as_bytes()).await.unwrap();
+        assert!(wait_for(|| host.0.pending.lock().unwrap().as_ref().is_some_and(|p| p.busy)).await, "stranger holds the code");
+        tokio::time::sleep(PAIR_TIMEOUT + Duration::from_millis(500)).await;
+        assert!(host.0.pending.lock().unwrap().as_ref().is_some_and(|p| !p.busy), "timeout frees it");
+        drop(stall);
+
+        // The real computer then pairs, and a message queued while offline survives a restart.
+        let (joiner, _) = node(&dir, "joiner");
+        joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
+        host.stop();
+        joiner.stop();
+        let id = joiner.send(PacketKind::Chat, json!({ "text": "queued" })).unwrap();
+        let port = joiner.0.port;
+        drop(joiner);
+        let reopened = Link::open(&dir.join("joiner"), port, Arc::new(|_: &PeerPacket| Ok(()))).unwrap();
+        assert_eq!(reopened.status().peers[0].queued, 1);
+        assert_eq!(reopened.0.peers.lock().unwrap().values().next().unwrap().outbox[0].id, id);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

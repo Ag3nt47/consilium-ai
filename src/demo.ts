@@ -291,6 +291,7 @@ export const demoApi = {
     peers: [],
     error: null,
   }),
+  linkInbox: async () => [],
   linkSend: async () => "demo-pkt-1",
 };
 

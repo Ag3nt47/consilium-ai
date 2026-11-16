@@ -278,6 +278,7 @@ const appApi = {
   linkPairCancel: () => invoke<void>("link_pair_cancel"),
   linkPairJoin: (address: string, code: string) => invoke<LinkPeer>("link_pair_join", { address, code }),
   linkUnpair: (nodeId: string) => invoke<LinkStatus>("link_unpair", { nodeId }),
+  linkInbox: () => invoke<unknown[]>("link_inbox"),
   linkSend: (payload: unknown) => invoke<string>("link_send", { payload }),
   runCommand: (id: string, eventId: string, index: number) => invoke<ChatEvent>("run_command", { id, eventId, index }),
   /** Shows the system file picker; returns the chosen files. */

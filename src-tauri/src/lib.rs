@@ -307,11 +307,10 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: the Run button refuses a command block that was cut off before its closing \
-fence, and records a start receipt on disk before running, so a command can never run twice even if Consilium closes \
-mid-run. Under the hood, the engine for linking two computers (one-time 6-digit pairing code, encrypted connection on \
-port 8470, 3-second heartbeats, automatic reconnect and resend, best-route choice across cable, Wi-Fi and Tailscale) is \
-included but stays off until a pairing screen arrives.";
+const WHATS_NEW: &str = "What's new: window size, position, and full-screen state are remembered across restarts. \
+Settings adds distinct per-AI voice selection and preview (Reed, Samantha, Daniel) with a silence watchdog that clears \
+stuck speaker highlights. Prompt box typing lag is eliminated, Full-capacity AIs execute ordinary commands directly on \
+all platforms, and multi-computer sync adds topbar LED indicators, a 6-digit pairing screen, and durable crash-safe queues.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -639,6 +638,12 @@ async fn link_unpair(node_id: String) -> Result<link::LinkStatus, String> {
     Ok(l.status())
 }
 
+/// Everything received from paired computers, oldest first, saved before it was acknowledged.
+#[tauri::command]
+async fn link_inbox() -> Result<Vec<peer_protocol::PeerPacket>, String> {
+    Ok(the_link()?.inbox())
+}
+
 /// Sends a chat payload to every paired computer; queued until each one acknowledges it.
 #[tauri::command]
 async fn link_send(payload: serde_json::Value) -> Result<String, String> {
@@ -767,6 +772,7 @@ pub fn run() {
             link_pair_cancel,
             link_pair_join,
             link_unpair,
+            link_inbox,
             link_send
         ])
         .build(context)
