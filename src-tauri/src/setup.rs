@@ -150,12 +150,7 @@ pub fn open_in_terminal(step: &Step) -> Result<(), String> {
     #[cfg(windows)]
     {
         let script = dir.join(format!("consilium-setup-{}.ps1", uuid::Uuid::new_v4()));
-        let body = format!(
-            "Write-Host 'Consilium setup: {title}'\nWrite-Host ''\nWrite-Host 'This will run:'\nWrite-Host '  {cmd_shown}'\nRead-Host 'Press Enter to continue, or close this window to cancel'\n{cmd}\nWrite-Host ''\nWrite-Host 'Done. Close this window and press refresh in Consilium.'\n",
-            title = step.title.replace('\'', "''"),
-            cmd_shown = step.command.replace('\'', "''"),
-            cmd = step.command
-        );
+        let body = powershell_script(step);
         std::fs::write(&script, body).map_err(|e| e.to_string())?;
         std::process::Command::new("cmd")
             .args(["/c", "start", "Consilium setup", "powershell", "-NoExit", "-ExecutionPolicy", "Bypass", "-File"])
@@ -166,6 +161,28 @@ pub fn open_in_terminal(step: &Step) -> Result<(), String> {
     }
     #[allow(unreachable_code)]
     Err("setup isn't supported on this system".into())
+}
+
+/// The PowerShell script the Windows setup window runs. It reports failure honestly
+/// instead of always saying "Done", and retries an npm install once with a fresh cache
+/// in %TEMP%: on some Windows PCs npm can't create folders in its usual cache
+/// (`npm error syscall mkdir ... npm-cache\_cacache\tmp`, errno UNKNOWN), often because
+/// antivirus or a damaged cache folder blocks it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn powershell_script(step: &Step) -> String {
+    let title = step.title.replace('\'', "''");
+    let shown = step.command.replace('\'', "''");
+    let cmd = &step.command;
+    let retry = if cmd.contains("npm") && cmd.contains(" install -g ") {
+        format!(
+            "if ($LASTEXITCODE -ne 0) {{\n  Write-Host ''\n  Write-Host 'npm failed; trying once more with a fresh download cache...'\n  $global:LASTEXITCODE = 0\n  {cmd} --cache \"$env:TEMP\\consilium-npm-cache\"\n}}\n"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "Write-Host 'Consilium setup: {title}'\nWrite-Host ''\nWrite-Host 'This will run:'\nWrite-Host '  {shown}'\nRead-Host 'Press Enter to continue, or close this window to cancel'\n$global:LASTEXITCODE = 0\n{cmd}\n{retry}Write-Host ''\nif ($LASTEXITCODE -ne 0) {{\n  Write-Host \"That didn't work (exit code $LASTEXITCODE). Send a picture of this window to Consilium so the council can fix it.\" -ForegroundColor Red\n}} else {{\n  Write-Host 'Done. Close this window and press refresh in Consilium.'\n}}\n"
+    )
 }
 
 #[cfg(unix)]
@@ -204,6 +221,17 @@ mod tests {
         if agents::find(Kind::GeminiCli).is_none() || agents::find(Kind::Antigravity).is_some() {
             assert!(step("gemini", "install").unwrap().command.contains("antigravity.google/cli/install"));
         }
+    }
+
+    #[test]
+    fn windows_npm_installs_retry_with_a_fresh_cache_and_report_failure() {
+        let npm = Step { title: "Install Codex", command: "& \"C:\\Program Files\\nodejs\\npm.cmd\" install -g @openai/codex".into() };
+        let ps = powershell_script(&npm);
+        assert!(ps.contains("install -g @openai/codex --cache \"$env:TEMP\\consilium-npm-cache\""));
+        assert!(ps.contains("if ($LASTEXITCODE -ne 0)"));
+        assert!(ps.contains("That didn't work"));
+        let other = Step { title: "Install Claude", command: "irm https://claude.ai/install.ps1 | iex".into() };
+        assert!(!powershell_script(&other).contains("--cache"));
     }
 
     #[test]

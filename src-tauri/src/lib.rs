@@ -443,7 +443,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: the background spyware check (Zero Breach) can now actually start. It waited for system load under 35%, but counted memory in use, which stays around 60 to 70% on an ordinary Mac, so it never ran. It now goes by processor load and only holds back for memory when it is nearly full. It still runs only after five quiet minutes and stops as soon as an AI starts working. This update should also be the first that keeps the macOS permissions you already granted.";
+const WHATS_NEW: &str = "What's new: in Settings, each linked computer's card now shows which AIs are working there and a one-line summary of its project folder, such as its branch and how many files changed. On Windows, the background git check no longer flashes a console window. If installing Codex or another npm tool on Windows fails because npm can't write to its download cache, the setup window now tries once more with a fresh cache, and it says plainly when an install failed instead of always saying Done.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
