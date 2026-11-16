@@ -11,7 +11,7 @@ A single AI can give a fast answer; a council can expose blind spots. Consilium 
 
 Download Consilium if you want more than several disconnected chatbot tabs: one place to ask for competing opinions, reach a better-supported decision, or have a supervised AI team help research, code and troubleshoot with a visible record of who did what.
 
-<p align="center"><img src="docs/media/demo.png" width="860" alt="Animated demo: a question goes to ChatGPT and Claude in Discuss mode; they answer in turn, Claude corrects ChatGPT, ChatGPT concedes and asks the human a question shown as a red REQUEST callout"></p>
+<p align="center"><img src="docs/media/demo.gif" width="860" alt="Animated demo: a question goes to ChatGPT and Claude in Discuss mode; they answer in turn, Claude corrects ChatGPT, ChatGPT concedes and asks the human a question shown as a red REQUEST callout"></p>
 <p align="center"><sub>Demo with invented data.</sub></p>
 
 - **Existing sign-ins for CLI agents.** ChatGPT takes part through OpenAI's Codex CLI, Claude through Anthropic's Claude Code CLI, and Gemini through Google's Antigravity CLI. Optional Grok and DeepSeek connectors use API keys stored only in the app's local data folder (mode `0600` on Unix) or their standard environment variables; keys are never put into the transcript or returned to the UI.
@@ -44,14 +44,14 @@ Runs on macOS, Windows and Linux.
 
 | | |
 | --- | --- |
-| ![Conversation in the Consilium theme](docs/media/conversation.png) | ![The Netrunner cyberpunk theme, the default for new installs](docs/media/netrunner.png) |
-| **Consilium** theme (version tab, messaging indicator, Seen receipts) | **Netrunner** cyberpunk theme (crisp REQUEST callouts, typewriter effects) |
+| ![Conversation in the visionOS Glass theme](docs/media/conversation.png) | ![The Netrunner cyberpunk theme, the default for new installs](docs/media/netrunner.png) |
+| **visionOS Glass** theme (title bar icons, CI light, task checklist, Seen receipts) | **Netrunner** cyberpunk theme (crisp REQUEST callouts, typewriter effects) |
 | ![Voice Chat and per-AI audio visualizers](docs/media/voice.png) | ![The Retro '84 theme](docs/media/retro84.png) |
 | **Voice Chat** & dual audio visualizers | **Retro '84** theme (neon grid, scanlines; effects can be turned off) |
 | ![First run: the Set up AIs card for a missing sign-in](docs/media/first-run-setup.png) | ![Settings: theme picker, effects, update checks](docs/media/settings.png) |
 | First run: **Set up AIs** | Settings: themes, Signal messaging, Bing wallpaper |
-| ![Add AI: Gemini's install, sign-in and add steps](docs/media/add-ai.png) | ![The Cyber theme](docs/media/cyber.png) |
-| **+ Add AI** | **Cyber** theme |
+| ![Add AI: Gemini's install, sign-in and add steps](docs/media/add-ai.png) | |
+| **+ Add AI** | |
 
 Screenshots use invented demo data. To see the UI in a browser without the app, run `npm run dev` and open `http://127.0.0.1:1420/?step=5` (`step` 0–5 walks through the demo; add `&theme=netrunner`, `&theme=retro84`, `&voice=1`, `&settings=1` or `&setup=1`).
 
