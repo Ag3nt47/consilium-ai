@@ -1052,7 +1052,7 @@ async fn run_at_with_usage(
     };
     let reply_file = work.join("reply.txt");
     let plan = plan_with_files(kind, access, &dir, &reply_file, system, prompt, files);
-    let result = execute(path, kind, &dir, &reply_file, plan, cancel, timeout, activity).await;
+    let result = execute(path, kind, access, &dir, &reply_file, plan, cancel, timeout, activity).await;
     let _ = std::fs::remove_dir_all(&work);
     result
 }
@@ -1061,6 +1061,7 @@ async fn run_at_with_usage(
 async fn execute(
     path: &Path,
     kind: Kind,
+    access: Access,
     dir: &Path,
     reply_file: &Path,
     plan: Plan,
@@ -1093,7 +1094,7 @@ async fn execute(
     let mut recent_output = String::new();
     let mut activity_output = String::new();
     let mut watch_output = true;
-    let outcome = loop {
+    let outcome = 'watch: loop {
         tokio::select! {
             status = child.wait() => break Ok(status),
             chunk = chunk_rx.recv(), if watch_output => {
@@ -1103,13 +1104,24 @@ async fn execute(
                 };
                 recent_output.push_str(&String::from_utf8_lossy(&chunk));
                 keep_tail(&mut recent_output, 8_192);
-                if let Some(sink) = &activity {
+                if activity.is_some() || access == Access::Unrestricted {
                     activity_output.push_str(&String::from_utf8_lossy(&chunk));
                     while let Some(end) = activity_output.find('\n') {
                         let line = activity_output[..end].trim_end_matches('\r').to_string();
                         activity_output.drain(..=end);
+                        if access == Access::Unrestricted {
+                            if let Some(command) = streamed_command(kind, &line).filter(|c| destructive_command(c)) {
+                                break 'watch Err(format!(
+                                    "safety stop: blocked a high-risk command from {}: {}\nREQUEST: Review the command and run it yourself only if its destructive effect is intended.",
+                                    tool_name(kind),
+                                    safe_activity_detail(&command),
+                                ));
+                            }
+                        }
                         if let Some(signal) = activity_from_line(kind, &line) {
-                            sink(signal);
+                            if let Some(sink) = &activity {
+                                sink(signal);
+                            }
                         }
                     }
                     keep_tail(&mut activity_output, 32_768);
@@ -1369,6 +1381,146 @@ fn activity_from_line(kind: Kind, line: &str) -> Option<ActivitySignal> {
         Kind::Antigravity => antigravity_activity(&v),
         Kind::GeminiCli | Kind::XaiApi | Kind::DeepSeekApi => None,
     }
+}
+
+/// Extracts a command at the provider's pre-execution activity boundary. This is intentionally
+/// separate from the display telemetry: the guard examines the complete command before redaction
+/// and truncation, while the UI continues to receive only a short scrubbed description.
+fn streamed_command(kind: Kind, line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    match kind {
+        Kind::Codex if v["type"] == "item.started" && v["item"]["type"] == "command_execution" => {
+            v["item"]["command"].as_str().map(str::to_string)
+        }
+        Kind::ClaudeCode if v["type"] == "assistant" => v["message"]["content"]
+            .as_array()?
+            .iter()
+            .find(|block| block["type"] == "tool_use" && block["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("bash")))
+            .and_then(|block| block["input"]["command"].as_str())
+            .map(str::to_string),
+        Kind::Antigravity if v["event"] == "step_update" => {
+            let step = &v["step_update"];
+            let tool = step["tool_name"]
+                .as_str()
+                .or_else(|| step["display_name"].as_str())
+                .or_else(|| step["tool"]["name"].as_str())?
+                .to_ascii_lowercase();
+            (tool.contains("command") || tool.contains("terminal"))
+                .then(|| step["command"].as_str().map(str::to_string))
+                .flatten()
+        }
+        _ => None,
+    }
+}
+
+/// Emergency brake for commands whose ordinary meaning is broad, difficult-to-recover data loss
+/// or an OS/disk shutdown. It is deliberately narrow: provider-native permission modes remain the
+/// primary guard, and ambiguous commands are not guessed at. The stream event normally arrives
+/// before execution, but a provider can change that ordering; this is defense in depth, not an OS
+/// sandbox.
+fn destructive_command(command: &str) -> bool {
+    shell_segments(command).into_iter().any(destructive_segment)
+}
+
+fn shell_segments(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(q) = quote {
+            current.push(ch);
+            if ch == q {
+                quote = None;
+            } else if ch == '\\' && q == '"' {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                current.push(ch);
+            }
+            ';' | '\n' => {
+                if !current.trim().is_empty() {
+                    out.push(current.trim().to_string());
+                }
+                current.clear();
+            }
+            '&' | '|' if chars.peek() == Some(&ch) => {
+                chars.next();
+                if !current.trim().is_empty() {
+                    out.push(current.trim().to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_string());
+    }
+    out
+}
+
+fn destructive_segment(segment: String) -> bool {
+    let words: Vec<String> = segment
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| matches!(c, '\'' | '"' | ',' | '(' | ')')).to_ascii_lowercase())
+        .collect();
+    if words.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while start < words.len() && (words[start] == "sudo" || words[start] == "command" || words[start] == "env") {
+        start += 1;
+        while start < words.len() && words[start].starts_with('-') {
+            start += 1;
+        }
+    }
+    let Some(program) = words.get(start).map(|s| s.rsplit(['/', '\\']).next().unwrap_or(s)) else { return false };
+    let args = &words[start + 1..];
+    match program {
+        "rm" => {
+            let recursive = args.iter().any(|a| a == "--recursive" || (a.starts_with('-') && a.contains('r')));
+            let force = args.iter().any(|a| a == "--force" || (a.starts_with('-') && a.contains('f')));
+            recursive && force && args.iter().any(|a| dangerous_target(a))
+        }
+        "git" => {
+            (args.first().is_some_and(|a| a == "reset") && args.iter().any(|a| a == "--hard"))
+                || (args.first().is_some_and(|a| a == "clean")
+                    && args.iter().any(|a| a.starts_with('-') && a.contains('f')))
+        }
+        "diskutil" => args.first().is_some_and(|a| a.starts_with("erase")),
+        "mkfs" | "fdisk" | "format" | "shutdown" | "reboot" | "halt" | "poweroff" => true,
+        "dd" => args.iter().any(|a| a.starts_with("of=/dev/")),
+        "find" => args.iter().any(|a| a == "-delete") && args.first().is_some_and(|a| dangerous_target(a)),
+        "remove-item" => {
+            args.iter().any(|a| a == "-recurse")
+                && args.iter().any(|a| a == "-force")
+                && args.iter().any(|a| dangerous_target(a))
+        }
+        "sh" | "bash" | "zsh" | "powershell" | "pwsh" | "cmd" => args
+            .iter()
+            .position(|a| matches!(a.as_str(), "-c" | "-command" | "/c"))
+            .is_some_and(|i| destructive_command(&args[i + 1..].join(" "))),
+        "rmdir" | "rd" => {
+            args.iter().any(|a| a == "/s")
+                && args.iter().any(|a| a == "/q")
+                && args.iter().any(|a| dangerous_target(a))
+        }
+        _ => false,
+    }
+}
+
+fn dangerous_target(target: &str) -> bool {
+    matches!(
+        target.trim_end_matches(['/', '\\']),
+        "" | "." | ".." | "*" | "/*" | "/.*" | "./*" | "../*" | "~" | "$home" | "${home}" | "$env:userprofile" | "%userprofile%" | "c:"
+    )
 }
 
 fn signal(kind: &str, label: &str, detail: impl AsRef<str>) -> ActivitySignal {
@@ -1807,6 +1959,64 @@ mod plan_tests {
     }
 
     #[test]
+    fn unrestricted_stream_guard_extracts_provider_commands() {
+        assert_eq!(
+            streamed_command(
+                Kind::Codex,
+                r#"{"type":"item.started","item":{"type":"command_execution","command":"git reset --hard"}}"#,
+            )
+            .as_deref(),
+            Some("git reset --hard")
+        );
+        assert_eq!(
+            streamed_command(
+                Kind::ClaudeCode,
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"rm -rf /"}}]}}"#,
+            )
+            .as_deref(),
+            Some("rm -rf /")
+        );
+        assert_eq!(
+            streamed_command(
+                Kind::Antigravity,
+                r#"{"event":"step_update","step_update":{"tool_name":"run_terminal_command","command":"shutdown -h now"}}"#,
+            )
+            .as_deref(),
+            Some("shutdown -h now")
+        );
+    }
+
+    #[test]
+    fn destructive_guard_is_narrow_and_cross_platform() {
+        for command in [
+            "rm -rf /",
+            "sudo rm -fr ~",
+            "git reset --hard HEAD",
+            "git clean -fdx",
+            "diskutil eraseDisk APFS Empty /dev/disk4",
+            "dd if=image.iso of=/dev/sda",
+            "Remove-Item -Recurse -Force $env:USERPROFILE",
+            r#"rd /s /q C:\"#,
+            "npm test && shutdown -h now",
+            "bash -c 'rm -rf /'",
+            "powershell -Command Remove-Item -Recurse -Force $env:USERPROFILE",
+        ] {
+            assert!(destructive_command(command), "should block: {command}");
+        }
+        for command in [
+            "rm -rf /tmp/consilium-build-123",
+            "git status --short",
+            "git restore --staged src/App.tsx",
+            "rg 'git reset --hard' docs",
+            "printf 'rm -rf /'",
+            "cargo test",
+            "Remove-Item -Recurse ./dist",
+        ] {
+            assert!(!destructive_command(command), "should allow: {command}");
+        }
+    }
+
+    #[test]
     fn claude_stream_result_remains_the_reply_and_usage_source() {
         let out = concat!(
             "{\"type\":\"system\",\"subtype\":\"init\"}\n",
@@ -1977,6 +2187,24 @@ printf 'done' > "$out""#,
             *seen.lock().unwrap(),
             vec![signal("thinking", "Planning", ""), signal("running", "Running command", "npm test")]
         );
+    }
+
+    #[tokio::test]
+    async fn unrestricted_turn_stops_on_a_streamed_destructive_command() {
+        let p = fake(
+            r#"while [ "$1" != "-o" ]; do shift; done; cat >/dev/null
+echo '{"type":"item.started","item":{"type":"command_execution","command":"git reset --hard"}}'
+sleep 30"#,
+        );
+        let ws = std::env::temp_dir().join(format!("consilium-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let started = std::time::Instant::now();
+        let error = go(&p, Kind::Codex, Access::Unrestricted, Some(&ws), "system")
+            .await
+            .unwrap_err();
+        let _ = std::fs::remove_dir_all(ws);
+        assert!(error.contains("safety stop") && error.contains("REQUEST:"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[tokio::test]

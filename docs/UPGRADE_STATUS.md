@@ -19,7 +19,7 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Devil's advocate in round 3+ | ✅ | Rotating reviewer |
 | Context sliding window (summarise long sessions) | ✅ | Over 120k prompt characters, older turns become a bounded local digest prioritising human intent, REQUEST decisions and concrete outcomes; the newest 104k remain verbatim. Current file diffs are separately hashed and bounded |
 | File-state hashing / git diff in each turn | ✅ | Bounded, redacted status/diff snapshot with a hard Git subprocess timeout before each editable turn |
-| Destructive command sanitizer for Full capacity | ⏭ | Can only gate what Consilium itself runs; the CLIs execute their own commands, so the real guard is their own permission modes plus worktrees |
+| Destructive command sanitizer for Full capacity | 🔨 | Provider-native permission modes remain primary. An emergency brake now stops observable broad data-loss/disk/OS commands at the structured pre-execution stream boundary; provider ordering can change, so OS-enforced worktree isolation remains next |
 | Secret redaction | ✅ | `redact.rs`, plus `check-secrets.mjs` before pushes |
 | Git worktree per agent in Full capacity | ⏭ | `consilium/agent-<id>` branches, merged on approval |
 | Atomic memory appends | ✅ | `memory.rs` writes under a lock, size-capped |
