@@ -192,7 +192,8 @@ code {
 
 .app {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  /* The sidebar grows and shrinks with the window instead of a fixed 260px. */
+  grid-template-columns: clamp(220px, 21vw, 320px) minmax(0, 1fr);
   height: 100%;
   position: relative;
 }
@@ -3215,3 +3216,25 @@ button.attachment {
 .msg-qr img { background: #fff; padding: 8px; border-radius: 10px; image-rendering: pixelated; }
 .msg-qr-note { flex-basis: 100%; font-size: 13px; text-align: center; }
 .msg-code { font-family: var(--mono, ui-monospace, monospace); font-size: 18px; font-weight: 700; letter-spacing: 3px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border); }
+
+/* Council cards scale with the sidebar's width, not the window's: each card is a size container,
+   so long states ("Out of usage · back Fri 2:15 AM  Retry") and usage labels wrap or shorten instead
+   of running past the card's edge. */
+.agents { container-type: inline-size; container-name: council; }
+.agent { min-width: 0; }
+.agent-state { white-space: normal; overflow-wrap: anywhere; line-height: 1.25; }
+.agent-state.benched { grid-column: 2 / -1; justify-self: start; text-align: left; }
+.agent .check { grid-column: 2 / -1; min-width: 0; overflow-wrap: anywhere; font-size: 10.5px; }
+.usage-label { gap: 6px; min-width: 0; }
+.usage-label b { white-space: nowrap; }
+.usage-forecast { overflow-wrap: anywhere; }
+.agent-name { font-size: clamp(12px, 0.55rem + 0.6vw, 14px); }
+
+@container council (max-width: 230px) {
+  /* Narrow sidebar: the state drops under the name so the name keeps its room. */
+  .agent { grid-template-columns: 12px minmax(0, 1fr) auto; }
+  .agent-state,
+  .agent > .setup-link { grid-column: 2 / -1; justify-self: start; text-align: left; }
+  .agent-exhausted-tag { display: block; margin-left: 0; }
+  .usage-label small { display: none; }
+}
