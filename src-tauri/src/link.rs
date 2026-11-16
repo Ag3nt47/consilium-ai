@@ -1165,7 +1165,7 @@ fn local_addrs(port: u16) -> Vec<String> {
         .into_iter()
         .filter(|i| !i.is_loopback())
         .filter_map(|i| match i.ip() {
-            std::net::IpAddr::V4(v4) if !v4.is_link_local() => Some(format!("{v4}:{port}")),
+            std::net::IpAddr::V4(v4) => Some(format!("{v4}:{port}")),
             _ => None,
         })
         .collect();
@@ -1285,7 +1285,9 @@ fn route_ip_allowed(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
             let o = v4.octets();
-            v4.is_private() || v4.is_loopback() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+            // Link-local 169.254.x.x is what a direct cable, Thunderbolt bridge or Bluetooth
+            // network gets with no router handing out addresses (not the cloud metadata address).
+            v4.is_private() || v4.is_loopback() || (v4.is_link_local() && o[2..] != [169, 254]) || (o[0] == 100 && (o[1] & 0xc0) == 64)
         }
         std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
     }
@@ -1435,10 +1437,10 @@ mod tests {
 
     #[test]
     fn routes_are_limited_to_private_networks() {
-        for ok in ["192.168.1.5", "10.0.0.2", "172.20.1.1", "100.101.102.103", "127.0.0.1", "fd7a:115c::1"] {
+        for ok in ["192.168.1.5", "10.0.0.2", "172.20.1.1", "100.101.102.103", "127.0.0.1", "169.254.1.1", "fd7a:115c::1"] {
             assert!(route_ip_allowed(ok.parse().unwrap()), "{ok}");
         }
-        for bad in ["8.8.8.8", "169.254.1.1", "100.128.0.1", "0.0.0.0", "224.0.0.1", "2001:db8::1"] {
+        for bad in ["8.8.8.8", "169.254.169.254", "100.128.0.1", "0.0.0.0", "224.0.0.1", "2001:db8::1"] {
             assert!(!route_ip_allowed(bad.parse().unwrap()), "{bad}");
         }
     }

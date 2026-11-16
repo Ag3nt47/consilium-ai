@@ -34,6 +34,10 @@ const MAX_PER_MINUTE: usize = 40;
 /// Longest message text accepted from another computer, in characters.
 const MAX_TEXT: usize = 64_000;
 const MINUTE_MS: u64 = 60_000;
+/// Most earlier messages sent when a conversation is first shared with linked computers.
+const HISTORY_LIMIT: usize = 200;
+/// Largest total text in one history packet, well under the link's 3 MB line limit.
+const HISTORY_BYTES: usize = 1_500_000;
 
 #[derive(Default, Serialize, Deserialize)]
 struct Mirrors {
@@ -42,6 +46,9 @@ struct Mirrors {
     /// Packet ids already filed, so re-reading the inbox at startup files nothing twice.
     #[serde(default)]
     filed: HashSet<String>,
+    /// This computer's conversations whose earlier messages have been sent to linked computers.
+    #[serde(default)]
+    backfilled: HashSet<String>,
 }
 
 pub struct Sync {
@@ -86,6 +93,22 @@ struct Shared {
     /// `conversation`, which is its own id there. Every other computer ignores it.
     #[serde(default)]
     owner: Option<String>,
+    /// With kind "history": the conversation's earlier messages, oldest first. Older versions
+    /// skip anything that isn't kind "message", so they ignore it.
+    #[serde(default)]
+    history: Vec<Earlier>,
+}
+
+/// One earlier message in a history packet.
+#[derive(Serialize, Deserialize)]
+struct Earlier {
+    id: String,
+    sender: String,
+    #[serde(default)]
+    to: Vec<String>,
+    text: String,
+    #[serde(default)]
+    via: Option<String>,
 }
 
 /// Records a message typed in a mirror in the owner's conversation and runs its turn:
@@ -153,6 +176,7 @@ impl Sync {
             text: text.to_string(),
             via: None,
             owner: Some(owner),
+            history: vec![],
         })
         .map_err(|e| e.to_string())?;
         Ok((event, payload))
@@ -213,6 +237,50 @@ impl Sync {
             text: e.text.clone(),
             via: e.via.clone(),
             owner: None,
+            history: vec![],
+        })
+        .ok()
+    }
+
+    /// The first time a conversation of this computer's is shared, its earlier messages (up to
+    /// `HISTORY_LIMIT`, newest kept), as one packet sent before `e`; afterwards None.
+    fn history_for(&self, e: &Event) -> Option<Value> {
+        if e.kind != "message" || self.is_mirror(&e.conversation) {
+            return None;
+        }
+        {
+            let mut m = self.mirrors.lock().unwrap();
+            if !m.backfilled.insert(e.conversation.clone()) {
+                return None;
+            }
+            let _ = self.save(&m);
+        }
+        let events = self.store.load(&e.conversation).ok()?;
+        let mut earlier: Vec<Earlier> = Vec::new();
+        let mut bytes = 0;
+        for ev in events.iter().rev().filter(|ev| ev.kind == "message" && ev.id != e.id && !ev.text.trim().is_empty()) {
+            bytes += ev.text.len();
+            if earlier.len() >= HISTORY_LIMIT || bytes > HISTORY_BYTES {
+                break;
+            }
+            earlier.push(Earlier { id: ev.id.clone(), sender: ev.sender.clone(), to: ev.to.clone(), text: ev.text.clone(), via: ev.via.clone() });
+        }
+        if earlier.is_empty() {
+            return None;
+        }
+        earlier.reverse();
+        let title = self.store.meta(&e.conversation).map(|m| m.title).unwrap_or_default();
+        serde_json::to_value(Shared {
+            conversation: e.conversation.clone(),
+            title,
+            id: format!("history-{}", e.id),
+            sender: "human".into(),
+            kind: "history".into(),
+            to: vec![],
+            text: String::new(),
+            via: None,
+            owner: None,
+            history: earlier,
         })
         .ok()
     }
@@ -227,7 +295,7 @@ impl Sync {
         if shared.owner.is_some() {
             return self.take_reply(packet, shared, computer);
         }
-        if shared.kind != "message" || !crate::store::valid_id(&shared.conversation) || !known_sender(&shared.sender) {
+        if !matches!(shared.kind.as_str(), "message" | "history") || !crate::store::valid_id(&shared.conversation) || !known_sender(&shared.sender) {
             return Ok(None);
         }
         let mut m = self.mirrors.lock().unwrap();
@@ -258,6 +326,15 @@ impl Sync {
             }
             return Ok(None);
         }
+        if shared.kind == "history" {
+            return self.file_history(&mut m, &packet.node_id, &local, shared.history, computer);
+        }
+        let seen = format!("ev:{}/{}", packet.node_id, shared.id);
+        if m.filed.contains(&seen) {
+            m.filed.insert(packet.id.clone());
+            self.save(&m)?;
+            return Ok(None);
+        }
         // The human's own reply typed here, coming back from the owner: already shown.
         if shared.sender == "human" {
             let mut sent = self.sent.lock().unwrap();
@@ -268,23 +345,32 @@ impl Sync {
                 return Ok(None);
             }
         }
-        // A human message shows as "You (<computer>)", or "You (Signal)" if it came by phone.
-        // An AI shows as "<AI> (<computer>)", so it's never taken for this computer's own AI.
-        let via = match (shared.sender.as_str(), &shared.via) {
-            ("human", Some(v)) => Some(v.clone()),
-            _ => Some(computer.to_string()),
-        };
-        let text: String = if shared.text.chars().count() > MAX_TEXT {
-            let mut t: String = shared.text.chars().take(MAX_TEXT).collect();
-            t.push_str("\n\n… cut short here: the message was too long to copy between computers.");
-            t
-        } else {
-            shared.text
-        };
-        let event = self.store.append_imported(&local, &shared.sender, &shared.kind, shared.to, &text, via)?;
+        let via = shown_via(&shared.sender, &shared.via, computer);
+        let event = self.store.append_imported(&local, &shared.sender, &shared.kind, shared.to, &capped(shared.text), via)?;
         m.filed.insert(packet.id.clone());
+        m.filed.insert(seen);
         self.save(&m)?;
         Ok(Some(event))
+    }
+
+    /// Files a conversation's earlier messages in its mirror, skipping any already there (by id,
+    /// or by sender and text for ones copied before ids were recorded). Returns the last one filed.
+    fn file_history(&self, m: &mut Mirrors, node: &str, local: &str, earlier: Vec<Earlier>, computer: &str) -> Result<Option<Event>, String> {
+        let have: HashSet<(String, String)> =
+            self.store.load(local).unwrap_or_default().into_iter().map(|e| (e.sender, e.text)).collect();
+        let mut last = None;
+        for item in earlier.into_iter().take(HISTORY_LIMIT) {
+            let seen = format!("ev:{node}/{}", item.id);
+            let text = capped(item.text);
+            if !known_sender(&item.sender) || m.filed.contains(&seen) || have.contains(&(item.sender.clone(), text.clone())) {
+                continue;
+            }
+            let via = shown_via(&item.sender, &item.via, computer);
+            last = Some(self.store.append_imported(local, &item.sender, "message", item.to, &text, via)?);
+            m.filed.insert(seen);
+        }
+        self.save(m)?;
+        Ok(last)
     }
 
     fn save(&self, m: &Mirrors) -> Result<(), String> {
@@ -292,6 +378,25 @@ impl Sync {
         std::fs::write(&tmp, serde_json::to_vec(m).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         crate::store::replace_file(&tmp, &self.path).map_err(|e| e.to_string())
     }
+}
+
+/// A human message shows as "You (<computer>)", or "You (Signal)" if it came by phone.
+/// An AI shows as "<AI> (<computer>)", so it's never taken for this computer's own AI.
+fn shown_via(sender: &str, via: &Option<String>, computer: &str) -> Option<String> {
+    match (sender, via) {
+        ("human", Some(v)) => Some(v.clone()),
+        _ => Some(computer.to_string()),
+    }
+}
+
+/// `text`, cut to `MAX_TEXT` characters with a note if it was longer.
+fn capped(text: String) -> String {
+    if text.chars().count() <= MAX_TEXT {
+        return text;
+    }
+    let mut t: String = text.chars().take(MAX_TEXT).collect();
+    t.push_str("\n\n… cut short here: the message was too long to copy between computers.");
+    t
 }
 
 /// Only the human and known AIs may appear in a copied conversation.
@@ -329,6 +434,9 @@ pub fn share(e: &Event) {
     let (Some(s), Some(link)) = (SYNC.get(), crate::link_handle()) else { return };
     if !link.enabled() || !link.has_peers() {
         return;
+    }
+    if let Some(history) = s.history_for(e) {
+        let _ = link.send(PacketKind::Chat, history);
     }
     if let Some(payload) = s.outgoing(e) {
         let _ = link.send(PacketKind::Chat, payload);
@@ -404,6 +512,32 @@ mod tests {
     }
 
     #[test]
+    fn earlier_messages_arrive_once_when_a_conversation_is_first_shared() {
+        let root = std::env::temp_dir().join(format!("peer-sync-history-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        let conv = a.store.create("Plans").unwrap();
+        a.store.append(&conv.id, "human", "message", vec![], "first").unwrap();
+        a.store.append(&conv.id, "system", "system", vec![], "a note").unwrap();
+        let old = a.store.append(&conv.id, "claude", "message", vec![], "second").unwrap();
+        // "second" was already copied live before this version: it mustn't appear twice.
+        b.file(&packet("node-a", "p0", a.outgoing(&old).unwrap()), "MacBook").unwrap().unwrap();
+
+        let now = a.store.append(&conv.id, "human", "message", vec![], "third").unwrap();
+        let history = a.history_for(&now).expect("earlier messages go first");
+        assert!(a.history_for(&now).is_none(), "history is sent once per conversation");
+        b.file(&packet("node-a", "h1", history.clone()), "MacBook").unwrap();
+        b.file(&packet("node-a", "h2", history), "MacBook").unwrap();
+        b.file(&packet("node-a", "p1", a.outgoing(&now).unwrap()), "MacBook").unwrap().unwrap();
+
+        let mirror = b.mirrors.lock().unwrap().map.values().next().cloned().unwrap();
+        let texts: Vec<String> = b.store.load(&mirror).unwrap().into_iter().map(|e| e.text).collect();
+        assert_eq!(texts, vec!["second", "first", "third"], "each message once, no status notes");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn an_answer_typed_in_a_mirror_runs_on_the_owner_and_shows_once() {
         let root = std::env::temp_dir().join(format!("peer-sync-reply-{}", uuid::Uuid::new_v4()));
         let (a_dir, b_dir) = (root.join("a"), root.join("b"));
@@ -444,7 +578,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("peer-sync-guard-{}", uuid::Uuid::new_v4()));
         let b = Sync::new(Arc::new(Store::new(root.join("c")).unwrap()), &root);
         let msg = |sender: &str, text: &str| {
-            serde_json::json!({"conversation": "c0ffee00-0000-4000-8000-000000000000", "title": "Loop", "id": "x",
+            serde_json::json!({"conversation": "c0ffee00-0000-4000-8000-000000000000", "title": "Loop", "id": uuid::Uuid::new_v4().to_string(),
                 "sender": sender, "kind": "message", "text": text})
         };
         let at = |id: &str, ts: u64, payload: Value| PeerPacket { timestamp_ms: ts, ..packet("node-a", id, payload) };
