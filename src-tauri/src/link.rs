@@ -70,6 +70,21 @@ pub fn note_local_activity() {
 /// One computer that can answer Signal: (node ID, last time the human used it).
 pub type SignalCandidate<'a> = (&'a str, u64);
 
+/// A unique, stable nickname for paired computer `node_id` among `peers` (node id, name).
+pub fn nickname(node_id: &str, peers: &[(String, String)]) -> String {
+    let clean = |n: &str| -> String {
+        let n: String = n.chars().filter(|c| !c.is_control() && !matches!(c, '[' | ']' | '(' | ')')).take(40).collect();
+        n.trim().to_string()
+    };
+    let name = peers.iter().find(|(id, _)| id == node_id).map(|(_, n)| clean(n)).unwrap_or_default();
+    let tag: String = node_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(4).collect();
+    if name.is_empty() {
+        return format!("linked computer · {tag}");
+    }
+    let shared = peers.iter().any(|(id, n)| id != node_id && clean(n).eq_ignore_ascii_case(&name));
+    if shared { format!("{name} · {tag}") } else { name }
+}
+
 /// Whether this computer should answer a phone message, given the other linked computers that
 /// are connected right now and running Signal. Every linked computer receives each message, so
 /// exactly one must answer: the one the human used most recently, and on a tie the lowest node
@@ -433,17 +448,20 @@ impl Link {
         Ok(first_id)
     }
 
-    /// Packets received from paired computers, oldest first, each id once. Durable: written
-    /// before the sender was told it arrived.
     pub fn has_peers(&self) -> bool {
         !self.0.cfg.lock().unwrap().peers.is_empty()
     }
 
-    /// The paired computer's name, for labelling what it sent.
+    /// The paired computer's nickname, for labelling what it sent. Unique among the paired
+    /// computers, so two PCs both called "Desktop" show as "Desktop · 1a2b" and "Desktop · 9f8e".
     pub fn peer_name(&self, node_id: &str) -> String {
-        self.peer(node_id).map(|p| p.name).filter(|n| !n.is_empty()).unwrap_or_else(|| "linked computer".into())
+        let peers: Vec<(String, String)> =
+            self.0.cfg.lock().unwrap().peers.iter().map(|p| (p.node_id.clone(), p.name.clone())).collect();
+        nickname(node_id, &peers)
     }
 
+    /// Packets received from paired computers, oldest first, each id once. Durable: written
+    /// before the sender was told it arrived.
     pub fn inbox(&self) -> Vec<PeerPacket> {
         let text = std::fs::read_to_string(&self.0.inbox_path).unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
@@ -1213,6 +1231,16 @@ fn route_ip_allowed(ip: std::net::IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computer_nicknames_are_unique_and_clean() {
+        let peers = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
+        let p = peers(&[("aaaa1111", "Desktop"), ("bbbb2222", "desktop"), ("cccc3333", "Mac[Book] (2)\n")]);
+        assert_eq!(nickname("aaaa1111", &p), "Desktop · aaaa");
+        assert_eq!(nickname("bbbb2222", &p), "desktop · bbbb");
+        assert_eq!(nickname("cccc3333", &p), "MacBook 2");
+        assert_eq!(nickname("dddd4444", &p), "linked computer · dddd");
+    }
 
     #[test]
     fn exactly_one_linked_computer_answers_signal() {

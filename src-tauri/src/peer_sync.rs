@@ -6,6 +6,15 @@
 //! owns the turn. Mirrors are never sent back, which keeps two computers from echoing forever.
 //! Imported AI messages carry no REQUEST buttons yet; answering requests from another computer
 //! is the next step.
+//!
+//! Fail-safes, because AIs on two computers may both be working:
+//! - Each AI from another computer is named "<AI> (<computer>)", e.g. "Claude (MacBook)", on
+//!   screen and in every AI's transcript, so two Claudes are never mistaken for one another.
+//! - Imported messages never act here: no REQUEST, ADD_AI, TASK or REMEMBER takes effect, and
+//!   they never start a turn. Only the human's own message in a conversation does.
+//! - Only the human and known AIs are accepted as senders; text is capped in size.
+//! - A computer that sends more than `MAX_PER_MINUTE` messages in a minute is paused for the
+//!   rest of that minute, with one note in the mirror, so a runaway loop can't flood this one.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -19,6 +28,11 @@ use crate::store::{Event, Store};
 
 /// How many recently shared event ids are remembered, so an event shown twice is sent once.
 const RECENT: usize = 4096;
+/// Most messages accepted from one computer in any minute (by the time it sent them).
+const MAX_PER_MINUTE: usize = 40;
+/// Longest message text accepted from another computer, in characters.
+const MAX_TEXT: usize = 64_000;
+const MINUTE_MS: u64 = 60_000;
 
 #[derive(Default, Serialize, Deserialize)]
 struct Mirrors {
@@ -34,6 +48,16 @@ pub struct Sync {
     path: PathBuf,
     mirrors: Mutex<Mirrors>,
     recent: Mutex<(HashSet<String>, VecDeque<String>)>,
+    /// Per computer: send times of recently accepted messages, and when it was last paused.
+    rate: Mutex<HashMap<String, (VecDeque<u64>, u64)>>,
+}
+
+/// Why an incoming message was turned away.
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    Accept,
+    /// Over the limit; `true` the first time in this pause, so one note is written.
+    Flooding(bool),
 }
 
 static SYNC: OnceLock<Sync> = OnceLock::new();
@@ -57,7 +81,31 @@ impl Sync {
     pub fn new(store: Arc<Store>, link_dir: &Path) -> Self {
         let path = link_dir.join("mirrors.json");
         let mirrors = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Sync { store, path, mirrors: Mutex::new(mirrors), recent: Mutex::new((HashSet::new(), VecDeque::new())) }
+        Sync {
+            store,
+            path,
+            mirrors: Mutex::new(mirrors),
+            recent: Mutex::new((HashSet::new(), VecDeque::new())),
+            rate: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Counts a message `node` sent at `ts`, against the per-minute limit.
+    fn admit(&self, node: &str, ts: u64) -> Verdict {
+        let mut rate = self.rate.lock().unwrap();
+        let (times, paused_at) = rate.entry(node.to_string()).or_default();
+        while times.front().is_some_and(|&t| t + MINUTE_MS <= ts) {
+            times.pop_front();
+        }
+        if times.len() >= MAX_PER_MINUTE {
+            let first = *paused_at == 0 || *paused_at + MINUTE_MS <= ts;
+            if first {
+                *paused_at = ts;
+            }
+            return Verdict::Flooding(first);
+        }
+        times.push_back(ts);
+        Verdict::Accept
     }
 
     fn is_mirror(&self, conversation: &str) -> bool {
@@ -102,13 +150,14 @@ impl Sync {
             return Ok(None);
         }
         let shared: Shared = serde_json::from_value(packet.payload.clone()).map_err(|e| e.to_string())?;
-        if shared.kind != "message" || !crate::store::valid_id(&shared.conversation) {
+        if shared.kind != "message" || !crate::store::valid_id(&shared.conversation) || !known_sender(&shared.sender) {
             return Ok(None);
         }
         let mut m = self.mirrors.lock().unwrap();
         if m.filed.contains(&packet.id) {
             return Ok(None);
         }
+        let flooding = self.admit(&packet.node_id, packet.timestamp_ms);
         let key = format!("{}/{}", packet.node_id, shared.conversation);
         let local = match m.map.get(&key).filter(|id| self.store.meta(id).is_ok()) {
             Some(id) => id.clone(),
@@ -119,9 +168,33 @@ impl Sync {
                 meta.id
             }
         };
+        if let Verdict::Flooding(first) = flooding {
+            // Dropped for good: marked filed so a restart doesn't let the flood in after all.
+            m.filed.insert(packet.id.clone());
+            self.save(&m)?;
+            if first {
+                let note = format!(
+                    "Paused copying from {computer} for a minute: it sent more than {MAX_PER_MINUTE} messages in a minute, \
+                     which usually means AIs are caught in a loop. Messages it sent during the pause are not copied here."
+                );
+                self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None)?;
+            }
+            return Ok(None);
+        }
         // A human message shows as "You (<computer>)", or "You (Signal)" if it came by phone.
-        let via = if shared.sender == "human" { Some(shared.via.clone().unwrap_or_else(|| computer.to_string())) } else { None };
-        let event = self.store.append_imported(&local, &shared.sender, &shared.kind, shared.to, &shared.text, via)?;
+        // An AI shows as "<AI> (<computer>)", so it's never taken for this computer's own AI.
+        let via = match (shared.sender.as_str(), &shared.via) {
+            ("human", Some(v)) => Some(v.clone()),
+            _ => Some(computer.to_string()),
+        };
+        let text: String = if shared.text.chars().count() > MAX_TEXT {
+            let mut t: String = shared.text.chars().take(MAX_TEXT).collect();
+            t.push_str("\n\n… cut short here: the message was too long to copy between computers.");
+            t
+        } else {
+            shared.text
+        };
+        let event = self.store.append_imported(&local, &shared.sender, &shared.kind, shared.to, &text, via)?;
         m.filed.insert(packet.id.clone());
         self.save(&m)?;
         Ok(Some(event))
@@ -132,6 +205,11 @@ impl Sync {
         std::fs::write(&tmp, serde_json::to_vec(m).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         crate::store::replace_file(&tmp, &self.path).map_err(|e| e.to_string())
     }
+}
+
+/// Only the human and known AIs may appear in a copied conversation.
+fn known_sender(sender: &str) -> bool {
+    sender == "human" || crate::agents::AGENTS.iter().any(|a| a.id == sender)
 }
 
 /// Starts syncing with `store`. Call once, after the link has opened.
@@ -209,11 +287,41 @@ mod tests {
         let reply = a.store.append(&conv.id, "claude", "message", vec![], "hi").unwrap();
         let second = b.file(&packet("node-a", "p2", a.outgoing(&reply).unwrap()), "MacBook").unwrap().unwrap();
         assert_eq!(second.conversation, filed.conversation, "same conversation, same mirror");
-        assert_eq!(second.via, None);
+        assert_eq!(second.via.as_deref(), Some("MacBook"), "another computer's Claude is named for it");
         assert!(b.outgoing(&second).is_none(), "mirrors are never sent back");
 
         let note = a.store.append(&conv.id, "system", "system", vec![], "note").unwrap();
         assert!(a.outgoing(&note).is_none(), "status notes stay local");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn floods_unknown_senders_and_huge_messages_are_held_back() {
+        let root = std::env::temp_dir().join(format!("peer-sync-guard-{}", uuid::Uuid::new_v4()));
+        let b = Sync::new(Arc::new(Store::new(root.join("c")).unwrap()), &root);
+        let msg = |sender: &str, text: &str| {
+            serde_json::json!({"conversation": "c0ffee00-0000-4000-8000-000000000000", "title": "Loop", "id": "x",
+                "sender": sender, "kind": "message", "text": text})
+        };
+        let at = |id: &str, ts: u64, payload: Value| PeerPacket { timestamp_ms: ts, ..packet("node-a", id, payload) };
+
+        assert!(b.file(&at("u", 1, msg("someone", "hi")), "PC").unwrap().is_none(), "unknown sender refused");
+
+        let mut accepted = 0;
+        for i in 0..MAX_PER_MINUTE + 5 {
+            if b.file(&at(&format!("f{i}"), 1_000 + i as u64, msg("claude", "again")), "PC").unwrap().is_some() {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, MAX_PER_MINUTE, "a flood is cut off at the limit");
+        let conv = b.mirrors.lock().unwrap().map.values().next().cloned().unwrap();
+        let notes = b.store.load(&conv).unwrap().into_iter().filter(|e| e.kind == "system").count();
+        assert_eq!(notes, 1, "one pause note, not one per dropped message");
+        assert!(b.file(&at("later", 1_000 + MINUTE_MS + 100, msg("claude", "ok")), "PC").unwrap().is_some(), "resumes next minute");
+
+        let big = "a".repeat(MAX_TEXT + 10);
+        let e = b.file(&at("big", 10 * MINUTE_MS, msg("gemini", &big)), "PC").unwrap().unwrap();
+        assert!(e.text.chars().count() < MAX_TEXT + 200 && e.text.contains("cut short"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

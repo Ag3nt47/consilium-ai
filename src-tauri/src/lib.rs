@@ -436,7 +436,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: when several of your computers are linked to the same Signal number, only one of them now answers each message you send from your phone, so you no longer get duplicate replies. It is the computer you last typed on in Consilium; if you haven't used either, the same one is picked every time. This only applies while the computers are linked to each other in Settings; otherwise each answers as before.";
+const WHATS_NEW: &str = "What's new: computers linked in Settings now copy each conversation's new messages to one another, as a conversation named for the computer it came from. An AI on the other computer shows with that computer's name, such as Claude (MacBook), so two copies of the same AI are never confused, and two computers with the same name get a short tag to tell them apart. Copied messages never run requests, tasks or saved notes, and never start a turn. If a linked computer sends more than 40 messages in a minute, copying from it pauses for that minute, so AIs caught in a loop can't flood the other computer.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs

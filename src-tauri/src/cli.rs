@@ -199,6 +199,7 @@ fn render(p: Paint, e: &Event) -> String {
         "message" => {
             let sender_name = match (&e.sender[..], &e.via) {
                 ("human", Some(via)) => format!("You ({via})"),
+                (s, Some(via)) => format!("{} ({via})", name_of(s)),
                 _ => name_of(&e.sender),
             };
             let mut head = p.c(color_of(&e.sender), &sender_name);

@@ -111,7 +111,7 @@ const PHONE_RE = /\b(Signal|from your phone|phone)\b/i;
 /** Every approval, request, update, council change, phone message and error, newest first. */
 export function auditEntries(events: ChatEvent[], names: Record<string, string>): AuditEntry[] {
   const out: AuditEntry[] = [];
-  const who = (s: string, via?: string | null) => (s === "human" ? (via ? `You (${via})` : "You") : names[s] || s);
+  const who = (s: string, via?: string | null) => (s === "human" ? (via ? `You (${via})` : "You") : via ? `${names[s] || s} (${via})` : names[s] || s);
   for (const e of events) {
     const first = e.text.split("\n")[0].trim();
     if (e.kind === "error") {

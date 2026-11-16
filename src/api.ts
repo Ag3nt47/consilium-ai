@@ -451,5 +451,7 @@ export function onActivity(fn: (activity: AgentActivity) => void): Promise<Unlis
 
 export function senderName(sender: Sender, agents: AgentInfo[], via?: string | null): string {
   if (sender === "human") return via ? `You (${via})` : "You";
-  return agents.find((a) => a.id === sender)?.name ?? sender;
+  const name = agents.find((a) => a.id === sender)?.name ?? sender;
+  // An AI from another linked computer is named for it, e.g. "Claude (MacBook)".
+  return via ? `${name} (${via})` : name;
 }
