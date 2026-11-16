@@ -304,10 +304,11 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: Full-capacity turns now have an emergency brake for observable commands \
-that would broadly erase a project, reset uncommitted work, wipe a disk or shut down the computer. Consilium stops \
-the AI process tree and raises a REQUEST instead of letting the command continue. Provider-native permissions remain \
-the primary guard, with isolated worktrees still tracked as the next hardening step.";
+const WHATS_NEW: &str = "What's new: every CLI-backed AI in Full or Own access receives the native terminal \
+capability for Windows, macOS or Linux. PowerShell, Command Prompt and Unix shells remain available for ordinary \
+work, while administrator/root elevation needs a fresh exact-command REQUEST. The grant targets the requesting AI, \
+lasts for one turn, is consumed once, keeps UAC/sudo authentication in the operating system and rejects credentials \
+inside commands. Request App Update now also requires the tested update to be pushed to main before staging.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
