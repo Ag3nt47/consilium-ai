@@ -301,6 +301,10 @@ export type LinkPeer = {
   last_seen_ms: number | null;
   /** Packets sent but not yet acknowledged; re-sent when the link comes back. */
   queued: number;
+  /** What the AIs on that computer are answering right now, e.g. "Claude in Plans". */
+  activity: string[];
+  /** Its project folder's git state, e.g. "consilium-ai · main · 2 changed". */
+  git: string | null;
 };
 
 export type LinkStatus = {

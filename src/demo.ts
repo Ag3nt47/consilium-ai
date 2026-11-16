@@ -319,6 +319,8 @@ export const demoApi = {
         rtt_ms: 3,
         last_seen_ms: Date.now() - 1200,
         queued: 0,
+        activity: ["Gemini in Plans"],
+        git: "consilium-ai · main · clean",
       },
     ],
     error: null,
@@ -343,6 +345,8 @@ export const demoApi = {
     rtt_ms: 3,
     last_seen_ms: Date.now(),
     queued: 0,
+    activity: [],
+    git: null,
   }),
   linkUnpair: async () => ({
     enabled: true,

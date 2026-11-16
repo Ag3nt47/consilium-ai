@@ -550,6 +550,14 @@ function PeerCard({ peer, onUnpair }: { peer: LinkPeer; onUnpair: () => void }) 
           <span className="muted small">Outbox:</span>
           <span>{peer.queued > 0 ? `${peer.queued} queued` : "Synced"}</span>
         </div>
+        <div className="stat-item">
+          <span className="muted small">AIs working:</span>
+          <span>{!peer.connected ? "—" : (peer.activity ?? []).length ? peer.activity.join(", ") : "None"}</span>
+        </div>
+        <div className="stat-item">
+          <span className="muted small">Project:</span>
+          <span>{peer.git ?? "—"}</span>
+        </div>
       </div>
     </div>
   );

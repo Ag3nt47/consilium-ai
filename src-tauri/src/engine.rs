@@ -737,6 +737,16 @@ impl RealHost {
     }
 }
 
+/// Reads the project folder's git summary for linked computers, off the async executor and
+/// bounded, so a slow or non-git folder never delays an answer.
+async fn refresh_git_summary(path: PathBuf) {
+    if let Ok(Ok(summary)) =
+        tokio::time::timeout(Duration::from_secs(3), tokio::task::spawn_blocking(move || prompt::git_summary(&path))).await
+    {
+        crate::link::set_git_summary(summary);
+    }
+}
+
 impl council::Host for RealHost {
     fn ask(&self, agent: &'static Agent, answer: u32, rounds: u32, events: Vec<Event>, cancel: CancellationToken) -> council::Reply {
         let conv = self.conversation.as_str();
@@ -820,7 +830,11 @@ impl council::Host for RealHost {
                 updated_at: store::now_ms(),
             });
         });
+        let title = self.store.meta(conv).ok().map(|m| m.title).unwrap_or_default();
+        let label = if title.trim().is_empty() { agent.name.to_string() } else { format!("{} in {}", agent.name, title.trim()) };
         Box::pin(async move {
+            // Linked computers see this answer in progress until it ends, however it ends.
+            let _working = crate::link::working(&label);
             // Waiting is cancellation-aware, so Stop never hangs behind the capacity gate.
             let permit = match initial_slot {
                 Some(Ok(Some(slot))) => Some(slot),
@@ -830,6 +844,11 @@ impl council::Host for RealHost {
             };
             // Git can briefly touch many files in a large repository, so keep it off the async
             // executor and bound the wait. A slow/non-git folder must never delay the AI turn.
+            // The project's git state for linked computers, refreshed before and after each answer.
+            if let Some(path) = ws_path.clone() {
+                refresh_git_summary(path.clone()).await;
+            }
+            let summary_path = ws_path.clone();
             if let Some(path) = state_path {
                 if let Ok(Ok(Some(state))) = tokio::time::timeout(
                     Duration::from_secs(3),
@@ -854,6 +873,9 @@ impl council::Host for RealHost {
             )
             .await;
             drop(permit);
+            if let Some(path) = summary_path {
+                refresh_git_summary(path).await;
+            }
             if let Some(model) = reply.as_ref().ok().and_then(|r| r.model.as_deref()) {
                 record_model(&data, agent.id, model);
             }

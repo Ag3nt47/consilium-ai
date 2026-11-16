@@ -57,6 +57,49 @@ static SIGNAL_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// When the human last sent a message from this computer's own window (ms since the epoch).
 static LOCAL_ACTIVE_MS: AtomicU64 = AtomicU64::new(0);
 
+/// What this computer's AIs are doing right now, shared in each heartbeat: (turn id, label such
+/// as "Claude in Plans"). Entries are removed by [`WorkingGuard`] when the answer ends.
+static WORKING: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
+static WORKING_SEQ: AtomicU64 = AtomicU64::new(1);
+/// The latest git summary of the project folder an AI here worked in (see `prompt::git_summary`).
+static GIT_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
+const STATUS_ITEMS: usize = 8;
+const STATUS_CHARS: usize = 120;
+
+/// Marks one AI answer as in progress on this computer until the returned guard is dropped.
+pub fn working(label: &str) -> WorkingGuard {
+    let id = WORKING_SEQ.fetch_add(1, Ordering::SeqCst);
+    WORKING.lock().unwrap().push((id, clean_status(label)));
+    WorkingGuard(id)
+}
+
+pub struct WorkingGuard(u64);
+
+impl Drop for WorkingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut w) = WORKING.lock() {
+            w.retain(|(id, _)| *id != self.0);
+        }
+    }
+}
+
+/// Records the project folder's git summary to show on linked computers.
+pub fn set_git_summary(summary: Option<String>) {
+    *GIT_SUMMARY.lock().unwrap() = summary.map(|s| clean_status(&s));
+}
+
+/// One short line from another computer, safe to show: no control characters, bounded length.
+fn clean_status(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(STATUS_CHARS).collect::<String>().trim().to_string()
+}
+
+/// Reads a peer's heartbeat activity list, keeping at most a few short, clean lines.
+fn read_activity(v: Option<&Value>) -> Vec<String> {
+    v.and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(clean_status).filter(|s| !s.is_empty()).take(STATUS_ITEMS).collect())
+        .unwrap_or_default()
+}
+
 /// Records whether Signal is running on this computer.
 pub fn set_signal_on(on: bool) {
     SIGNAL_ON.store(on, Ordering::SeqCst);
@@ -65,6 +108,10 @@ pub fn set_signal_on(on: bool) {
 /// Records that the human just used this computer directly.
 pub fn note_local_activity() {
     LOCAL_ACTIVE_MS.store(now_ms(), Ordering::SeqCst);
+}
+
+fn local_activity() -> Vec<String> {
+    WORKING.lock().unwrap().iter().map(|(_, l)| l.clone()).take(STATUS_ITEMS).collect()
 }
 
 /// One computer that can answer Signal: (node ID, last time the human used it).
@@ -129,6 +176,10 @@ pub struct PeerView {
     pub rtt_ms: Option<u64>,
     pub last_seen_ms: Option<u64>,
     pub queued: usize,
+    /// What the AIs on that computer are answering right now, e.g. "Claude in Plans".
+    pub activity: Vec<String>,
+    /// Its project folder's git state, e.g. "consilium-ai · main · 2 changed".
+    pub git: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -177,6 +228,8 @@ struct PeerState {
     /// From the peer's latest heartbeat: Signal is running there, and when it was last used.
     signal_on: bool,
     active_ms: u64,
+    activity: Vec<String>,
+    git: Option<String>,
 }
 
 struct Inner {
@@ -345,6 +398,9 @@ impl Link {
                         rtt_ms: s.and_then(|s| s.rtt_ms),
                         last_seen_ms: s.map(|s| s.last_seen_ms).filter(|&t| t > 0),
                         queued: s.map_or(0, |s| s.outbox.len()),
+                        // Only while connected: an old heartbeat's activity would be stale.
+                        activity: s.filter(|s| s.tx.is_some()).map(|s| s.activity.clone()).unwrap_or_default(),
+                        git: s.and_then(|s| s.git.clone()),
                     }
                 })
                 .collect(),
@@ -886,7 +942,7 @@ impl Link {
                     if !current(self) { break; }
                     let silent = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| now_ms().saturating_sub(s.last_seen_ms));
                     if silent > DEAD_AFTER_MS { break; }
-                    let ping = PeerPacket::signed(&me, now_ms(), PacketKind::Heartbeat, self.0.seq.fetch_add(1, Ordering::SeqCst), json!({ "ping": now_ms(), "signal": SIGNAL_ON.load(Ordering::SeqCst), "active": LOCAL_ACTIVE_MS.load(Ordering::SeqCst) }), &key);
+                    let ping = PeerPacket::signed(&me, now_ms(), PacketKind::Heartbeat, self.0.seq.fetch_add(1, Ordering::SeqCst), json!({ "ping": now_ms(), "signal": SIGNAL_ON.load(Ordering::SeqCst), "active": LOCAL_ACTIVE_MS.load(Ordering::SeqCst), "working": local_activity(), "git": GIT_SUMMARY.lock().unwrap().clone() }), &key);
                     if let Ok(line) = ping.and_then(|p| seal(&me, &key, &p)) {
                         if w.write_all(format!("{line}\n").as_bytes()).await.is_err() { break; }
                     }
@@ -910,6 +966,8 @@ impl Link {
                     if let Some(s) = self.0.peers.lock().unwrap().get_mut(from) {
                         s.signal_on = packet.payload.get("signal").and_then(Value::as_bool).unwrap_or(false);
                         s.active_ms = packet.payload.get("active").and_then(Value::as_u64).unwrap_or(0);
+                        s.activity = read_activity(packet.payload.get("working"));
+                        s.git = packet.payload.get("git").and_then(Value::as_str).map(clean_status).filter(|g| !g.is_empty());
                     }
                 }
             }
@@ -1245,6 +1303,21 @@ mod tests {
         assert_eq!(nickname("bbbb2222", &p), "desktop · bbbb");
         assert_eq!(nickname("cccc3333", &p), "MacBook 2");
         assert_eq!(nickname("dddd4444", &p), "linked computer · dddd");
+    }
+
+    #[test]
+    fn heartbeat_activity_is_bounded_and_cleared_when_the_answer_ends() {
+        let g = working("Claude in Plans");
+        assert!(local_activity().iter().any(|l| l == "Claude in Plans"));
+        drop(g);
+        assert!(!local_activity().iter().any(|l| l == "Claude in Plans"));
+        let long = "x".repeat(500);
+        let mut many: Vec<Value> = (0..20).map(|i| json!(format!("AI {i}\u{1b}[31m"))).collect();
+        many.push(json!(long));
+        let read = read_activity(Some(&Value::Array(many)));
+        assert_eq!(read.len(), STATUS_ITEMS);
+        assert!(read.iter().all(|l| l.chars().count() <= STATUS_CHARS && !l.contains('\u{1b}')));
+        assert!(read_activity(Some(&json!("not a list"))).is_empty());
     }
 
     #[test]

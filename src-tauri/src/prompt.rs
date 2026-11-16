@@ -33,17 +33,23 @@ struct GitOutput {
 /// bounded prefix needed for the prompt. A reader thread keeps the pipe drained; the parent polls
 /// the child and kills it at the deadline so a stuck Git process cannot survive an async timeout.
 fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput> {
-    let mut child = Command::new("git")
-        .arg("-C")
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(workspace)
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    // A GUI app starting a console program on Windows would flash a console window each time.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut hasher = DefaultHasher::new();
@@ -88,6 +94,37 @@ fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput>
 /// A fresh, redacted snapshot of the repository immediately before an agent starts. It gives each
 /// council member the same change id and a bounded diff excerpt while still requiring the agent to
 /// re-read files before editing. Non-git folders simply have no snapshot.
+/// A one-line git summary of a project folder for linked computers, such as
+/// "consilium-ai · main @ 1a2b3c4 · 3 changed". `None` if the folder isn't a git repository.
+pub fn git_summary(workspace: &Path) -> Option<String> {
+    let status = git_output(workspace, &["status", "--short", "--branch", "--untracked-files=normal"], 64 * 1024)?;
+    let mut lines = status.shown.lines();
+    let head = lines.next().unwrap_or_default();
+    let changed = lines.filter(|l| !l.trim().is_empty()).count();
+    Some(summarize_git(&folder_name(workspace), head, changed, status.truncated))
+}
+
+fn folder_name(workspace: &Path) -> String {
+    workspace.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Turns git's `## branch...upstream [ahead 1]` header and a changed-file count into one line.
+fn summarize_git(folder: &str, header: &str, changed: usize, truncated: bool) -> String {
+    let header = header.trim_start_matches("## ").trim();
+    let (branch, rest) = header.split_once("...").map_or((header, ""), |(b, r)| (b, r));
+    let branch = branch.trim_start_matches("No commits yet on ").trim();
+    let mut out = format!("{folder} · {branch}");
+    if let Some(sync) = rest.split_once('[').and_then(|(_, r)| r.split_once(']')).map(|(s, _)| s) {
+        out.push_str(&format!(" ({sync})"));
+    }
+    out.push_str(&match (changed, truncated) {
+        (0, _) => " · clean".to_string(),
+        (n, false) => format!(" · {n} changed"),
+        (n, true) => format!(" · {n}+ changed"),
+    });
+    out
+}
+
 pub fn workspace_state(workspace: &Path) -> Option<String> {
     let status = git_output(
         workspace,
@@ -613,6 +650,13 @@ pub fn mentioned_agents(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_summary_line_is_short_and_readable() {
+        assert_eq!(summarize_git("app", "## main...origin/main [ahead 2]", 3, false), "app · main (ahead 2) · 3 changed");
+        assert_eq!(summarize_git("app", "## main...origin/main", 0, false), "app · main · clean");
+        assert_eq!(summarize_git("app", "## No commits yet on main", 1, true), "app · main · 1+ changed");
+    }
 
     #[test]
     fn another_computers_claude_is_never_you() {
