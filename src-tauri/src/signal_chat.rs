@@ -109,7 +109,7 @@ pub fn outbound_text(e: &Event) -> Option<String> {
         return None;
     }
     let mut msg = if name == "Consilium" {
-        format!("[Consilium]\n{}", crate::redact::scrub(body))
+        format!("Consilium: {}", crate::redact::scrub(body))
     } else {
         bridge::format_outbound_notification(&name, body)
     };
@@ -447,8 +447,8 @@ mod tests {
     #[test]
     fn only_ai_messages_and_consilium_notes_are_sent() {
         assert_eq!(outbound_text(&ev(1, "human", "message", "hi", vec![])), None);
-        assert!(outbound_text(&ev(2, "claude", "message", "done", vec![])).unwrap().contains("done"));
-        assert!(outbound_text(&ev(3, "consilium", "system", "updated", vec![])).unwrap().starts_with("[Consilium]\nupdated"));
+        assert!(outbound_text(&ev(2, "claude", "message", "done", vec![])).unwrap().starts_with("Claude: done"));
+        assert!(outbound_text(&ev(3, "consilium", "system", "updated", vec![])).unwrap().starts_with("Consilium: updated"));
         assert_eq!(outbound_text(&ev(4, "claude", "seen", "", vec![])), None);
         let long = outbound_text(&ev(5, "claude", "message", &"x".repeat(9000), vec![])).unwrap();
         assert!(long.chars().count() < MAX_OUT + 50 && long.ends_with("(the rest is in Consilium)"));

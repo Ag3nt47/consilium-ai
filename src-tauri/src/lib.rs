@@ -434,7 +434,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: when an AI joins the council, Consilium checks whether a public forecast of early usage resets is known for it, and if not asks one AI to search for one. Check for updates in Settings now also reports a newer version that is on GitHub but has no installer yet, instead of saying you are up to date. From this version on, every new version publishes its own installers on GitHub for macOS, Windows and Linux once GitHub's checks pass, so copies on other computers see it.";
+const WHATS_NEW: &str = "What's new: Signal replies now reach your phone. Because Consilium is linked to your own Signal number, its groups had no other member, so replies went nowhere; every AI reply and Consilium note now goes to your Note to Self, starting with who sent it, such as Claude: and the message.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs

@@ -360,9 +360,9 @@ pub fn execute_launch_action(target: &str) -> Result<String, String> {
 pub fn format_outbound_notification(sender: &str, text: &str) -> String {
     let clean = crate::redact::scrub(text);
     if clean.lines().any(|l| l.trim_start().to_ascii_lowercase().starts_with("request:")) {
-        format!("⚠️ [Consilium REQUEST from {sender}]\n{clean}")
+        format!("{sender} ⚠️ needs your answer:\n{clean}")
     } else {
-        format!("[Consilium - {sender}]\n{clean}")
+        format!("{sender}: {clean}")
     }
 }
 
@@ -856,7 +856,7 @@ mod tests {
         let formatted = format_outbound_notification("Claude", &raw);
         assert!(!formatted.contains("sk-ant-"));
         assert!(formatted.contains("[REDACTED Anthropic key]"));
-        assert!(formatted.contains("⚠️ [Consilium REQUEST from Claude]"));
+        assert!(formatted.starts_with("Claude ⚠️ needs your answer:"));
     }
 
     #[test]
