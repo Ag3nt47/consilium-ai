@@ -1,4 +1,4 @@
-# PeerLink: find every working network path to a peer and connect over the best one.
+﻿# PeerLink: find every working network path to a peer and connect over the best one.
 param(
   [Parameter(Position=0)][ValidateSet('add','status','connect','list')][string]$Action = 'list',
   [Parameter(Position=1)][string]$Peer,
