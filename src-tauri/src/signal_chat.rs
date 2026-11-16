@@ -24,6 +24,29 @@ use std::time::Duration;
 /// Longest text sent in one Signal message; longer replies are cut with a pointer to Consilium.
 const MAX_OUT: usize = 3500;
 
+/// Ready-made messages sent to the phone, so the human always hears back, even when something
+/// goes wrong before any AI answers.
+pub mod notice {
+    /// Sent as soon as a phone message is posted to the conversation.
+    pub const RECEIVED: &str = "Consilium: Message received. Please wait for the AI response.";
+    /// Sent when a phone "Approve" or "Deny" answered a pending request.
+    pub const DECISION: &str = "Consilium: Decision received and passed to the AI that asked.";
+    /// No AI in the council can take the message right now.
+    pub const NO_AI: &str =
+        "Consilium: Message received, but no AI can answer right now (all are out of usage or none are in the council). It's saved in the chat and will be answered once one is back.";
+    /// The message couldn't be added to the conversation.
+    pub const NOT_POSTED: &str =
+        "Consilium: Sorry, your message couldn't be added to the chat. Please send it again, or open Consilium on the computer.";
+    /// There is no conversation to post into.
+    pub const NO_CONVERSATION: &str =
+        "Consilium: Your message arrived, but there is no conversation open in Consilium. Start one on the computer, then send it again.";
+    /// Signal reconnected after Consilium started or restarted.
+    pub const BACK_ONLINE: &str =
+        "Consilium: Back online. Messages you send here reach the council again.";
+    /// A message was too long for Signal and was cut.
+    pub const CUT: &str = "\n… (the rest is in Consilium)";
+}
+
 /// Where a phone message came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
@@ -131,7 +154,7 @@ pub fn outbound_text(e: &Event) -> Option<String> {
         bridge::format_outbound_notification(&name, body)
     };
     if msg.chars().count() > MAX_OUT {
-        msg = msg.chars().take(MAX_OUT).collect::<String>() + "\n… (the rest is in Consilium)";
+        msg = msg.chars().take(MAX_OUT).collect::<String>() + notice::CUT;
     }
     Some(msg)
 }
@@ -266,6 +289,10 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
     let mut seen_set: HashSet<u64> = HashSet::new();
     let mut out = Outbox { cursors: HashMap::new(), origins: HashMap::new() };
     let mut line = String::new();
+    static ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let _ = send_self(&cfg, notice::BACK_ONLINE);
+    }
     loop {
         // Stop if Signal was switched off or re-set up; the outer loop starts again.
         let now = BridgeConfig::load(cfg_path)?;
@@ -303,24 +330,28 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
                 }
             }
         }
-        deliver(engine, &mut out, msg);
+        let reply = deliver(engine, &mut out, msg);
+        if let Err(e) = send_self(&cfg, reply) {
+            eprintln!("signal chat: couldn't acknowledge the phone message: {e}");
+        }
     }
 }
 
-/// Posts a phone message as the human's message in the newest conversation.
-fn deliver(engine: &Arc<Engine>, out: &mut Outbox, msg: Incoming) {
-    let Some(conv) = engine.store.list().into_iter().next() else { return };
+/// Posts a phone message as the human's message in the newest conversation, and returns the
+/// ready-made notice that tells the phone what happened to it.
+fn deliver(engine: &Arc<Engine>, out: &mut Outbox, msg: Incoming) -> &'static str {
+    let Some(conv) = engine.store.list().into_iter().next() else { return notice::NO_CONVERSATION };
     let members = engine.config.get().members;
     let events = engine.store.load(&conv.id).unwrap_or_default();
     let recent = &events[events.len().saturating_sub(400)..];
     let pending = pending_requests(recent);
     let auto = BridgeConfig::load(&bridge::config_path(None)).map(|c| c.auto_forward_decisions).unwrap_or(true);
-    let (text, targets) = match &msg.origin {
+    let (text, targets, decision) = match &msg.origin {
         Origin::Agent(a) => {
             let mine: Vec<String> = pending.iter().filter(|(_, by)| by == a).map(|(r, _)| r.clone()).collect();
             match bridge::resolve_incoming_message(&msg.text, &mine, auto) {
-                ResolvedSignalAction::Decision { formatted_message, .. } => (formatted_message, vec![a.clone()]),
-                _ => (msg.text.clone(), vec![a.clone()]),
+                ResolvedSignalAction::Decision { formatted_message, .. } => (formatted_message, vec![a.clone()], true),
+                _ => (msg.text.clone(), vec![a.clone()], false),
             }
         }
         Origin::Council => {
@@ -329,21 +360,35 @@ fn deliver(engine: &Arc<Engine>, out: &mut Outbox, msg: Incoming) {
                 ResolvedSignalAction::Decision { request, formatted_message, .. } => {
                     let by = pending.iter().find(|(r, _)| *r == request).map(|(_, b)| b.clone());
                     let to = by.filter(|b| members.contains(b)).map_or(members.clone(), |b| vec![b]);
-                    (formatted_message, to)
+                    (formatted_message, to, true)
                 }
-                _ => (msg.text.clone(), members.clone()),
+                _ => (msg.text.clone(), members.clone(), false),
             }
         }
     };
     let targets: Vec<String> = targets.into_iter().filter(|t| members.contains(t)).collect();
+    let nobody = targets.is_empty();
     match engine.send_via(&conv.id, &text, vec![], targets, 1, Some("Signal")) {
         Ok(e) => {
             out.origins.insert(e.id.clone(), msg.origin);
             if out.origins.len() > 500 {
                 out.origins.clear();
             }
+            receipt(nobody, decision)
         }
-        Err(e) => eprintln!("signal chat: couldn't post the phone message: {e}"),
+        Err(e) => {
+            eprintln!("signal chat: couldn't post the phone message: {e}");
+            notice::NOT_POSTED
+        }
+    }
+}
+
+/// The notice for a phone message that was posted.
+pub fn receipt(nobody_can_answer: bool, decision: bool) -> &'static str {
+    match (nobody_can_answer, decision) {
+        (true, _) => notice::NO_AI,
+        (false, true) => notice::DECISION,
+        (false, false) => notice::RECEIVED,
     }
 }
 
@@ -450,6 +495,17 @@ mod tests {
         .unwrap();
         e.requests = requests.into_iter().map(String::from).collect();
         e
+    }
+
+    #[test]
+    fn every_phone_message_gets_a_notice_back() {
+        assert_eq!(receipt(false, false), notice::RECEIVED);
+        assert_eq!(receipt(false, true), notice::DECISION);
+        assert_eq!(receipt(true, false), notice::NO_AI);
+        assert_eq!(receipt(true, true), notice::NO_AI);
+        for n in [notice::RECEIVED, notice::DECISION, notice::NO_AI, notice::NOT_POSTED, notice::NO_CONVERSATION, notice::BACK_ONLINE] {
+            assert!(n.starts_with("Consilium: "), "{n}");
+        }
     }
 
     #[test]

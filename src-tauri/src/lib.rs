@@ -434,7 +434,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: runnable shell commands now appear in Respond to request so you never miss a Run button. Unrestricted mode on Windows runs commands cleanly without permission denials. One-click Signal install works on Windows too, and phone messages are labeled You (Signal). Windows and Linux automatically download and stage updates from GitHub releases. Settings includes an Install All Tools button, and voice chat delivers faster 800ms turns with immediate spoken acknowledgements.";
+const WHATS_NEW: &str = "What's new: every message you send from Signal now gets an instant reply in your Note to Self, Message received, please wait for the AI response, so you know it arrived. If something goes wrong, such as no AI being able to answer or the message not reaching the chat, Signal tells you that instead, and it says when Consilium is back online after a restart. Consilium also no longer starts extra copies of Signal's background program on each launch; those stuck copies could stop messages getting through.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs

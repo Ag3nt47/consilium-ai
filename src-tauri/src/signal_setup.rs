@@ -311,6 +311,12 @@ fn ensure_daemon(cli: &std::path::Path, cfg: &BridgeConfig) -> Result<(), String
     if bridge::probe_signal(&probe, Duration::from_secs(2)).state == "ok" {
         return Ok(());
     }
+    // A daemon that is still catching up on messages can be too busy to answer the probe in time
+    // but already holds the port and the account. Starting a second one only leaves a copy waiting
+    // forever for the account lock, so a listening port counts as running.
+    if TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok() {
+        return Ok(());
+    }
     let log = std::fs::File::create(std::env::temp_dir().join("consilium-signal-daemon.log")).ok();
     let mut cmd = Command::new(cli);
     cmd.args(["-a", &cfg.account, "daemon", "--tcp", &addr.to_string()]).stdin(Stdio::null());
