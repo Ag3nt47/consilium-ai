@@ -1,8 +1,14 @@
 name: Release
 
-# Builds installers for macOS, Windows and Linux when a version tag (v1.2.3) is pushed, and attaches
-# them to a draft GitHub release for a maintainer to review and publish.
+# Publishes installers for macOS, Windows and Linux for every new version, so a copy of Consilium
+# on any computer can find and install it. It runs after the CI workflow passes on main: when
+# package.json's version has no GitHub release yet, it creates one, builds the installers into it
+# and publishes it. A pushed version tag (v1.2.3) or a manual run does the same for that version.
 on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
   push:
     tags: ["v*"]
   workflow_dispatch:
@@ -10,8 +16,45 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  prepare:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to create the release
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      sha: ${{ steps.v.outputs.sha }}
+      id: ${{ steps.v.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - id: v
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          tag="v$(node -p 'require("./package.json").version')"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null | grep -qx false; then
+            echo "$tag is already published; nothing to do."; exit 0
+          fi
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$SHA" \
+              --title "Consilium $tag" \
+              --notes "See CHANGELOG.md. Installers are not yet code-signed; see README > Install."
+          fi
+          id="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate -q ".[] | select(.tag_name==\"$tag\") | .id" | head -1)"
+          { echo "tag=$tag"; echo "sha=$SHA"; echo "id=$id"; } >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
+    if: needs.prepare.outputs.id != ''
     permissions:
       contents: write # to create the draft release
     strategy:
@@ -27,6 +70,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: lts/*
@@ -45,11 +90,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Consilium ${{ github.ref_name }}
-          releaseBody: See CHANGELOG.md. Installers are not yet code-signed; see README > Install.
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.prepare.outputs.id }}
           args: ${{ matrix.args }}
       # Fixed-name copies, so the README's one-click links
       # (releases/latest/download/<name>) always fetch the newest installer.
@@ -57,7 +98,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
           mkdir -p oneclick
@@ -74,3 +115,14 @@ jobs:
                      copy '*.deb' Consilium-Linux-amd64.deb ;;
           esac
           gh release upload "$TAG" oneclick/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to publish the release
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

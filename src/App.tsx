@@ -1612,7 +1612,11 @@ export default function App() {
     setUpdateNote("Checking…");
     const u = await checkForUpdate(true).catch(() => null);
     setUpdate(u);
-    setUpdateNote(u ? `Version ${u.latest} is available.` : "You're up to date (or offline).");
+    setUpdateNote(
+      !u ? "You're up to date (or offline)."
+        : u.unreleased ? `Version ${u.latest} is on GitHub but has no installer yet (you have ${u.current}). Build it from source, or ask the AIs to publish a release.`
+        : `Version ${u.latest} is available (you have ${u.current}).`,
+    );
   }
 
   const notReady = members.filter((a) => !a.available);
@@ -2019,9 +2023,9 @@ export default function App() {
       >
         {update && (
           <div className="banner">
-            Consilium {update.latest} is available (you have {update.current}).
-            <button title="Open the release page for the new version on GitHub" className="link" onClick={() => openUrl(update.url)}>
-              View release
+            Consilium {update.latest} {update.unreleased ? "is on GitHub, with no installer yet" : "is available"} (you have {update.current}).
+            <button title="Open the new version on GitHub" className="link" onClick={() => openUrl(update.url)}>
+              {update.unreleased ? "View on GitHub" : "View release"}
             </button>
             <button title="Hide this notice until the next check" className="link" onClick={() => setUpdate(null)}>
               Later

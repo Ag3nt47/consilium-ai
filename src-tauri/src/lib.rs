@@ -434,11 +434,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: in voice chat you can talk over a reply to interrupt it. The reply pauses \
-while you speak; if you go on to say something it stops and your message is sent, and if you say nothing for five \
-seconds it carries on. Spoken commands start with Consilium, such as Consilium, open settings, Consilium, stop, \
-Consilium, switch to Retro 84, or Consilium, open Safari. Opening a program always needs a click to confirm, and \
-any other request to control the computer goes to the AIs, who must ask for your approval first.";
+const WHATS_NEW: &str = "What's new: when an AI joins the council, Consilium checks whether a public forecast of early usage resets is known for it, and if not asks one AI to search for one. Check for updates in Settings now also reports a newer version that is on GitHub but has no installer yet, instead of saying you are up to date. From this version on, every new version publishes its own installers on GitHub for macOS, Windows and Linux once GitHub's checks pass, so copies on other computers see it.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs

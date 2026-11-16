@@ -14,6 +14,8 @@ export interface UpdateInfo {
   url: string;
   notes: string;
   publishedAt: string;
+  /** True when the newer version is on GitHub's main branch but has no published installer yet. */
+  unreleased?: boolean;
 }
 
 interface Cache {
@@ -77,5 +79,19 @@ export async function checkForUpdate(force = false): Promise<UpdateInfo | null> 
     return null; // offline: stay quiet
   }
   const c = readCache();
-  return c.latest && compareVersions(c.latest.latest, current) > 0 ? { current, ...c.latest } : null;
+  if (c.latest && compareVersions(c.latest.latest, current) > 0) return { current, ...c.latest };
+  // Releases can lag behind the source: report a newer version on main too, marked unreleased,
+  // so "up to date" is never claimed while GitHub has something newer.
+  if (!force) return null;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${REPO}/contents/package.json?ref=main`, {
+      headers: { Accept: "application/vnd.github.raw+json" },
+    });
+    if (!res.ok) return null;
+    const main = String((await res.json()).version || "");
+    if (compareVersions(main, current) <= 0) return null;
+    return { current, latest: main, url: `https://github.com/${REPO}`, notes: "", publishedAt: "", unreleased: true };
+  } catch {
+    return null;
+  }
 }
