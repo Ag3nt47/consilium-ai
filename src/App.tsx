@@ -36,6 +36,7 @@ import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { installHoverTips } from "./tooltip";
 import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
 import { MessagingIndicator, MessagingSettings } from "./messaging";
+import { LinkIndicator, LinkSettings } from "./link";
 import { ProjectVersions } from "./projects";
 import { RepoDrawer } from "./repo";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
@@ -1644,6 +1645,7 @@ export default function App() {
     { id: "usage", name: "Show Token Usage", hint: "Conversation & daily totals", run: () => openUsage() },
     { id: "self-check", name: "Run Self-Check", hint: "Probe all active council models", run: () => runSelfCheck() },
     { id: "manage-ais", name: "Add / Remove AIs", hint: "Council membership", run: () => setShowAddAi(true) },
+    { id: "link-sync", name: "Multi-Computer Sync", hint: "Pair and sync with Mac or Windows PC over Gigabit / Wi-Fi", run: () => setShowSettings(true) },
     { id: "settings", name: "Open Settings", hint: "Theme & access preferences", run: () => {
         setShowSettings(true);
         api.getMemory().then((m) => {
@@ -1789,6 +1791,7 @@ export default function App() {
         <header className="topbar">
           <div className="title-block">
             <MessagingIndicator />
+            <LinkIndicator />
             {wallpaper && prefs.bingWallpaper && wallpaper.title && (
               <span
                 className="wallpaper-pill"
@@ -2322,6 +2325,8 @@ export default function App() {
             {cli?.note && <pre className="cli-note small">{cli.note}</pre>}
             <div className="section-label">Messaging</div>
             <MessagingSettings />
+            <div className="section-label">Multi-Computer Sync (Mac &amp; Windows)</div>
+            <LinkSettings />
             <div className="section-label">Updates</div>
             <label className="toggle">
               <input

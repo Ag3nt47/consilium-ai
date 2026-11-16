@@ -240,6 +240,58 @@ export const demoApi = {
           data_url: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%' stop-color='%230f172a'/><stop offset='50%' stop-color='%231e1b4b'/><stop offset='100%' stop-color='%23020617'/></linearGradient></defs><rect width='100%' height='100%' fill='url(%23g)'/><circle cx='60%' cy='40%' r='300' fill='%23312e81' opacity='0.4'/></svg>",
         }
       : null,
+  linkStatus: async () => ({
+    enabled: true,
+    node_id: "demo-node-mac",
+    name: "MacBook-Pro",
+    port: 8470,
+    addrs: ["192.168.1.15:8470"],
+    pairing_code_expires_ms: null,
+    peers: [
+      {
+        node_id: "demo-node-win",
+        name: "Windows-Desktop",
+        connected: true,
+        route: "192.168.1.42:8470",
+        rtt_ms: 3,
+        last_seen_ms: Date.now() - 1200,
+        queued: 0,
+      },
+    ],
+    error: null,
+  }),
+  linkSetEnabled: async (on: boolean) => ({
+    enabled: on,
+    node_id: "demo-node-mac",
+    name: "MacBook-Pro",
+    port: 8470,
+    addrs: ["192.168.1.15:8470"],
+    pairing_code_expires_ms: null,
+    peers: [],
+    error: null,
+  }),
+  linkPairHost: async () => ({ code: "847291", expires_ms: Date.now() + 5 * 60 * 1000 }),
+  linkPairCancel: async () => undefined,
+  linkPairJoin: async (_address: string, _code: string) => ({
+    node_id: "demo-node-win",
+    name: "Windows-Desktop",
+    connected: true,
+    route: "192.168.1.42:8470",
+    rtt_ms: 3,
+    last_seen_ms: Date.now(),
+    queued: 0,
+  }),
+  linkUnpair: async () => ({
+    enabled: true,
+    node_id: "demo-node-mac",
+    name: "MacBook-Pro",
+    port: 8470,
+    addrs: ["192.168.1.15:8470"],
+    pairing_code_expires_ms: null,
+    peers: [],
+    error: null,
+  }),
+  linkSend: async () => "demo-pkt-1",
 };
 
 export const demoTurn: TurnState | null = state.thinking

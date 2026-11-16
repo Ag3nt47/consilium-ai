@@ -98,17 +98,17 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 | Item | Status | Notes |
 |---|---|---|
 | Wired/LAN TCP link, JSON-lines framing, static port 8470 | 🔨 | Engine done in `link.rs` (Claude): one JSON object per line, 3 MB line cap, frames sealed with ChaCha20-Poly1305 and every packet HMAC-checked, fresh challenge both ways per session. Tested between two link instances on one Mac; not yet between two real computers. Off until the human pairs or turns it on |
-| Pairing and authentication | 🔨 | Engine done: one-time 6-digit code (approved by the human), SPAKE2 key exchange so the code can't be guessed offline, key confirmation both ways, code expires after 5 min or 3 wrong tries, keys kept in a 0600 `link.json`. `peer_protocol.rs` (Gemini) supplies packet schema, HMAC and freshness. Settings pairing screen is next |
+| Pairing and authentication | ✅ | Engine + Screen complete: one-time 6-digit code (approved by human), SPAKE2 key exchange so code cannot be guessed offline, key confirmation both ways, 5-min/3-try expiration, 0600 keys, countdown UI, and candidate subnet discovery (Gemini + Claude) |
 | Dedup ledger (`sync_ledger`) | 🔨 | Wired into the link: reserve → dispatch → commit → acknowledge, so duplicates are acknowledged but not delivered twice (tested). Dispatch currently emits a `link-packet` event; writing received chat into the conversation store is next |
-| 3 s heartbeat, 2 s reconnect with backoff | 🔨 | Engine done: heartbeat every 3 s, silent link dropped after 10 s, redial from 2 s backing off to 30 s; unacknowledged packets re-sent and re-stamped on reconnect (tested). Status light per computer is next |
-| Automatic discovery (mDNS/Bonjour) + manual IP fallback | ⏭ | `_consilium._tcp` advertisement; manual host:port in Settings |
+| 3 s heartbeat, 2 s reconnect with backoff | ✅ | Engine done: heartbeat every 3 s, silent link dropped after 10 s, redial from 2 s backing off to 30 s; unacknowledged packets re-sent and re-stamped on reconnect. Live status lights and RTT latency displayed per peer |
+| Automatic discovery (mDNS/Bonjour) + manual IP fallback | 🔨 | Subnet detection & candidate IP auto-find on LAN in UI; manual host:port in Settings |
 | Wireless: Wi-Fi LAN / Tailscale | 🔨 | Engine done: each side advertises all its addresses (cable, Wi-Fi, Tailscale); any reachable one works. Not tested across real networks yet |
 | Auto-choose best channel and seamless failover | 🔨 | TCP part done: every known address is dialled at once and the first to answer is used; a dropped route is replaced on the next attempt and queued packets follow. Bluetooth and Signal fallback not built |
 | What syncs | ⏭ | Chat messages, REQUEST decisions (applied once, on the machine that owns the turn), AI activity, project git state summary. No file contents or secrets in the first release |
 | Bluetooth BLE/RFCOMM fallback | 🕓 | Rust BLE (`btleplug`) is central-only on macOS/Windows, so a Mac↔PC GATT server needs native per-OS code; built after the TCP link proves out, with MTU chunking + reassembly as specified |
 | Phone bots (Telegram/Matrix) as out-of-band control | 🕓 | Shares the Signal receiver's safeguards (allowlist, replay, freshness); Telegram row in Document 2 |
 | Cloud AI apps → local (Custom GPT Actions, Claude MCP via tunnel) | 🕓 | Exposes this computer to the internet; needs the human's explicit approval, an authenticated Cloudflare/Tailscale Funnel tunnel, an allowlisted command set and no shell access |
-| "UI integration" (PySide6 signals) | ⏭ | Becomes Tauri events into the existing message queue, status LEDs in the council sidebar |
+| "UI integration" (PySide6 signals) | ✅ | Topbar `LinkIndicator` with status LEDs (connected/disconnected/syncing/offline), `LinkSettings` in Settings, pairing code countdown, candidate subnet discovery, route & RTT meters, and Cmd+K palette hook |
 
 ## Reliability and portability added during the upgrade
 
