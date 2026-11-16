@@ -99,7 +99,13 @@ pub fn pending_requests(events: &[Event]) -> Vec<(String, String)> {
 /// The text sent to Signal for one conversation event, or None when it isn't worth sending.
 pub fn outbound_text(e: &Event) -> Option<String> {
     let name = match e.sender.as_str() {
-        "human" => return None,
+        "human" => {
+            // A message received from Signal should not be echoed back to the phone
+            if e.via.as_deref().map_or(false, |v| v.eq_ignore_ascii_case("signal")) {
+                return None;
+            }
+            "You".to_string()
+        }
         crate::council::CONSILIUM if e.kind == "system" => "Consilium".to_string(),
         id if e.kind == "message" => crate::agents::by_id(id).map_or(id.to_string(), |a| a.name.to_string()),
         _ => return None,
@@ -109,7 +115,18 @@ pub fn outbound_text(e: &Event) -> Option<String> {
         return None;
     }
     let mut msg = if name == "Consilium" {
-        format!("Consilium: {}", crate::redact::scrub(body))
+        format!("[Consilium]\n{}", crate::redact::scrub(body))
+    } else if name == "You" {
+        if !e.to.is_empty() {
+            let targets: Vec<String> = e
+                .to
+                .iter()
+                .map(|t| crate::agents::by_id(t).map_or(t.clone(), |a| a.name.to_string()))
+                .collect();
+            format!("You (to {}): {}", targets.join(", "), crate::redact::scrub(body))
+        } else {
+            format!("You: {}", crate::redact::scrub(body))
+        }
     } else {
         bridge::format_outbound_notification(&name, body)
     };
@@ -227,10 +244,8 @@ pub fn run(engine: Arc<Engine>, cfg_path: PathBuf) {
 }
 
 struct Outbox {
-    /// Conversation being mirrored and the newest event already handled in it.
-    conversation: String,
-    cursor: u64,
-    log_len: u64,
+    /// Cursors for active conversations: conversation ID -> highest seq mirrored.
+    cursors: HashMap<String, u64>,
     /// Human events Consilium created from phone messages, and where each came from.
     origins: HashMap<String, Origin>,
 }
@@ -249,7 +264,7 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
     let mut reader = BufReader::new(s);
     let mut seen: VecDeque<u64> = VecDeque::new();
     let mut seen_set: HashSet<u64> = HashSet::new();
-    let mut out = Outbox { conversation: String::new(), cursor: 0, log_len: 0, origins: HashMap::new() };
+    let mut out = Outbox { cursors: HashMap::new(), origins: HashMap::new() };
     let mut line = String::new();
     loop {
         // Stop if Signal was switched off or re-set up; the outer loop starts again.
@@ -321,7 +336,7 @@ fn deliver(engine: &Arc<Engine>, out: &mut Outbox, msg: Incoming) {
         }
     };
     let targets: Vec<String> = targets.into_iter().filter(|t| members.contains(t)).collect();
-    match engine.send_with(&conv.id, &text, vec![], targets, 1) {
+    match engine.send_via(&conv.id, &text, vec![], targets, 1, Some("Signal")) {
         Ok(e) => {
             out.origins.insert(e.id.clone(), msg.origin);
             if out.origins.len() > 500 {
@@ -332,41 +347,50 @@ fn deliver(engine: &Arc<Engine>, out: &mut Outbox, msg: Incoming) {
     }
 }
 
-/// Sends the newest conversation's new AI messages and Consilium notes to Signal.
+/// Sends new messages (AI replies, in-app human messages, Consilium notes) across active conversations to Signal.
 fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
-    let Some(conv) = engine.store.list().into_iter().next() else { return };
-    let len = engine.store.log_len(&conv.id);
-    if conv.id == out.conversation && len == out.log_len {
+    let convs = engine.store.list();
+    if convs.is_empty() {
         return;
     }
-    let events = engine.store.load(&conv.id).unwrap_or_default();
-    let newest = events.last().map_or(0, |e| e.seq);
-    if conv.id != out.conversation {
-        // Start mirroring from now: older messages aren't replayed to the phone.
-        out.conversation = conv.id.clone();
-        out.cursor = newest;
-        out.log_len = len;
-        return;
-    }
-    out.log_len = len;
-    let mut last_human: Option<&Event> = events.iter().rev().find(|e| e.seq <= out.cursor && e.sender == "human");
-    for e in events.iter().filter(|e| e.seq > out.cursor) {
-        if e.sender == "human" {
-            last_human = Some(e);
+    for conv in convs.into_iter().take(10) {
+        let events = engine.store.load(&conv.id).unwrap_or_default();
+        let newest = events.last().map_or(0, |e| e.seq);
+        let cursor = match out.cursors.get(&conv.id) {
+            Some(&c) => c,
+            None => {
+                // Start mirroring from now: older messages aren't replayed to the phone.
+                out.cursors.insert(conv.id.clone(), newest);
+                continue;
+            }
+        };
+        if newest <= cursor {
             continue;
         }
-        let Some(text) = outbound_text(e) else { continue };
-        // An AI answering a message sent from its own group answers there.
-        let asked_privately = last_human
-            .and_then(|h| out.origins.get(&h.id))
-            .is_some_and(|o| *o == Origin::Agent(e.sender.clone()));
-        let private_to = asked_privately
-            .then(|| crate::agents::by_id(&e.sender).map_or(e.sender.clone(), |a| a.name.to_string()));
-        if let Err(err) = send_self(cfg, &self_text(&text, private_to.as_deref())) {
-            eprintln!("signal chat: couldn't send to Signal: {err}");
+        let mut last_human: Option<&Event> = events.iter().rev().find(|e| e.seq <= cursor && e.sender == "human");
+        for e in events.iter().filter(|e| e.seq > cursor) {
+            if e.sender == "human" {
+                last_human = Some(e);
+            }
+            let Some(text) = outbound_text(e) else { continue };
+            // An AI answering a message sent from its own group answers there.
+            let asked_privately = last_human
+                .and_then(|h| out.origins.get(&h.id))
+                .is_some_and(|o| *o == Origin::Agent(e.sender.clone()));
+            let private_to = asked_privately
+                .then(|| crate::agents::by_id(&e.sender).map_or(e.sender.clone(), |a| a.name.to_string()));
+            let formatted = self_text(&text, private_to.as_deref());
+            if let Err(err) = send_self(cfg, &formatted) {
+                eprintln!("signal chat: couldn't send to Signal: {err}");
+            }
+            let group = if asked_privately { cfg.groups.agents.get(&e.sender) } else { None };
+            let group = group.unwrap_or(&cfg.groups.main);
+            if !group.is_empty() {
+                let _ = send_group(cfg, group, &text);
+            }
         }
+        out.cursors.insert(conv.id, newest);
     }
-    out.cursor = newest;
 }
 
 #[cfg(test)]
@@ -445,12 +469,16 @@ mod tests {
     }
 
     #[test]
-    fn only_ai_messages_and_consilium_notes_are_sent() {
-        assert_eq!(outbound_text(&ev(1, "human", "message", "hi", vec![])), None);
-        assert!(outbound_text(&ev(2, "claude", "message", "done", vec![])).unwrap().starts_with("Claude: done"));
-        assert!(outbound_text(&ev(3, "consilium", "system", "updated", vec![])).unwrap().starts_with("Consilium: updated"));
-        assert_eq!(outbound_text(&ev(4, "claude", "seen", "", vec![])), None);
-        let long = outbound_text(&ev(5, "claude", "message", &"x".repeat(9000), vec![])).unwrap();
+    fn messages_and_consilium_notes_are_sent() {
+        let mut from_phone = ev(1, "human", "message", "hi", vec![]);
+        from_phone.via = Some("Signal".into());
+        assert_eq!(outbound_text(&from_phone), None);
+        let from_mac = ev(2, "human", "message", "hi from mac", vec![]);
+        assert_eq!(outbound_text(&from_mac), Some("You: hi from mac".to_string()));
+        assert!(outbound_text(&ev(3, "claude", "message", "done", vec![])).unwrap().starts_with("Claude: done"));
+        assert!(outbound_text(&ev(4, "consilium", "system", "updated", vec![])).unwrap().starts_with("[Consilium]\nupdated"));
+        assert_eq!(outbound_text(&ev(5, "claude", "seen", "", vec![])), None);
+        let long = outbound_text(&ev(6, "claude", "message", &"x".repeat(9000), vec![])).unwrap();
         assert!(long.chars().count() < MAX_OUT + 50 && long.ends_with("(the rest is in Consilium)"));
     }
 }

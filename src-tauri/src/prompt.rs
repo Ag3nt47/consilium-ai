@@ -610,6 +610,7 @@ mod tests {
             seen: vec![],
             usage: None,
             attachments: vec![],
+            via: None,
         }
     }
 

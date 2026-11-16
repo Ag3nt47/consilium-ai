@@ -2205,7 +2205,7 @@ export default function App() {
             e.kind === "message" ? (
               <article key={e.id} className={`msg from-${e.sender}`}>
                 <div className="msg-head">
-                  <span className="who">{senderName(e.sender, agents)}</span>
+                  <span className="who">{senderName(e.sender, agents, e.via)}</span>
                   {e.to.length > 0 && e.sender === "human" && (
                     <span className="to">→ {e.to.map((t) => senderName(t, agents)).join(", ")}</span>
                   )}

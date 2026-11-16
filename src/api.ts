@@ -61,6 +61,8 @@ export interface ChatEvent {
   attachments?: Attachment[];
   /** Message ids handed to this event's sender. Present only on persisted read receipts. */
   seen?: string[];
+  /** Transport or bridge the message arrived through (e.g. "Signal"), if not sent directly in-app. */
+  via?: string | null;
 }
 
 /** A file attached to a message; Consilium keeps its own copy in the conversation's folder. */
@@ -445,7 +447,7 @@ export function onActivity(fn: (activity: AgentActivity) => void): Promise<Unlis
   return listen<AgentActivity>("consilium://activity", (msg) => fn(msg.payload));
 }
 
-export function senderName(sender: Sender, agents: AgentInfo[]): string {
-  if (sender === "human") return "You";
+export function senderName(sender: Sender, agents: AgentInfo[], via?: string | null): string {
+  if (sender === "human") return via ? `You (${via})` : "You";
   return agents.find((a) => a.id === sender)?.name ?? sender;
 }

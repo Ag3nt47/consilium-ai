@@ -111,15 +111,15 @@ const PHONE_RE = /\b(Signal|from your phone|phone)\b/i;
 /** Every approval, request, update, council change, phone message and error, newest first. */
 export function auditEntries(events: ChatEvent[], names: Record<string, string>): AuditEntry[] {
   const out: AuditEntry[] = [];
-  const who = (s: string) => (s === "human" ? "You" : names[s] || s);
+  const who = (s: string, via?: string | null) => (s === "human" ? (via ? `You (${via})` : "You") : names[s] || s);
   for (const e of events) {
     const first = e.text.split("\n")[0].trim();
     if (e.kind === "error") {
-      out.push({ id: `${e.id}-err`, ts: e.ts, kind: "error", who: who(e.sender), text: first });
+      out.push({ id: `${e.id}-err`, ts: e.ts, kind: "error", who: who(e.sender, e.via), text: first });
       continue;
     }
     if (e.sender === "human" && /^(Approved|Denied):/.test(first)) {
-      out.push({ id: e.id, ts: e.ts, kind: first.startsWith("Approved") ? "approved" : "denied", who: "You", text: first.replace(/^(Approved|Denied):\s*/, "") });
+      out.push({ id: e.id, ts: e.ts, kind: first.startsWith("Approved") ? "approved" : "denied", who: who("human", e.via), text: first.replace(/^(Approved|Denied):\s*/, "") });
       continue;
     }
     if (e.kind === "system") {
@@ -127,8 +127,8 @@ export function auditEntries(events: ChatEvent[], names: Record<string, string>)
       out.push({ id: e.id, ts: e.ts, kind, who: "Consilium", text: first });
       continue;
     }
-    e.requests?.forEach((r, i) => out.push({ id: `${e.id}-r${i}`, ts: e.ts, kind: "request", who: who(e.sender), text: r }));
-    e.add_ai?.forEach((a, i) => out.push({ id: `${e.id}-a${i}`, ts: e.ts, kind: "council", who: who(e.sender), text: `Proposed adding ${a}` }));
+    e.requests?.forEach((r, i) => out.push({ id: `${e.id}-r${i}`, ts: e.ts, kind: "request", who: who(e.sender, e.via), text: r }));
+    e.add_ai?.forEach((a, i) => out.push({ id: `${e.id}-a${i}`, ts: e.ts, kind: "council", who: who(e.sender, e.via), text: `Proposed adding ${a}` }));
   }
   return out.sort((a, b) => b.ts - a.ts);
 }

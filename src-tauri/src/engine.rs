@@ -215,6 +215,18 @@ impl Engine {
         targets: Vec<String>,
         rounds: u32,
     ) -> Result<Event, String> {
+        self.send_via(id, text, attachments, targets, rounds, None)
+    }
+
+    pub fn send_via(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        attachments: Vec<crate::attach::Attachment>,
+        targets: Vec<String>,
+        rounds: u32,
+        via: Option<&str>,
+    ) -> Result<Event, String> {
         let dir = self.store.files_dir(id);
         if let Some(a) = attachments.iter().find(|a| !crate::attach::belongs(&dir, a)) {
             return Err(format!("{} isn't one of this conversation's attachments", a.name));
@@ -229,7 +241,7 @@ impl Engine {
         let targets = self.addressed(targets, text);
         let rounds = rounds.clamp(1, MAX_ROUNDS);
         let mut running = self.running.lock().unwrap();
-        let event = self.store.append_with_attachments(id, targets.clone(), text, attachments)?;
+        let event = self.store.append_with_attachments_via(id, targets.clone(), text, attachments, via)?;
         self.mine.lock().unwrap().insert(event.id.clone());
         self.ui.event(&event);
         let lock = match running.get(id) {

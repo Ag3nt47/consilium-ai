@@ -96,6 +96,9 @@ pub struct Event {
     /// Files the human attached to this message (see `attach`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<crate::attach::Attachment>,
+    /// Transport or bridge the message arrived through (e.g. "Signal"), if not sent directly in-app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -368,7 +371,19 @@ impl Store {
         text: &str,
         attachments: Vec<crate::attach::Attachment>,
     ) -> Result<Event, String> {
-        self.append_full(id, "human", "message", to, text, None, attachments, vec![])
+        self.append_with_attachments_via(id, to, text, attachments, None)
+    }
+
+    /// A message from the human with attached files and an optional delivery transport (e.g. "Signal").
+    pub fn append_with_attachments_via(
+        &self,
+        id: &str,
+        to: Vec<String>,
+        text: &str,
+        attachments: Vec<crate::attach::Attachment>,
+        via: Option<&str>,
+    ) -> Result<Event, String> {
+        self.append_full(id, "human", "message", to, text, None, attachments, vec![], via.map(String::from))
     }
 
     pub fn append_with_usage(
@@ -380,12 +395,12 @@ impl Store {
         text: &str,
         usage: Option<TokenUsage>,
     ) -> Result<Event, String> {
-        self.append_full(id, sender, kind, to, text, usage, vec![], vec![])
+        self.append_full(id, sender, kind, to, text, usage, vec![], vec![], None)
     }
 
     /// Records the messages that were handed to an AI in one compact, hidden receipt event.
     pub fn append_seen(&self, id: &str, sender: &str, seen: Vec<String>) -> Result<Event, String> {
-        self.append_full(id, sender, "seen", vec![], "", None, vec![], seen)
+        self.append_full(id, sender, "seen", vec![], "", None, vec![], seen, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -399,6 +414,7 @@ impl Store {
         usage: Option<TokenUsage>,
         attachments: Vec<crate::attach::Attachment>,
         seen: Vec<String>,
+        via: Option<String>,
     ) -> Result<Event, String> {
         Self::check(id)?;
         // Everything in a conversation is sent to every AI's provider, so secrets are masked first.
@@ -434,6 +450,7 @@ impl Store {
             seen,
             usage,
             attachments,
+            via,
         };
         let mut line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
         line.push('\n');

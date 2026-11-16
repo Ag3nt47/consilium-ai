@@ -197,7 +197,11 @@ fn color_of(sender: &str) -> &'static str {
 fn render(p: Paint, e: &Event) -> String {
     match e.kind.as_str() {
         "message" => {
-            let mut head = p.c(color_of(&e.sender), &name_of(&e.sender));
+            let sender_name = match (&e.sender[..], &e.via) {
+                ("human", Some(via)) => format!("You ({via})"),
+                _ => name_of(&e.sender),
+            };
+            let mut head = p.c(color_of(&e.sender), &sender_name);
             if e.sender == "human" && !e.to.is_empty() {
                 let to: Vec<String> = e.to.iter().map(|t| name_of(t)).collect();
                 head.push_str(&p.c("2", &format!(" → {}", to.join(", "))));
@@ -1095,9 +1099,12 @@ mod tests {
             seen: vec![],
             usage: None,
             attachments: vec![],
+            via: None,
         };
         assert_eq!(render(p, &e), "Claude\n  Done.\n  REQUEST: pick a name\n\n");
-        let to_both = Event { sender: "human".into(), to: vec!["gpt".into(), "claude".into()], text: "hi".into(), ..e };
+        let to_both = Event { sender: "human".into(), to: vec!["gpt".into(), "claude".into()], text: "hi".into(), ..e.clone() };
         assert_eq!(render(p, &to_both), "You → ChatGPT, Claude\n  hi\n\n");
+        let from_signal = Event { sender: "human".into(), text: "hi from phone".into(), via: Some("Signal".into()), ..e };
+        assert_eq!(render(p, &from_signal), "You (Signal)\n  hi from phone\n\n");
     }
 }
