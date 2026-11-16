@@ -19,6 +19,58 @@ fn known_tools(os: &str) -> &'static [&'static str] {
     }
 }
 
+/// Tools the human wants Consilium to know about but not ship: listed to every AI with shell
+/// access so it can recognise when one fits and ask to install it. Nothing here is downloaded.
+/// (name, binary to look for, source, what it is for and how to install it)
+const CATALOG: &[(&str, &str, &str, &str)] = &[
+    (
+        "AnonRouter",
+        "anonrouter",
+        "https://anonrouter.ai",
+        "privacy router (\"VPN for AI\") that relays requests to AI model APIs without exposing the caller; \
+use it when the human wants AI or web traffic kept private. No package name has been verified yet: confirm \
+the official SDK or CLI from anonrouter.ai before requesting an install, and never send keys or the human's \
+details to it without approval",
+    ),
+    (
+        "Zero Breach Toolkit",
+        "zero-breach",
+        "https://github.com/interplains/Zero-Breach-Toolkit",
+        "offline spyware and compromise scanner for macOS, Windows and Linux; run it only when the computer is \
+idle, and pause it while AIs or builds are busy",
+    ),
+    (
+        "Ghidra",
+        "ghidraRun",
+        "https://github.com/NationalSecurityAgency/ghidra",
+        "decompiler REA uses for compiled native programs; request it only when a task needs native analysis",
+    ),
+    (
+        "JADX",
+        "jadx",
+        "https://github.com/skylot/jadx",
+        "Android APK and DEX decompiler REA uses; request it only when a task needs Android analysis",
+    ),
+];
+
+fn catalog_note(dirs_: &[PathBuf]) -> String {
+    let lines: Vec<String> = CATALOG
+        .iter()
+        .map(|(name, bin, source, about)| {
+            let state = match present(bin, dirs_) {
+                Some(path) => format!("installed at {}", path.display()),
+                None => "not installed".to_string(),
+            };
+            format!("- {name} ({source}, {state}): {about}.")
+        })
+        .collect();
+    format!(
+        "\nCatalog of tools the human has asked Consilium to know about (not bundled; request an install with \
+INSTALL_COMMAND_JSON when a task calls for one):\n{}",
+        lines.join("\n")
+    )
+}
+
 fn search_dirs() -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
     let mut dirs_: Vec<PathBuf> = std::env::var_os("PATH")
@@ -87,7 +139,8 @@ exact request first, in this form: `REQUEST: Install <tool> from <source> to <pu
 scripts. Consilium blocks an unapproved install and lets the approved command run once, in the turn after the \
 human's `Approved:`. After installing, verify the tool runs and record it with a REMEMBER: line (name, source, \
 path). If an install needs administrator rights, use the elevated-command request instead.\n\
-Package managers and tools on this {os} host: {have}.{missing}"
+Package managers and tools on this {os} host: {have}.{missing}{catalog}",
+        catalog = catalog_note(&search_dirs())
     )
 }
 
@@ -235,5 +288,7 @@ mod tests {
         assert!(text.contains("brew (/opt/homebrew/bin/brew)"));
         assert!(text.contains("Not installed:") && text.contains("pipx"));
         assert!(text.contains("without asking"));
+        assert!(text.contains("AnonRouter (https://anonrouter.ai"));
+        assert!(text.contains("not bundled"));
     }
 }
