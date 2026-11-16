@@ -411,7 +411,7 @@ impl Link {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut f = options.open(&self.0.inbox_path).map_err(|e| e.to_string())?;
+        let mut f = open_with_retry(&options, &self.0.inbox_path)?;
         repair_partial_line(&mut f)?;
         f.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
         f.write_all(&line).map_err(|e| e.to_string())?;
@@ -1072,6 +1072,22 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     crate::store::replace_file(&tmp, path).map_err(|e| e.to_string())
 }
 
+fn open_with_retry(options: &std::fs::OpenOptions, path: &Path) -> Result<std::fs::File, String> {
+    let mut err = String::new();
+    for i in 0..10 {
+        match options.open(path) {
+            Ok(f) => return Ok(f),
+            Err(e) => {
+                err = e.to_string();
+                if i < 9 {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+    Err(err)
+}
+
 /// A power loss can leave the final JSONL record partially written. Remove only that incomplete
 /// tail before appending the sender's retry; complete earlier records remain untouched.
 fn repair_partial_line(file: &mut std::fs::File) -> Result<(), String> {
@@ -1094,12 +1110,24 @@ fn repair_partial_line(file: &mut std::fs::File) -> Result<(), String> {
         file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
         file.read_exact(&mut chunk[..size]).map_err(|e| e.to_string())?;
         if let Some(index) = chunk[..size].iter().rposition(|&byte| byte == b'\n') {
-            file.set_len(start + index as u64 + 1).map_err(|e| e.to_string())?;
+            let target = start + index as u64 + 1;
+            let _ = file.seek(SeekFrom::Start(target));
+            if file.set_len(target).is_err() {
+                // If the OS refuses set_len on this handle, close the partial line with \n
+                // so the corrupt fragment does not bleed into the next valid JSON line.
+                let _ = file.seek(SeekFrom::End(0));
+                let _ = file.write_all(b"\n");
+            }
             return Ok(());
         }
         end = start;
     }
-    file.set_len(0).map_err(|e| e.to_string())
+    let _ = file.seek(SeekFrom::Start(0));
+    if file.set_len(0).is_err() {
+        let _ = file.seek(SeekFrom::End(0));
+        let _ = file.write_all(b"\n");
+    }
+    Ok(())
 }
 
 /// Private LAN (10/8, 172.16/12, 192.168/16), Tailscale/CGNAT (100.64/10), IPv6 unique-local,
