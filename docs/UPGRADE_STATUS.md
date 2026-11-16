@@ -97,13 +97,13 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 
 | Item | Status | Notes |
 |---|---|---|
-| Wired/LAN TCP link, JSON-lines framing, static port 8470 | ⏭ | Tokio TCP in a new `link.rs`; one JSON object per line, 1 MB line cap, packet `{id, node_id, timestamp, type, seq, payload}` |
-| Pairing and authentication | 🔨 | `peer_protocol.rs` now defines the versioned packet schema, payload hashing, HMAC-SHA256 authentication, strict peer/freshness/size validation and excludes hidden model reasoning from the protocol. Pairing UI and key exchange are still next |
-| Dedup ledger (`sync_ledger`) | 🔨 | `peer_protocol.rs` durably records authenticated packet IDs before dispatch, syncs each append, bounds and atomically compacts the ledger, and prevents replay across restarts. Network dispatch integration is still next |
-| 3 s heartbeat, 2 s reconnect with backoff | ⏭ | Never blocks the UI; link status dot per peer |
+| Wired/LAN TCP link, JSON-lines framing, static port 8470 | 🔨 | Engine done in `link.rs` (Claude): one JSON object per line, 3 MB line cap, frames sealed with ChaCha20-Poly1305 and every packet HMAC-checked, fresh challenge both ways per session. Tested between two link instances on one Mac; not yet between two real computers. Off until the human pairs or turns it on |
+| Pairing and authentication | 🔨 | Engine done: one-time 6-digit code (approved by the human), SPAKE2 key exchange so the code can't be guessed offline, key confirmation both ways, code expires after 5 min or 3 wrong tries, keys kept in a 0600 `link.json`. `peer_protocol.rs` (Gemini) supplies packet schema, HMAC and freshness. Settings pairing screen is next |
+| Dedup ledger (`sync_ledger`) | 🔨 | Wired into the link: reserve → dispatch → commit → acknowledge, so duplicates are acknowledged but not delivered twice (tested). Dispatch currently emits a `link-packet` event; writing received chat into the conversation store is next |
+| 3 s heartbeat, 2 s reconnect with backoff | 🔨 | Engine done: heartbeat every 3 s, silent link dropped after 10 s, redial from 2 s backing off to 30 s; unacknowledged packets re-sent and re-stamped on reconnect (tested). Status light per computer is next |
 | Automatic discovery (mDNS/Bonjour) + manual IP fallback | ⏭ | `_consilium._tcp` advertisement; manual host:port in Settings |
-| Wireless: Wi-Fi LAN / Tailscale | ⏭ | Same TCP link over any reachable address; Tailscale IPs accepted as peers |
-| Auto-choose best channel and seamless failover | ⏭ | Ranked: wired LAN → Wi-Fi LAN → Tailscale → Bluetooth → Signal relay. Probe all, use the lowest-latency healthy one, resend unacknowledged packets on the next channel |
+| Wireless: Wi-Fi LAN / Tailscale | 🔨 | Engine done: each side advertises all its addresses (cable, Wi-Fi, Tailscale); any reachable one works. Not tested across real networks yet |
+| Auto-choose best channel and seamless failover | 🔨 | TCP part done: every known address is dialled at once and the first to answer is used; a dropped route is replaced on the next attempt and queued packets follow. Bluetooth and Signal fallback not built |
 | What syncs | ⏭ | Chat messages, REQUEST decisions (applied once, on the machine that owns the turn), AI activity, project git state summary. No file contents or secrets in the first release |
 | Bluetooth BLE/RFCOMM fallback | 🕓 | Rust BLE (`btleplug`) is central-only on macOS/Windows, so a Mac↔PC GATT server needs native per-OS code; built after the TCP link proves out, with MTU chunking + reassembly as specified |
 | Phone bots (Telegram/Matrix) as out-of-band control | 🕓 | Shares the Signal receiver's safeguards (allowlist, replay, freshness); Telegram row in Document 2 |

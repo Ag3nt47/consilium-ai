@@ -93,6 +93,16 @@ impl PeerPacket {
         Ok(packet)
     }
 
+    /// Re-stamps a queued packet for redelivery after an outage. The id and sequence stay the same,
+    /// so the receiver's ledger still drops it if the first delivery had in fact arrived.
+    pub fn resigned(&self, timestamp_ms: u64, key: &[u8]) -> Result<Self, String> {
+        validate_key(key)?;
+        let mut packet = self.clone();
+        packet.timestamp_ms = timestamp_ms;
+        packet.mac = packet.expected_mac(key)?;
+        Ok(packet)
+    }
+
     /// Validates a frame before its id is written to the replay ledger. `expected_peer` comes from
     /// the paired-device record, never from discovery data supplied by the network.
     pub fn validate(&self, expected_peer: &str, key: &[u8], now_ms: u64) -> Result<(), String> {

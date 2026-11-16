@@ -11,6 +11,7 @@ pub mod cli;
 mod config;
 mod council;
 mod engine;
+mod link;
 mod liveui;
 mod memory;
 pub mod peer_protocol;
@@ -591,6 +592,54 @@ async fn get_daily_wallpaper() -> Result<Option<wallpaper::DailyWallpaper>, Stri
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+static LINK: std::sync::OnceLock<link::Link> = std::sync::OnceLock::new();
+
+fn the_link() -> Result<&'static link::Link, String> {
+    LINK.get().ok_or_else(|| "the computer link couldn't start; see the log".to_string())
+}
+
+// Link commands are async so they run on the runtime that the link's tasks need.
+#[tauri::command]
+async fn link_status() -> Result<link::LinkStatus, String> {
+    Ok(the_link()?.status())
+}
+
+#[tauri::command]
+async fn link_set_enabled(on: bool) -> Result<link::LinkStatus, String> {
+    let l = the_link()?;
+    l.set_enabled(on)?;
+    Ok(l.status())
+}
+
+#[tauri::command]
+async fn link_pair_host() -> Result<link::PairingCode, String> {
+    the_link()?.begin_pairing()
+}
+
+#[tauri::command]
+async fn link_pair_cancel() -> Result<(), String> {
+    the_link()?.cancel_pairing();
+    Ok(())
+}
+
+#[tauri::command]
+async fn link_pair_join(address: String, code: String) -> Result<link::PeerView, String> {
+    the_link()?.join(&address, &code).await
+}
+
+#[tauri::command]
+async fn link_unpair(node_id: String) -> Result<link::LinkStatus, String> {
+    let l = the_link()?;
+    l.unpair(&node_id)?;
+    Ok(l.status())
+}
+
+/// Sends a chat payload to every paired computer; queued until each one acknowledges it.
+#[tauri::command]
+async fn link_send(payload: serde_json::Value) -> Result<String, String> {
+    the_link()?.send(peer_protocol::PacketKind::Chat, payload)
+}
+
 pub fn run() {
     let mut context = tauri::generate_context!();
     if let Some(data) = data_dir() {
@@ -619,6 +668,21 @@ pub fn run() {
             // Keeps the window in step with the terminal command.
             tauri::async_runtime::spawn(engine.clone().watch(true));
             app.manage(AppState { engine });
+            // Direct link to the user's other paired computers. Off until they pair or turn it on.
+            let emitter = app.handle().clone();
+            let handler: link::Handler = Arc::new(move |p: &peer_protocol::PeerPacket| {
+                emitter.emit("link-packet", p).map_err(|e| e.to_string())
+            });
+            match link::Link::open(&data.join("link"), link::PORT, handler) {
+                Ok(l) => {
+                    if l.enabled() {
+                        let started = l.clone();
+                        tauri::async_runtime::spawn(async move { started.start() });
+                    }
+                    let _ = LINK.set(l);
+                }
+                Err(e) => eprintln!("link: {e}"),
+            }
             // Falls back to the built-in page if an instantly applied one never starts.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
@@ -689,7 +753,14 @@ pub fn run() {
             attach_files,
             attach_data,
             open_attachment,
-            get_daily_wallpaper
+            get_daily_wallpaper,
+            link_status,
+            link_set_enabled,
+            link_pair_host,
+            link_pair_cancel,
+            link_pair_join,
+            link_unpair,
+            link_send
         ])
         .build(context)
         .expect("error while starting Consilium")

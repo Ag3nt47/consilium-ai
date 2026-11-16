@@ -224,6 +224,31 @@ export interface AgentActivity {
   updated_at: number;
 }
 
+/** One paired computer, as the direct link sees it (src-tauri/src/link.rs). */
+export type LinkPeer = {
+  node_id: string;
+  name: string;
+  connected: boolean;
+  /** The address in use, e.g. "192.168.1.20:8470"; the fastest answering route wins. */
+  route: string | null;
+  rtt_ms: number | null;
+  last_seen_ms: number | null;
+  /** Packets sent but not yet acknowledged; re-sent when the link comes back. */
+  queued: number;
+};
+
+export type LinkStatus = {
+  enabled: boolean;
+  node_id: string;
+  name: string;
+  port: number;
+  /** This computer's addresses, to type on the other computer if needed. */
+  addrs: string[];
+  pairing_code_expires_ms: number | null;
+  peers: LinkPeer[];
+  error: string | null;
+};
+
 const appApi = {
   agents: () => invoke<AgentInfo[]>("agents_status"),
   /** Remaining plan usage per council member id; members that don't report it are absent. */
@@ -246,6 +271,14 @@ const appApi = {
   attachData: (id: string, name: string, data: number[]) => invoke<Attachment>("attach_data", { id, name, data }),
   openAttachment: (id: string, attachment: Attachment) => invoke<void>("open_attachment", { id, attachment }),
   /** Runs command box `index` of AI message `eventId` once; its output goes to that AI as your message. */
+  linkStatus: () => invoke<LinkStatus>("link_status"),
+  linkSetEnabled: (on: boolean) => invoke<LinkStatus>("link_set_enabled", { on }),
+  /** Shows a one-time 6-digit code (valid 5 minutes, 3 tries) and turns the link on. */
+  linkPairHost: () => invoke<{ code: string; expires_ms: number }>("link_pair_host"),
+  linkPairCancel: () => invoke<void>("link_pair_cancel"),
+  linkPairJoin: (address: string, code: string) => invoke<LinkPeer>("link_pair_join", { address, code }),
+  linkUnpair: (nodeId: string) => invoke<LinkStatus>("link_unpair", { nodeId }),
+  linkSend: (payload: unknown) => invoke<string>("link_send", { payload }),
   runCommand: (id: string, eventId: string, index: number) => invoke<ChatEvent>("run_command", { id, eventId, index }),
   /** Shows the system file picker; returns the chosen files. */
   pickFiles: async (): Promise<string[]> => {
