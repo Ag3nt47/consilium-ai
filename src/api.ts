@@ -64,8 +64,8 @@ export const ACCESS_LEVELS: { id: Access; name: string; note: string }[] = [
   { id: "chat", name: "Chat only", note: "Sees only the conversation. No files, no tools." },
   { id: "read", name: "Read project", note: "Can read files in the conversation's project folder." },
   { id: "edit", name: "Edit project", note: "Can read and edit files in the project folder. No shell commands." },
-  { id: "own", name: "Full (its own settings)", note: "Works in the project folder with the permissions you already approved in that AI's own app. Anything that would need your approval is refused, since nobody can approve it in the background." },
-  { id: "unrestricted", name: "Unrestricted", note: "No approval checks or sandbox: runs any command, installs software and changes files in the project folder." },
+  { id: "own", name: "Full (its own settings)", note: "Uses the AI app's approved tools, including the host's native shell. Administrator/root commands still need a fresh, exact REQUEST and normal OS authentication." },
+  { id: "unrestricted", name: "Unrestricted", note: "Runs native PowerShell/Command Prompt on Windows or shells on macOS/Linux, installs software and changes files. Administrator/root elevation still needs a one-command REQUEST." },
 ];
 
 export interface AgentInfo {

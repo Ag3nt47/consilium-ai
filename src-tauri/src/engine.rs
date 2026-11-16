@@ -685,6 +685,7 @@ impl council::Host for RealHost {
             system.push_str(&usage);
         }
         let transcript = prompt::transcript(&events, agent.id);
+        let elevated_commands = prompt::elevated_command_grants(&events, agent.id);
         let files = crate::attach::files_for(&events, &self.store.files_dir(conv));
         let ws_path = workspace.map(PathBuf::from);
         let state_path = (access != Access::Chat).then(|| ws_path.clone()).flatten();
@@ -748,6 +749,7 @@ impl council::Host for RealHost {
                 &files,
                 &cancel,
                 Some(activity),
+                elevated_commands,
             )
             .await;
             drop(permit);

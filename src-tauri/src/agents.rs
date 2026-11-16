@@ -978,7 +978,7 @@ pub async fn run_with_files(
     files: &crate::attach::Files,
     cancel: &CancellationToken,
 ) -> Result<AgentReply, String> {
-    run_with_files_observed(agent, access, workspace, system, prompt, files, cancel, None).await
+    run_with_files_observed(agent, access, workspace, system, prompt, files, cancel, None, Vec::new()).await
 }
 
 /// `run_with_files`, reporting provider-native activity as structured output arrives.
@@ -992,6 +992,7 @@ pub async fn run_with_files_observed(
     files: &crate::attach::Files,
     cancel: &CancellationToken,
     activity: Option<ActivitySink>,
+    elevated_commands: Vec<String>,
 ) -> Result<AgentReply, String> {
     if let Some(provider) = api_provider(agent.kind) {
         // Attached files aren't sent: the API agents see only the conversation text.
@@ -1008,7 +1009,20 @@ pub async fn run_with_files_observed(
     }
     let kind = effective_kind(agent);
     let path = find(kind).ok_or_else(|| format!("{} isn't installed", agent.name))?;
-    run_at_with_usage(&path, kind, access, workspace, system, prompt, files, cancel, RUN_TIMEOUT, activity).await
+    run_at_with_usage(
+        &path,
+        kind,
+        access,
+        workspace,
+        system,
+        prompt,
+        files,
+        cancel,
+        RUN_TIMEOUT,
+        activity,
+        elevated_commands,
+    )
+    .await
 }
 
 /// Text-only `run_at_with_usage` at a given CLI path and time limit; the tests drive fake CLIs
@@ -1025,7 +1039,19 @@ pub async fn run_at(
     cancel: &CancellationToken,
     timeout: Duration,
 ) -> Result<String, String> {
-    run_at_with_usage(path, kind, access, workspace, system, prompt, &crate::attach::Files::default(), cancel, timeout, None)
+    run_at_with_usage(
+        path,
+        kind,
+        access,
+        workspace,
+        system,
+        prompt,
+        &crate::attach::Files::default(),
+        cancel,
+        timeout,
+        None,
+        Vec::new(),
+    )
         .await
         .map(|reply| reply.text)
 }
@@ -1042,6 +1068,7 @@ async fn run_at_with_usage(
     cancel: &CancellationToken,
     timeout: Duration,
     activity: Option<ActivitySink>,
+    elevated_commands: Vec<String>,
 ) -> Result<AgentReply, String> {
     let work = std::env::temp_dir().join(format!("consilium-{}", uuid::Uuid::new_v4()));
     let empty = work.join("empty");
@@ -1052,7 +1079,19 @@ async fn run_at_with_usage(
     };
     let reply_file = work.join("reply.txt");
     let plan = plan_with_files(kind, access, &dir, &reply_file, system, prompt, files);
-    let result = execute(path, kind, access, &dir, &reply_file, plan, cancel, timeout, activity).await;
+    let result = execute(
+        path,
+        kind,
+        access,
+        &dir,
+        &reply_file,
+        plan,
+        cancel,
+        timeout,
+        activity,
+        elevated_commands,
+    )
+    .await;
     let _ = std::fs::remove_dir_all(&work);
     result
 }
@@ -1068,6 +1107,7 @@ async fn execute(
     cancel: &CancellationToken,
     timeout: Duration,
     activity: Option<ActivitySink>,
+    mut elevated_commands: Vec<String>,
 ) -> Result<AgentReply, String> {
     let mut cmd = command(path);
     cmd.current_dir(dir).stdin(Stdio::piped()).args(&plan.args);
@@ -1104,18 +1144,41 @@ async fn execute(
                 };
                 recent_output.push_str(&String::from_utf8_lossy(&chunk));
                 keep_tail(&mut recent_output, 8_192);
-                if activity.is_some() || access == Access::Unrestricted {
+                if activity.is_some() || matches!(access, Access::Own | Access::Unrestricted) {
                     activity_output.push_str(&String::from_utf8_lossy(&chunk));
                     while let Some(end) = activity_output.find('\n') {
                         let line = activity_output[..end].trim_end_matches('\r').to_string();
                         activity_output.drain(..=end);
-                        if access == Access::Unrestricted {
-                            if let Some(command) = streamed_command(kind, &line).filter(|c| destructive_command(c)) {
+                        if matches!(access, Access::Own | Access::Unrestricted) {
+                            if let Some(command) = streamed_command(kind, &line) {
+                                if elevated_command(&command) {
+                                    if let Some(index) = elevated_commands.iter().position(|grant| grant.trim() == command.trim()) {
+                                        // Each grant is consumed before execution and exists only for this turn.
+                                        elevated_commands.remove(index);
+                                    } else {
+                                        let scrubbed = crate::redact::scrub(&command);
+                                        if scrubbed != command {
+                                            break 'watch Err(
+                                                "administrator approval refused: the command contains a credential-like value. Remove the secret and ask again; never place credentials in commands or REQUESTs."
+                                                    .into(),
+                                            );
+                                        }
+                                        let encoded = serde_json::to_string(command.trim()).unwrap_or_else(|_| "\"\"".into());
+                                        break 'watch Err(format!(
+                                            "administrator approval required for {}.\nREQUEST: Approve one elevated command on {} for the stated task, using the normal visible OS authentication prompt? ELEVATED_COMMAND_JSON: {}",
+                                            tool_name(kind),
+                                            std::env::consts::OS,
+                                            encoded,
+                                        ));
+                                    }
+                                }
+                                if destructive_command(&command) {
                                 break 'watch Err(format!(
                                     "safety stop: blocked a high-risk command from {}: {}\nREQUEST: Review the command and run it yourself only if its destructive effect is intended.",
                                     tool_name(kind),
                                     safe_activity_detail(&command),
                                 ));
+                                }
                             }
                         }
                         if let Some(signal) = activity_from_line(kind, &line) {
@@ -1395,8 +1458,20 @@ fn streamed_command(kind: Kind, line: &str) -> Option<String> {
         Kind::ClaudeCode if v["type"] == "assistant" => v["message"]["content"]
             .as_array()?
             .iter()
-            .find(|block| block["type"] == "tool_use" && block["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("bash")))
-            .and_then(|block| block["input"]["command"].as_str())
+            .find(|block| {
+                block["type"] == "tool_use"
+                    && block["name"].as_str().is_some_and(|n| {
+                        matches!(
+                            n.to_ascii_lowercase().as_str(),
+                            "bash" | "powershell" | "pwsh" | "cmd" | "terminal" | "run_command" | "exec"
+                        )
+                    })
+            })
+            .and_then(|block| {
+                block["input"]["command"]
+                    .as_str()
+                    .or_else(|| block["input"]["cmd"].as_str())
+            })
             .map(str::to_string),
         Kind::Antigravity if v["event"] == "step_update" => {
             let step = &v["step_update"];
@@ -1411,6 +1486,50 @@ fn streamed_command(kind: Kind, line: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Whether a command crosses the OS administrator/root boundary. Full capacity deliberately does
+/// not imply elevation: a matching, one-turn grant from an exact REQUEST is required separately.
+fn elevated_command(command: &str) -> bool {
+    shell_segments(command).into_iter().any(elevated_segment)
+}
+
+fn elevated_segment(segment: String) -> bool {
+    let words: Vec<String> = segment
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|ch: char| matches!(ch, '\'' | '"' | ',' | '(' | ')'))
+                .to_ascii_lowercase()
+        })
+        .collect();
+    if words.is_empty() {
+        return false;
+    }
+    let program = words[0].rsplit(['/', '\\']).next().unwrap_or(&words[0]);
+    let args = &words[1..];
+    if matches!(program, "sudo" | "sudoedit" | "doas" | "pkexec" | "runas" | "runas.exe" | "gsudo" | "gsudo.exe") {
+        return true;
+    }
+    let run_as_verb = words.windows(2).any(|pair| pair[0] == "-verb" && pair[1] == "runas");
+    if program == "start-process" && run_as_verb {
+        return true;
+    }
+    if matches!(program, "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe") {
+        let joined = args.join(" ");
+        if joined.contains("start-process") && run_as_verb {
+            return true;
+        }
+    }
+    if matches!(program, "osascript" | "osascript.exe") {
+        return args.join(" ").contains("with administrator privileges");
+    }
+    if matches!(program, "sh" | "bash" | "zsh" | "cmd" | "cmd.exe") {
+        return args
+            .iter()
+            .position(|arg| matches!(arg.as_str(), "-c" | "/c"))
+            .is_some_and(|index| elevated_command(&args[index + 1..].join(" ")));
+    }
+    false
 }
 
 /// Emergency brake for commands whose ordinary meaning is broad, difficult-to-recover data loss
@@ -1622,7 +1741,9 @@ fn claude_tool_activity(block: &serde_json::Value) -> ActivitySignal {
         "read" | "glob" => signal("reading", &format!("Using {name}"), detail),
         "grep" | "websearch" | "webfetch" => signal("researching", &format!("Using {name}"), detail),
         "edit" | "write" | "multiedit" | "notebookedit" => signal("coding", &format!("Using {name}"), detail),
-        "bash" => signal("running", "Running command", detail),
+        "bash" | "powershell" | "pwsh" | "cmd" | "terminal" | "run_command" | "exec" => {
+            signal("running", "Running command", detail)
+        }
         "task" | "agent" => signal("delegating", "Delegating task", detail),
         _ => signal("tool", &format!("Using {name}"), detail),
     }
@@ -1650,7 +1771,7 @@ fn antigravity_activity(v: &serde_json::Value) -> Option<ActivitySignal> {
                     signal("researching", &format!("Using {tool}"), detail)
                 } else if lower.contains("write") || lower.contains("replace") || lower.contains("edit") {
                     signal("coding", &format!("Using {tool}"), detail)
-                } else if lower.contains("command") || lower.contains("terminal") {
+                } else if lower.contains("command") || lower.contains("terminal") || lower.contains("powershell") || lower.contains("bash") {
                     signal("running", &format!("Using {tool}"), detail)
                 } else {
                     signal("tool", &format!("Using {tool}"), detail)
@@ -1978,6 +2099,14 @@ mod plan_tests {
         );
         assert_eq!(
             streamed_command(
+                Kind::ClaudeCode,
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"PowerShell","input":{"command":"Stop-Computer"}}]}}"#,
+            )
+            .as_deref(),
+            Some("Stop-Computer")
+        );
+        assert_eq!(
+            streamed_command(
                 Kind::Antigravity,
                 r#"{"event":"step_update","step_update":{"tool_name":"run_terminal_command","command":"shutdown -h now"}}"#,
             )
@@ -2013,6 +2142,31 @@ mod plan_tests {
             "Remove-Item -Recurse ./dist",
         ] {
             assert!(!destructive_command(command), "should allow: {command}");
+        }
+    }
+
+    #[test]
+    fn elevation_guard_recognises_native_admin_paths_without_blocking_plain_shells() {
+        for command in [
+            "sudo apt-get install widget",
+            "doas pkg_add widget",
+            "pkexec systemctl restart widget",
+            "runas.exe /user:Administrator cmd.exe",
+            "Start-Process PowerShell -Verb RunAs",
+            "powershell.exe -Command Start-Process cmd.exe -Verb RunAs",
+            "osascript -e 'do shell script \"installer\" with administrator privileges'",
+            "cmd.exe /c gsudo.exe winget install Widget",
+        ] {
+            assert!(elevated_command(command), "should require approval: {command}");
+        }
+        for command in [
+            "powershell.exe -NoProfile -Command Get-ChildItem",
+            "cmd.exe /d /s /c npm test",
+            "bash -lc 'cargo test'",
+            "winget search Widget",
+            "systemctl --user restart widget",
+        ] {
+            assert!(!elevated_command(command), "ordinary shell use should be allowed: {command}");
         }
     }
 
@@ -2179,6 +2333,7 @@ printf 'done' > "$out""#,
             &CancellationToken::new(),
             RUN_TIMEOUT,
             Some(sink),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -2205,6 +2360,42 @@ sleep 30"#,
         let _ = std::fs::remove_dir_all(ws);
         assert!(error.contains("safety stop") && error.contains("REQUEST:"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn elevated_command_needs_an_exact_grant_and_consumes_it_once() {
+        let command = "sudo apt-get install widget";
+        let script = format!(
+            r#"while [ "$1" != "-o" ]; do shift; done; out="$2"; cat >/dev/null
+echo '{{"type":"item.started","item":{{"type":"command_execution","command":"{command}"}}}}'
+printf 'done' > "$out""#
+        );
+        let ws = std::env::temp_dir().join(format!("consilium-elevation-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let p = fake(&script);
+        let denied = go(&p, Kind::Codex, Access::Unrestricted, Some(&ws), "system")
+            .await
+            .unwrap_err();
+        assert!(denied.contains("administrator approval required"), "{denied}");
+        assert!(denied.contains("ELEVATED_COMMAND_JSON"), "{denied}");
+
+        let approved = run_at_with_usage(
+            &p,
+            Kind::Codex,
+            Access::Unrestricted,
+            Some(&ws),
+            "system",
+            "prompt",
+            &crate::attach::Files::default(),
+            &CancellationToken::new(),
+            RUN_TIMEOUT,
+            None,
+            vec![command.into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(approved.text, "done");
+        let _ = std::fs::remove_dir_all(ws);
     }
 
     #[tokio::test]

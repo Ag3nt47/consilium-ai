@@ -157,6 +157,88 @@ pub struct Context<'a> {
     pub project_notes: Option<&'a str>,
 }
 
+/// Native terminal guidance shared by every CLI-backed AI with shell access. Keeping this in the
+/// system prompt makes the capability portable across providers while preserving the operating
+/// system's own UAC / administrator authentication boundary.
+fn terminal_capability(os: &str, access: Access) -> Option<String> {
+    if !matches!(access, Access::Own | Access::Unrestricted) {
+        return None;
+    }
+    let (platform, shells, elevation) = match os {
+        "windows" => (
+            "Windows",
+            "Use PowerShell (`pwsh`, falling back to `powershell.exe`) for native automation. Use `cmd.exe /d /s /c` only when a `.cmd`/`.bat` file or a legacy command requires Command Prompt.",
+            "After approval, use the normal Windows UAC path (for example PowerShell `Start-Process ... -Verb RunAs`) so Windows shows the person what is being elevated.",
+        ),
+        "macos" => (
+            "macOS",
+            "Use the native shell and ordinary command-line tools; use `zsh`, `bash`, or `sh` explicitly when a script requires one.",
+            "After approval, use the normal macOS administrator authorization path. If `sudo` needs a TTY, open a visible native terminal for that one command or ask the person to run it there.",
+        ),
+        "linux" => (
+            "Linux",
+            "Use the native shell and ordinary command-line tools; use `bash` or `sh` explicitly when a script requires one.",
+            "After approval, use the host's normal `sudo`, `doas`, or `pkexec` path. If authentication needs a TTY, open a visible native terminal for that one command or ask the person to run it there.",
+        ),
+        other => (
+            other,
+            "Use only native shell tools that are actually installed on this host.",
+            "After approval, use the operating system's normal visible administrator-authorization path.",
+        ),
+    };
+    Some(format!(
+        "Native terminal capability ({platform}): {shells}\n\
+Administrator elevation is a separate boundary even in Full capacity. Before any command that uses \
+administrator/root elevation, stop and ask one exact request in this form: `REQUEST: Approve one elevated \
+command on {platform} for <reason>? ELEVATED_COMMAND_JSON: <JSON string containing the exact command>`. \
+Include the affected paths or services and the rollback in the reason. An approval applies only to that exact \
+command, once, when the newest human message quotes that request with `Approved:`. A denial, edited command, \
+custom response, later message, or old approval is not authorization. {elevation} Never ask for, read, store, \
+echo, or pipe an administrator password, recovery key, UAC credential, token, or one-time code. Never use \
+`sudo -S`, password environment variables, credential files, or an approval for one command to run another."
+    ))
+}
+
+const ELEVATED_COMMAND_MARKER: &str = "ELEVATED_COMMAND_JSON:";
+
+fn elevated_command_in_request(request: &str) -> Option<String> {
+    let (before, encoded) = request.rsplit_once(ELEVATED_COMMAND_MARKER)?;
+    if before.contains(ELEVATED_COMMAND_MARKER) {
+        return None;
+    }
+    let command: String = serde_json::from_str(encoded.trim()).ok()?;
+    let command = command.trim().to_string();
+    (!command.is_empty()
+        && command.len() <= 4_096
+        && !command.chars().any(|ch| matches!(ch, '\n' | '\r' | '\0')))
+    .then_some(command)
+}
+
+/// Exact, single-turn elevation grant for `me`. The approval must be the newest human message,
+/// target this AI (when addressed), quote one of this AI's earlier REQUEST lines exactly, and end
+/// in a machine-readable JSON command. Old approvals therefore cannot be replayed by a later turn.
+pub fn elevated_command_grants(events: &[Event], me: &str) -> Vec<String> {
+    let Some(approval) = events.iter().rev().find(|event| event.kind == "message" && event.sender == "human") else {
+        return Vec::new();
+    };
+    if !approval.to.is_empty() && !approval.to.iter().any(|target| target == me) {
+        return Vec::new();
+    }
+    let Some(request) = approval.text.trim().strip_prefix("Approved:").map(str::trim) else {
+        return Vec::new();
+    };
+    let requested_by_me = events.iter().rev().any(|event| {
+        event.seq < approval.seq
+            && event.kind == "message"
+            && event.sender == me
+            && event.requests.iter().any(|candidate| candidate == request)
+    });
+    if !requested_by_me {
+        return Vec::new();
+    }
+    elevated_command_in_request(request).into_iter().collect()
+}
+
 pub fn system(me: &str, round: u32, rounds: u32, ctx: &Context) -> String {
     let others: Vec<String> = ctx
         .members
@@ -221,6 +303,10 @@ re-read files before changing them. End your message with a short list of what y
 commands or use tools: answer in text, and say what you would check rather than guessing."
             .to_string(),
     });
+    if let Some(capability) = terminal_capability(std::env::consts::OS, ctx.access) {
+        s.push_str("\n\n");
+        s.push_str(&capability);
+    }
     if ctx.workspace.is_some() && matches!(ctx.access, Access::Edit | Access::Own | Access::Unrestricted) {
         s.push_str(
             "\n\nWhen the human asks the council to build or change something, work at full capacity as a team: \
@@ -614,5 +700,49 @@ mod tests {
         assert!(!system("gpt", 1, 1, &Context { members: &m, workspace: None, access: Access::Edit, memory: None, project_notes: None }).contains("full capacity"));
         let read = system("gpt", 1, 1, &Context { members: &m, workspace: Some("/p"), access: Access::Read, memory: None, project_notes: None });
         assert!(read.contains("cannot change files"));
+    }
+
+    #[test]
+    fn native_terminal_skill_is_cross_platform_and_approval_gated() {
+        for (os, names) in [
+            ("windows", ["PowerShell", "cmd.exe"]),
+            ("macos", ["macOS", "sudo"]),
+            ("linux", ["Linux", "sudo"]),
+        ] {
+            let text = terminal_capability(os, Access::Unrestricted).unwrap();
+            assert!(names.iter().all(|name| text.contains(name)), "{os}: {text}");
+            assert!(text.contains("ELEVATED_COMMAND_JSON"));
+            assert!(text.contains("exact command, once"));
+            assert!(text.contains("Never ask for, read, store"));
+        }
+        assert!(terminal_capability("windows", Access::Own).is_some());
+        assert!(terminal_capability("windows", Access::Edit).is_none());
+        assert!(terminal_capability("linux", Access::Read).is_none());
+        assert!(terminal_capability("macos", Access::Chat).is_none());
+    }
+
+    #[test]
+    fn elevation_grant_is_exact_targeted_and_only_on_the_latest_human_approval() {
+        let request = r##"Approve one elevated command on Linux to install the package? ELEVATED_COMMAND_JSON: "sudo apt-get install widget""##;
+        let mut asked = ev("gpt", &format!("REQUEST: {request}"));
+        asked.id = "asked".into();
+        asked.seq = 1;
+        asked.requests = vec![request.into()];
+        let mut approved = ev("human", &format!("Approved: {request}"));
+        approved.id = "approved".into();
+        approved.seq = 2;
+        approved.to = vec!["gpt".into()];
+        assert_eq!(
+            elevated_command_grants(&[asked.clone(), approved.clone()], "gpt"),
+            vec!["sudo apt-get install widget"]
+        );
+        assert!(elevated_command_grants(&[asked.clone(), approved.clone()], "claude").is_empty());
+
+        let mut later = ev("human", "also update the docs");
+        later.seq = 3;
+        assert!(elevated_command_grants(&[asked.clone(), approved.clone(), later], "gpt").is_empty());
+
+        approved.text = format!("Approved: {request} --changed");
+        assert!(elevated_command_grants(&[asked, approved], "gpt").is_empty());
     }
 }

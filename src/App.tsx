@@ -1128,7 +1128,7 @@ export default function App() {
     try {
       await api.send(
         current,
-        "Update request: nothing is staged to install. If a build is already running, say so and when it should be ready; don't start a second one. Otherwise agree in one message who takes what, then work from docs/UPGRADE_STATUS.md, the canonical backlog for every requirement in the uploaded Word documents 'Consilium Upgrade Overhaul.docx' and '2nd consilium update.docx'. Prioritize unfinished document items marked in progress or next before later items, docs/ROADMAP.md, open bugs, or newly noticed improvements. Build and test the selected work, update the backlog in the same commit, and stage it: npm run update:ui for screen-only changes, or a version bump and npm run update:stage for engine changes. Do not mark a document item complete until it is implemented and verified. Only one build at a time on this machine.",
+        "Update request: nothing is staged to install. If a build is already running, say so and when it should be ready; don't start a second one. Otherwise agree in one message who takes what, then work from docs/UPGRADE_STATUS.md, the canonical backlog for every requirement in the uploaded Word documents 'Consilium Upgrade Overhaul.docx' and '2nd consilium update.docx'. Prioritize unfinished document items marked in progress or next before later items, docs/ROADMAP.md, open bugs, or newly noticed improvements. Build and test the selected work, update the backlog in the same commit, commit it, integrate it onto main, and push origin/main before staging it. Confirm GitHub checks pass on macOS, Windows and Linux. Stage with npm run update:ui for screen-only changes, or a version bump and npm run update:stage for engine changes. Do not mark a document item complete until it is implemented and verified. Only one build at a time on this machine.",
         members.map((member) => member.id),
         1,
       );
@@ -1389,7 +1389,7 @@ export default function App() {
   }
 
   // Full capacity: a project folder for every conversation, every AI Unrestricted, everyone asked,
-  // Discuss on. The AIs can then run commands and install software in that folder.
+  // Discuss on. Native shells are available; administrator/root elevation remains per-command.
   async function fullCapacity() {
     try {
       let folder = council?.default_workspace ?? null;
@@ -1400,7 +1400,8 @@ export default function App() {
       }
       const ok = confirm(
         `Full capacity: every AI becomes Unrestricted in ${folder} and any conversation's own project folder. ` +
-          "They can run any command, install software and change files there without asking you first.\n\nContinue?",
+          "They can run native shell commands, install software and change files there without asking first. " +
+          "Administrator/root elevation still requires a fresh REQUEST for one exact command and the normal OS prompt.\n\nContinue?",
       );
       if (!ok) return;
       await api.setDefaultWorkspace(folder);

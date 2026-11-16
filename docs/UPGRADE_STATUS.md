@@ -93,6 +93,7 @@ not complete the phase.
 | Item | Status | Notes |
 |---|---|---|
 | macOS / Windows / Linux feature parity | ✅ | Update Now, orphan cleanup, Signal setup and platform-specific shortcuts/installers use native paths on all three |
+| Approval-gated native terminal capability | ✅ | Every Full/Own CLI agent receives OS-specific PowerShell/cmd or Unix-shell guidance. Administrator/root elevation requires a fresh exact-command REQUEST, is single-use, keeps UAC/sudo authentication in the OS, and forbids password capture or piping |
 | Adaptive support for older or weaker PCs | ✅ | Portable CPU/RAM profile caps local AI processes across the app and terminal; high pressure reduces polling and GPU-heavy visual effects |
 | Crash-safe fail-forward behavior | ✅ | OS-held AI slots release after crashes; a broken capacity gate does not lock the user out; Stop remains cancellation-aware while queued |
 | Clear Netrunner REQUEST callouts | ✅ | Opaque dark-red panel, brighter border/text and unblurred action buttons |
