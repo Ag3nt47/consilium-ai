@@ -67,3 +67,28 @@ export function handledCommands(events: { sender: string; kind: string; text: st
 export function deniedText(who: string, eventId: string, index: number): string {
   return `Denied command from ${who}'s message: don't run it.\n${commandRef(eventId, index)}`;
 }
+
+export function commandElementId(key: string): string {
+  return `command-${key.replace(/#/g, "-")}`;
+}
+
+/** Runnable shell command blocks from an AI that haven't been run or denied yet, oldest first. */
+export function pendingCommands(
+  events: { id: string; seq: number; sender: string; kind: string; text: string }[],
+  handled: Map<string, "ran" | "denied">,
+  afterSeq: number | null,
+): string[] {
+  if (afterSeq === null) return [];
+  const out: string[] = [];
+  for (const e of events) {
+    if (e.seq <= afterSeq || e.kind !== "message" || e.sender === "human") continue;
+    const fences = fencedBlocks(e.text);
+    fences.forEach((fence, index) => {
+      if (fence.closed && shellName(fence.lang)) {
+        const key = `${e.id}#${index}`;
+        if (!handled.has(key)) out.push(key);
+      }
+    });
+  }
+  return out;
+}

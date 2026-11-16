@@ -434,7 +434,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: Signal replies now reach your phone. Because Consilium is linked to your own Signal number, its groups had no other member, so replies went nowhere; every AI reply and Consilium note now goes to your Note to Self, starting with who sent it, such as Claude: and the message.";
+const WHATS_NEW: &str = "What's new: runnable shell commands now appear in Respond to request so you never miss a Run button. Unrestricted mode on Windows runs commands cleanly without permission denials. One-click Signal install works on Windows too, and phone messages are labeled You (Signal). Windows and Linux automatically download and stage updates from GitHub releases. Settings includes an Install All Tools button, and voice chat delivers faster 800ms turns with immediate spoken acknowledgements.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -471,6 +471,13 @@ fn announce_update(engine: &Engine, data: &std::path::Path) {
 #[tauri::command]
 fn update_available() -> Option<update::Staged> {
     data_dir().and_then(|d| update::staged(&d))
+}
+
+/// Stages a release update downloaded from GitHub into `<data>/update/next`.
+#[tauri::command]
+async fn stage_release_update(version: String, url: String) -> Result<(), String> {
+    let data = data_dir().ok_or("can't find Consilium's data folder")?;
+    update::stage_from_url(&data, &version, &url).await
 }
 
 /// Update Now: tells every conversation with AIs at work that the app is updating, starts the
@@ -940,6 +947,7 @@ pub fn run() {
             run_command,
             update_available,
             update_now,
+            stage_release_update,
             ui_update_available,
             ui_update_apply,
             ui_loaded,

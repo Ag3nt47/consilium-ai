@@ -142,6 +142,32 @@ export class Speaker {
     else this.report();
   }
 
+  /** Quick spoken acknowledgement in voice chat while an AI prepares its answer. */
+  sayThinking(agent = "gemini", name = "Gemini") {
+    if (!synth || this.current || this.queue.length > 0) return;
+    const phrases = ["Thinking…", "One moment…", "On it…", "Checking that…"];
+    const phrase = phrases[Math.floor(Math.random() * phrases.length)];
+    const u = new SpeechSynthesisUtterance(phrase);
+    const v = voiceFor(agent);
+    if (v) u.voice = v;
+    u.rate = 1.15;
+    u.pitch = PITCH[agent] ?? 1;
+    this.current = { agent, name };
+    this.report();
+    u.onend = u.onerror = () => {
+      if (this.current?.name === name && this.queue.length === 0) {
+        this.current = null;
+        this.report();
+      }
+    };
+    try {
+      synth.speak(u);
+    } catch {
+      this.current = null;
+      this.report();
+    }
+  }
+
   private clearWatchdog() {
     window.clearInterval(this.watchdog);
     this.watchdog = undefined;
@@ -266,7 +292,7 @@ export class Listener {
     private onInterim: (text: string) => void,
     private onUtterance: (text: string) => void,
     private onError: (message: string) => void,
-    private pauseMs = 1500,
+    private pauseMs = 800,
   ) {}
 
   start() {

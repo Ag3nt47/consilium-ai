@@ -2,6 +2,7 @@
 // It only notifies: nothing is downloaded or installed automatically. Offline or rate-limited
 // checks fail quietly. Only the public releases API is contacted, with no identifying data.
 import { getVersion } from "@tauri-apps/api/app";
+import { api } from "./api";
 
 export const REPO = "Ag3nt47/consilium-ai";
 export const RELEASES_URL = `https://github.com/${REPO}/releases`;
@@ -71,6 +72,21 @@ export async function checkForUpdate(force = false): Promise<UpdateInfo | null> 
         publishedAt: String(r.published_at || ""),
       };
       writeCache({ lastCheck: Date.now(), etag: res.headers.get("ETag") || undefined, latest });
+      if (Array.isArray(r.assets) && compareVersions(latest.latest, current) > 0) {
+        const asset = r.assets.find((a: Record<string, unknown>) => {
+          const name = String(a.name || "").toLowerCase();
+          if (navigator.userAgent.includes("Windows") || navigator.platform?.includes("Win")) {
+            return name.endsWith("-setup.exe") || name.endsWith(".exe");
+          }
+          if (navigator.userAgent.includes("Linux") || navigator.platform?.includes("Linux")) {
+            return name.endsWith(".appimage");
+          }
+          return false;
+        });
+        if (asset && typeof asset.browser_download_url === "string") {
+          api.stageReleaseUpdate(latest.latest, asset.browser_download_url).catch(() => undefined);
+        }
+      }
     } else {
       // 404 (no releases yet), rate limits, etc.: remember we checked, try again tomorrow.
       writeCache({ ...cache, lastCheck: Date.now() });

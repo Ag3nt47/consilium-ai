@@ -1,5 +1,5 @@
 import { TypedText, TYPED_THEMES } from "./typed";
-import { fencedBlocks, shellName, needsAdmin, handledCommands, deniedText, type Fence } from "./commands";
+import { commandElementId, fencedBlocks, handledCommands, needsAdmin, pendingCommands, shellName, deniedText, type Fence } from "./commands";
 import { dictationHint, paletteKey, paletteKeyWords } from "./platform";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -431,7 +431,7 @@ function CommandBox({ event, fence, index, actions }: { event: ChatEvent; fence:
     });
   };
   return (
-    <div className={`command-box${shell ? " shell" : ""}`}>
+    <div id={commandElementId(key)} className={`command-box${shell ? " shell" : ""}`}>
       <div className="command-head">
         <span className="command-lang">{shell ?? (fence.lang || "code")}{shell && needsAdmin(fence.code) ? " · admin" : ""}</span>
         <span className="command-actions">
@@ -1440,6 +1440,7 @@ export default function App() {
         if (voiceCommandRef.current(t)) return;
         // A real interruption: stop reading. The replies stay in the chat.
         if (spoken) sp.stop();
+        sp.sayThinking(members[0]?.id ?? "gemini", members[0]?.name ?? "Gemini");
         sendTextRef.current(t);
       },
       (m) => setError(m),
@@ -1531,17 +1532,47 @@ export default function App() {
   }), [ranCommands, runningCommands, current, members, agents]);
   const answered = useMemo(() => answeredRequests(events), [events]);
   const unanswered = useMemo(() => pendingRequests(events, answered, requestFloor), [events, answered, requestFloor]);
+  const unansweredCmds = useMemo(() => pendingCommands(events, ranCommands, requestFloor), [events, ranCommands, requestFloor]);
+  const totalUnanswered = unanswered.length + unansweredCmds.length;
   const typedActivity = TYPED_THEMES.has(prefs.theme);
 
-  // Scroll to the oldest request still waiting for Approve or Deny, and flash it.
+  // Scroll to the oldest request or command still waiting for a response, and flash it.
   function jumpToRequest() {
-    const el = unanswered.length ? document.getElementById(requestElementId(unanswered[0])) : null;
-    if (!el) return;
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
-    el.classList.remove("request-flash");
-    void el.offsetWidth;
-    el.classList.add("request-flash");
-    window.setTimeout(() => el.classList.remove("request-flash"), 1800);
+    let targetEl: HTMLElement | null = null;
+    for (const e of events) {
+      if (requestFloor !== null && e.seq <= requestFloor) continue;
+      for (const line of e.text.split("\n").keys()) {
+        const rKey = requestKey(e.id, line);
+        if (unanswered.includes(rKey)) {
+          const el = document.getElementById(requestElementId(rKey));
+          if (el) {
+            targetEl = el;
+            break;
+          }
+        }
+      }
+      if (targetEl) break;
+      const fences = fencedBlocks(e.text);
+      for (const [fi, fence] of fences.entries()) {
+        if (fence.closed && shellName(fence.lang)) {
+          const cKey = `${e.id}#${fi}`;
+          if (unansweredCmds.includes(cKey)) {
+            const el = document.getElementById(commandElementId(cKey));
+            if (el) {
+              targetEl = el;
+              break;
+            }
+          }
+        }
+      }
+      if (targetEl) break;
+    }
+    if (!targetEl) return;
+    targetEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    targetEl.classList.remove("request-flash");
+    void targetEl.offsetWidth;
+    targetEl.classList.add("request-flash");
+    window.setTimeout(() => targetEl?.classList.remove("request-flash"), 1800);
   }
 
   async function retryAgent(a: AgentInfo) {
@@ -2286,11 +2317,11 @@ export default function App() {
             <button
               type="button"
               className="btn small respond-request"
-              disabled={unanswered.length === 0}
+              disabled={totalUnanswered === 0}
               onClick={jumpToRequest}
-              title={unanswered.length ? `Scroll to the oldest request still waiting for a response${unanswered.length > 1 ? ` (${unanswered.length} waiting)` : ""}` : "No unanswered requests"}
+              title={totalUnanswered ? `Scroll to the oldest request or command still waiting for a response${totalUnanswered > 1 ? ` (${totalUnanswered} waiting)` : ""}` : "No unanswered requests"}
             >
-              Respond to request{unanswered.length > 0 ? ` · ${unanswered.length}` : ""}
+              Respond to request{totalUnanswered > 0 ? ` · ${totalUnanswered}` : ""}
             </button>
             <button
               type="button"

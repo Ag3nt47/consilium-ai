@@ -38,6 +38,19 @@ export function ToolsSettings({
       .then(() => setNote(`Sent to ${ais.find((a) => a.id === to)?.name ?? to} about ${name}. Watch the chat for the result.`))
       .catch((e) => setNote(`Couldn't send it: ${e}`));
 
+  const uninstalled = tools?.filter((t) => !t.installed) ?? [];
+  const installAll = () => {
+    if (!uninstalled.length || !to) return;
+    const names = uninstalled.map((t) => t.name).join(", ");
+    const pinned = uninstalled.filter((t) => t.install_command);
+    let prompt = `Please install all uninstalled tools and skills from the tool catalog: ${names}.\n`;
+    if (pinned.length > 0) {
+      prompt += "Approved pinned install commands:\n" + pinned.map((t) => `- ${t.name}: INSTALL_COMMAND_JSON: ${JSON.stringify(t.install_command)}`).join("\n") + "\n";
+    }
+    prompt += "Check prerequisites, install required dependencies, request approval where needed, and record installed tools with REMEMBER:.";
+    send(prompt, `all tools (${names})`);
+  };
+
   return (
     <div className="tools-settings">
       <p className="muted small">
@@ -53,6 +66,14 @@ export function ToolsSettings({
             </option>
           ))}
         </select>{" "}
+        <button
+          className="btn small-btn"
+          disabled={!to || !uninstalled.length}
+          title={uninstalled.length ? `Request installation of all ${uninstalled.length} uninstalled catalog tools` : "All catalog tools are already installed"}
+          onClick={installAll}
+        >
+          Install all tools ({uninstalled.length})
+        </button>{" "}
         <button className="link" title="Check again which tools are installed" onClick={reload}>
           Refresh
         </button>

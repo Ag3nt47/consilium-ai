@@ -2538,7 +2538,8 @@ button.attachment {
   text-shadow: none;
   border-radius: 0;
 }
-.request.request-flash {
+.request.request-flash,
+.command-box.request-flash {
   animation: request-flash 0.6s ease-in-out 3;
 }
 @keyframes request-flash {

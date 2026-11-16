@@ -84,7 +84,13 @@ fn swap_paths(data: &Path, exe: &Path, appimage: Option<&Path>) -> Result<(PathB
     let dir = staged_dir(data);
     let (staged, target) = match appimage {
         Some(a) => (dir.join("Consilium.AppImage"), a.to_path_buf()),
-        None if cfg!(windows) => (dir.join("consilium.exe"), exe.to_path_buf()),
+        None if cfg!(windows) => {
+            if dir.join("Consilium-Windows-Setup.exe").is_file() {
+                (dir.join("Consilium-Windows-Setup.exe"), exe.to_path_buf())
+            } else {
+                (dir.join("consilium.exe"), exe.to_path_buf())
+            }
+        }
         None => (dir.join("consilium"), exe.to_path_buf()),
     };
     if !staged.is_file() {
@@ -149,12 +155,58 @@ pub fn windows_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &
         "$ErrorActionPreference = 'SilentlyContinue'\n\
          for ($i = 0; $i -lt 60; $i++) {{ if (-not (Get-Process -Id {pid})) {{ break }}; Start-Sleep -Milliseconds 500 }}\n\
          Stop-Process -Id {pid} -Force; Start-Sleep -Milliseconds 300\n\
-         Remove-Item -LiteralPath {old} -Force\n\
-         try {{ Move-Item -LiteralPath {t} -Destination {old} -ErrorAction Stop; Move-Item -LiteralPath {s} -Destination {t} -ErrorAction Stop; Remove-Item -LiteralPath {old} -Force }}\n\
-         catch {{ if (-not (Test-Path -LiteralPath {t})) {{ Move-Item -LiteralPath {old} -Destination {t} }} }}\n\
-         Remove-Item -LiteralPath {l} -Recurse -Force\n\
+         if ({s} -like '*-Setup.exe' -or {s} -like '*-setup.exe') {{\n\
+             Start-Process -FilePath {s} -ArgumentList '/S' -Wait\n\
+             Remove-Item -LiteralPath {l} -Recurse -Force\n\
+         }} else {{\n\
+             Remove-Item -LiteralPath {old} -Force\n\
+             try {{ Move-Item -LiteralPath {t} -Destination {old} -ErrorAction Stop; Move-Item -LiteralPath {s} -Destination {t} -ErrorAction Stop; Remove-Item -LiteralPath {old} -Force }}\n\
+             catch {{ if (-not (Test-Path -LiteralPath {t})) {{ Move-Item -LiteralPath {old} -Destination {t} }} }}\n\
+             Remove-Item -LiteralPath {l} -Recurse -Force\n\
+         }}\n\
          Start-Process -FilePath {t}\n"
     )
+}
+
+/// Downloads and stages a release binary into `<data>/update/next`.
+pub async fn stage_from_url(data: &Path, version: &str, url: &str) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .user_agent("Consilium-Updater")
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let resp = client.get(url).send().await.map_err(|e| format!("download failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("download returned HTTP {}", resp.status()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("read failed: {e}"))?;
+    let next_dir = staged_dir(data);
+    let tmp_dir = data.join("update").join("tmp_download");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("create tmp dir: {e}"))?;
+
+    let filename = if cfg!(windows) {
+        "Consilium-Windows-Setup.exe"
+    } else if cfg!(target_os = "linux") {
+        "Consilium.AppImage"
+    } else {
+        "update.bin"
+    };
+
+    let target_file = tmp_dir.join(filename);
+    std::fs::write(&target_file, &bytes).map_err(|e| format!("write asset: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o755));
+    }
+
+    let clean_ver = version.trim_start_matches(['v', 'V']).trim();
+    std::fs::write(tmp_dir.join("VERSION"), format!("{clean_ver}\n")).map_err(|e| format!("write version: {e}"))?;
+
+    let _ = std::fs::remove_dir_all(&next_dir);
+    std::fs::rename(&tmp_dir, &next_dir).map_err(|e| format!("stage update: {e}"))?;
+    Ok(())
 }
 
 /// Starts the detached helper. The caller then exits the app.
@@ -275,5 +327,14 @@ mod tests {
         assert!(s.contains(r"Move-Item -LiteralPath 'C:\Users\O''Neil\AppData\Local\Consilium\Consilium.exe' -Destination 'C:\Users\O''Neil\AppData\Local\Consilium\Consilium.exe.old'"));
         assert!(s.contains("catch { if (-not (Test-Path"));
         assert!(s.trim_end().ends_with(r"Start-Process -FilePath 'C:\Users\O''Neil\AppData\Local\Consilium\Consilium.exe'"));
+
+        let setup = windows_helper_script(
+            9,
+            Path::new(r"C:\Users\O'Neil\AppData\Roaming\c\update\next\Consilium-Windows-Setup.exe"),
+            Path::new(r"C:\Users\O'Neil\AppData\Local\Consilium\Consilium.exe"),
+            Path::new(r"C:\Users\O'Neil\AppData\Roaming\c\update\next"),
+        );
+        assert!(setup.contains("Start-Process -FilePath 'C:\\Users\\O''Neil\\AppData\\Roaming\\c\\update\\next\\Consilium-Windows-Setup.exe' -ArgumentList '/S' -Wait"));
+        assert!(setup.trim_end().ends_with(r"Start-Process -FilePath 'C:\Users\O''Neil\AppData\Local\Consilium\Consilium.exe'"));
     }
 }

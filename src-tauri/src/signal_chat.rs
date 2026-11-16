@@ -101,7 +101,7 @@ pub fn outbound_text(e: &Event) -> Option<String> {
     let name = match e.sender.as_str() {
         "human" => {
             // A message received from Signal should not be echoed back to the phone
-            if e.via.as_deref().map_or(false, |v| v.eq_ignore_ascii_case("signal")) {
+            if e.via.as_deref().is_some_and(|v| v.eq_ignore_ascii_case("signal")) {
                 return None;
             }
             "You".to_string()

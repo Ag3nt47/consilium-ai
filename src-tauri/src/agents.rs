@@ -922,7 +922,15 @@ pub fn plan_with_files(
                     push("accept-edits");
                 }
                 Access::Own => {} // Antigravity's own permission settings decide
-                Access::Unrestricted => push("--dangerously-skip-permissions"),
+                Access::Unrestricted => {
+                    // On Windows, Antigravity's print mode (-p) with --dangerously-skip-permissions
+                    // triggers an internal policy denial for shell execution ("bash"), returning
+                    // denied_actions instead of running the command. On Windows we omit the flag so
+                    // it uses Antigravity's own permission configuration (which works in Full).
+                    if !cfg!(windows) {
+                        push("--dangerously-skip-permissions");
+                    }
+                }
             }
             if let Some(d) = dir {
                 push("--add-dir");
@@ -2242,7 +2250,10 @@ mod plan_tests {
     fn unrestricted_access_uses_each_tools_own_bypass_switch() {
         assert!(args(Kind::Codex, Access::Unrestricted).contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(args(Kind::ClaudeCode, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
+        #[cfg(not(windows))]
         assert!(args(Kind::Antigravity, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
+        #[cfg(windows)]
+        assert!(!args(Kind::Antigravity, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
         assert!(has(&args(Kind::GeminiCli, Access::Unrestricted), &["--approval-mode", "yolo"]));
         for k in [Kind::Codex, Kind::ClaudeCode, Kind::Antigravity, Kind::GeminiCli] {
             assert!(!args(k, Access::Edit).iter().any(|a| a.contains("dangerously") || a == "yolo"));
