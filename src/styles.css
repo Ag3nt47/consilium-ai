@@ -3258,3 +3258,23 @@ button.attachment {
   .pc-pressure-sub { display: none; }
   .sidebar-foot { gap: 4px; }
 }
+
+/* Sidebar fit levels, set by useSidebarFit in App.tsx: each level makes the council cards and
+   the PC pressure box more compact, until PC pressure, Add AI and Settings fit on screen.
+   Level 4 is the last resort: the council list scrolls in its own box instead of being cut off. */
+.sidebar[data-fit="1"], .sidebar[data-fit="2"], .sidebar[data-fit="3"], .sidebar[data-fit="4"] { gap: 6px; padding-top: 8px; padding-bottom: 8px; }
+.sidebar:not([data-fit="0"]) .brand-tagline,
+.sidebar:not([data-fit="0"]) .usage-forecast,
+.sidebar:not([data-fit="0"]) .usage-label small,
+.sidebar:not([data-fit="0"]) .agent-kind { display: none; }
+.sidebar:not([data-fit="0"]) .agent { padding: 4px 8px; }
+.sidebar:not([data-fit="0"]) .agent-list { gap: 3px; }
+.sidebar:not([data-fit="0"]) .sidebar-foot { gap: 4px; }
+.sidebar[data-fit="2"] .pc-pressure-sub, .sidebar[data-fit="3"] .pc-pressure-sub, .sidebar[data-fit="4"] .pc-pressure-sub { display: none; }
+.sidebar[data-fit="2"] .usage-row + .usage-row, .sidebar[data-fit="3"] .usage-row + .usage-row, .sidebar[data-fit="4"] .usage-row + .usage-row { display: none; }
+.sidebar[data-fit="2"] .brand-icon, .sidebar[data-fit="3"] .brand-icon, .sidebar[data-fit="4"] .brand-icon { width: 24px; height: 24px; }
+.sidebar[data-fit="3"] .usage-meter, .sidebar[data-fit="3"] .usage-unavailable,
+.sidebar[data-fit="4"] .usage-meter, .sidebar[data-fit="4"] .usage-unavailable { display: none; }
+.sidebar[data-fit="3"] .agent, .sidebar[data-fit="4"] .agent { padding: 3px 8px; }
+.sidebar[data-fit="4"] .agents { flex: 1 1 auto; min-height: 60px; }
+.sidebar[data-fit="4"] .agent-list { flex: 0 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }

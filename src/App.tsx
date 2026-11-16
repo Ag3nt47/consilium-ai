@@ -1,7 +1,7 @@
 import { TypedText, TYPED_THEMES } from "./typed";
 import { fencedBlocks, shellName, needsAdmin, handledCommands, deniedText, type Fence } from "./commands";
 import { dictationHint, paletteKey, paletteKeyWords } from "./platform";
-import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -765,6 +765,31 @@ function pressureColor(percent: number): string {
 
 function ordinal(n: number): string {
   return n === 2 ? "2nd" : n === 3 ? "3rd" : `${n}th`;
+}
+
+/** Sidebar fit: steps the sidebar through compactness levels (0 = full, 4 = council list scrolls)
+ *  until PC pressure, Add AI and Settings fit on screen. Re-measures on resize and content change. */
+const SIDEBAR_FIT_MAX = 4;
+function useSidebarFit(ref: { current: HTMLElement | null }) {
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let frame = 0;
+    const fit = () => {
+      frame = 0;
+      for (let level = 0; level <= SIDEBAR_FIT_MAX; level++) {
+        el.dataset.fit = String(level);
+        if (el.scrollHeight <= el.clientHeight + 1) return;
+      }
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(fit); };
+    fit();
+    const ro = new ResizeObserver(schedule);
+    ro.observe(el);
+    const mo = new MutationObserver(schedule);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => { ro.disconnect(); mo.disconnect(); if (frame) cancelAnimationFrame(frame); };
+  }, [ref]);
 }
 
 function ResourcePressureGauge({ pressure }: { pressure: SystemPressure | null }) {
@@ -1873,6 +1898,9 @@ export default function App() {
     }
   }
 
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  useSidebarFit(sidebarRef);
+
   const filteredCommands = useMemo(() => {
     const q = paletteQuery.trim().toLowerCase();
     if (!q) return paletteCommands;
@@ -1882,7 +1910,7 @@ export default function App() {
   return (
     <div className="app">
       <div className="fx-scanlines" aria-hidden />
-      <aside className="sidebar">
+      <aside className="sidebar" ref={sidebarRef}>
         <div className="brand">
           <img src="/icon.png" alt="" className="brand-icon" />
           <div>
