@@ -1163,6 +1163,27 @@ async fn execute(
                         ));
                     }
                 }
+                if !elevated_command(&command) && crate::toolbox::install_command(&command) {
+                    let wanted = format!("{}{}", crate::prompt::INSTALL_GRANT_PREFIX, command.trim());
+                    if let Some(index) = elevated_commands.iter().position(|grant| grant.trim() == wanted) {
+                        // Consumed before execution, like an elevation grant.
+                        elevated_commands.remove(index);
+                    } else {
+                        if crate::redact::scrub(&command) != command {
+                            return Err(
+                                "install approval refused: the command contains a credential-like value. Remove the secret and ask again."
+                                    .into(),
+                            );
+                        }
+                        let encoded =
+                            serde_json::to_string(command.trim()).unwrap_or_else(|_| "\"\"".into());
+                        return Err(format!(
+                            "install approval required: {} tried to install software onto this computer.\nREQUEST: Install this for the stated task? INSTALL_COMMAND_JSON: {}",
+                            tool_name(kind),
+                            encoded,
+                        ));
+                    }
+                }
                 if destructive_command(&command) {
                     return Err(format!(
                         "safety stop: blocked a high-risk command from {}: {}\nREQUEST: Review the command and run it yourself only if its destructive effect is intended.",
@@ -2410,6 +2431,33 @@ printf 'done' > "$out""#
         .await
         .unwrap();
         assert_eq!(approved.text, "done");
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[tokio::test]
+    async fn install_needs_an_exact_install_grant() {
+        let command = "cargo install ripgrep";
+        let script = format!(
+            r#"while [ "$1" != "-o" ]; do shift; done; out="$2"; cat >/dev/null
+echo '{{"type":"item.started","item":{{"type":"command_execution","command":"{command}"}}}}'
+printf 'done' > "$out""#
+        );
+        let ws = std::env::temp_dir().join(format!("consilium-install-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let p = fake(&script);
+        let denied = go(&p, Kind::Codex, Access::Unrestricted, Some(&ws), "system").await.unwrap_err();
+        assert!(denied.contains("INSTALL_COMMAND_JSON"), "{denied}");
+        let run = |grants: Vec<String>| {
+            let (p, ws) = (p.clone(), ws.clone());
+            async move {
+                run_at_with_usage(&p, Kind::Codex, Access::Unrestricted, Some(&ws), "system", "prompt",
+                    &crate::attach::Files::default(), &CancellationToken::new(), RUN_TIMEOUT, None, grants).await
+            }
+        };
+        // A bare (elevation-style) grant must not authorise an install.
+        assert!(run(vec![command.into()]).await.is_err());
+        let ok = run(vec![format!("{}{command}", crate::prompt::INSTALL_GRANT_PREFIX)]).await.unwrap();
+        assert_eq!(ok.text, "done");
         let _ = std::fs::remove_dir_all(ws);
     }
 

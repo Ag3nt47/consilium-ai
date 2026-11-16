@@ -202,10 +202,18 @@ echo, or pipe an administrator password, recovery key, UAC credential, token, or
 const ELEVATED_COMMAND_MARKER: &str = "ELEVATED_COMMAND_JSON:";
 
 fn elevated_command_in_request(request: &str) -> Option<String> {
-    let (before, encoded) = request.rsplit_once(ELEVATED_COMMAND_MARKER)?;
-    if before.contains(ELEVATED_COMMAND_MARKER) {
+    command_in_request(request, ELEVATED_COMMAND_MARKER)
+}
+
+/// Prefix that marks a grant in the per-turn grant list as an install approval. Install grants
+/// cover only a non-elevated install; elevation still needs an `ELEVATED_COMMAND_JSON` approval.
+pub const INSTALL_GRANT_PREFIX: &str = "install\u{0}";
+
+fn command_in_request(request: &str, marker: &str) -> Option<String> {
+    if request.matches(ELEVATED_COMMAND_MARKER).count() + request.matches(crate::toolbox::INSTALL_COMMAND_MARKER).count() != 1 {
         return None;
     }
+    let (_, encoded) = request.rsplit_once(marker)?;
     let command: String = serde_json::from_str(encoded.trim()).ok()?;
     let command = command.trim().to_string();
     (!command.is_empty()
@@ -236,7 +244,13 @@ pub fn elevated_command_grants(events: &[Event], me: &str) -> Vec<String> {
     if !requested_by_me {
         return Vec::new();
     }
-    elevated_command_in_request(request).into_iter().collect()
+    elevated_command_in_request(request)
+        .into_iter()
+        .chain(
+            command_in_request(request, crate::toolbox::INSTALL_COMMAND_MARKER)
+                .map(|command| format!("{INSTALL_GRANT_PREFIX}{command}")),
+        )
+        .collect()
 }
 
 pub fn system(me: &str, round: u32, rounds: u32, ctx: &Context) -> String {
@@ -306,6 +320,8 @@ commands or use tools: answer in text, and say what you would check rather than 
     if let Some(capability) = terminal_capability(std::env::consts::OS, ctx.access) {
         s.push_str("\n\n");
         s.push_str(&capability);
+        s.push_str("\n\n");
+        s.push_str(&crate::toolbox::capability(std::env::consts::OS, &crate::toolbox::inventory()));
     }
     s.push_str(
         "\n\nCommand boxes: when you want the human to run a command, put it alone in a fenced block tagged with its \
@@ -766,5 +782,33 @@ mod tests {
 
         approved.text = format!("Approved: {request} --changed");
         assert!(elevated_command_grants(&[asked, approved], "gpt").is_empty());
+    }
+
+    #[test]
+    fn install_grant_is_marked_and_cannot_double_as_elevation() {
+        let request = r##"Install ripgrep from crates.io to search faster? INSTALL_COMMAND_JSON: "cargo install ripgrep@14.1.1""##;
+        let mut asked = ev("claude", &format!("REQUEST: {request}"));
+        asked.seq = 1;
+        asked.requests = vec![request.into()];
+        let mut approved = ev("human", &format!("Approved: {request}"));
+        approved.seq = 2;
+        let grants = elevated_command_grants(&[asked.clone(), approved.clone()], "claude");
+        assert_eq!(grants, vec![format!("{INSTALL_GRANT_PREFIX}cargo install ripgrep@14.1.1")]);
+        assert!(!grants.iter().any(|g| g == "cargo install ripgrep@14.1.1"));
+
+        // Two markers in one request are ambiguous and grant nothing.
+        let both = r##"Install? INSTALL_COMMAND_JSON: "x" ELEVATED_COMMAND_JSON: "sudo x""##;
+        asked.requests = vec![both.into()];
+        approved.text = format!("Approved: {both}");
+        assert!(elevated_command_grants(&[asked, approved], "claude").is_empty());
+    }
+
+    #[test]
+    fn full_capacity_prompt_offers_tool_seeking() {
+        let m = members(&["gpt"]);
+        let full = system("gpt", 1, 1, &Context { members: &m, workspace: Some("/p"), access: Access::Unrestricted, memory: None, project_notes: None });
+        assert!(full.contains("seek out what you need") && full.contains("INSTALL_COMMAND_JSON"));
+        let edit = system("gpt", 1, 1, &Context { members: &m, workspace: Some("/p"), access: Access::Edit, memory: None, project_notes: None });
+        assert!(!edit.contains("INSTALL_COMMAND_JSON"));
     }
 }

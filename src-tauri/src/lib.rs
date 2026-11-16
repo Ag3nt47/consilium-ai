@@ -25,6 +25,7 @@ mod redact;
 mod resume;
 mod setup;
 mod store;
+mod toolbox;
 mod update;
 mod usage;
 pub mod wallpaper;
@@ -307,7 +308,9 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: window size, position, and full-screen state are remembered across restarts. \
+const WHATS_NEW: &str = "What's new: AIs now look for the tools, CLIs, MCP servers and skills a task needs on their own, \
+and see which package managers this computer has. Installing anything onto the computer itself stops first and asks you \
+with a REQUEST naming the exact install command; approve it and that one command runs once. Also since 0.3.15: window size, position, and full-screen state are remembered across restarts. \
 Settings adds distinct per-AI voice selection and preview (Reed, Samantha, Daniel) with a silence watchdog that clears \
 stuck speaker highlights. Prompt box typing lag is eliminated, Full-capacity AIs execute ordinary commands directly on \
 all platforms, and multi-computer sync adds topbar LED indicators, a 6-digit pairing screen, and durable crash-safe queues.";
