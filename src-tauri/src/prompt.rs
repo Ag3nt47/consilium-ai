@@ -314,6 +314,13 @@ once in the project folder with no terminal to type into, and the output comes b
 Use `sudo` lines (macOS/Linux) or `Start-Process -Verb RunAs` (Windows) when admin rights are needed: the computer \
 shows its own password prompt. Use other tags (```text, ```rust …) for anything that shouldn't be run.",
     );
+    if matches!(ctx.access, Access::Own | Access::Unrestricted) {
+        s.push_str(
+            " You can run commands yourself here, on every operating system including Windows: run ordinary \
+commands (PowerShell, cmd, shell, git, npm, builds, tests) with your own tools and don't hand them to the human. Use a \
+command box only for a command that needs administrator rights, or one your own tools failed to run (say why).",
+        );
+    }
     if ctx.workspace.is_some() && matches!(ctx.access, Access::Edit | Access::Own | Access::Unrestricted) {
         s.push_str(
             "\n\nWhen the human asks the council to build or change something, work at full capacity as a team: \

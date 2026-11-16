@@ -1,7 +1,7 @@
 import { TypedText, TYPED_THEMES } from "./typed";
 import { fencedBlocks, shellName, needsAdmin, handledCommands, deniedText, type Fence } from "./commands";
 import { dictationHint, paletteKey, paletteKeyWords } from "./platform";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -773,6 +773,46 @@ function ResourcePressureGauge({ pressure }: { pressure: SystemPressure | null }
   );
 }
 
+// The prompt box keeps its own text so typing re-renders only this textarea, not the whole
+// conversation (which made the caret lag in long chats). The app reads and sets it through a handle
+// and only hears about empty <-> non-empty changes, for the Send button.
+type DraftHandle = { get(): string; set(text: string): void };
+const DraftBox = memo(
+  forwardRef<DraftHandle, { initial: string; onEmptyChange: (empty: boolean) => void; onSend: () => void; onPasteFiles: (files: File[]) => void }>(
+    function DraftBox({ initial, onEmptyChange, onSend, onPasteFiles }, ref) {
+      const [text, setText] = useState(initial);
+      const textRef = useRef(text);
+      const update = (v: string) => {
+        if (!v.trim() !== !textRef.current.trim()) onEmptyChange(!v.trim());
+        textRef.current = v;
+        setText(v);
+      };
+      useImperativeHandle(ref, () => ({ get: () => textRef.current, set: update }));
+      return (
+        <textarea
+          value={text}
+          onPaste={(e) => {
+            const files = Array.from(e.clipboardData.files);
+            if (files.length) {
+              if (!e.clipboardData.getData("text")) e.preventDefault();
+              onPasteFiles(files);
+            }
+          }}
+          placeholder="Message the council…  (Enter to send, Shift+Enter for a new line; drop or paste files to attach)"
+          onChange={(e) => update(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              onSend();
+            }
+          }}
+          rows={3}
+        />
+      );
+    },
+  ),
+);
+
 function folderName(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
@@ -785,7 +825,9 @@ export default function App() {
   const [events, setEvents] = useState<ChatEvent[]>([]);
   const [turn, setTurn] = useState<TurnState | null>(null);
   const [activities, setActivities] = useState<Record<string, AgentActivity>>({});
-  const [draft, setDraft] = useState(IN_APP ? "" : demoDraft);
+  const draftBox = useRef<DraftHandle>(null);
+  const [draftEmpty, setDraftEmpty] = useState(!(IN_APP ? "" : demoDraft).trim());
+  const setDraft = useCallback((text: string) => draftBox.current?.set(text), []);
   /** Files waiting to go with the next message. */
   const [pending, setPending] = useState<Attachment[]>([]);
   const [dropping, setDropping] = useState(false);
@@ -1140,9 +1182,9 @@ export default function App() {
 
   // Sending while the AIs are answering doesn't interrupt them: they read it and carry on. Stop interrupts.
   async function send() {
-    if (!current || (!draft.trim() && !pending.length)) return;
+    const text = draftBox.current?.get() ?? "";
+    if (!current || (!text.trim() && !pending.length)) return;
     setError(null);
-    const text = draft;
     const files = pending;
     setDraft("");
     setPending([]);
@@ -1213,6 +1255,12 @@ export default function App() {
   }
 
   // Pasted files (a screenshot, say) are attached; pasted text goes into the message as usual.
+  // Stable handles for the prompt box, so it doesn't re-render when the app does.
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  const attachPastedRef = useRef(attachPasted);
+  attachPastedRef.current = attachPasted;
+
   async function attachPasted(files: File[]) {
     if (!current) return;
     for (const f of files) {
@@ -2129,24 +2177,12 @@ export default function App() {
           )}
           <PersonaChips value={persona} onChange={setPersona} />
           <div className="composer-row">
-            <textarea
-              value={draft}
-              onPaste={(e) => {
-                const files = Array.from(e.clipboardData.files);
-                if (files.length) {
-                  if (!e.clipboardData.getData("text")) e.preventDefault();
-                  attachPasted(files);
-                }
-              }}
-              placeholder="Message the council…  (Enter to send, Shift+Enter for a new line; drop or paste files to attach)"
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              rows={3}
+            <DraftBox
+              ref={draftBox}
+              initial={IN_APP ? "" : demoDraft}
+              onEmptyChange={setDraftEmpty}
+              onSend={() => sendRef.current()}
+              onPasteFiles={(files) => attachPastedRef.current(files)}
             />
             <div className="send-buttons">
               <button className="btn ghost" onClick={attachPicked} title="Attach files: documents, Word files, pictures, PDFs, code" aria-label="Attach files">
@@ -2167,7 +2203,7 @@ export default function App() {
               <button
                 className="btn primary"
                 onClick={send}
-                disabled={!draft.trim() && !pending.length}
+                disabled={draftEmpty && !pending.length}
                 title={busy ? "Add this to the discussion; the AIs read it without being interrupted (Enter)" : "Send (Enter)"}
               >
                 Send
