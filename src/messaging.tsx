@@ -237,7 +237,7 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
         <li>
           <span>
             <b>Link this computer</b>
-            <small>Shows a QR code. On your phone: Signal › Settings › Linked devices › Link new device.</small>
+            <small>Shows a QR code to scan. On your phone: Signal › Settings › Linked devices › Link new device. If connecting multiple paired computers, you only need to link one for the entire ecosystem.</small>
           </span>
           <button title={`Open ${terminalName} with the link command${OS === "windows" ? "" : " and QR code"}`} className="btn small-btn" disabled={!installed} onClick={() => step("link")}>
             Link

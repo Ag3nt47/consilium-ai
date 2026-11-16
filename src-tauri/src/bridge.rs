@@ -394,8 +394,8 @@ fn find_tool(name: &str) -> Option<PathBuf> {
     let mut dirs_: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
+    dirs_.extend([".local/bin", ".local/node/bin", ".cargo/bin"].iter().map(|d| home.join(d)));
     dirs_.extend(["/opt/homebrew/bin", "/usr/local/bin"].iter().map(PathBuf::from));
-    dirs_.push(home.join(".local/bin"));
     // Windows tools are `signal-cli.bat`, `code.cmd`, `git.exe`: try those names too.
     let names: Vec<String> = if cfg!(windows) {
         ["exe", "bat", "cmd"].iter().map(|e| format!("{name}.{e}")).chain([name.to_string()]).collect()
@@ -487,17 +487,55 @@ pub fn setup_command(action: &str, cfg: &BridgeConfig) -> Result<(&'static str, 
         }
         "link" => {
             let cli = find_tool("signal-cli").ok_or("Install signal-cli first")?;
+            let host = std::env::var("HOSTNAME")
+                .or_else(|_| std::env::var("COMPUTERNAME"))
+                .unwrap_or_else(|_| {
+                    if cfg!(target_os = "macos") {
+                        "Mac".into()
+                    } else if cfg!(windows) {
+                        "Windows".into()
+                    } else {
+                        "Linux".into()
+                    }
+                });
+            let device_name = format!("Consilium ({host})");
             let qr = find_tool("qrencode").filter(|_| !cfg!(windows)); // PowerShell has no `>(…)`
+            let node = find_tool("node");
+            let home = dirs::home_dir().unwrap_or_default();
+            let qr_script = std::env::current_dir()
+                .ok()
+                .map(|p| p.join("scripts/qr.mjs"))
+                .filter(|p| p.is_file())
+                .or_else(|| {
+                    let p = home.join("Projects/consilium-ai/scripts/qr.mjs");
+                    if p.is_file() {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                });
+
             let cmd = match qr {
                 Some(q) => format!(
-                    "echo 'On your phone: Signal > Settings > Linked devices > Link new device, then scan this code.'; {} link -n Consilium | tee >(xargs -L 1 {} -t ansiutf8)",
+                    "echo 'On your phone: Signal > Settings > Linked devices > Link new device, then scan this code.'; {} link -n '{}' | tee >(xargs -L 1 {} -t ansiutf8)",
                     quote(&cli),
+                    device_name,
                     quote(&q)
                 ),
-                None => format!(
-                    "echo 'Open the sgnl:// link below on your phone, or install qrencode to see a QR code.'; {} link -n Consilium",
-                    quote(&cli)
-                ),
+                None => match (node, qr_script) {
+                    (Some(n), Some(s)) => format!(
+                        "echo 'On your phone: Signal > Settings > Linked devices > Link new device, then scan this code.'; {} link -n '{}' | {} {}",
+                        quote(&cli),
+                        device_name,
+                        quote(&n),
+                        quote(&s)
+                    ),
+                    _ => format!(
+                        "echo 'Open the sgnl:// link below on your phone, or install qrencode to see a QR code.'; {} link -n '{}'",
+                        quote(&cli),
+                        device_name
+                    ),
+                },
             };
             Ok(("Link Consilium to your Signal account", cmd))
         }
