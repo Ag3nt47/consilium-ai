@@ -6,6 +6,7 @@ mod agents;
 mod apiagent;
 mod attach;
 mod bench;
+mod ci;
 pub mod bridge;
 pub mod cli;
 mod config;
@@ -334,10 +335,10 @@ fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachmen
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: Signal setup now happens inside Consilium. The phone number saves when you \
-press Enter or leave the box, then a QR code appears right in the panel to scan from Signal › Linked devices. \
-After linking, Signal starts in the background (and again on every launch), Consilium sends a code to your \
-Note to Self chat, and setup finishes when you send that code back from your phone.";
+const WHATS_NEW: &str = "What's new: a CI light in the title bar, beside the versions tab, shows whether \
+GitHub's checks pass (green), fail (red) or are still running (amber) on the project's newest commit; click it to \
+open the run. Consilium reads the checks itself about once a minute, tells every AI the result in its prompt, and \
+posts a note here when a commit's checks pass or fail, so the AIs no longer need to keep checking GitHub.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -540,6 +541,15 @@ async fn ingest_repo(url: String) -> Result<repo::RepoReport, String> {
 async fn project_versions(workspace: Option<String>) -> Vec<projects::ProjectVersion> {
     let Some(folder) = workspace.filter(|w| !w.is_empty()) else { return Vec::new() };
     tauri::async_runtime::spawn_blocking(move || projects::active(std::path::Path::new(&folder)))
+        .await
+        .unwrap_or_default()
+}
+
+/// GitHub checks for the active projects in this folder: passing, failing or still running.
+#[tauri::command]
+async fn ci_status(workspace: Option<String>) -> Vec<ci::CiStatus> {
+    let Some(folder) = workspace.filter(|w| !w.is_empty()) else { return Vec::new() };
+    tauri::async_runtime::spawn_blocking(move || ci::for_workspace(std::path::Path::new(&folder)))
         .await
         .unwrap_or_default()
 }
@@ -747,6 +757,8 @@ pub fn run() {
             // Keeps the window in step with the terminal command.
             tauri::async_runtime::spawn(engine.clone().watch(true));
             tauri::async_runtime::spawn(security.clone().watch(engine.clone()));
+            // Reads each active project's GitHub checks and posts a note when they finish.
+            tauri::async_runtime::spawn(ci::watch(engine.clone()));
             app.manage(AppState { engine, security });
             // Direct link to the user's other paired computers. Off until they pair or turn it on.
             let emitter = app.handle().clone();
@@ -823,6 +835,7 @@ pub fn run() {
             signal_setup_state,
             signal_setup_cancel,
             project_versions,
+            ci_status,
             ingest_repo,
             run_command,
             update_available,

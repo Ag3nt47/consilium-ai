@@ -40,7 +40,7 @@ import { MessagingIndicator, MessagingSettings } from "./messaging";
 import { LinkIndicator, LinkSettings } from "./link";
 import { SecurityScanSettings } from "./security";
 import { ToolsSettings } from "./tools";
-import { ProjectVersions } from "./projects";
+import { CiBadge, ProjectVersions } from "./projects";
 import { RepoDrawer } from "./repo";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
@@ -1907,6 +1907,7 @@ export default function App() {
                 </button>
               )}
               <ProjectVersions workspace={meta?.workspace ?? council?.default_workspace ?? null} />
+              <CiBadge workspace={meta?.workspace ?? council?.default_workspace ?? null} />
             </div>
           </div>
           <div className="topbar-actions">

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { IN_APP } from "./api";
 
 export interface ProjectVersion {
@@ -122,5 +123,95 @@ export function ProjectVersions({ workspace }: { workspace: string | null }) {
         </div>
       )}
     </div>
+  );
+}
+
+export interface CiStatus {
+  project: string;
+  path: string;
+  branch: string;
+  commit: string | null;
+  state: "pass" | "fail" | "running" | "none" | "error";
+  failed: string[];
+  runs: number;
+  url: string | null;
+  detail: string | null;
+  checked_at: number;
+}
+
+const CI_WORD: Record<CiStatus["state"], string> = {
+  pass: "passing",
+  fail: "failing",
+  running: "running",
+  none: "no checks",
+  error: "unknown",
+};
+
+function overall(list: CiStatus[]): CiStatus["state"] {
+  for (const st of ["fail", "running", "pass", "error"] as const) if (list.some((c) => c.state === st)) return st;
+  return "none";
+}
+
+function ciTitle(list: CiStatus[]) {
+  return list
+    .map((c) => {
+      const head = `${c.project} ${c.branch}${c.commit ? ` @${c.commit}` : ""}: GitHub checks ${CI_WORD[c.state]}`;
+      if (c.state === "fail" && c.failed.length) return `${head} (${c.failed.join(", ")})`;
+      if (c.detail) return `${head} (${c.detail})`;
+      return head;
+    })
+    .concat("Checked about once a minute; the AIs see this too. Click to open the run on GitHub.")
+    .join("\n");
+}
+
+/** Title-bar light beside the versions tab: green when GitHub's checks pass on the newest commit,
+ *  red when they fail, amber while they run. Clicking opens the run on GitHub. */
+export function CiBadge({ workspace }: { workspace: string | null }) {
+  const [list, setList] = useState<CiStatus[]>([]);
+
+  useEffect(() => {
+    let live = true;
+    const check = async () => {
+      if (!workspace) return setList([]);
+      if (!IN_APP) {
+        if (live)
+          setList([
+            {
+              project: "image-service", path: "/projects/image-service", branch: "main", commit: "9a2f1b0",
+              state: "pass", failed: [], runs: 2, url: null, detail: null, checked_at: Date.now(),
+            },
+          ]);
+        return;
+      }
+      try {
+        const found = await invoke<CiStatus[]>("ci_status", { workspace });
+        if (live) setList(found);
+      } catch {
+        if (live) setList([]);
+      }
+    };
+    check();
+    const t = setInterval(check, 30_000);
+    window.addEventListener("focus", check);
+    return () => {
+      live = false;
+      clearInterval(t);
+      window.removeEventListener("focus", check);
+    };
+  }, [workspace]);
+
+  if (!list.length) return null;
+  const state = overall(list);
+  const target = list.find((c) => c.state === state && c.url) ?? list.find((c) => c.url);
+  return (
+    <button
+      className={`ci-badge ci-${state}`}
+      title={ciTitle(list)}
+      aria-label={`GitHub checks ${CI_WORD[state]}`}
+      onClick={() => target?.url && openUrl(target.url)}
+    >
+      <span className="ci-dot" aria-hidden="true" />
+      CI {state === "pass" ? "✓" : state === "fail" ? "✗" : state === "running" ? "…" : "?"}
+    </button>
   );
 }

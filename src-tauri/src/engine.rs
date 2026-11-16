@@ -684,6 +684,10 @@ impl council::Host for RealHost {
         if let Some(usage) = crate::usage::for_prompt(&crate::usage::load(&self.data), &members, agent.id, store::now_ms()) {
             system.push_str(&usage);
         }
+        // The projects' GitHub checks, as last read by the background watcher.
+        if let Some(w) = workspace.as_deref() {
+            system.push_str(&crate::ci::for_prompt(std::path::Path::new(w)));
+        }
         let transcript = prompt::transcript(&events, agent.id);
         let mut elevated_commands = prompt::elevated_command_grants(&events, agent.id);
         // The Tools page's Install button: one pinned catalog install for the AI it was sent to.
