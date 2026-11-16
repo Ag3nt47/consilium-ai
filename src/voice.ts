@@ -33,13 +33,69 @@ export const canSpeak = synth !== null;
 
 // Each AI keeps the same voice; pitch differs too in case the system has only one voice.
 const PITCH: Record<string, number> = { gpt: 1.0, claude: 0.9, gemini: 1.12 };
-function voiceFor(agent: string): SpeechSynthesisVoice | null {
+// Preferred system voices per AI, best first, so each sounds distinct without any setup.
+const PREFERRED: Record<string, string[]> = {
+  claude: ["Daniel", "Arthur", "Oliver", "Rishi", "Fred"],
+  gpt: ["Samantha", "Ava", "Allison", "Susan", "Victoria"],
+  gemini: ["Reed", "Evan", "Nathan", "Aaron", "Tom", "Alex"],
+};
+const VOICES_KEY = "consilium.voices";
+
+/** The human's chosen voice per AI (voice name), or none for automatic. */
+export function loadVoiceChoices(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(VOICES_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+export function saveVoiceChoice(agent: string, voiceName: string) {
+  const all = loadVoiceChoices();
+  if (voiceName) all[agent] = voiceName;
+  else delete all[agent];
+  try {
+    localStorage.setItem(VOICES_KEY, JSON.stringify(all));
+  } catch {
+    /* applies until the app closes */
+  }
+}
+
+/** Installed voices in the system language, for the Settings picker. */
+export function availableVoices(): SpeechSynthesisVoice[] {
   const lang = (navigator.language || "en").slice(0, 2);
-  const voices = (synth?.getVoices() ?? []).filter((v) => v.lang.startsWith(lang) && v.localService);
+  return (synth?.getVoices() ?? []).filter((v) => v.lang.startsWith(lang));
+}
+
+export function voiceFor(agent: string): SpeechSynthesisVoice | null {
+  const voices = availableVoices();
   if (!voices.length) return null;
+  const chosen = loadVoiceChoices()[agent];
+  const byName = (n: string) => voices.find((v) => v.name === n || v.name.startsWith(n + " "));
+  if (chosen) {
+    const v = byName(chosen);
+    if (v) return v;
+  }
+  for (const n of PREFERRED[agent] ?? []) {
+    const v = byName(n);
+    if (v) return v;
+  }
+  const local = voices.filter((v) => v.localService);
+  const pool = local.length ? local : voices;
   let h = 0;
   for (const c of agent) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return voices[h % voices.length];
+  return pool[h % pool.length];
+}
+
+/** Reads a short sample in an AI's voice, for the Settings picker. */
+export function previewVoice(agent: string, name: string) {
+  if (!synth) return;
+  synth.cancel();
+  const u = new SpeechSynthesisUtterance(`Hello, this is ${name}.`);
+  const v = voiceFor(agent);
+  if (v) u.voice = v;
+  u.pitch = PITCH[agent] ?? 1;
+  synth.speak(u);
 }
 
 export interface VoicePlaybackItem {
@@ -56,11 +112,18 @@ export interface VoicePlaybackState {
  * Reads messages aloud one after another. `onPlayback` identifies the AI that is speaking and the
  * replies waiting behind it, so voice chat can show an honest per-AI status instead of one generic
  * "an AI is speaking" animation.
+ *
+ * WebKit sometimes never fires `onend` (notably when the utterance object is garbage-collected or
+ * speech is interrupted), which used to leave voice chat stuck on "Reading … aloud" with the
+ * microphone off. So the current utterance is held strongly, a watchdog advances once the
+ * synthesiser has gone quiet, and a generation counter ignores late or duplicate end events.
  */
 export class Speaker {
   private queue: { agent: string; name: string; text: string }[] = [];
   private current: VoicePlaybackItem | null = null;
-  private busy = false;
+  private utterance: SpeechSynthesisUtterance | null = null;
+  private gen = 0;
+  private watchdog: number | undefined;
   constructor(private onPlayback: (state: VoicePlaybackState) => void) {}
 
   private report() {
@@ -74,35 +137,64 @@ export class Speaker {
     const t = speakable(text);
     if (!synth || !t) return;
     this.queue.push({ agent, name, text: `${name}: ${t}` });
-    if (!this.busy) this.next();
+    if (!this.current) this.next();
     else this.report();
   }
 
+  private clearWatchdog() {
+    window.clearInterval(this.watchdog);
+    this.watchdog = undefined;
+  }
+
   private next() {
+    this.clearWatchdog();
+    const gen = ++this.gen;
     const item = this.queue.shift();
     if (!synth || !item) {
       this.current = null;
-      this.busy = false;
+      this.utterance = null;
       this.report();
       return;
     }
-    this.busy = true;
     this.current = { agent: item.agent, name: item.name };
     this.report();
     const u = new SpeechSynthesisUtterance(item.text);
     const v = voiceFor(item.agent);
     if (v) u.voice = v;
     u.pitch = PITCH[item.agent] ?? 1;
-    u.onend = u.onerror = () => this.next();
+    const done = () => {
+      if (gen === this.gen && this.utterance === u) this.next();
+    };
+    u.onend = u.onerror = done;
+    this.utterance = u;
     synth.speak(u);
+    // Advance if the synthesiser has been silent for two checks in a row without telling us.
+    const started = Date.now();
+    let quiet = 0;
+    this.watchdog = window.setInterval(() => {
+      if (gen !== this.gen) return this.clearWatchdog();
+      const silent = !synth.speaking && !synth.pending;
+      quiet = silent ? quiet + 1 : 0;
+      if ((quiet >= 2 && Date.now() - started > 1000) || Date.now() - started > 10 * 60_000) done();
+    }, 500);
+  }
+
+  /** Stops the reply being read now and moves on to the next one. */
+  skip() {
+    if (!this.current) return;
+    this.gen++; // the cancelled utterance's end event must not advance twice
+    synth?.cancel();
+    this.next();
   }
 
   /** Stops speaking and drops everything queued. */
   stop() {
+    this.clearWatchdog();
+    this.gen++;
     this.queue = [];
     synth?.cancel();
     this.current = null;
-    this.busy = false;
+    this.utterance = null;
     this.report();
   }
 }

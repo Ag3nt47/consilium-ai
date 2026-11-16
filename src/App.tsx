@@ -31,6 +31,7 @@ import {
   type UsageWindow,
 } from "./api";
 import { canListen, canSpeak, Listener, Speaker, voiceOn } from "./voice";
+import { VoiceSettings } from "./voicesettings";
 import { AgentVoiceMeter, VoiceVisualizer } from "./visualizer";
 import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
 import { installHoverTips } from "./tooltip";
@@ -2080,7 +2081,7 @@ export default function App() {
               {speaking ? (
                 <>
                   <span>Reading {speakingAgent ? `${senderName(speakingAgent, agents)}’s` : "the"} reply aloud…</span>
-                  <button title="Stop reading this reply aloud and move on to the next" className="btn small" onClick={() => speakerRef.current?.stop()}>
+                  <button title="Stop reading this reply aloud and move on to the next" className="btn small" onClick={() => speakerRef.current?.skip()}>
                     Skip
                   </button>
                 </>
@@ -2325,6 +2326,8 @@ export default function App() {
             {cli?.note && <pre className="cli-note small">{cli.note}</pre>}
             <div className="section-label">Messaging</div>
             <MessagingSettings />
+            <div className="section-label">Voices</div>
+            <VoiceSettings agents={members.length ? members : agents} />
             <div className="section-label">Multi-Computer Sync (Mac &amp; Windows)</div>
             <LinkSettings />
             <div className="section-label">Updates</div>
