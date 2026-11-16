@@ -440,7 +440,8 @@ pub fn view(cfg: &BridgeConfig, path: &Path) -> SetupView {
         allowed_acis: cfg.allowed_acis.clone(),
         auto_forward_decisions: cfg.auto_forward_decisions,
         signal_cli: find_tool("signal-cli").map(|p| p.display().to_string()),
-        can_install: cfg!(any(target_os = "macos", target_os = "linux")),
+        // Windows on ARM has no pinned Java download, so it gets the install guide instead.
+        can_install: cfg!(any(target_os = "macos", target_os = "linux", all(windows, target_arch = "x86_64"))),
         install_running: install_root().join("installing").exists(),
         install_error: std::fs::read_to_string(install_root().join("failed")).ok().map(|e| e.trim().to_string()),
         config_path: path.display().to_string(),
