@@ -30,6 +30,7 @@ mod resume;
 mod setup;
 mod signal_chat;
 mod signal_setup;
+mod startup_check;
 mod security_scan;
 mod store;
 mod tasks;
@@ -973,6 +974,9 @@ pub fn run() {
             tauri::async_runtime::spawn(ci::watch(engine.clone()));
             // Carries the newest conversation to and from Signal once setup is verified.
             signal_chat::run(engine.clone(), bridge::config_path(None));
+            // Checks every connection once connections have had time to come up, then reports
+            // the result in the newest conversation and to the phone.
+            tauri::async_runtime::spawn(startup_check::run(engine.clone(), data.clone()));
             app.manage(AppState { engine, security });
             // Direct link to the user's other paired computers. Off until they pair or turn it on.
             let emitter = app.handle().clone();

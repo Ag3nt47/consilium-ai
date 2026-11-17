@@ -105,6 +105,11 @@ pub fn set_signal_on(on: bool) {
     SIGNAL_ON.store(on, Ordering::SeqCst);
 }
 
+/// Whether the Signal session on this computer is connected right now.
+pub fn signal_on() -> bool {
+    SIGNAL_ON.load(Ordering::SeqCst)
+}
+
 /// Records that the human just used this computer directly.
 pub fn note_local_activity() {
     LOCAL_ACTIVE_MS.store(now_ms(), Ordering::SeqCst);

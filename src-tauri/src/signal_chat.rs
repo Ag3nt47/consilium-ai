@@ -227,6 +227,10 @@ pub fn outbound_text(e: &Event) -> Option<String> {
     if body.is_empty() {
         return None;
     }
+    // The startup check sends its report to the phone itself.
+    if name == "Consilium" && body.starts_with(crate::startup_check::HEADER) {
+        return None;
+    }
     let mut msg = if name == "Consilium" {
         format!("[Consilium]\n{}", crate::redact::scrub(body))
     } else if name == "You" {
@@ -279,6 +283,22 @@ fn call(cfg: &BridgeConfig, method: &str, params: Value) -> Result<Value, String
 
 fn send_group(cfg: &BridgeConfig, group: &str, text: &str) -> Result<(), String> {
     call(cfg, "send", json!({"groupId": group, "message": text})).map(|_| ())
+}
+
+/// Sends a Consilium report to the phone's Note to Self, when Signal is set up and connected.
+pub fn send_to_phone(text: &str) -> Result<(), String> {
+    let cfg = BridgeConfig::load(&bridge::config_path(None))?;
+    if !cfg.enabled || !bridge::valid_account(&cfg.account) || cfg.allowed_acis.is_empty() {
+        return Err("Signal isn't set up".into());
+    }
+    if !crate::link::signal_on() {
+        return Err("Signal isn't connected".into());
+    }
+    let mut msg = crate::redact::scrub(text);
+    if msg.chars().count() > MAX_OUT {
+        msg = msg.chars().take(MAX_OUT).collect::<String>() + notice::CUT;
+    }
+    send_self(&cfg, &msg)
 }
 
 /// Sends to the account's own Note to Self. Consilium runs as a linked device of the human's own
