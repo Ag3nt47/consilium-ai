@@ -18,6 +18,14 @@ use std::path::{Path, PathBuf};
 pub struct Staged {
     pub version: String,
     pub current: String,
+    /// The staged and running builds, e.g. "0.3.37 #812 (76debf3a1b2c)" (see `build_id`).
+    pub build: String,
+    pub current_build: String,
+}
+
+/// Which build is staged, written by `scripts/stage-update.mjs` after the build is in place.
+pub fn build_stamp(data: &Path) -> PathBuf {
+    data.join("update").join("BUILD.json")
 }
 
 pub fn staged_app(data: &Path) -> PathBuf {
@@ -49,20 +57,30 @@ fn staged_version(data: &Path) -> Option<String> {
     }
 }
 
-fn parse(v: &str) -> Vec<u64> {
-    v.split(['.', '-', '+']).map_while(|p| p.parse().ok()).collect()
-}
-
-/// Whether `staged` is a newer version than `current`.
-pub fn newer(staged: &str, current: &str) -> bool {
-    parse(staged) > parse(current)
-}
-
-/// The staged update, if there is one newer than this build.
-pub fn staged(data: &Path) -> Option<Staged> {
+/// The staged build: its version, with the build number and commit from its stamp when the
+/// stamp is for that version (a build staged some other way has a version alone).
+pub fn staged_build(data: &Path) -> Option<crate::build_id::Build> {
     let version = staged_version(data)?;
-    let current = env!("CARGO_PKG_VERSION").to_string();
-    newer(&version, &current).then_some(Staged { version, current })
+    let stamp = std::fs::read(build_stamp(data))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| crate::build_id::Build::from_peer(&v))
+        .filter(|b| b.version == version);
+    Some(stamp.unwrap_or(crate::build_id::Build { version, number: 0, commit: String::new() }))
+}
+
+/// The staged update, if it is a later build than this one. Two builds of one version are told
+/// apart by build number, and an older or equal build is never offered, so an update can't be
+/// overridden by an older one.
+pub fn staged(data: &Path) -> Option<Staged> {
+    let build = staged_build(data)?;
+    let this = crate::build_id::Build::this();
+    build.newer_than(&this).then(|| Staged {
+        version: build.version.clone(),
+        current: this.version.clone(),
+        build: build.label(),
+        current_build: this.label(),
+    })
 }
 
 /// The installed `.app` this process runs from (…/Consilium.app/Contents/MacOS/consilium).
@@ -314,6 +332,8 @@ pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str)
         return Err("the downloaded update didn't match GitHub's checksum, so it was thrown away".into());
     }
     let next_dir = staged_dir(data);
+    // A release download has no build stamp; one left from an earlier build mustn't describe it.
+    let _ = std::fs::remove_file(build_stamp(data));
     let tmp_dir = data.join("update").join("tmp_download");
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("create tmp dir: {e}"))?;
@@ -407,11 +427,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn versions_compare_numerically() {
-        assert!(newer("0.3.10", "0.3.9"));
-        assert!(newer("0.4.0", "0.3.1"));
-        assert!(!newer("0.3.1", "0.3.1"));
-        assert!(!newer("0.3.0", "0.3.1"));
+    #[cfg(not(target_os = "macos"))]
+    fn a_staged_build_counts_only_when_it_is_later_than_this_one() {
+        let dir = std::env::temp_dir().join(format!("consilium-staged-build-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(staged_dir(&dir)).unwrap();
+        let this = crate::build_id::Build::this();
+        let stage = |version: &str, stamp: Option<serde_json::Value>| {
+            std::fs::write(staged_dir(&dir).join("VERSION"), format!("{version}\n")).unwrap();
+            match stamp {
+                Some(s) => std::fs::write(build_stamp(&dir), s.to_string()).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(build_stamp(&dir));
+                }
+            }
+        };
+        stage(&this.version, Some(serde_json::json!({"version": this.version, "number": this.number + 1, "commit": "abcdef123456"})));
+        let s = staged(&dir).expect("a later build of the same version is offered");
+        assert_eq!(s.build, format!("{} #{} (abcdef123456)", this.version, this.number + 1));
+        stage(&this.version, Some(serde_json::json!({"version": this.version, "number": this.number, "commit": "abcdef123456"})));
+        assert_eq!(staged(&dir), None, "the same build isn't offered again");
+        stage(&this.version, Some(serde_json::json!({"version": "0.0.1", "number": this.number + 5})));
+        assert_eq!(staged(&dir), None, "a stamp for another version is ignored, and the version alone is equal");
+        stage("999.0.0", None);
+        assert_eq!(staged(&dir).map(|s| s.version), Some("999.0.0".into()), "a later version needs no stamp");
+        stage("0.0.1", None);
+        assert_eq!(staged(&dir), None, "an older version is never offered");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

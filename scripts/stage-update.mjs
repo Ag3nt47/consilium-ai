@@ -25,6 +25,34 @@ const DATA =
 const UPDATE = join(DATA, "update");
 const RELEASE = join(process.env.CARGO_TARGET_DIR || join(ROOT, "src-tauri", "target"), "release");
 const VERSION = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
+// Which build this is (see src-tauri/src/build_id.rs): the build number only grows along a branch,
+// so linked computers can tell two builds of one version apart and never go backwards.
+const gitOut = (args) => {
+  try {
+    return execFileSync("git", args, { cwd: ROOT, encoding: "utf8" }).trim();
+  } catch {
+    return "";
+  }
+};
+const BUILD = {
+  version: VERSION,
+  number: Number(process.env.CONSILIUM_BUILD_NUMBER || gitOut(["rev-list", "--count", "HEAD"]) || 0),
+  commit:
+    process.env.CONSILIUM_COMMIT ||
+    (() => {
+      const sha = gitOut(["rev-parse", "--short=12", "HEAD"]);
+      return sha && gitOut(["status", "--porcelain", "--untracked-files=no"]) ? `${sha}+dirty` : sha;
+    })(),
+};
+const parseVersion = (v) => v.split(/[.+-]/).map(Number).filter((n) => Number.isInteger(n));
+const newer = (a, b) => {
+  const [x, y] = [parseVersion(a.version), parseVersion(b.version)];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if ((x[i] ?? -1) !== (y[i] ?? -1)) return (x[i] ?? -1) > (y[i] ?? -1);
+  }
+  return (a.number || 0) > (b.number || 0);
+};
+const label = (b) => (b.number ? `${b.version} #${b.number}${b.commit ? ` (${b.commit})` : ""}` : b.version);
 
 // This Mac keeps Node and Rust outside the default PATH.
 process.env.PATH = [join(homedir(), ".local", "node", "bin"), join(homedir(), ".cargo", "bin"), process.env.PATH].join(delimiter);
@@ -100,6 +128,19 @@ function signStably(app) {
 
 mkdirSync(UPDATE, { recursive: true });
 
+// Never replace a staged build with an older one: that is how an update gets overridden.
+const STAMP = join(UPDATE, "BUILD.json");
+try {
+  const staged = JSON.parse(readFileSync(STAMP, "utf8"));
+  const there = existsSync(join(UPDATE, OS === "darwin" ? "Consilium.app" : "next"));
+  if (there && !newer(BUILD, staged) && !process.env.CONSILIUM_FORCE_STAGE) {
+    fail(`A newer or equal build (${label(staged)}) is already staged; not replacing it with ${label(BUILD)}. Set CONSILIUM_FORCE_STAGE=1 to replace it anyway.`);
+  }
+} catch {
+  /* nothing staged, or no stamp */
+}
+rmSync(STAMP, { force: true });
+
 if (OS === "darwin") {
   build("--bundles app");
   const app = join(RELEASE, "bundle", "macos", "Consilium.app");
@@ -132,4 +173,6 @@ if (OS === "darwin") {
   renameSync(tmp, join(UPDATE, "next"));
 }
 
-console.log(`Staged ${VERSION} for ${OS}. Click Update Now in Consilium.`);
+// Written last, once the build is in place.
+writeFileSync(STAMP, `${JSON.stringify(BUILD)}\n`);
+console.log(`Staged ${label(BUILD)} for ${OS}. Click Update Now in Consilium.`);

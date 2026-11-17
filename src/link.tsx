@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, type LinkPeer, type LinkStatus, type PeerTestReport } from "./api";
+import { api, buildCompare, buildLabel, type Build, type LinkPeer, type LinkStatus, type PeerTestReport } from "./api";
 
 /** Topbar status light and button for multi-computer sync (Mac & Windows).
  *  Displays connection health, fastest active route, and opens the sync setup modal on click. */
@@ -328,7 +328,22 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
               <div>
                 <span className="muted small">Node ID:</span> <code>{status.node_id.slice(0, 12)}…</code>
               </div>
+              {status.build && (
+                <div>
+                  <span className="muted small">Consilium build:</span> <code>{buildLabel(status.build)}</code>
+                </div>
+              )}
             </div>
+            {status.follow && status.follow.state !== "idle" && (
+              <div className={`link-follow link-follow-${status.follow.state}`} style={{ marginTop: "8px" }}>
+                <span className="muted small">Keeping in step:</span>{" "}
+                {status.follow.state === "staged"
+                  ? `${status.follow.target} is ready to install, matching ${status.follow.from}.`
+                  : status.follow.state === "failed"
+                    ? `Couldn't prepare ${status.follow.target} to match ${status.follow.from}: ${status.follow.detail}`
+                    : `${status.follow.detail ?? "Preparing"}: ${status.follow.target}, to match ${status.follow.from}.`}
+              </div>
+            )}
 
             <div style={{ marginTop: "8px" }}>
               <span className="muted small">Local Addresses (reachable on your network):</span>
@@ -502,7 +517,7 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
               </div>
             ) : (
               peers.map((peer) => (
-                <PeerCard key={peer.node_id} peer={peer} onUnpair={() => unpair(peer.node_id, peer.name)} />
+                <PeerCard key={peer.node_id} peer={peer} mine={status.build} onUnpair={() => unpair(peer.node_id, peer.name)} />
               ))
             )}
           </div>
@@ -512,7 +527,7 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
   );
 }
 
-function PeerCard({ peer, onUnpair }: { peer: LinkPeer; onUnpair: () => void }) {
+function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUnpair: () => void }) {
   const [testing, setTesting] = useState(false);
   const [testReport, setTestReport] = useState<PeerTestReport | null>(null);
   const [refreshingRoutes, setRefreshingRoutes] = useState(false);
@@ -642,6 +657,20 @@ function PeerCard({ peer, onUnpair }: { peer: LinkPeer; onUnpair: () => void }) 
         <div className="stat-item">
           <span className="muted small">Project:</span>
           <span>{peer.git ?? "—"}</span>
+        </div>
+        <div className="stat-item">
+          <span className="muted small">Consilium build:</span>
+          <span>
+            {!peer.build
+              ? "Older version (doesn't report its build)"
+              : !mine
+                ? buildLabel(peer.build)
+                : `${buildLabel(peer.build)} · ${
+                    { same: "same as this computer", newer: "newer: this computer will match it", older: "older: it will match this computer" }[
+                      buildCompare(peer.build, mine)
+                    ]
+                  }`}
+          </span>
         </div>
       </div>
 

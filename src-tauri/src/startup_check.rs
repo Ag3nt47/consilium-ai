@@ -274,6 +274,7 @@ mod tests {
             queued,
             activity: vec![],
             git: None,
+            build: None,
             addrs: vec!["192.168.1.157:8470".into(), "192.168.1.170:8470".into()],
         }
     }
@@ -288,6 +289,8 @@ mod tests {
             pairing_code_expires_ms: None,
             peers,
             error: None,
+            build: crate::build_id::Build::this(),
+            follow: crate::follow::status(),
         }
     }
 

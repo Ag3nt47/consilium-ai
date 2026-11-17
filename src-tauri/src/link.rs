@@ -185,6 +185,8 @@ pub struct PeerView {
     pub activity: Vec<String>,
     /// Its project folder's git state, e.g. "consilium-ai · main · 2 changed".
     pub git: Option<String>,
+    /// The Consilium build it runs, so updates can be kept in step (see `follow`).
+    pub build: Option<crate::build_id::Build>,
     /// All known candidate routes (wired Ethernet, Wi-Fi, direct cable) for failover.
     pub addrs: Vec<String>,
 }
@@ -199,6 +201,9 @@ pub struct LinkStatus {
     pub pairing_code_expires_ms: Option<u64>,
     pub peers: Vec<PeerView>,
     pub error: Option<String>,
+    /// The build this computer runs, and what it is doing to match the others (see `follow`).
+    pub build: crate::build_id::Build,
+    pub follow: crate::follow::Status,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +264,8 @@ struct PeerState {
     active_ms: u64,
     activity: Vec<String>,
     git: Option<String>,
+    /// The build it runs (see `build_id`), from its latest heartbeat.
+    build: Option<crate::build_id::Build>,
 }
 
 struct Inner {
@@ -410,6 +417,8 @@ impl Link {
         let peers = self.0.peers.lock().unwrap();
         let pending = self.0.pending.lock().unwrap();
         LinkStatus {
+            build: crate::build_id::Build::this(),
+            follow: crate::follow::status(),
             enabled: cfg.enabled,
             node_id: cfg.node_id.clone(),
             name: cfg.name.clone(),
@@ -435,6 +444,7 @@ impl Link {
                         // Only while connected: an old heartbeat's activity would be stale.
                         activity: s.filter(|s| s.tx.is_some()).map(|s| s.activity.clone()).unwrap_or_default(),
                         git: s.and_then(|s| s.git.clone()),
+                        build: s.and_then(|s| s.build.clone()),
                         addrs: p.addrs.clone(),
                     }
                 })
@@ -547,6 +557,7 @@ impl Link {
                         "active": LOCAL_ACTIVE_MS.load(Ordering::SeqCst),
                         "working": local_activity(),
                         "git": GIT_SUMMARY.lock().unwrap().clone(),
+                        "build": crate::build_id::Build::this(),
                         "addrs": local_addrs(self.0.port),
                     }),
                     &key,
@@ -1156,6 +1167,7 @@ impl Link {
                             "active": LOCAL_ACTIVE_MS.load(Ordering::SeqCst),
                             "working": local_activity(),
                             "git": GIT_SUMMARY.lock().unwrap().clone(),
+                            "build": crate::build_id::Build::this(),
                             "addrs": local_addrs(self.0.port),
                         }),
                         &key,
@@ -1187,6 +1199,7 @@ impl Link {
                         s.active_ms = packet.payload.get("active").and_then(Value::as_u64).unwrap_or(0);
                         s.activity = read_activity(packet.payload.get("working"));
                         s.git = packet.payload.get("git").and_then(Value::as_str).map(clean_status).filter(|g| !g.is_empty());
+                        s.build = packet.payload.get("build").and_then(crate::build_id::Build::from_peer);
                     }
                     if packet.payload.get("addrs").is_some() {
                         self.learn_addrs(from, &packet.payload, None);

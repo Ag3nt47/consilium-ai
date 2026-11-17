@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Linked computers stay on the same build**: every build now has a build number and commit
+  (e.g. "0.3.37 #812 (76debf3a1b2c)"), so two builds of one version are told apart. An update is
+  only offered over an older build, and staging never replaces a newer staged build, so updates
+  can't be overridden. Linked computers show each other's build, and one that is behind fetches
+  the newest one's exact commit from GitHub into Consilium's own folder, builds and stages it, and
+  says so in the conversation; it then installs like any update and the AIs carry on.
 - **Linked computers work together**: the AIs on every linked computer now answer in the same
   conversation. Your message reaches the other computer's AIs, their answers come back into your
   conversation as "Claude (MacBook)" and so on, and each side's AIs read the other's answers. When

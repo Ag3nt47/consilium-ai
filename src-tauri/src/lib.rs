@@ -7,6 +7,7 @@ mod apiagent;
 mod attach;
 mod autocontinue;
 mod bench;
+mod build_id;
 mod ci;
 pub mod bridge;
 pub mod cli;
@@ -14,6 +15,7 @@ mod config;
 mod customai;
 mod council;
 mod engine;
+mod follow;
 mod link;
 mod liveui;
 mod memory;
@@ -1092,6 +1094,8 @@ pub fn run() {
                 Err(e) => eprintln!("link: {e}"),
             }
             peer_sync::init(app.state::<AppState>().engine.clone(), &data.join("link"));
+            // Keeps this computer on the newest build any linked computer runs.
+            follow::start(app.state::<AppState>().engine.clone(), data.clone());
             // Falls back to the built-in page if an instantly applied one never starts.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {

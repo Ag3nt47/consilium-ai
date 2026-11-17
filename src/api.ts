@@ -311,6 +311,8 @@ export type LinkPeer = {
   activity: string[];
   /** Its project folder's git state, e.g. "consilium-ai · main · 2 changed". */
   git: string | null;
+  /** The Consilium build it runs; absent from computers on older versions. */
+  build?: Build | null;
   /** Known candidate routes (wired Ethernet, Wi-Fi, direct cable) for failover. */
   addrs: string[];
 };
@@ -345,7 +347,44 @@ export type LinkStatus = {
   pairing_code_expires_ms: number | null;
   peers: LinkPeer[];
   error: string | null;
+  /** The build this computer runs, and what it is doing to match the newest linked computer. */
+  build?: Build;
+  follow?: FollowStatus;
 };
+
+/** A Consilium build (src-tauri/src/build_id.rs): two builds of one version differ in `number`. */
+export type Build = {
+  version: string;
+  /** Commits in its history, so it only grows; 0 when unknown. */
+  number: number;
+  /** Short commit id, with "+dirty" when built with uncommitted changes. */
+  commit: string;
+};
+
+/** Keeping this computer on the newest build a linked computer runs (src-tauri/src/follow.rs). */
+export type FollowStatus = {
+  state: "idle" | "waiting" | "preparing" | "staged" | "failed";
+  target: string | null;
+  from: string | null;
+  detail: string | null;
+};
+
+/** e.g. "0.3.37 #812 (76debf3a1b2c)", or the version alone when the rest is unknown. */
+export function buildLabel(b: Build): string {
+  if (!b.number) return b.version;
+  return `${b.version} #${b.number}${b.commit ? ` (${b.commit})` : ""}`;
+}
+
+/** How `b` stands against `mine`: same version compares by build number (see build_id.rs). */
+export function buildCompare(b: Build, mine: Build): "newer" | "older" | "same" {
+  const parse = (v: string) => v.split(/[.+-]/).map(Number).filter((n) => Number.isInteger(n));
+  const [x, y] = [parse(b.version), parse(mine.version)];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if ((x[i] ?? -1) !== (y[i] ?? -1)) return (x[i] ?? -1) > (y[i] ?? -1) ? "newer" : "older";
+  }
+  if (b.number === mine.number) return "same";
+  return b.number > mine.number ? "newer" : "older";
+}
 
 const appApi = {
   agents: () => invoke<AgentInfo[]>("agents_status"),
