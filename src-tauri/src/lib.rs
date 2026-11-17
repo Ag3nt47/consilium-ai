@@ -484,7 +484,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: when a conversation is first shared with a linked computer, its last 200 earlier messages now go across too, so a chat started before you linked the computers shows in full on both; messages already copied are not repeated. Linked computers can also connect over a direct cable between them, such as Ethernet, Thunderbolt or a Bluetooth network, not only through your router.";
+const WHATS_NEW: &str = "What's new: you can now add AIs beyond Claude, ChatGPT and Gemini. In the Add AI window, which also opens on first launch, the new Add your own AI section has presets for Ollama and LM Studio (models on your own computer, no key needed), OpenRouter, Mistral, Groq, Together and the OpenAI API, or Other for any service that takes OpenAI-style requests. Added AIs chat in the council like Grok and DeepSeek. Linked computers also switch routes faster: if the cable or Wi-Fi drops, the link redials over the other routes within about 4 seconds, and each computer card in Settings lists its routes with a Refresh routes button.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
