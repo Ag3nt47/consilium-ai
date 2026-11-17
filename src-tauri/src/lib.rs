@@ -762,12 +762,22 @@ fn auto_run_commands(engine: Arc<Engine>, e: &Event) {
     if !config.auto_run_commands || engine.config.access(&e.sender) != Access::Unrestricted {
         return;
     }
-    let runnable: Vec<usize> = runcmd::fenced_blocks(&e.text)
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| runcmd::auto_runnable(b))
-        .map(|(i, _)| i)
-        .collect();
+    let blocks = runcmd::fenced_blocks(&e.text);
+    let runnable: Vec<usize> = blocks.iter().enumerate().filter(|(_, b)| runcmd::auto_runnable(b)).map(|(i, _)| i).collect();
+    // A box that could do lasting damage waits for a click even with Always run on, so a Deny can
+    // never come too late; a note says which one and why.
+    for (i, b) in blocks.iter().enumerate() {
+        if let Some(why) = runcmd::risky(&b.code).filter(|_| b.closed && runcmd::check(b).is_ok()) {
+            let _ = engine.note(
+                &e.conversation,
+                &format!(
+                    "Always run held back command box {} from {}: {why}. It runs only if you click Run.",
+                    i + 1,
+                    prompt::label(&e.sender)
+                ),
+            );
+        }
+    }
     if runnable.is_empty() {
         return;
     }

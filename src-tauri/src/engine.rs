@@ -345,6 +345,12 @@ impl Engine {
     /// turn of their own, if `may_start` allows (it limits how often AIs alone can start one).
     pub fn from_linked(self: &Arc<Self>, id: &str, event: &Event, may_start: &dyn Fn() -> bool) {
         let members = self.config.get().members;
+        // Another computer's AI may address AIs here by handle, e.g. "@claude-<this computer>".
+        let addressed: Vec<String> = if event.sender == "human" {
+            vec![]
+        } else {
+            prompt::mentioned_here(&event.text).into_iter().filter(|m| members.contains(m)).collect()
+        };
         let mut running = self.running.lock().unwrap();
         if let Some(r) = running.get(id) {
             let taken = if event.sender == "human" {
@@ -353,6 +359,8 @@ impl Engine {
                     self.journal.join(id, &r.turn, &members);
                 }
                 joined
+            } else if !addressed.is_empty() {
+                r.council.mentioned(event, &addressed)
             } else {
                 r.council.heard(event)
             };
@@ -372,7 +380,9 @@ impl Engine {
                 None => return,
             },
         };
-        self.begin(&mut running, Pending::new(id, members, LINKED_ROUNDS), lock, event.seq);
+        // Those addressed answer; otherwise everyone may react.
+        let targets = if addressed.is_empty() { members } else { addressed };
+        self.begin(&mut running, Pending::new(id, targets, LINKED_ROUNDS), lock, event.seq);
     }
 
     /// The council members a message is for: the chosen ones, plus any it @mentions.
@@ -836,7 +846,10 @@ impl council::Host for RealHost {
         if access == Access::Unrestricted && self.config.get().auto_run_commands {
             system.push_str(
                 "\n\nAlways run is on: command boxes you post run on this computer by themselves and the output comes back to you, \
-so the human isn't asked to click Run. Prefer running commands yourself; admin and install commands still wait for the human.",
+so the human isn't asked to click Run. Prefer running commands yourself; admin and install commands still wait for the human. \
+So does any box that deletes or overwrites files, rewrites git history, uninstalls software, stops programs or runs a \
+downloaded script: it waits for the human's click, with a note saying why. Put such a step in a box of its own, after \
+checking what it would remove (list the folder first), so everything else still runs by itself.",
             );
         }
         if access == Access::Unrestricted || access == Access::Own {
