@@ -460,8 +460,39 @@ type CommandActions = {
 };
 
 /** A fenced code block. Shell blocks from an AI get Run and Deny; every block gets Copy. */
+/** A small â†“ in the corner of a box whose content scrolls; jumps to its end, hides once there. */
+function ScrollEndButton({ target }: { target: { current: HTMLElement | null } }) {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const el = target.current;
+    if (!el) return;
+    const update = () => setShow(el.scrollHeight - el.scrollTop - el.clientHeight > 24);
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener("scroll", update);
+      ro.disconnect();
+    };
+  }, [target]);
+  if (!show) return null;
+  return (
+    <button
+      type="button"
+      className="scroll-end-btn"
+      onClick={() => target.current?.scrollTo({ top: target.current.scrollHeight, behavior: "smooth" })}
+      title="Jump to the end of this box"
+      aria-label="Jump to the end of this box"
+    >
+      {"\u2193"}
+    </button>
+  );
+}
+
 function CommandBox({ event, fence, index, actions }: { event: ChatEvent; fence: Fence; index: number; actions?: CommandActions }) {
   const [copied, setCopied] = useState(false);
+  const preRef = useRef<HTMLPreElement>(null);
   const shell = shellName(fence.lang);
   // Only a box written for this computer, by an AI on this computer, can run here; any other box
   // says where it belongs and keeps Copy.
@@ -508,7 +539,8 @@ function CommandBox({ event, fence, index, actions }: { event: ChatEvent; fence:
           </button>
         </span>
       </div>
-      <pre><code>{fence.code}</code></pre>
+      <pre ref={preRef}><code>{fence.code}</code></pre>
+      <ScrollEndButton target={preRef} />
     </div>
   );
 }
@@ -1476,11 +1508,15 @@ export default function App() {
     }
   }, [events, turn, prefs.effects]);
 
+  // Shows the floating jump-to-latest button while the chat is scrolled well up.
+  const [awayFromLatest, setAwayFromLatest] = useState(false);
+
   function onMessagesScroll() {
     const el = messagesRef.current;
     if (!el) return;
     const top = el.scrollTop;
     const nearBottom = el.scrollHeight - top - el.clientHeight < 80;
+    setAwayFromLatest(el.scrollHeight - top - el.clientHeight > 300);
     // Only an upward scroll unpins: smooth auto-scrolls and growing content never move scrollTop up.
     if (nearBottom) {
       followRef.current = true;
@@ -2741,6 +2777,14 @@ export default function App() {
             <button type="button" className="btn small new-messages" onClick={scrollToLatest} title="Jump to the newest message">
               ↓ {unseen} new message{unseen > 1 ? "s" : ""}
             </button>
+          )}
+          {awayFromLatest && (
+            <div className="jump-latest-wrap">
+              <button type="button" className="jump-latest" onClick={scrollToLatest} title="Jump to the newest message" aria-label="Jump to the newest message">
+                {"\u2193"}
+                {unseen > 0 ? ` ${unseen} new` : ""}
+              </button>
+            </div>
           )}
         </section>
 
