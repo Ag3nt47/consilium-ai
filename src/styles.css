@@ -3550,6 +3550,28 @@ button.attachment {
   color: #f1c40f;
   border: 1px solid rgba(241, 196, 15, 0.3);
 }
+.handshake-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+.handshake-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.handshake-item code {
+  word-break: break-all;
+}
+.handshake-mark {
+  display: inline-block;
+  width: 1.2em;
+  text-align: center;
+  font-weight: 700;
+}
+.handshake-item.acknowledged .handshake-mark { color: var(--ok, #3fb950); }
+.handshake-item.pending .handshake-mark { opacity: 0.6; }
 .failover-section {
   margin-top: 12px;
   padding-top: 10px;

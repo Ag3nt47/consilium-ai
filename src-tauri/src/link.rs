@@ -66,6 +66,45 @@ static GIT_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
 const STATUS_ITEMS: usize = 8;
 const STATUS_CHARS: usize = 120;
 
+/// The AI handshake. For each linked computer (node id): which of its AIs the AIs here have read
+/// and then answered, as their AI -> our AIs (see `Link::acknowledge`). Shared in heartbeats, so
+/// each side can show a check once AIs on both computers have heard each other.
+static READ: Mutex<std::collections::BTreeMap<String, std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>> =
+    Mutex::new(std::collections::BTreeMap::new());
+/// This computer's council members that are ready to answer, for the roll call in each heartbeat.
+static COUNCIL: Mutex<Vec<String>> = Mutex::new(Vec::new());
+const MAX_ROLL: usize = 16;
+
+/// Records which council members here are ready to answer (installed, not out of usage).
+pub fn set_council(ids: Vec<String>) {
+    *COUNCIL.lock().unwrap() = ids.into_iter().take(MAX_ROLL).collect();
+}
+
+/// What the AIs here have read of `node_id`'s AIs, for its heartbeat: {their AI: [our AIs]}.
+fn read_for(node_id: &str) -> Value {
+    READ.lock().unwrap().get(node_id).map(|m| json!(m)).unwrap_or_else(|| json!({}))
+}
+
+/// Known AI ids from another computer's list, so nothing odd reaches the screen.
+fn known_ais<'a>(items: impl Iterator<Item = &'a Value>) -> Vec<String> {
+    let known: Vec<&str> = crate::agents::all().into_iter().map(|a| a.id).collect();
+    items.filter_map(Value::as_str).filter(|s| known.contains(s)).map(str::to_string).take(MAX_ROLL).collect()
+}
+
+/// One AI's side of the handshake with a linked computer.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AiHandshake {
+    pub ai: String,
+    /// "here" for this computer's AI, "there" for the linked computer's.
+    pub side: String,
+    /// How AIs on the other computer address it, e.g. "@claude-lukes-mbp".
+    pub handle: String,
+    /// It has read a message from an AI on the other computer and answered.
+    pub reads: bool,
+    /// An AI on the other computer has read one of its messages and answered.
+    pub read: bool,
+}
+
 /// Marks one AI answer as in progress on this computer until the returned guard is dropped.
 pub fn working(label: &str) -> WorkingGuard {
     let id = WORKING_SEQ.fetch_add(1, Ordering::SeqCst);
@@ -187,8 +226,38 @@ pub struct PeerView {
     pub git: Option<String>,
     /// The Consilium build it runs, so updates can be kept in step (see `follow`).
     pub build: Option<crate::build_id::Build>,
+    /// Every AI on both computers, and whether it has heard and been heard by the other side.
+    pub handshake: Vec<AiHandshake>,
     /// All known candidate routes (wired Ethernet, Wi-Fi, direct cable) for failover.
     pub addrs: Vec<String>,
+}
+
+/// The handshake between this computer (named `me`) and the linked computer `node_id` (named
+/// `name`), from what each side reports. Empty while it isn't connected.
+fn handshake(node_id: &str, name: &str, me: &str, s: Option<&PeerState>) -> Vec<AiHandshake> {
+    let Some(s) = s else { return vec![] };
+    let read = READ.lock().unwrap();
+    let ours_read: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = read.get(node_id).cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    for ai in COUNCIL.lock().unwrap().iter() {
+        out.push(AiHandshake {
+            ai: ai.clone(),
+            side: "here".into(),
+            handle: crate::prompt::handle(ai, me),
+            reads: ours_read.values().any(|by| by.contains(ai)),
+            read: s.read_ours.get(ai).is_some_and(|by| !by.is_empty()),
+        });
+    }
+    for ai in &s.council {
+        out.push(AiHandshake {
+            ai: ai.clone(),
+            side: "there".into(),
+            handle: crate::prompt::handle(ai, name),
+            reads: s.read_ours.values().any(|by| by.contains(ai)),
+            read: ours_read.get(ai).is_some_and(|by| !by.is_empty()),
+        });
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -266,6 +335,9 @@ struct PeerState {
     git: Option<String>,
     /// The build it runs (see `build_id`), from its latest heartbeat.
     build: Option<crate::build_id::Build>,
+    /// Its council members ready to answer, and which of ours they have read: our AI -> theirs.
+    council: Vec<String>,
+    read_ours: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 struct Inner {
@@ -445,6 +517,7 @@ impl Link {
                         activity: s.filter(|s| s.tx.is_some()).map(|s| s.activity.clone()).unwrap_or_default(),
                         git: s.and_then(|s| s.git.clone()),
                         build: s.and_then(|s| s.build.clone()),
+                        handshake: handshake(&p.node_id, &p.name, &cfg.name, s.filter(|s| s.tx.is_some())),
                         addrs: p.addrs.clone(),
                     }
                 })
@@ -558,6 +631,8 @@ impl Link {
                         "working": local_activity(),
                         "git": GIT_SUMMARY.lock().unwrap().clone(),
                         "build": crate::build_id::Build::this(),
+                        "council": COUNCIL.lock().unwrap().clone(),
+                        "read": read_for(node_id),
                         "addrs": local_addrs(self.0.port),
                     }),
                     &key,
@@ -711,6 +786,16 @@ impl Link {
             }
         }
         Ok(first_id)
+    }
+
+    /// An AI here (`our_ai`) was handed a message from `their_ai` on the computer shown as
+    /// `computer`, and answered: one half of their handshake.
+    pub fn acknowledge(&self, computer: &str, their_ai: &str, our_ai: &str) {
+        let peers: Vec<(String, String)> =
+            self.0.cfg.lock().unwrap().peers.iter().map(|p| (p.node_id.clone(), p.name.clone())).collect();
+        if let Some((node, _)) = peers.iter().find(|(id, _)| nickname(id, &peers) == computer) {
+            READ.lock().unwrap().entry(node.clone()).or_default().entry(their_ai.to_string()).or_default().insert(our_ai.to_string());
+        }
     }
 
     /// This computer's id among the linked computers.
@@ -1168,6 +1253,8 @@ impl Link {
                             "working": local_activity(),
                             "git": GIT_SUMMARY.lock().unwrap().clone(),
                             "build": crate::build_id::Build::this(),
+                            "council": COUNCIL.lock().unwrap().clone(),
+                            "read": read_for(&peer.node_id),
                             "addrs": local_addrs(self.0.port),
                         }),
                         &key,
@@ -1200,6 +1287,19 @@ impl Link {
                         s.activity = read_activity(packet.payload.get("working"));
                         s.git = packet.payload.get("git").and_then(Value::as_str).map(clean_status).filter(|g| !g.is_empty());
                         s.build = packet.payload.get("build").and_then(crate::build_id::Build::from_peer);
+                        s.council = packet.payload.get("council").and_then(Value::as_array).map(|a| known_ais(a.iter())).unwrap_or_default();
+                        s.read_ours = packet
+                            .payload
+                            .get("read")
+                            .and_then(Value::as_object)
+                            .map(|m| {
+                                m.iter()
+                                    .filter(|(ours, _)| crate::agents::all().iter().any(|a| a.id == ours.as_str()))
+                                    .take(MAX_ROLL)
+                                    .map(|(ours, theirs)| (ours.clone(), theirs.as_array().map(|a| known_ais(a.iter())).unwrap_or_default()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                     }
                     if packet.payload.get("addrs").is_some() {
                         self.learn_addrs(from, &packet.payload, None);
@@ -1540,6 +1640,30 @@ mod tests {
         assert_eq!(nickname("bbbb2222", &p), "desktop · bbbb");
         assert_eq!(nickname("cccc3333", &p), "MacBook 2");
         assert_eq!(nickname("dddd4444", &p), "linked computer · dddd");
+    }
+
+    #[test]
+    fn the_ai_handshake_checks_both_directions() {
+        set_council(vec!["claude".into(), "gemini".into()]);
+        // The Mac's Claude has read our Claude; our Gemini has read the Mac's Claude.
+        READ.lock().unwrap().insert("node-hs".into(), [("claude".to_string(), ["gemini".to_string()].into())].into());
+        let mac = PeerState {
+            council: known_ais([json!("claude"), json!("gpt"), json!("intruder")].iter()),
+            read_ours: [("claude".to_string(), vec!["claude".to_string()])].into(),
+            ..Default::default()
+        };
+        assert_eq!(mac.council, vec!["claude", "gpt"], "only known AIs are listed");
+        let hs = handshake("node-hs", "Lukes-MBP", "Windows PC", Some(&mac));
+        let get = |side: &str, ai: &str| hs.iter().find(|h| h.side == side && h.ai == ai).cloned().unwrap();
+        let ours = get("here", "claude");
+        assert_eq!((ours.handle.as_str(), ours.reads, ours.read), ("@claude-windows-pc", false, true), "read by the Mac, hasn't read it yet");
+        assert_eq!((get("here", "gemini").reads, get("here", "gemini").read), (true, false));
+        let theirs = get("there", "claude");
+        assert_eq!((theirs.handle.as_str(), theirs.reads, theirs.read), ("@claude-lukes-mbp", true, true), "both directions: a green check");
+        assert_eq!((get("there", "gpt").reads, get("there", "gpt").read), (false, false));
+        assert!(handshake("node-hs", "Lukes-MBP", "Windows PC", None).is_empty(), "nothing while disconnected");
+        assert_eq!(read_for("node-hs"), json!({"claude": ["gemini"]}));
+        READ.lock().unwrap().remove("node-hs");
     }
 
     #[test]

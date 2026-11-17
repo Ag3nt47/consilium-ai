@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **AIs address each other across computers**: every AI on another linked computer has a handle
+  with its computer's name, such as `@claude-lukes-mbp`, and every AI is told the handles. A
+  handle reaches only that AI, which joins in and answers (up to three such turns per message you
+  send). A plain `@claude` still means the AI on your own computer.
+- **AI handshake**: the linked-computers panel lists every AI on both computers with a green ✓
+  once it has read the other computer's AIs and been read by them.
+- **Always run holds back risky commands**: a box that deletes or overwrites files, rewrites git
+  history, uninstalls software, stops programs or the computer, changes folder permissions or runs
+  a downloaded script waits for your click even with Always run on, with a note saying why. Before,
+  such a box could run before a Deny arrived.
+- Fixed: a message typed from the terminal into another computer's conversation stayed on this
+  computer. The open app now sends it on.
 - **Linked computers stay on the same build**: every build now has a build number and commit
   (e.g. "0.3.37 #812 (76debf3a1b2c)"), so two builds of one version are told apart. An update is
   only offered over an older build, and staging never replaces a newer staged build, so updates

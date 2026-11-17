@@ -674,6 +674,35 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         </div>
       </div>
 
+      {peer.connected && (
+        <div className="handshake-section">
+          <div className="row between align-center">
+            <span className="failover-title">AI handshake:</span>
+            <span className="muted small">
+              {(peer.handshake ?? []).length === 0
+                ? "Waiting for that computer to report its AIs (it needs this version)"
+                : (peer.handshake ?? []).every((h) => h.reads && h.read)
+                  ? "✓ Every AI has heard the other computer"
+                  : "A ✓ appears once an AI has read the other computer's AIs and been read by them"}
+            </span>
+          </div>
+          <div className="handshake-list">
+            {(peer.handshake ?? []).map((h) => (
+              <div key={`${h.side}-${h.ai}`} className={`handshake-item ${h.reads && h.read ? "acknowledged" : "pending"}`}>
+                <span className="handshake-mark" aria-label={h.reads && h.read ? "acknowledged" : "not yet"}>
+                  {h.reads && h.read ? "✓" : "…"}
+                </span>{" "}
+                <code>{h.handle}</code>{" "}
+                <span className="muted small">
+                  {h.side === "here" ? "this computer" : peer.name} ·{" "}
+                  {h.reads ? "read theirs" : "hasn't read theirs yet"}, {h.read ? "read by them" : "not read by them yet"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="failover-section">
         <div className="row between align-center failover-header">
           <div className="row align-center gap-xs">

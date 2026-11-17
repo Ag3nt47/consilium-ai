@@ -313,6 +313,8 @@ export type LinkPeer = {
   git: string | null;
   /** The Consilium build it runs; absent from computers on older versions. */
   build?: Build | null;
+  /** Every AI on both computers and whether it has heard, and been heard by, the other side. */
+  handshake?: AiHandshake[];
   /** Known candidate routes (wired Ethernet, Wi-Fi, direct cable) for failover. */
   addrs: string[];
 };
@@ -350,6 +352,18 @@ export type LinkStatus = {
   /** The build this computer runs, and what it is doing to match the newest linked computer. */
   build?: Build;
   follow?: FollowStatus;
+};
+
+/** One AI's side of the handshake with a linked computer (src-tauri/src/link.rs). */
+export type AiHandshake = {
+  ai: string;
+  side: "here" | "there";
+  /** How the AIs on the other computer address it, e.g. "@claude-lukes-mbp". */
+  handle: string;
+  /** It has read a message from an AI on the other computer and answered. */
+  reads: boolean;
+  /** An AI on the other computer has read one of its messages and answered. */
+  read: boolean;
 };
 
 /** A Consilium build (src-tauri/src/build_id.rs): two builds of one version differ in `number`. */

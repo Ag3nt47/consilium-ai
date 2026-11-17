@@ -606,10 +606,22 @@ pub fn init(engine: Arc<crate::engine::Engine>, link_dir: &Path) {
         waking.from_linked(conversation, e, may_start)
     }));
     // Sends conversations a linked computer doesn't have yet, now and whenever one is paired.
-    engine.spawn_task(Box::pin(async {
+    let engine = engine.clone();
+    let spawner = engine.clone();
+    spawner.spawn_task(Box::pin(async move {
         loop {
             if let (Some(s), Some(link)) = (SYNC.get(), crate::link_handle()) {
                 if link.enabled() && link.has_peers() {
+                    // The roll call: council members here that can answer right now.
+                    let now = crate::store::now_ms();
+                    let ready: Vec<String> = engine
+                        .config
+                        .get()
+                        .members
+                        .into_iter()
+                        .filter(|m| crate::agents::by_id(m).is_some_and(crate::agents::installed) && engine.bench.until(m, now).is_none())
+                        .collect();
+                    crate::link::set_council(ready);
                     let peers: Vec<String> = link.status().peers.into_iter().map(|p| p.node_id).collect();
                     for packet in s.catch_up(&peers) {
                         let _ = link.send(PacketKind::Chat, packet);

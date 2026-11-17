@@ -406,6 +406,17 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
             .into_iter()
             .filter(|message| !already_seen.contains(message.as_str()))
             .collect();
+        // Other computers' AIs whose messages this AI is reading now: once it answers, that is
+        // its half of the handshake with each (see `link::Link::acknowledge`).
+        let mut heard_from: Vec<(String, String)> = Vec::new();
+        for e in events.iter().filter(|e| e.kind == "message" && e.sender != "human" && newly_seen.contains(&e.id)) {
+            if let Some(via) = &e.via {
+                let pair = (via.clone(), e.sender.clone());
+                if !heard_from.contains(&pair) {
+                    heard_from.push(pair);
+                }
+            }
+        }
         // A receipt means this bounded transcript was handed to the AI. Persist it before waiting
         // for the answer, so a slow, stopped, or failed turn still reports what it received.
         if !newly_seen.is_empty() {
@@ -414,6 +425,13 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
             }
         }
         let result = s.host.ask(agent, n, rounds, events, s.cancel.clone()).await;
+        if result.is_ok() {
+            if let Some(link) = crate::link_handle() {
+                for (computer, their_ai) in &heard_from {
+                    link.acknowledge(computer, their_ai, &id);
+                }
+            }
+        }
         {
             let mut st = s.state.lock().unwrap();
             st.thinking.retain(|(a, _)| a != &id);

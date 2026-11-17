@@ -275,6 +275,7 @@ mod tests {
             activity: vec![],
             git: None,
             build: None,
+            handshake: vec![],
             addrs: vec!["192.168.1.157:8470".into(), "192.168.1.170:8470".into()],
         }
     }
