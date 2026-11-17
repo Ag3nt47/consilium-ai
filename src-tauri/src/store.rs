@@ -169,6 +169,12 @@ pub struct Store {
     appending: Mutex<()>,
 }
 
+enum TurnProbe {
+    Free(fs::File),
+    Held,
+    Unknown,
+}
+
 /// Held while this process runs a conversation's AIs. The operating system releases it when the
 /// file is closed, so a quit or crash can never leave a conversation locked.
 pub struct TurnLock {
@@ -208,16 +214,38 @@ impl Store {
     /// already has it.
     pub fn try_turn_lock(&self, id: &str) -> Option<TurnLock> {
         Self::check(id).ok()?;
-        let file = OpenOptions::new().create(true).truncate(false).write(true).open(self.turn_lock_path(id)).ok()?;
-        file.try_lock().ok()?;
-        Some(TurnLock { _file: file })
+        match self.probe_turn_lock(id) {
+            TurnProbe::Free(file) => Some(TurnLock { _file: file }),
+            TurnProbe::Held | TurnProbe::Unknown => None,
+        }
+    }
+
+    /// Tries to take the turn lock, telling "another holder" apart from a passing error (such as
+    /// running short of file handles), which is retried a few times before giving up.
+    fn probe_turn_lock(&self, id: &str) -> TurnProbe {
+        let path = self.turn_lock_path(id);
+        for attempt in 0..5 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let Ok(file) = OpenOptions::new().create(true).truncate(false).write(true).open(&path) else {
+                continue;
+            };
+            match file.try_lock() {
+                Ok(()) => return TurnProbe::Free(file),
+                Err(std::fs::TryLockError::WouldBlock) => return TurnProbe::Held,
+                Err(std::fs::TryLockError::Error(_)) => continue,
+            }
+        }
+        TurnProbe::Unknown
     }
 
     /// Whether some process is running this conversation's AIs. (A process that holds the lock
-    /// itself knows that already: this probe reports its own lock as held too.)
+    /// itself knows that already: this probe reports its own lock as held too.) Only a lock that is
+    /// really held counts: an error while checking doesn't make the conversation look busy.
     pub fn turn_locked(&self, id: &str) -> bool {
         // No lock file yet means no turn has ever run (and the probe doesn't create one).
-        valid_id(id) && self.turn_lock_path(id).exists() && self.try_turn_lock(id).is_none()
+        valid_id(id) && self.turn_lock_path(id).exists() && matches!(self.probe_turn_lock(id), TurnProbe::Held)
     }
 
     /// Asks whichever process is running this conversation's AIs to stop them (see `take_stop_request`).
