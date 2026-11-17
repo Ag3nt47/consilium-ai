@@ -14,6 +14,7 @@ use std::sync::Mutex;
 const FILE: &str = "children.pids";
 /// Program names a recorded pid must still have before its group is ended, so a pid the system
 /// has since reused for something else is never touched.
+#[cfg(unix)]
 const AGENT_NAMES: [&str; 6] = ["claude", "codex", "agy", "gemini", "node", "CodexCLI"];
 
 static LOCK: Mutex<()> = Mutex::new(());
