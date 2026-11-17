@@ -422,7 +422,7 @@ put a [Name] tag on your own message.
 starting with REQUEST: so it is shown to them in red. Ask only what you actually need. The human \
 answers each REQUEST with Approve or Deny buttons, so when you can, phrase it as one question \
 that a yes or no answers; their answer arrives as a message starting \"Approved:\" or \"Denied:\" followed \
-by your request.
+by your request. When a request of yours is no longer needed, withdraw it with a line starting with WITHDRAW: and its text (or WITHDRAW: all), so the human isn't left answering old questions.
 - To ask another participant something, @mention them: they see it and answer in the same turn.
 - Participants answer independently and at the same time: nobody waits for a turn, so others may be writing while you are, and messages may arrive while you think. React to whatever is newest.
 - Lines tagged [Consilium] are notes from the app itself (for example an AI that is out of usage and sitting out, or an update). Take them into account; don't reply to Consilium.{add_ai}
@@ -664,8 +664,80 @@ pub fn transcript(events: &[Event], me: &str) -> String {
         out.push_str("\n\nRECENT MESSAGES (verbatim)\n\n");
     }
     out.push_str(&parts.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n\n"));
+    out.push_str(&open_requests_note(events, me));
     out.push_str(&format!("\n\nEND OF CONVERSATION. Write your next message as {} now.", label(me)));
     out
+}
+
+/// A request's wording for matching: case, spacing and end punctuation aside.
+fn request_words(text: &str) -> String {
+    text.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches(['.', '?', '!', ':', ';', ',']).to_string()
+}
+
+/// Whether a WITHDRAW line's text names `request`: the same words, the start of them, or "all".
+fn withdraws(withdrawal: &str, request: &str) -> bool {
+    let (w, r) = (request_words(withdrawal), request_words(request));
+    w == "all" || w == "all requests" || w == r || (w.chars().count() >= 12 && (r.starts_with(&w) || w.starts_with(&r)))
+}
+
+/// Requests from AIs here still waiting for the human, oldest first, as (asker, request): not
+/// approved, denied, answered or withdrawn, and not older than `stale_ms` before `now`. Mirrors
+/// the request tray (App.tsx `answeredRequests`), so each AI can withdraw what it no longer needs.
+pub fn open_requests(events: &[Event], now: u64, stale_ms: u64) -> Vec<(String, String)> {
+    let mut waiting: Vec<(String, String, u64)> = Vec::new();
+    for e in events.iter().filter(|e| e.kind == "message" || e.kind == "error") {
+        if e.sender == "human" {
+            let text = e.text.trim();
+            let answered = ["approved:", "denied:", "response to request:"]
+                .iter()
+                .find_map(|p| text.to_lowercase().starts_with(p).then(|| text[p.len()..].lines().next().unwrap_or("").trim().to_string()));
+            if let Some(a) = answered.filter(|_| e.kind == "message") {
+                if let Some(i) = waiting.iter().position(|(_, r, _)| r.trim() == a) {
+                    waiting.remove(i);
+                }
+            }
+            continue;
+        }
+        // Only this computer's own AIs: another computer's requests are answered there.
+        if e.via.is_some() {
+            continue;
+        }
+        for line in e.text.lines() {
+            let line = line.trim();
+            if let Some(w) = strip_prefix_ci(line, "WITHDRAW:") {
+                waiting.retain(|(who, r, _)| !(who == &e.sender && withdraws(w, r)));
+            } else if let Some(r) = strip_prefix_ci(line, "REQUEST:").filter(|r| !r.trim().is_empty()) {
+                waiting.push((e.sender.clone(), r.trim().to_string(), e.ts));
+            }
+        }
+    }
+    waiting.into_iter().filter(|(_, _, ts)| ts + stale_ms >= now).map(|(who, r, _)| (who, r)).collect()
+}
+
+fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    (line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix)).then(|| line[prefix.len()..].trim())
+}
+
+/// Requests and command boxes waiting longer than this leave the request tray, and the AIs stop
+/// being reminded of them.
+pub const STALE_REQUEST_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// For `me`'s instructions: its requests still waiting for the human, and how to withdraw them.
+fn open_requests_note(events: &[Event], me: &str) -> String {
+    let mine: Vec<String> = open_requests(events, crate::store::now_ms(), STALE_REQUEST_MS)
+        .into_iter()
+        .filter(|(who, _)| who == me)
+        .map(|(_, r)| r)
+        .collect();
+    if mine.is_empty() {
+        return String::new();
+    }
+    let list = mine.iter().enumerate().map(|(i, r)| format!("{}. {r}", i + 1)).collect::<Vec<_>>().join("\n");
+    format!(
+        "\n\nYOUR REQUESTS STILL WAITING FOR THE HUMAN\n{list}\nIf any of these is no longer needed (done another way, \
+         superseded by a newer request, or out of date), withdraw it so the human isn't asked about it: write a line \
+         `WITHDRAW: <the request's text>`, or `WITHDRAW: all`. Don't repeat a request that is still waiting."
+    )
 }
 
 /// True when a reply is just "PASS" (nothing to add in a discussion round).
@@ -748,6 +820,41 @@ mod tests {
         assert_eq!(summarize_git("app", "## main...origin/main [ahead 2]", 3, false), "app · main (ahead 2) · 3 changed");
         assert_eq!(summarize_git("app", "## main...origin/main", 0, false), "app · main · clean");
         assert_eq!(summarize_git("app", "## No commits yet on main", 1, true), "app · main · 1+ changed");
+    }
+
+    #[test]
+    fn an_ai_sees_its_open_requests_and_can_withdraw_them() {
+        let at = |mut e: Event, ts: u64| {
+            e.ts = ts;
+            e
+        };
+        let day = STALE_REQUEST_MS;
+        let events = vec![
+            at(ev("claude", "REQUEST: May I push to main?\nREQUEST: Install Node 22 on the Mac?"), 10 * day),
+            at(ev("gpt", "REQUEST: May I run the tests?"), 10 * day),
+            at(ev("human", "Approved: May I push to main?"), 10 * day),
+            at(ev("gpt", "WITHDRAW: Install Node 22 on the Mac"), 10 * day),
+            at(ev("claude", "REQUEST: Restart the app?"), 10 * day),
+            at(ev("claude", "REQUEST: Something from long ago?"), 8 * day),
+        ];
+        let open = open_requests(&events, 10 * day + 1, day);
+        assert_eq!(
+            open,
+            vec![
+                ("claude".to_string(), "Install Node 22 on the Mac?".to_string()),
+                ("gpt".to_string(), "May I run the tests?".to_string()),
+                ("claude".to_string(), "Restart the app?".to_string()),
+            ],
+            "approved, stale and other AIs' withdrawals aside"
+        );
+        let mut withdrawn = events.clone();
+        withdrawn.push(at(ev("claude", "All done another way.\nWITHDRAW: install node 22 on the mac."), 10 * day));
+        assert!(!open_requests(&withdrawn, 10 * day + 1, day).iter().any(|(_, r)| r.contains("Node")));
+        withdrawn.push(at(ev("claude", "WITHDRAW: all"), 10 * day));
+        assert_eq!(open_requests(&withdrawn, 10 * day + 1, day), vec![("gpt".to_string(), "May I run the tests?".to_string())]);
+        let mut theirs = ev("claude", "REQUEST: from the Mac");
+        theirs.via = Some("Lukes-MBP".into());
+        assert!(open_requests(&[theirs], 0, day).is_empty(), "another computer's requests are answered there");
     }
 
     #[test]

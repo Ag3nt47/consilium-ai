@@ -338,6 +338,8 @@ struct PeerState {
     /// Its council members ready to answer, and which of ours they have read: our AI -> theirs.
     council: Vec<String>,
     read_ours: std::collections::BTreeMap<String, Vec<String>>,
+    /// Packets received from it, so a route switched to in a stress test is proven by traffic.
+    packets_in: u64,
 }
 
 struct Inner {
@@ -649,6 +651,84 @@ impl Link {
         Ok(addrs)
     }
 
+    /// The communication stress test: for each connected computer, moves the live link onto each
+    /// of its routes in turn (the others are left out, as if they had failed), proves each with a
+    /// packet received over it, and finally returns the link to the fastest route. A route that
+    /// doesn't connect, or carries nothing, fails and the test moves on.
+    pub async fn stress_test(&self) -> Result<Vec<StressReport>, String> {
+        let token = self.0.running.lock().unwrap().clone().ok_or("linking is off")?;
+        let peers = self.0.cfg.lock().unwrap().peers.clone();
+        let mut out = Vec::new();
+        for peer in peers.into_iter().filter(|p| !p.addrs.is_empty()) {
+            let connected = self.0.peers.lock().unwrap().get(&peer.node_id).is_some_and(|s| s.tx.is_some());
+            if !connected {
+                out.push(StressReport { computer: self.peer_name(&peer.node_id), routes: vec![], restored: None });
+                continue;
+            }
+            let mut routes = Vec::new();
+            for addr in peer.addrs.iter().take(12) {
+                routes.push(self.switch_to(&peer, std::slice::from_ref(addr), &token).await);
+            }
+            // Back to normal: the fastest route that answers.
+            let restored = self.switch_to(&peer, &peer.addrs, &token).await;
+            out.push(StressReport {
+                computer: self.peer_name(&peer.node_id),
+                routes,
+                restored: restored.ok.then_some(restored.addr),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Moves the live link with `peer` onto the fastest of `addrs`, and waits for a packet over it.
+    async fn switch_to(&self, peer: &Peer, addrs: &[String], token: &CancellationToken) -> RouteSwitch {
+        let label = addrs.first().cloned().unwrap_or_default();
+        let generation = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| s.generation);
+        let started = std::time::Instant::now();
+        let (me, p, a, t) = (self.clone(), peer.clone(), addrs.to_vec(), token.clone());
+        let dial = tokio::spawn(async move { me.dial_on(p, &a, t).await });
+        let mut switched_at: Option<(String, u64, u64)> = None;
+        let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, detail };
+        while started.elapsed() < STRESS_SWITCH_TIMEOUT {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let (route, packets) = {
+                let states = self.0.peers.lock().unwrap();
+                let Some(s) = states.get(&peer.node_id) else { continue };
+                if s.generation <= generation || s.tx.is_none() {
+                    (None, 0)
+                } else {
+                    (s.route.clone(), s.packets_in)
+                }
+            };
+            if let Some(route) = route {
+                match &switched_at {
+                    None => switched_at = Some((route, packets, started.elapsed().as_millis() as u64)),
+                    Some((r, before, ms)) if packets > *before => {
+                        return RouteSwitch {
+                            kind: route_kind(r).into(),
+                            addr: r.clone(),
+                            ok: true,
+                            ms: Some(*ms),
+                            detail: format!("switched in {ms} ms, traffic confirmed after {} ms", started.elapsed().as_millis()),
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            if dial.is_finished() && switched_at.is_none() {
+                let why = match dial.await {
+                    Ok(Err(e)) => e,
+                    _ => "the connection closed".into(),
+                };
+                return fail(label, why);
+            }
+        }
+        match switched_at {
+            Some((r, _, _)) => fail(r, "connected, but nothing came back over it".into()),
+            None => fail(label, "timed out".into()),
+        }
+    }
+
     /// Tests connectivity, route latency, and sync alignment for a paired computer.
     pub async fn test_peer(&self, node_id: &str) -> Result<PeerTestReport, String> {
         let (peer, connected, active_route, rtt_ms, queued_outgoing) = {
@@ -670,15 +750,7 @@ impl Link {
 
         let mut routes = Vec::new();
         for addr in &peer.addrs {
-            let kind = if addr.starts_with("169.254.") {
-                "Direct Cable / Bluetooth (Link-Local)".to_string()
-            } else if addr.starts_with("100.") {
-                "Tailscale Mesh".to_string()
-            } else if addr.starts_with("127.0.0.1") {
-                "Loopback".to_string()
-            } else {
-                "Gigabit / Wi-Fi LAN".to_string()
-            };
+            let kind = route_kind(addr).to_string();
 
             let started = std::time::Instant::now();
             let timeout = Duration::from_millis(1000);
@@ -1142,7 +1214,13 @@ impl Link {
     }
 
     async fn dial(self, peer: Peer, token: CancellationToken) -> Result<(), String> {
-        let (stream, route, rtt) = fastest_route(&peer.addrs).await.ok_or("no route answered")?;
+        let addrs = peer.addrs.clone();
+        self.dial_on(peer, &addrs, token).await
+    }
+
+    /// Connects to `peer` over the fastest of `addrs` and runs the session until it ends.
+    async fn dial_on(self, peer: Peer, addrs: &[String], token: CancellationToken) -> Result<(), String> {
+        let (stream, route, rtt) = fastest_route(addrs).await.ok_or("no route answered")?;
         let _ = stream.set_nodelay(true);
         let key = peer_key(&peer)?;
         let (r, mut w) = stream.into_split();
@@ -1234,6 +1312,7 @@ impl Link {
                     if packet.validate(&peer.node_id, &key, now_ms()).is_err() { continue; }
                     if let Some(s) = self.0.peers.lock().unwrap().get_mut(&peer.node_id) {
                         s.last_seen_ms = now_ms();
+                        s.packets_in += 1;
                     }
                     self.receive(&me, &key, &peer.node_id, packet, &tx);
                 }
@@ -1343,6 +1422,65 @@ impl Link {
 }
 
 /// Tries every known address at once and keeps whichever connects first.
+/// What kind of connection an address is, for test results.
+fn route_kind(addr: &str) -> &'static str {
+    if addr.starts_with("169.254.") {
+        "Direct cable / Bluetooth (link-local)"
+    } else if addr.starts_with("100.") {
+        "Tailscale"
+    } else if addr.starts_with("127.") {
+        "Loopback"
+    } else {
+        "LAN (Ethernet or Wi-Fi)"
+    }
+}
+
+/// How long the stress test waits for the link to move onto a route and carry a packet.
+const STRESS_SWITCH_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// One route in the communication stress test.
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteSwitch {
+    pub addr: String,
+    pub kind: String,
+    pub ok: bool,
+    /// How long the switch took.
+    pub ms: Option<u64>,
+    pub detail: String,
+}
+
+/// The stress test with one linked computer: each route, and where the link ended up.
+#[derive(Debug, Clone, Serialize)]
+pub struct StressReport {
+    pub computer: String,
+    pub routes: Vec<RouteSwitch>,
+    /// The route the link returned to afterwards; None if it isn't connected.
+    pub restored: Option<String>,
+}
+
+impl StressReport {
+    /// The result as a status note for the conversation.
+    pub fn summary(&self, when: &str) -> String {
+        if self.routes.is_empty() {
+            return format!("Communication stress test ({when}) with {}: not connected right now, so nothing was tested.", self.computer);
+        }
+        let ok = self.routes.iter().filter(|r| r.ok).count();
+        let mut s = format!(
+            "Communication stress test ({when}) with {}: {ok} of {} routes work. Each route was used on its own, with the others shut out, until a packet came back over it:",
+            self.computer,
+            self.routes.len()
+        );
+        for r in &self.routes {
+            s.push_str(&format!("\n{} {} {}: {}", if r.ok { "✓" } else { "✗" }, r.kind, r.addr, r.detail));
+        }
+        match &self.restored {
+            Some(r) => s.push_str(&format!("\nThe link is back on the fastest route, {r}.")),
+            None => s.push_str("\nThe link didn't come back after the test; it keeps redialling every route."),
+        }
+        s
+    }
+}
+
 async fn fastest_route(addrs: &[String]) -> Option<(TcpStream, String, u64)> {
     let (tx, mut rx) = mpsc::channel(addrs.len().max(1));
     for addr in addrs.iter().take(12).cloned() {
@@ -1723,6 +1861,33 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         false
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_stress_test_switches_through_every_route_and_reports_each() {
+        let dir = std::env::temp_dir().join(format!("link-stress-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        let code = host.begin_pairing().unwrap();
+        let good = format!("127.0.0.1:{}", host.0.port);
+        joiner.join(&good, &code.code).await.unwrap();
+        assert!(wait_for(|| joiner.status().peers.first().is_some_and(|p| p.connected)).await, "session comes up");
+        // One route that works and one that is down (nothing listens there).
+        let dead = format!("127.0.0.1:{}", free_port());
+        joiner.0.cfg.lock().unwrap().peers[0].addrs = vec![good.clone(), dead.clone()];
+        let reports = joiner.stress_test().await.unwrap();
+        assert_eq!(reports.len(), 1);
+        let r = &reports[0];
+        assert_eq!(r.routes.len(), 2);
+        assert!(r.routes[0].ok && r.routes[0].addr == good, "{:?}", r.routes[0]);
+        assert!(!r.routes[1].ok && r.routes[1].addr == dead, "{:?}", r.routes[1]);
+        assert_eq!(r.restored.as_deref(), Some(good.as_str()), "back on the working route");
+        assert!(wait_for(|| joiner.status().peers[0].connected).await);
+        let note = r.summary("requested");
+        assert!(note.contains("1 of 2 routes work") && note.contains("✓ Loopback") && note.contains("✗ Loopback"), "{note}");
+        host.stop();
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]

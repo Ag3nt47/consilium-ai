@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, buildCompare, buildLabel, type Build, type LinkPeer, type LinkStatus, type PeerTestReport } from "./api";
+import { api, buildCompare, buildLabel, type Build, type LinkPeer, type LinkStatus, type PeerTestReport, type StressReport } from "./api";
 
 /** Topbar status light and button for multi-computer sync (Mac & Windows).
  *  Displays connection health, fastest active route, and opens the sync setup modal on click. */
@@ -123,6 +123,20 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<"host" | "join">("host");
+  // The communication stress test: running, and its last results (also posted in the chat).
+  const [stressing, setStressing] = useState(false);
+  const [stress, setStress] = useState<StressReport[] | null>(null);
+  const runStress = async () => {
+    setStressing(true);
+    setError(null);
+    try {
+      setStress(await api.stressTestLink());
+    } catch (e) {
+      setError(`Stress test failed: ${e}`);
+    } finally {
+      setStressing(false);
+    }
+  };
 
   // Host mode (showing code)
   const [hostCode, setHostCode] = useState<string | null>(null);
@@ -344,6 +358,33 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
                     : `${status.follow.detail ?? "Preparing"}: ${status.follow.target}, to match ${status.follow.from}.`}
               </div>
             )}
+
+            <div className="stress-test" style={{ marginTop: "8px" }}>
+              <button
+                className="btn small"
+                onClick={runStress}
+                disabled={stressing || !(status.peers ?? []).some((p) => p.connected)}
+                title="Shuts out every route but one, moves the link onto it and checks that traffic comes back, one route at a time, then returns to the fastest. Results are posted in the chat. It also runs after every restart."
+              >
+                {stressing ? "Stress testing routes…" : "Communication stress test"}
+              </button>
+              {stress?.map((r) => (
+                <div key={r.computer} className="stress-report">
+                  <div className="muted small">
+                    {r.computer}:{" "}
+                    {r.routes.length === 0
+                      ? "not connected, nothing tested"
+                      : `${r.routes.filter((x) => x.ok).length} of ${r.routes.length} routes work${r.restored ? `, back on ${r.restored}` : ", link not back yet"}`}
+                  </div>
+                  {r.routes.map((x) => (
+                    <div key={x.addr} className={`handshake-item ${x.ok ? "acknowledged" : "pending"}`}>
+                      <span className="handshake-mark">{x.ok ? "✓" : "✗"}</span> {x.kind} <code>{x.addr}</code>{" "}
+                      <span className="muted small">{x.detail}</span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
 
             <div style={{ marginTop: "8px" }}>
               <span className="muted small">Local Addresses (reachable on your network):</span>

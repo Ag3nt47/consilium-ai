@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Updates install and restart by themselves**: a new setting (Settings → Updates, on by default,
+  including for existing installs) installs a newer build as soon as it is ready and restarts;
+  the AIs' work resumes after. It waits while a command you started is running. Consilium checks
+  GitHub every 30 minutes, and linked computers move to the newest build any of them runs.
+- **Old requests clear themselves**: an AI can withdraw a request it no longer needs with
+  `WITHDRAW: <request>` or `WITHDRAW: all`, and is reminded each turn which of its requests are
+  still waiting. Requests and command boxes older than a day leave the request tray; they stay
+  in the chat.
+- **Communication stress test**: a button with the linked computers (and after every restart)
+  moves the link onto each route in turn, shutting the others out, checks that traffic comes back
+  over it, returns to the fastest route, and posts the results in the chat.
 - **AIs address each other across computers**: every AI on another linked computer has a handle
   with its computer's name, such as `@claude-lukes-mbp`, and every AI is told the handles. A
   handle reaches only that AI, which joins in and answers (up to three such turns per message you

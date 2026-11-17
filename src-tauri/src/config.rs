@@ -57,6 +57,10 @@ pub struct Council {
     /// click each time (see `runcmd::auto_runnable`). Admin commands still wait. Off by default.
     #[serde(default)]
     pub auto_run_commands: bool,
+    /// A newer staged build installs by itself and Consilium restarts into it, with the AIs' work
+    /// resuming after (see `autoinstall`). On by default, including for existing installs.
+    #[serde(default = "yes")]
+    pub auto_install_updates: bool,
 }
 
 fn yes() -> bool {
@@ -75,6 +79,7 @@ impl Default for Council {
             auto_continue: true,
             isolate_agents: false,
             auto_run_commands: false,
+            auto_install_updates: true,
         }
     }
 }
@@ -229,6 +234,15 @@ impl Config {
         Ok(next)
     }
 
+    pub fn set_auto_install_updates(&self, on: bool) -> Result<Council, String> {
+        let mut c = self.current();
+        let mut next = c.clone();
+        next.auto_install_updates = on;
+        self.save(&next)?;
+        *c = next.clone();
+        Ok(next)
+    }
+
     pub fn set_auto_run_commands(&self, on: bool) -> Result<Council, String> {
         let mut c = self.current();
         let mut next = c.clone();
@@ -270,6 +284,17 @@ mod tests {
         let again = Config::load(p.clone());
         assert_eq!(again.get().members, vec!["gpt", "claude", "gemini"]);
         assert_eq!(again.access("gpt"), Access::Own);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn automatic_updates_are_on_for_new_and_existing_installs_until_turned_off() {
+        let p = temp();
+        assert!(Config::load(p.clone()).get().auto_install_updates, "a new install");
+        std::fs::write(&p, r#"{"members":["gpt"]}"#).unwrap();
+        assert!(Config::load(p.clone()).get().auto_install_updates, "settings saved before the option existed");
+        Config::load(p.clone()).set_auto_install_updates(false).unwrap();
+        assert!(!Config::load(p.clone()).get().auto_install_updates, "turning it off sticks");
         let _ = std::fs::remove_file(p);
     }
 

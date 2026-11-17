@@ -297,6 +297,9 @@ function Inline({ text }: { text: string }) {
 }
 
 /** The human's answer to a request, as sent by the Approve and Deny buttons. */
+/** Requests and command boxes waiting longer than this leave the request tray (they stay in the chat). */
+const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+
 function decisionText(request: string, approved: boolean): string {
   return `${approved ? "Approved" : "Denied"}: ${request.trim()}`;
 }
@@ -314,18 +317,49 @@ function requestKey(eventId: string, line: number): string {
  * Match each human button answer to the request cards that existed when it was sent.
  * Keeping event-specific keys means a later request with the same wording still gets fresh buttons.
  */
-type RequestResolution = "approved" | "denied" | "responded";
+type RequestResolution = "approved" | "denied" | "responded" | "withdrawn";
+
+/** A request's wording, for matching a WITHDRAW line to it: case, spacing and end punctuation aside. */
+function requestWords(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim().replace(/[.?!:;,]+$/, "");
+}
+
+/** Whether `withdrawal` (the text after WITHDRAW:) names `request`: the same words, or the start of them. */
+function withdraws(withdrawal: string, request: string): boolean {
+  const [w, r] = [requestWords(withdrawal), requestWords(request)];
+  if (w === "all" || w === "all requests" || w === r) return true;
+  return w.length >= 12 && (r.startsWith(w) || w.startsWith(r));
+}
 
 function answeredRequests(events: ChatEvent[]): Map<string, RequestResolution> {
   const out = new Map<string, RequestResolution>();
   const waiting = new Map<string, string[]>();
+  // Who asked each waiting request (sender and computer), so an AI only withdraws its own.
+  const asker = new Map<string, string>();
   for (const e of events) {
     if (e.kind !== "message" && e.kind !== "error") continue;
     if (e.sender !== "human") {
+      const me = `${e.sender}|${e.via ?? ""}`;
       for (const [line, text] of e.text.split("\n").entries()) {
+        const withdrawal = /^\s*WITHDRAW:\s*(.+)$/i.exec(text)?.[1].trim();
+        if (withdrawal) {
+          for (const [request, keys] of [...waiting]) {
+            if (!withdraws(withdrawal, request)) continue;
+            const left = keys.filter((k) => {
+              if (asker.get(k) !== me) return true;
+              out.set(k, "withdrawn");
+              return false;
+            });
+            if (left.length) waiting.set(request, left);
+            else waiting.delete(request);
+          }
+          continue;
+        }
         const request = /^\s*REQUEST:\s*(.+)$/i.exec(text)?.[1].trim();
         if (!request) continue;
-        waiting.set(request, [...(waiting.get(request) ?? []), requestKey(e.id, line)]);
+        const key = requestKey(e.id, line);
+        asker.set(key, me);
+        waiting.set(request, [...(waiting.get(request) ?? []), key]);
       }
       continue;
     }
@@ -478,7 +512,8 @@ function hasExactCommand(request: string): boolean {
 function RequestActions({ answer, pending, onDecide, onAlways, onRespond }: { answer?: RequestResolution; pending?: boolean; onDecide: (approved: boolean) => void; onAlways?: () => void; onRespond: (response: string) => Promise<void> }) {
   const [response, setResponse] = useState("");
   if (answer !== undefined) {
-    const label = answer === "approved" ? "✓ Approved" : answer === "denied" ? "✕ Denied" : "↪ Responded";
+    const label =
+      answer === "approved" ? "✓ Approved" : answer === "denied" ? "✕ Denied" : answer === "withdrawn" ? "– Withdrawn: no longer needed" : "↪ Responded";
     return <span className={`request-answer ${answer}`} aria-live="polite">{label}</span>;
   }
   const submitResponse = async () => {
@@ -1365,8 +1400,14 @@ export default function App() {
     };
   }, [refreshAgents, refreshList]);
 
+  // Checks GitHub at launch and every 30 minutes; a newer release is downloaded and staged, and
+  // with automatic install on (Settings → Updates) Consilium installs it and restarts by itself.
   useEffect(() => {
-    if (prefs.autoUpdate) checkForUpdate(false).then(setUpdate).catch(() => undefined);
+    if (!prefs.autoUpdate) return;
+    const check = () => checkForUpdate(false).then(setUpdate).catch(() => undefined);
+    check();
+    const t = setInterval(check, 30 * 60 * 1000);
+    return () => clearInterval(t);
   }, [prefs.autoUpdate]);
 
   useEffect(() => {
@@ -1825,8 +1866,11 @@ export default function App() {
     const cmd = new Set(unansweredCmds);
     if (!req.size && !cmd.size) return [];
     const out: PendingItem[] = [];
+    // Anything older than a day has gone stale: it stays in the chat, with its buttons, but leaves
+    // the tray, so the tray holds what still matters.
+    const freshAfter = Date.now() - STALE_AFTER_MS;
     for (const e of events) {
-      if (e.sender === "human" || (requestFloor !== null && e.seq <= requestFloor)) continue;
+      if (e.sender === "human" || (requestFloor !== null && e.seq <= requestFloor) || e.ts < freshAfter) continue;
       const found: [number, PendingItem][] = [];
       for (const [line, text] of e.text.split("\n").entries()) {
         const key = requestKey(e.id, line);
@@ -3082,7 +3126,21 @@ export default function App() {
                 checked={prefs.autoUpdate}
                 onChange={(e) => setPrefs({ ...prefs, autoUpdate: e.target.checked })}
               />
-              Check GitHub for a new version once a day
+              Check GitHub for a new version every 30 minutes
+            </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={council?.auto_install_updates ?? true}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  api
+                    .setAutoInstallUpdates(on)
+                    .then(() => setCouncil((c) => (c ? { ...c, auto_install_updates: on } : c)))
+                    .catch((err) => setError(`Couldn't update setting: ${err}`));
+                }}
+              />
+              Install updates and restart automatically (the AIs' work resumes after; waits for running commands)
             </label>
             <div className="row">
               <button title="Check GitHub for a newer Consilium release now" className="btn ghost" onClick={checkNow}>

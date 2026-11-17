@@ -496,7 +496,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: AIs on linked computers can address each other by handle (for example @claude-lukes-mbp), and the link panel shows which AIs on each computer have heard each other. Messages typed in a linked computer's conversation from the terminal now reach that computer. Always Run now holds back commands that could do lasting damage, such as deleting files, rewriting git history or uninstalling software, until you click, so a Deny can never arrive too late.";
+const WHATS_NEW: &str = "What's new: Consilium now installs updates and restarts by itself (Settings → Updates, on by default), waiting for any running command first, and linked computers move to the newest build together. AIs can withdraw requests that are no longer needed with WITHDRAW: <request> or WITHDRAW: all, and requests older than a day leave the request tray. A communication stress test moves the link onto each route in turn, checks it, and posts the results here; it also runs after every restart.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -562,11 +562,17 @@ fn linux_package_kind() -> Option<&'static str> {
 /// installer and quits. The cut-off turns resume after the relaunch, like after any restart.
 #[tauri::command]
 fn update_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    install_staged(&app, &state.engine)
+}
+
+/// Installs the staged build and quits, so Consilium restarts into it (Update Now, or the
+/// automatic install).
+fn install_staged(app: &AppHandle, engine: &Arc<Engine>) -> Result<(), String> {
     let data = data_dir().ok_or("can't find Consilium's data folder")?;
     let staged = update::staged(&data).ok_or("no newer build is staged")?;
 
     // Save a snapshot of each project's uncommitted work before closing the app
-    let snapshots = safety::snapshot_all(&data, &state.engine, &staged.version);
+    let snapshots = safety::snapshot_all(&data, engine, &staged.version);
 
     let mut note = format!(
         "Update Now: Consilium is installing {} and restarting in a few seconds. Hold here: work in \
@@ -583,8 +589,8 @@ fn update_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     }
     // Start the installer first: if it can't run, nobody is told to stop for an update that won't come.
     update::start_install(&data)?;
-    for id in state.engine.running_ids() {
-        let _ = state.engine.note(&id, &note);
+    for id in engine.running_ids() {
+        let _ = engine.note(&id, &note);
     }
     // Save the window's size and full-screen state now, so the relaunch opens the same way.
     {
@@ -597,6 +603,92 @@ fn update_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
         app.exit(0);
     });
     Ok(())
+}
+
+/// Automatic updates: when the setting is on (it is by default), a newer staged build (a GitHub
+/// release, or the build a linked computer runs, prepared by `follow`) is installed without a
+/// click and Consilium restarts into it; the AIs' work resumes after, as after Update Now. It waits
+/// while a command is running, so nothing is cut off halfway, and a failed install is retried
+/// after `AUTO_INSTALL_RETRY_MS`, once, with a note in the conversation.
+fn start_auto_install(app: AppHandle, engine: Arc<Engine>) {
+    const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+    const AUTO_INSTALL_RETRY_MS: u64 = 30 * 60_000;
+    tauri::async_runtime::spawn(async move {
+        let mut failed: Option<(String, u64)> = None;
+        loop {
+            tokio::time::sleep(CHECK_EVERY).await;
+            let Some(data) = data_dir() else { continue };
+            if !engine.config.get().auto_install_updates || runcmd::running() > 0 {
+                continue;
+            }
+            let Some(staged) = update::staged(&data) else { continue };
+            if failed.as_ref().is_some_and(|(b, at)| *b == staged.build && store::now_ms() < at + AUTO_INSTALL_RETRY_MS) {
+                continue;
+            }
+            let newest = engine.store.list().into_iter().find(|c| !peer_sync::is_mirror(&c.id)).map(|c| c.id);
+            if let Some(id) = &newest {
+                let _ = engine.note(
+                    id,
+                    &format!(
+                        "Installing Consilium {} automatically (now {}) and restarting; the AIs' work resumes after. \
+                         Turn this off in Settings → Updates.",
+                        staged.build, staged.current_build
+                    ),
+                );
+            }
+            if let Err(e) = install_staged(&app, &engine) {
+                failed = Some((staged.build.clone(), store::now_ms()));
+                if let Some(id) = &newest {
+                    let _ = engine.note(id, &format!("The automatic install of Consilium {} didn't start: {e}. Trying again in 30 minutes; Update Now works too.", staged.build));
+                }
+            }
+        }
+    });
+}
+
+/// Runs the communication stress test with every linked computer and posts each result in the
+/// newest conversation as a status note. `when` says what started it.
+async fn stress_test_and_post(engine: &Arc<Engine>, when: &str) -> Result<Vec<link::StressReport>, String> {
+    let link = link_handle().ok_or("linking isn't running")?;
+    let reports = link.stress_test().await?;
+    if let Some(id) = engine.store.list().into_iter().find(|c| !peer_sync::is_mirror(&c.id)).map(|c| c.id) {
+        for r in &reports {
+            let _ = engine.note(&id, &r.summary(when));
+        }
+    }
+    Ok(reports)
+}
+
+/// The Communication stress test button (Settings → Multi-Computer Sync).
+#[tauri::command]
+async fn stress_test_link(state: State<'_, AppState>) -> Result<Vec<link::StressReport>, String> {
+    let engine = state.engine.clone();
+    stress_test_and_post(&engine, "requested").await
+}
+
+/// After every start, once a linked computer is connected, runs the stress test and posts it.
+fn stress_test_after_start(engine: Arc<Engine>) {
+    tauri::async_runtime::spawn(async move {
+        for _ in 0..120 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let Some(link) = link_handle() else { continue };
+            if !link.enabled() {
+                return;
+            }
+            if link.status().peers.iter().any(|p| p.connected) {
+                // A moment for the AIs' resumed work and the catch-up to settle first.
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                let _ = stress_test_and_post(&engine, "after restart").await;
+                return;
+            }
+        }
+    });
+}
+
+/// Turns automatic install-and-restart on or off (Settings → Updates).
+#[tauri::command]
+fn set_auto_install_updates(state: State<AppState>, on: bool) -> Result<(), String> {
+    state.engine.config.set_auto_install_updates(on).map(|_| ())
 }
 
 /// Status of the most recent session safety snapshot.
@@ -1106,6 +1198,10 @@ pub fn run() {
             peer_sync::init(app.state::<AppState>().engine.clone(), &data.join("link"));
             // Keeps this computer on the newest build any linked computer runs.
             follow::start(app.state::<AppState>().engine.clone(), data.clone());
+            // Installs newer builds by itself and restarts, unless turned off in Settings.
+            start_auto_install(app.handle().clone(), app.state::<AppState>().engine.clone());
+            // Tests every route to the linked computers after each start and posts the result.
+            stress_test_after_start(app.state::<AppState>().engine.clone());
             // Falls back to the built-in page if an instantly applied one never starts.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
@@ -1189,6 +1285,8 @@ pub fn run() {
             set_auto_continue,
             set_isolate_agents,
             set_auto_run_commands,
+            set_auto_install_updates,
+            stress_test_link,
             agent_branches,
             merge_agent_branch,
             discard_agent_branch,

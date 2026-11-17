@@ -359,8 +359,26 @@ pub fn mark_started(dir: &Path, conversation: &str, event_id: &str, index: usize
 }
 
 /// Runs `block` in `cwd` and collects its output.
+/// Commands running right now on this computer (see `run`).
+static COMMANDS_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many commands are running right now. An automatic update waits for them: a restart would
+/// cut one off halfway (a push, a merge or an install), and a started command never runs twice.
+pub fn running() -> usize {
+    COMMANDS_RUNNING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+struct CommandRunning;
+impl Drop for CommandRunning {
+    fn drop(&mut self) {
+        COMMANDS_RUNNING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 pub async fn run(block: &Block, cwd: &Path, scratch: &Path) -> Result<Outcome, String> {
     check(block)?;
+    COMMANDS_RUNNING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let _running = CommandRunning;
     let shell = shell_for(&block.lang).ok_or("only shell commands can be run")?;
     let plan = plan(shell, &block.code, std::env::consts::OS)?;
     std::fs::create_dir_all(scratch).map_err(|e| format!("couldn't prepare the command: {e}"))?;
