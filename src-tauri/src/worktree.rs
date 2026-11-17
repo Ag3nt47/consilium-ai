@@ -289,6 +289,7 @@ mod tests {
     fn init(repo: &Path) {
         std::fs::create_dir_all(repo).unwrap();
         sh(repo, &["init", "-q", "-b", "main"]);
+        sh(repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("a.txt"), "one\n").unwrap();
         sh(repo, &["add", "."]);
         sh(repo, &["commit", "-q", "-m", "first"]);
@@ -319,13 +320,13 @@ mod tests {
 
         // Preparing again keeps unmerged work.
         prepare(&data, &ws, "claude").unwrap();
-        assert_eq!(std::fs::read_to_string(copy.join("a.txt")).unwrap(), "two\n");
+        assert_eq!(std::fs::read_to_string(copy.join("a.txt")).unwrap().replace("\r\n", "\n"), "two\n");
 
         // Merging needs a committer identity in the main repo.
         sh(&repo, &["config", "user.name", "t"]);
         sh(&repo, &["config", "user.email", "t"]);
         merge(&ws, "proj", "claude").unwrap();
-        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "two\n");
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap().replace("\r\n", "\n"), "two\n");
 
         // The person commits more; the idle, fully merged copy catches up on the next turn.
         std::fs::write(repo.join("b.txt"), "b\n").unwrap();
@@ -356,7 +357,7 @@ mod tests {
         sh(&ws, &["commit", "-q", "-am", "human"]);
         let name = ws.file_name().unwrap().to_string_lossy().into_owned();
         assert!(merge(&ws, &name, "gpt").is_err());
-        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "human\n");
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap().replace("\r\n", "\n"), "human\n");
         assert!(Command::new("git").arg("-C").arg(&ws).args(["status", "--porcelain"]).output().unwrap().stdout.is_empty());
         assert!(merge(&ws, &name, "../x").is_err());
         assert!(discard(&data, &ws, &name, "a b").is_err());

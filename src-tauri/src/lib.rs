@@ -11,6 +11,7 @@ mod ci;
 pub mod bridge;
 pub mod cli;
 mod config;
+mod customai;
 mod council;
 mod engine;
 mod link;
@@ -29,6 +30,7 @@ mod resume;
 mod setup;
 mod signal_chat;
 mod signal_setup;
+mod startup_check;
 mod security_scan;
 mod store;
 mod tasks;
@@ -90,7 +92,7 @@ async fn agents_status(state: State<'_, AppState>) -> Result<Vec<agents::AgentIn
     let config = state.engine.config.clone();
     // Every AI is checked at the same time, so a slow CLI doesn't hold up the others.
     let mut tasks = tokio::task::JoinSet::new();
-    for agent in agents::AGENTS.iter() {
+    for agent in agents::all().into_iter() {
         let member = config.is_member(agent.id);
         let access = config.access(agent.id);
         tasks.spawn(async move { agents::status(agent, member, access).await });
@@ -110,7 +112,7 @@ async fn agents_status(state: State<'_, AppState>) -> Result<Vec<agents::AgentIn
 /// Members first, in council order; then everyone else in the fixed catalogue order, since the
 /// parallel status checks finish in whatever order they happen to.
 fn sort_agents<T>(items: &mut [T], members: &[String], id: impl Fn(&T) -> &str) {
-    let catalogue = |id: &str| agents::AGENTS.iter().position(|a| a.id == id).unwrap_or(usize::MAX);
+    let catalogue = |id: &str| agents::all().into_iter().position(|a| a.id == id).unwrap_or(usize::MAX);
     items.sort_by_key(|a| {
         let id = id(a);
         (members.iter().position(|m| m == id).unwrap_or(usize::MAX), catalogue(id))
@@ -483,7 +485,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: when a conversation is first shared with a linked computer, its last 200 earlier messages now go across too, so a chat started before you linked the computers shows in full on both; messages already copied are not repeated. Linked computers can also connect over a direct cable between them, such as Ethernet, Thunderbolt or a Bluetooth network, not only through your router.";
+const WHATS_NEW: &str = "What's new: each time Consilium starts, it checks Signal, your linked computers, each AI (installed, signed in, out of usage), the internet, GitHub's checks and waiting updates, then posts the result here and to your phone's Note to Self. Signal messages sent from your phone while Consilium is closed or restarting are no longer lost: they now wait on Signal's servers and arrive when it's back. Long phone messages and photos are no longer occasionally dropped, and if Signal's background program stops, Consilium starts it again. Pressing Enter in the message box now always sends, or says why it couldn't.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -653,10 +655,37 @@ fn setup_agent(agent: String, action: String) -> Result<String, String> {
 #[tauri::command]
 fn set_api_key(agent: String, key: String) -> Result<(), String> {
     let a = agents::by_id(&agent).ok_or("unknown agent")?;
-    if agents::api_provider(a.kind).is_none() {
+    if !agents::is_api(a.kind) {
         return Err(format!("{} signs in through its own app, not a key", a.name));
     }
     apiagent::set_key(a.id, &key)
+}
+
+/// Adds an AI of the person's own: any OpenAI-compatible API, or a model on this computer or the
+/// home network. The key, if any, is stored like the other API keys and never sent back.
+#[tauri::command]
+fn add_custom_ai(name: String, base_url: String, model: String, local: bool, key: String) -> Result<String, String> {
+    let id = customai::add(&name, &base_url, &model, local)?;
+    if !key.trim().is_empty() {
+        if let Err(e) = apiagent::set_key(&id, &key) {
+            let _ = customai::remove(&id);
+            return Err(e);
+        }
+    }
+    Ok(id)
+}
+
+/// Deletes an AI the person added, with its key. It leaves the council first.
+#[tauri::command]
+fn remove_custom_ai(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    if customai::by_id(&id).is_none() {
+        return Err("Only AIs you added yourself can be deleted.".into());
+    }
+    if state.engine.config.is_member(&id) {
+        state.engine.config.set_member(&id, false)?;
+    }
+    let _ = apiagent::set_key(&id, "");
+    customai::remove(&id)
 }
 
 /// Runs block `index` of AI message `event_id` (the human clicked Run on its command box), then
@@ -887,6 +916,16 @@ async fn link_test_peer(node_id: String) -> Result<link::PeerTestReport, String>
     the_link()?.test_peer(&node_id).await
 }
 
+#[tauri::command]
+async fn link_add_peer_route(node_id: String, address: String) -> Result<Vec<String>, String> {
+    the_link()?.add_peer_route(&node_id, &address)
+}
+
+#[tauri::command]
+async fn link_refresh_routes(node_id: String) -> Result<Vec<String>, String> {
+    the_link()?.refresh_routes(&node_id)
+}
+
 /// Everything received from paired computers, oldest first, saved before it was acknowledged.
 #[tauri::command]
 async fn link_inbox() -> Result<Vec<peer_protocol::PeerPacket>, String> {
@@ -935,6 +974,9 @@ pub fn run() {
             tauri::async_runtime::spawn(ci::watch(engine.clone()));
             // Carries the newest conversation to and from Signal once setup is verified.
             signal_chat::run(engine.clone(), bridge::config_path(None));
+            // Checks every connection once connections have had time to come up, then reports
+            // the result in the newest conversation and to the phone.
+            tauri::async_runtime::spawn(startup_check::run(engine.clone(), data.clone()));
             app.manage(AppState { engine, security });
             // Direct link to the user's other paired computers. Off until they pair or turn it on.
             let emitter = app.handle().clone();
@@ -1006,6 +1048,8 @@ pub fn run() {
             running,
             setup_agent,
             set_api_key,
+            add_custom_ai,
+            remove_custom_ai,
             system_pressure,
             security_scan_status,
             security_scan_save,
@@ -1054,6 +1098,8 @@ pub fn run() {
             link_pair_join,
             link_unpair,
             link_test_peer,
+            link_add_peer_route,
+            link_refresh_routes,
             link_inbox,
             link_send
         ])

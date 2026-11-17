@@ -99,11 +99,67 @@ fn quiet(cmd: &mut Command) -> &mut Command {
 
 /// Whether signal-cli already holds keys for this number on this computer.
 fn already_linked(cli: &std::path::Path, account: &str) -> bool {
-    let out = quiet(Command::new(cli).arg("listAccounts")).stdin(Stdio::null()).output();
-    match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).lines().any(|l| l.split_whitespace().any(|w| w == account)),
-        Err(_) => false,
+    // While a daemon holds the account, `listAccounts` can wait for its lock forever, so it gets
+    // 30 seconds and is then stopped instead of being left behind.
+    let Ok(mut child) = quiet(Command::new(cli).arg("listAccounts"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < Duration::from_secs(30) => std::thread::sleep(Duration::from_millis(200)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
     }
+    let mut out = String::new();
+    if let Some(mut o) = child.stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut o, &mut out);
+    }
+    out.lines().any(|l| l.split_whitespace().any(|w| w == account))
+}
+
+/// Whether a signal-cli command line is one an older Consilium left running that now does harm:
+/// a daemon for `account` that receives without being asked (it drops phone messages that arrive
+/// while Consilium restarts), or a `listAccounts` check that never exited.
+pub fn stale_signal_cli(args: &[String], account: &str, running_secs: u64) -> bool {
+    let Some(main) = args.iter().position(|a| a == "org.asamk.signal.Main") else {
+        return false;
+    };
+    let rest = &args[main + 1..];
+    if rest.iter().any(|a| a == "listAccounts") {
+        return running_secs > 120;
+    }
+    let ours = rest.windows(2).any(|w| w[0] == "-a" && w[1] == account);
+    ours && rest.iter().any(|a| a == "daemon") && !rest.iter().any(|a| a == "manual")
+}
+
+/// Stops the signal-cli processes `stale_signal_cli` picks out. Returns how many were stopped.
+fn stop_stale_signal_cli(account: &str) -> usize {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    let mut stopped = 0;
+    for p in sys.processes().values() {
+        let args: Vec<String> = p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        if stale_signal_cli(&args, account, p.run_time()) && p.kill() {
+            stopped += 1;
+        }
+    }
+    stopped
 }
 
 /// Pulls "+15551234567" out of signal-cli's "Associated with: +15551234567" line.
@@ -290,11 +346,39 @@ pub fn autostart(cfg_path: std::path::PathBuf) {
             return;
         }
         if let Ok(cli) = signal_cli() {
-            if already_linked(&cli, &cfg.account) {
+            // A daemon that already answers proves the account is linked; asking signal-cli
+            // again would wait on the daemon's lock.
+            if daemon_answers(&cfg) || already_linked(&cli, &cfg.account) {
                 let _ = ensure_daemon(&cli, &cfg);
             }
         }
     });
+}
+
+fn daemon_answers(cfg: &BridgeConfig) -> bool {
+    let mut probe = cfg.clone();
+    probe.enabled = true;
+    bridge::probe_signal(&probe, Duration::from_secs(2)).state == "ok"
+}
+
+/// Called when the chat bridge can't reach the daemon: starts it again, at most once a minute.
+pub fn revive(cfg: &BridgeConfig) {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap();
+        if last.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    if matches!(state().phase.as_str(), "linking" | "starting" | "verifying") {
+        return; // a setup in progress manages the daemon itself
+    }
+    if let Ok(cli) = signal_cli() {
+        if let Err(e) = ensure_daemon(&cli, cfg) {
+            eprintln!("signal: couldn't restart signal-cli: {e}");
+        }
+    }
 }
 
 fn endpoint_addr(cfg: &BridgeConfig) -> Result<SocketAddr, String> {
@@ -305,9 +389,16 @@ fn endpoint_addr(cfg: &BridgeConfig) -> Result<SocketAddr, String> {
 
 /// Starts `signal-cli daemon` in the background unless one already answers.
 fn ensure_daemon(cli: &std::path::Path, cfg: &BridgeConfig) -> Result<(), String> {
+    // Launch, setup and the chat bridge's restart can all get here at once; only one may start it.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let addr = endpoint_addr(cfg)?;
     let mut probe = cfg.clone();
     probe.enabled = true;
+    if stop_stale_signal_cli(&cfg.account) > 0 {
+        // Give the old daemon a moment to let go of the port and the account.
+        std::thread::sleep(Duration::from_secs(3));
+    }
     if bridge::probe_signal(&probe, Duration::from_secs(2)).state == "ok" {
         return Ok(());
     }
@@ -319,7 +410,10 @@ fn ensure_daemon(cli: &std::path::Path, cfg: &BridgeConfig) -> Result<(), String
     }
     let log = std::fs::File::create(std::env::temp_dir().join("consilium-signal-daemon.log")).ok();
     let mut cmd = Command::new(cli);
-    cmd.args(["-a", &cfg.account, "daemon", "--tcp", &addr.to_string()]).stdin(Stdio::null());
+    // Manual receive mode: signal-cli only takes messages off Signal's servers while Consilium is
+    // connected and subscribed, so anything sent while Consilium is closed or restarting waits on
+    // the server instead of being received and dropped.
+    cmd.args(["-a", &cfg.account, "daemon", "--tcp", &addr.to_string(), "--receive-mode", "manual"]).stdin(Stdio::null());
     match log.and_then(|f| f.try_clone().ok().map(|g| (f, g))) {
         Some((o, e)) => cmd.stdout(o).stderr(e),
         None => cmd.stdout(Stdio::null()).stderr(Stdio::null()),
@@ -350,21 +444,16 @@ fn verify(cfg: &BridgeConfig, code: &str, run: u64) -> Result<Option<String>, St
         "jsonrpc": "2.0", "id": "consilium-verify", "method": "send",
         "params": { "noteToSelf": true, "message": msg }
     });
+    w.write_all(crate::signal_chat::SUBSCRIBE.as_bytes()).map_err(|e| e.to_string())?;
     w.write_all(format!("{req}\n").as_bytes()).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(s);
     let started = Instant::now();
-    let mut line = String::new();
+    let mut buf = Vec::new();
     while started.elapsed() < VERIFY_WINDOW {
         if *RUN.lock().unwrap() != run {
             return Err("Setup was restarted".into());
         }
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => return Err("signal-cli closed the connection".into()),
-            Ok(_) => {}
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
-            Err(e) => return Err(e.to_string()),
-        }
+        let Some(line) = crate::signal_chat::read_whole_line(&mut reader, &mut buf)? else { continue };
         if line.len() > 256 * 1024 {
             continue;
         }
@@ -420,6 +509,22 @@ fn rand_u32() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_old_daemons_and_stuck_checks_are_stopped() {
+        let a = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        let acct = "+15551234567";
+        let old = a("java -cp x org.asamk.signal.Main -a +15551234567 daemon --tcp 127.0.0.1:7583");
+        let new = a("java -cp x org.asamk.signal.Main -a +15551234567 daemon --tcp 127.0.0.1:7583 --receive-mode manual");
+        let other = a("java -cp x org.asamk.signal.Main -a +15559999999 daemon --tcp 127.0.0.1:7583");
+        let list = a("java -cp x org.asamk.signal.Main listAccounts");
+        assert!(stale_signal_cli(&old, acct, 5));
+        assert!(!stale_signal_cli(&new, acct, 5));
+        assert!(!stale_signal_cli(&other, acct, 5));
+        assert!(!stale_signal_cli(&list, acct, 30));
+        assert!(stale_signal_cli(&list, acct, 600));
+        assert!(!stale_signal_cli(&a("java -jar something-else.jar daemon"), acct, 600));
+    }
+
     use super::*;
 
     #[test]

@@ -415,7 +415,15 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
               </div>
             ) : (
               <div className="tab-pane">
-                <p className="muted small">
+                <div className="failover-intro-callout small">
+                  <strong>⚡ Automatic Wired & Wireless Failover</strong>
+                  <p className="muted" style={{ margin: "4px 0 0 0" }}>
+                    Consilium automatically discovers and syncs both wired (Gigabit Ethernet) and wireless (Wi-Fi) network routes.
+                    If a cable is disconnected or Wi-Fi drops, connections automatically switch to the next fastest route in under 2 seconds without dropping messages.
+                  </p>
+                </div>
+
+                <p className="muted small" style={{ marginTop: "12px" }}>
                   Enter the local network address and 6-digit pairing code shown on the other computer.
                 </p>
 
@@ -507,6 +515,34 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
 function PeerCard({ peer, onUnpair }: { peer: LinkPeer; onUnpair: () => void }) {
   const [testing, setTesting] = useState(false);
   const [testReport, setTestReport] = useState<PeerTestReport | null>(null);
+  const [refreshingRoutes, setRefreshingRoutes] = useState(false);
+  const [showAddRoute, setShowAddRoute] = useState(false);
+  const [newRouteAddr, setNewRouteAddr] = useState("");
+  const [addRouteMsg, setAddRouteMsg] = useState<string | null>(null);
+
+  const refreshRoutes = async () => {
+    setRefreshingRoutes(true);
+    try {
+      await api.linkRefreshRoutes(peer.node_id);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setRefreshingRoutes(false);
+    }
+  };
+
+  const addRoute = async () => {
+    if (!newRouteAddr.trim()) return;
+    try {
+      await api.linkAddPeerRoute(peer.node_id, newRouteAddr.trim());
+      setNewRouteAddr("");
+      setShowAddRoute(false);
+      setAddRouteMsg("Route added");
+      setTimeout(() => setAddRouteMsg(null), 3000);
+    } catch (e) {
+      setAddRouteMsg(`Failed: ${e}`);
+    }
+  };
 
   const isOnline = peer.connected;
   const statusClass = isOnline ? "online" : "offline";
@@ -552,7 +588,18 @@ function PeerCard({ peer, onUnpair }: { peer: LinkPeer; onUnpair: () => void }) 
         <div className="row align-center gap-sm">
           <span className={`peer-led ${statusClass}`} title={statusText} />
           <div>
-            <strong className="peer-name">{peer.name}</strong>
+            <div className="row align-center gap-xs">
+              <strong className="peer-name">{peer.name}</strong>
+              {(peer.addrs || []).length >= 2 ? (
+                <span className="failover-badge ready" title="Redundant failover routes ready">
+                  ⚡ {(peer.addrs || []).length} routes (failover ready)
+                </span>
+              ) : (
+                <span className="failover-badge single" title="Single route; connect Ethernet or Wi-Fi for auto-failover">
+                  1 route
+                </span>
+              )}
+            </div>
             <code className="peer-node-id">{peer.node_id.slice(0, 10)}…</code>
           </div>
         </div>
@@ -595,6 +642,69 @@ function PeerCard({ peer, onUnpair }: { peer: LinkPeer; onUnpair: () => void }) 
         <div className="stat-item">
           <span className="muted small">Project:</span>
           <span>{peer.git ?? "—"}</span>
+        </div>
+      </div>
+
+      <div className="failover-section">
+        <div className="row between align-center failover-header">
+          <div className="row align-center gap-xs">
+            <span className="failover-title">Redundant Routes & Failover:</span>
+            <span className="muted small">({(peer.addrs || []).length} configured)</span>
+          </div>
+          <div className="row align-center gap-xs">
+            <button
+              className="btn small ghost failover-btn"
+              onClick={refreshRoutes}
+              disabled={refreshingRoutes}
+              title="Broadcast current local network interfaces and request peer's updated endpoints"
+            >
+              {refreshingRoutes ? "Syncing…" : "⚡ Sync Routes"}
+            </button>
+            <button
+              className="btn small ghost failover-btn"
+              onClick={() => setShowAddRoute(!showAddRoute)}
+              title="Manually register an extra IP/port failover route"
+            >
+              {showAddRoute ? "Cancel" : "+ Add Route"}
+            </button>
+          </div>
+        </div>
+
+        {showAddRoute && (
+          <div className="add-route-row row align-center gap-xs">
+            <input
+              type="text"
+              placeholder="e.g. 192.168.1.170:8470 or 169.254.1.2:8470"
+              value={newRouteAddr}
+              onChange={(e) => setNewRouteAddr(e.target.value)}
+              className="add-route-input small"
+            />
+            <button className="btn small primary" onClick={addRoute} disabled={!newRouteAddr.trim()}>
+              Add
+            </button>
+            {addRouteMsg && <span className="small muted">{addRouteMsg}</span>}
+          </div>
+        )}
+
+        <div className="failover-routes-chips">
+          {(peer.addrs || []).map((addr) => {
+            const isActive = peer.route && peer.route === addr;
+            const kind = addr.startsWith("169.254.")
+              ? "Direct Cable / BT"
+              : addr.startsWith("100.")
+              ? "Tailscale"
+              : addr.startsWith("127.0.0.1")
+              ? "Loopback"
+              : "Gigabit / Wi-Fi";
+            return (
+              <div key={addr} className={`failover-chip ${isActive ? "active" : "standby"}`}>
+                <span className="chip-icon">{isActive ? "🟢" : "⚪"}</span>
+                <code>{addr}</code>
+                <span className="chip-kind">{kind}</span>
+                <span className="chip-role">{isActive ? "Active (Primary)" : "Standby (Failover)"}</span>
+              </div>
+            );
+          })}
         </div>
       </div>
 

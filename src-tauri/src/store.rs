@@ -153,7 +153,7 @@ pub fn add_ai_in(text: &str) -> Vec<String> {
         }
         for word in t[7..].split(|c: char| c == ',' || c.is_whitespace()) {
             let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
-            if let Some(a) = crate::agents::AGENTS.iter().find(|a| a.id == w || a.name.to_lowercase() == w) {
+            if let Some(a) = crate::agents::all().into_iter().find(|a| a.id == w || a.name.to_lowercase() == w) {
                 if !out.iter().any(|x| x == a.id) {
                     out.push(a.id.to_string());
                 }

@@ -44,6 +44,7 @@ import { CiBadge, ProjectVersions } from "./projects";
 import { TaskBoardPanel } from "./tasks";
 import { RepoDrawer } from "./repo";
 import { BranchesDrawer } from "./branches";
+import { CustomAiForm } from "./customai";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const THEMES = [
@@ -931,7 +932,8 @@ const DraftBox = memo(
           placeholder="Message the council…  (Enter to send, Shift+Enter for a new line; drop or paste files to attach)"
           onChange={(e) => update(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            // Enter that finishes typing an accented or non-Latin character isn't a send.
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               onSend();
             }
@@ -1191,7 +1193,7 @@ export default function App() {
       const first = list[0] ?? (await api.create());
       if (!list.length) await refreshList();
       setCurrent(first.id);
-    });
+    }).catch((e) => setError(`Couldn't load your conversations: ${e}. Sending a message will try again.`));
     const un1 = onEvent((e) => {
       if (e.conversation === currentRef.current) {
         setEvents((prev) => (prev.some((p) => p.id === e.id) ? prev : [...prev, e]));
@@ -1357,18 +1359,36 @@ export default function App() {
   // Sending while the AIs are answering doesn't interrupt them: they read it and carry on. Stop interrupts.
   async function send() {
     const text = draftBox.current?.get() ?? "";
-    if (!current || (!text.trim() && !pending.length)) return;
+    if (!text.trim() && !pending.length) return;
+    // Enter used to do nothing at all when no conversation was open (for example when the list
+    // failed to load at startup). Open the newest one, or start one, and send there instead.
+    let id = current;
+    if (!id) {
+      try {
+        const list = await refreshList();
+        id = (list[0] ?? (await api.create())).id;
+        setCurrent(id);
+      } catch (e) {
+        setError(`Couldn't send: no conversation is open, and opening one failed (${e}). Your message is still in the box.`);
+        return;
+      }
+    }
     setError(null);
     const files = pending;
     setDraft("");
     setPending([]);
+    // If the app's engine doesn't answer, say so instead of leaving the box empty and silent.
+    const slow = window.setTimeout(() => setError("Your message is taking unusually long to send. It will appear here once Consilium accepts it."), 15000);
     try {
       const to = targets.filter((t) => members.some((m) => m.id === t));
-      await api.send(current, withPersona(text, persona), to, discuss ? rounds : 1, false, files);
+      await api.send(id, withPersona(text, persona), to, discuss ? rounds : 1, false, files);
+      setError((e) => (e?.startsWith("Your message is taking") ? null : e));
     } catch (e) {
       setDraft(text);
       setPending(files);
       setError(String(e));
+    } finally {
+      window.clearTimeout(slow);
     }
   }
 
@@ -2887,7 +2907,8 @@ export default function App() {
             <h2>Add AI</h2>
             <p className="muted small">
               Most AIs join through their company's official command-line tool and your own account. Grok and DeepSeek
-              have no such tool, so they use an API key you paste here: it is saved only on this computer, never in the chat.
+              have no such tool, so they use an API key you paste here. You can also add any other AI below: a
+              service that takes your own key, or a model running on your computer: it is saved only on this computer, never in the chat.
               You decide who joins; an AI in the conversation can suggest one, but only you can add it.
             </p>
             <p className="setup-boundary">
@@ -2907,6 +2928,15 @@ export default function App() {
                       {a.company} · {a.tool}
                       {a.version ? ` · ${a.version}` : ""}
                     </span>
+                    {a.custom && (
+                      <button
+                        title="Delete this AI you added, and its saved key"
+                        className="link danger-link"
+                        onClick={() => api.removeCustomAi(a.id).then(refreshAgents).catch((e) => setError(String(e)))}
+                      >
+                        delete
+                      </button>
+                    )}
                   </div>
                   {a.transport === "api" ? (
                   <ol className="addai-steps">
@@ -2972,6 +3002,14 @@ export default function App() {
                 </div>
               );
             })}
+            <CustomAiForm
+              onAdded={(id) => {
+                refreshAgents();
+                setToast(`Added @${id}. Press "Add" on its card to bring it into the council.`);
+                setTimeout(() => setToast(null), 7000);
+              }}
+              onError={(e) => setError(e)}
+            />
             <div className="section-label">In the council</div>
             {members.map((a) => (
               <div key={a.id} className="member-row">

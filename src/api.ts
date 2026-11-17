@@ -117,6 +117,8 @@ export interface AgentInfo {
   member: boolean;
   access: Access;
   transport: string;
+  /** An AI the person added themselves (it can be deleted). */
+  custom?: boolean;
   tool: string;
   available: boolean;
   signed_in: boolean | null;
@@ -307,6 +309,8 @@ export type LinkPeer = {
   activity: string[];
   /** Its project folder's git state, e.g. "consilium-ai · main · 2 changed". */
   git: string | null;
+  /** Known candidate routes (wired Ethernet, Wi-Fi, direct cable) for failover. */
+  addrs: string[];
 };
 
 export type RouteTest = {
@@ -373,6 +377,10 @@ const appApi = {
   linkPairJoin: (address: string, code: string) => invoke<LinkPeer>("link_pair_join", { address, code }),
   linkUnpair: (nodeId: string) => invoke<LinkStatus>("link_unpair", { nodeId }),
   linkTestPeer: (nodeId: string) => invoke<PeerTestReport>("link_test_peer", { nodeId }),
+  linkAddPeerRoute: (nodeId: string, address: string) =>
+    invoke<string[]>("link_add_peer_route", { nodeId, address }),
+  linkRefreshRoutes: (nodeId: string) =>
+    invoke<string[]>("link_refresh_routes", { nodeId }),
   linkInbox: () => invoke<unknown[]>("link_inbox"),
   linkSend: (payload: unknown) => invoke<string>("link_send", { payload }),
   runCommand: (id: string, eventId: string, index: number) => invoke<ChatEvent>("run_command", { id, eventId, index }),
@@ -425,6 +433,9 @@ const appApi = {
   setup: (agent: string, action: "install" | "signin") => invoke<string>("setup_agent", { agent, action }),
   /** Saves an API-key AI's key on this computer (empty removes it). The key is never returned. */
   setApiKey: (agent: string, key: string) => invoke<void>("set_api_key", { agent, key }),
+  addCustomAi: (name: string, baseUrl: string, model: string, local: boolean, key: string) =>
+    invoke<string>("add_custom_ai", { name, baseUrl, model, local, key }),
+  removeCustomAi: (id: string) => invoke<void>("remove_custom_ai", { id }),
   /** Samples host PC CPU and memory pressure (0-100%). */
   systemPressure: () => invoke<SystemPressure>("system_pressure"),
   securityScanStatus: () => invoke<SecurityScanStatus>("security_scan_status"),

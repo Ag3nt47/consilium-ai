@@ -227,6 +227,10 @@ pub fn outbound_text(e: &Event) -> Option<String> {
     if body.is_empty() {
         return None;
     }
+    // The startup check sends its report to the phone itself.
+    if name == "Consilium" && body.starts_with(crate::startup_check::HEADER) {
+        return None;
+    }
     let mut msg = if name == "Consilium" {
         format!("[Consilium]\n{}", crate::redact::scrub(body))
     } else if name == "You" {
@@ -279,6 +283,22 @@ fn call(cfg: &BridgeConfig, method: &str, params: Value) -> Result<Value, String
 
 fn send_group(cfg: &BridgeConfig, group: &str, text: &str) -> Result<(), String> {
     call(cfg, "send", json!({"groupId": group, "message": text})).map(|_| ())
+}
+
+/// Sends a Consilium report to the phone's Note to Self, when Signal is set up and connected.
+pub fn send_to_phone(text: &str) -> Result<(), String> {
+    let cfg = BridgeConfig::load(&bridge::config_path(None))?;
+    if !cfg.enabled || !bridge::valid_account(&cfg.account) || cfg.allowed_acis.is_empty() {
+        return Err("Signal isn't set up".into());
+    }
+    if !crate::link::signal_on() {
+        return Err("Signal isn't connected".into());
+    }
+    let mut msg = crate::redact::scrub(text);
+    if msg.chars().count() > MAX_OUT {
+        msg = msg.chars().take(MAX_OUT).collect::<String>() + notice::CUT;
+    }
+    send_self(&cfg, &msg)
 }
 
 /// Sends to the account's own Note to Self. Consilium runs as a linked device of the human's own
@@ -356,6 +376,31 @@ pub fn ensure_groups(cfg_path: &std::path::Path, members: &[String]) -> Result<B
 
 /// Runs for the life of the app: links Signal and the newest conversation in both directions
 /// while Signal is switched on and verified.
+/// Asks signal-cli (in manual receive mode) to start passing messages to this connection.
+pub const SUBSCRIBE: &str = "{\"jsonrpc\":\"2.0\",\"id\":\"consilium-subscribe\",\"method\":\"subscribeReceive\"}\n";
+
+/// Reads one whole line from signal-cli. A read timeout part-way through a line keeps what has
+/// arrived in `buf` for the next call, so a long message (a photo, a long text) that arrives in
+/// pieces isn't cut in two and lost. Returns None while the line is still incomplete.
+pub fn read_whole_line(r: &mut impl BufRead, buf: &mut Vec<u8>) -> Result<Option<String>, String> {
+    match r.read_until(b'\n', buf) {
+        Ok(0) => return Err("signal-cli closed the connection".into()),
+        Ok(_) => {}
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    if buf.last() != Some(&b'\n') {
+        if buf.len() > 16 * 1024 * 1024 {
+            buf.clear(); // no line is ever this long; don't hold on to it
+        }
+        return Ok(None);
+    }
+    let line = String::from_utf8_lossy(buf).into_owned();
+    buf.clear();
+    Ok(Some(line))
+}
+
 pub fn run(engine: Arc<Engine>, cfg_path: PathBuf) {
     std::thread::spawn(move || loop {
         if let Err(e) = session(&engine, &cfg_path) {
@@ -380,10 +425,26 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
         return Ok(());
     }
     let members = engine.config.get().members;
-    let cfg = ensure_groups(cfg_path, &members)?;
-    let s = TcpStream::connect_timeout(&addr(&cfg)?, Duration::from_secs(5)).map_err(|e| e.to_string())?;
+    let cfg = match ensure_groups(cfg_path, &members) {
+        Ok(c) => c,
+        Err(e) => {
+            // Usually signal-cli itself has stopped: start it again rather than waiting forever.
+            crate::signal_setup::revive(&BridgeConfig::load(cfg_path)?);
+            return Err(e);
+        }
+    };
+    let s = match TcpStream::connect_timeout(&addr(&cfg)?, Duration::from_secs(5)) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::signal_setup::revive(&cfg);
+            return Err(e.to_string());
+        }
+    };
     // Short, so AI replies go out to the phone within a quarter of a second.
     s.set_read_timeout(Some(Duration::from_millis(250))).map_err(|e| e.to_string())?;
+    // signal-cli runs in manual receive mode: it takes messages off Signal's servers only while
+    // this connection is subscribed, so messages sent while Consilium is closed wait there.
+    (&s).write_all(SUBSCRIBE.as_bytes()).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(s);
     crate::link::set_signal_on(true);
     // Whatever way the session ends, linked computers stop counting on this one.
@@ -397,7 +458,7 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
     let mut seen: VecDeque<u64> = VecDeque::new();
     let mut seen_set: HashSet<u64> = HashSet::new();
     let mut out = Outbox { cursors: HashMap::new(), origins: HashMap::new() };
-    let mut line = String::new();
+    let mut buf: Vec<u8> = Vec::new();
     static ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         let _ = send_self(&cfg, notice::BACK_ONLINE);
@@ -412,13 +473,7 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
             return Ok(()); // a new member needs its own group
         }
         forward(engine, &cfg, &mut out);
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => return Err("signal-cli closed the connection".into()),
-            Ok(_) => {}
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
-            Err(e) => return Err(e.to_string()),
-        }
+        let Some(line) = read_whole_line(&mut reader, &mut buf)? else { continue };
         if line.len() > 512 * 1024 {
             continue;
         }
@@ -670,6 +725,49 @@ mod tests {
         .unwrap();
         e.requests = requests.into_iter().map(String::from).collect();
         e
+    }
+
+    /// Hands out its chunks one per read, with a read timeout between them, like a socket.
+    struct Chunky(Vec<Vec<u8>>, bool);
+    impl std::io::Read for Chunky {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.1 = !self.1;
+            if self.1 {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            if self.0.is_empty() {
+                return Ok(0);
+            }
+            let mut c = self.0.remove(0);
+            let n = c.len().min(out.len());
+            out[..n].copy_from_slice(&c[..n]);
+            if n < c.len() {
+                self.0.insert(0, c.split_off(n));
+            }
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_message_split_by_a_read_timeout_arrives_whole() {
+        let msg = sync("+15551234567", json!({"message": "héllo", "destinationNumber": "+15551234567"})).to_string();
+        let bytes = format!("{msg}\n").into_bytes();
+        // Split inside the two-byte "é" as well, and between lines.
+        let cut = msg.find('é').unwrap() + 1;
+        let chunks = vec![bytes[..10].to_vec(), bytes[10..cut].to_vec(), bytes[cut..].to_vec(), b"{\"a\":1}\n".to_vec()];
+        let mut r = BufReader::with_capacity(4, Chunky(chunks, false));
+        let mut buf = Vec::new();
+        let mut lines = Vec::new();
+        loop {
+            match read_whole_line(&mut r, &mut buf) {
+                Ok(Some(l)) => lines.push(l),
+                Ok(None) => {}
+                Err(_) => break,
+            }
+        }
+        assert_eq!(lines, vec![format!("{msg}\n"), "{\"a\":1}\n".to_string()]);
+        let v: Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(parse_incoming(&v, "+15551234567", &groups()).unwrap().text, "héllo");
     }
 
     #[test]

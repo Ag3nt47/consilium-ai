@@ -1,6 +1,6 @@
 //! What each agent is told: who is in the room, how to address the human, and the transcript.
 
-use crate::agents::AGENTS;
+use crate::agents;
 use crate::config::Access;
 use crate::store::Event;
 use std::hash::{DefaultHasher, Hasher};
@@ -177,7 +177,7 @@ pub fn label(sender: &str) -> String {
     match sender {
         "human" => "Human".into(),
         crate::council::CONSILIUM => "Consilium".into(),
-        s => AGENTS.iter().find(|a| a.id == s).map(|a| a.name.to_string()).unwrap_or_else(|| s.to_string()),
+        s => agents::all().into_iter().find(|a| a.id == s).map(|a| a.name.to_string()).unwrap_or_else(|| s.to_string()),
     }
 }
 
@@ -347,7 +347,7 @@ pub fn system(me: &str, round: u32, rounds: u32, ctx: &Context) -> String {
         .members
         .iter()
         .filter(|m| m.as_str() != me)
-        .filter_map(|m| AGENTS.iter().find(|a| a.id == m))
+        .filter_map(|m| agents::all().into_iter().find(|a| a.id == m))
         .map(|a| format!("{} (@{})", a.name, a.id))
         .collect();
     let others = match others.len() {
@@ -462,7 +462,7 @@ Identify the strongest concrete failure mode, unsafe assumption, or missing test
 proposal. Cite transcript or workspace evidence, propose a way to falsify the claim, and do not \
 agree merely to reach consensus.",
                 );
-            } else if let Some(agent) = AGENTS.iter().find(|a| a.id == reviewer) {
+            } else if let Some(agent) = agents::all().into_iter().find(|a| a.id == reviewer) {
                 s.push_str(&format!(
                     "\n\n{} is the designated adversarial reviewer this round. Address its evidence directly; \
 do not smooth over a substantive objection just to reach consensus.",
@@ -476,7 +476,7 @@ do not smooth over a substantive objection just to reach consensus.",
 
 /// How to bring in an AI that isn't a participant yet; empty when every known AI already is.
 fn add_ai_hint(members: &[String]) -> String {
-    let outside: Vec<String> = AGENTS
+    let outside: Vec<String> = agents::all()
         .iter()
         .filter(|a| !members.iter().any(|m| m == a.id))
         .map(|a| format!("{} (@{})", a.name, a.id))
@@ -632,9 +632,9 @@ pub fn mentioned_agents(text: &str) -> Vec<String> {
         if bytes[i] == '@' && (i == 0 || !bytes[i - 1].is_alphanumeric()) {
             let word: String = bytes[i + 1..].iter().take_while(|c| c.is_alphanumeric() || **c == '_').collect();
             match word.as_str() {
-                "all" | "everyone" => AGENTS.iter().for_each(|a| push(a.id)),
+                "all" | "everyone" => agents::all().into_iter().for_each(|a| push(a.id)),
                 w => {
-                    if let Some(a) = AGENTS.iter().find(|a| a.id == w || a.name.to_lowercase() == w) {
+                    if let Some(a) = agents::all().into_iter().find(|a| a.id == w || a.name.to_lowercase() == w) {
                         push(a.id)
                     }
                 }
