@@ -494,7 +494,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: on Windows, Update Now now closes Consilium, installs the new version and reopens it; each step is written to update\\install.log in Consilium's data folder, and if the install fails, Update Now stays offered so you can try again. On Linux, replacing the program retries for a few seconds if the old one is still closing. Before Update Now closes the app, Consilium also saves a snapshot of each project's uncommitted work in git, without changing any files, so it can be restored and merged back in if anything goes missing.";
+const WHATS_NEW: &str = "What's new: linked computers work together—AIs across paired computers collaborate in the same conversation with answers flowing between machines seamlessly. On Windows, command boxes from Full-capacity AIs can run automatically with Always Run to avoid repeated approval prompts, the update helper retries file replacement with backoff to prevent file lock errors, and AI process tracking handles PID reuse and Windows CLI discovery reliably. Test runs on macOS now bind to loopback so firewall incoming connection prompts are eliminated.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
