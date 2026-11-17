@@ -540,7 +540,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: installed AIs and tools no longer look uninstalled after an update (Consilium reads your current PATH instead of the one it was started with). When one linked computer installs an update it tells the others, which follow right away. Command boxes are system-aware: PowerShell and Command Prompt boxes only get Run on Windows, bash and zsh only on Mac and Linux, and a command written by another computer's AI is marked for that computer and never runs here, so write boxes for the computer you are on. Also: updates install and restart by themselves (Settings → Updates), AIs can withdraw requests with WITHDRAW:, and a communication stress test runs after every restart.";
+const WHATS_NEW: &str = "What's new: in a chat with Auto-run this chat on, every REQUEST is approved automatically about 20 seconds after it is asked (the human can click Deny first), as often as needed, and auto-continue no longer pauses after quiet rounds there. So in those chats, ask with REQUEST and carry on once the approval note arrives; nothing waits for the human.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs

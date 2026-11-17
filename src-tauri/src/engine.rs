@@ -493,7 +493,7 @@ impl Engine {
         }
         let events = self.store.load(conv).unwrap_or_default();
         let board = crate::tasks::load(self.store.dir(), conv);
-        match crate::autocontinue::decide(&events, &board) {
+        match crate::autocontinue::decide(&events, &board, crate::auto_run::is_on(self.store.dir(), conv)) {
             crate::autocontinue::Decision::Continue(note) => {
                 let _ = self.note_for_council(conv, &note);
             }

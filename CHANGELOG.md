@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Auto-continue keeps going in auto-run chats**: in a chat with "Auto-run this chat" on,
+  auto-continue no longer pauses after two rounds that changed nothing on the task board, since
+  commands there report back by themselves. It still stops after 8 rounds, on an unanswered
+  REQUEST in other chats, when no task is left, and on Stop.
+- **Auto-run chats approve every request**: in a chat with "Auto-run this chat" on, each REQUEST
+  is approved on your behalf about 20 seconds after it is asked (click Deny first to stop it), as
+  many times as the AIs ask, so nothing waits for you. The request card shows it as approved.
 - **Auto-run this chat**: a red button on command boxes turns on, after a warning, running every
   command box in that chat without asking, including deletes, overwrites, git history rewrites,
   installs and admin commands (the computer still shows its own password prompt). Only that chat is
