@@ -27,11 +27,17 @@ const RETRY_DELAY_MS: u64 = 15 * 60 * 1_000;
 /// GitHub release v3.0.2 standalone Python asset, reviewed and pinned on 2026-11-16.
 const ZERO_BREACH_SHA256: &str = "0b6df5f02c6b13256b735bfb55c1ef0a31ff0c762550910be9f66b4f5090dafb";
 
+fn default_auto_remove() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScanSettings {
     /// Enabled by default, but inert until the separately approved scanner is installed.
     pub enabled: bool,
     pub interval_hours: u32,
+    #[serde(default = "default_auto_remove")]
+    pub auto_remove_malicious_extensions: bool,
 }
 
 impl Default for ScanSettings {
@@ -39,6 +45,7 @@ impl Default for ScanSettings {
         Self {
             enabled: true,
             interval_hours: DEFAULT_INTERVAL_HOURS,
+            auto_remove_malicious_extensions: true,
         }
     }
 }
@@ -67,6 +74,7 @@ pub struct ScanStatus {
     pub tool_path: String,
     pub enabled: bool,
     pub interval_hours: u32,
+    pub auto_remove_malicious_extensions: bool,
     pub running: bool,
     pub last_started_ms: u64,
     pub last_finished_ms: u64,
@@ -129,6 +137,7 @@ impl Scanner {
             tool_path: tool.display().to_string(),
             enabled: settings.enabled,
             interval_hours: settings.interval_hours,
+            auto_remove_malicious_extensions: settings.auto_remove_malicious_extensions,
             running: runtime.running,
             last_started_ms: record.last_started_ms,
             last_finished_ms: record.last_finished_ms,
@@ -319,16 +328,33 @@ impl Scanner {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     let code = status.code();
-                    let summary = match code {
-                        Some(0) => "No known indicators or evidence gaps were reported by this scan.",
-                        Some(2) => "Zero Breach reported one or more actionable matches. Review the private report.",
-                        Some(3) => "No actionable match was reported, but some evidence could not be checked.",
+                    let mut summary = match code {
+                        Some(0) => "No known indicators or evidence gaps were reported by this scan.".to_string(),
+                        Some(2) => "Zero Breach reported one or more actionable matches. Review the private report.".to_string(),
+                        Some(3) => "No actionable match was reported, but some evidence could not be checked.".to_string(),
                         Some(c) => return self.finish(Some(c), format!("Zero Breach ended with exit code {c}."), None),
-                        None => "Zero Breach was interrupted before it returned a result.",
+                        None => "Zero Breach was interrupted before it returned a result.".to_string(),
                     };
                     set_private_file(&json);
                     set_private_file(&text);
-                    self.finish(code, summary.into(), Some(text));
+                    let auto_remove = self
+                        .settings
+                        .lock()
+                        .map(|s| s.auto_remove_malicious_extensions)
+                        .unwrap_or(true);
+                    if auto_remove && json.is_file() {
+                        if let Ok(removed) = auto_remove_malicious_extensions(&json) {
+                            if !removed.is_empty() {
+                                summary = format!(
+                                    "{} Automatically removed {} malicious browser extension(s): {}.",
+                                    summary,
+                                    removed.len(),
+                                    removed.join(", ")
+                                );
+                            }
+                        }
+                    }
+                    self.finish(code, summary, Some(text));
                     return;
                 }
                 Ok(None) => {}
@@ -470,6 +496,129 @@ fn set_private_file(_path: &Path) {
     }
 }
 
+/// Extracts all valid Chromium extension IDs (32 chars in a..=p) from a Zero Breach report.
+pub fn parse_malicious_extension_ids(report_json: &str) -> Vec<String> {
+    let mut ids = std::collections::BTreeSet::new();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(report_json) {
+        if let Some(doors) = value.get("doors").and_then(|d| d.as_array()) {
+            for door in doors {
+                if door.get("door").and_then(|d| d.as_str()) == Some("browser:malicious-extension") {
+                    if let Some(observed) = door.get("observed").and_then(|o| o.as_str()) {
+                        for segment in observed.split('[') {
+                            if let Some(candidate) = segment.split(']').next() {
+                                if candidate.len() == 32 && candidate.chars().all(|c| ('a'..='p').contains(&c)) {
+                                    ids.insert(candidate.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ids.into_iter().collect()
+}
+
+pub fn chromium_user_data_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            let app_sup = PathBuf::from(home).join("Library/Application Support");
+            roots.push(app_sup.join("Google/Chrome"));
+            roots.push(app_sup.join("Google/Chrome Canary"));
+            roots.push(app_sup.join("Chromium"));
+            roots.push(app_sup.join("Microsoft Edge"));
+            roots.push(app_sup.join("Microsoft Edge Canary"));
+            roots.push(app_sup.join("Microsoft Edge Dev"));
+            roots.push(app_sup.join("BraveSoftware/Brave-Browser"));
+            roots.push(app_sup.join("Vivaldi"));
+            roots.push(app_sup.join("Arc/User Data"));
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let local_dir = PathBuf::from(local);
+            roots.push(local_dir.join("Google\\Chrome\\User Data"));
+            roots.push(local_dir.join("Google\\Chrome SxS\\User Data"));
+            roots.push(local_dir.join("Microsoft\\Edge\\User Data"));
+            roots.push(local_dir.join("Microsoft\\Edge SxS\\User Data"));
+            roots.push(local_dir.join("Microsoft\\Edge Dev\\User Data"));
+            roots.push(local_dir.join("BraveSoftware\\Brave-Browser\\User Data"));
+            roots.push(local_dir.join("Chromium\\User Data"));
+            roots.push(local_dir.join("Vivaldi\\User Data"));
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            let cfg = PathBuf::from(home).join(".config");
+            roots.push(cfg.join("google-chrome"));
+            roots.push(cfg.join("google-chrome-beta"));
+            roots.push(cfg.join("google-chrome-unstable"));
+            roots.push(cfg.join("chromium"));
+            roots.push(cfg.join("microsoft-edge"));
+            roots.push(cfg.join("microsoft-edge-dev"));
+            roots.push(cfg.join("BraveSoftware/Brave-Browser"));
+            roots.push(cfg.join("vivaldi"));
+        }
+    }
+    roots.retain(|r| r.is_dir());
+    roots
+}
+
+pub fn remove_browser_extension_in_roots(roots: &[PathBuf], extension_id: &str) -> Vec<PathBuf> {
+    if extension_id.len() != 32 || !extension_id.chars().all(|c| ('a'..='p').contains(&c)) {
+        return Vec::new();
+    }
+    let mut removed = Vec::new();
+    let subdirs = [
+        "Extensions",
+        "Sync Extension Settings",
+        "Local Extension Settings",
+        "Extension Rules",
+        "Extension State",
+    ];
+
+    for root in roots {
+        let entries = match fs::read_dir(root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let profile_path = entry.path();
+            if !profile_path.is_dir() {
+                continue;
+            }
+            for sub in &subdirs {
+                let target = profile_path.join(sub).join(extension_id);
+                if target.is_dir() && fs::remove_dir_all(&target).is_ok() {
+                    removed.push(target);
+                }
+            }
+        }
+    }
+    removed
+}
+
+pub fn auto_remove_malicious_extensions(report_path: &Path) -> Result<Vec<String>, String> {
+    let content = fs::read_to_string(report_path).map_err(|e| e.to_string())?;
+    let ids = parse_malicious_extension_ids(&content);
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let roots = chromium_user_data_roots();
+    let mut successfully_removed = Vec::new();
+    for id in &ids {
+        let paths = remove_browser_extension_in_roots(&roots, id);
+        if !paths.is_empty() {
+            successfully_removed.push(id.clone());
+        }
+    }
+    Ok(successfully_removed)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -493,6 +642,7 @@ mod tests {
             .save_settings(ScanSettings {
                 enabled: false,
                 interval_hours: 1,
+                auto_remove_malicious_extensions: true,
             })
             .unwrap();
         let status = scanner.status();
@@ -540,6 +690,84 @@ mod tests {
         assert!(status.installed);
         assert!(!status.verified);
         assert!(scanner.request_run().unwrap_err().contains("doesn't match"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parses_malicious_extension_ids_from_report_doors() {
+        let json = r#"{
+            "doors": [
+                {
+                    "door": "browser:malicious-extension",
+                    "observed": "Protecto Whois Search™ [dkcjihabohaldgjkdmenepolojcjdaah] in chrome Default - malicious"
+                },
+                {
+                    "door": "browser:malicious-extension",
+                    "observed": "Verify Site Safety for Chrome [dkcjihabohaldgjkdmenepolojcjdaah] in edge Default - malicious"
+                },
+                {
+                    "door": "browser:ad-blocker",
+                    "observed": "uBlock Origin"
+                }
+            ]
+        }"#;
+        let ids = parse_malicious_extension_ids(json);
+        assert_eq!(ids, vec!["dkcjihabohaldgjkdmenepolojcjdaah".to_string()]);
+    }
+
+    #[test]
+    fn removes_matching_extension_directories_and_preserves_others() {
+        let root =
+            std::env::temp_dir().join(format!("consilium-ext-test-{}", uuid::Uuid::new_v4()));
+        let profile = root.join("Default");
+        let bad_id = "dkcjihabohaldgjkdmenepolojcjdaah";
+        let good_id = "cjpalhdlnbpafiamejdnhcphjbkeiagm";
+
+        let bad_ext = profile.join("Extensions").join(bad_id).join("1.0.0");
+        let bad_sync = profile.join("Sync Extension Settings").join(bad_id);
+        let good_ext = profile.join("Extensions").join(good_id).join("1.0.0");
+
+        fs::create_dir_all(&bad_ext).unwrap();
+        fs::create_dir_all(&bad_sync).unwrap();
+        fs::create_dir_all(&good_ext).unwrap();
+        fs::write(bad_ext.join("manifest.json"), b"{}").unwrap();
+        fs::write(good_ext.join("manifest.json"), b"{}").unwrap();
+
+        let removed = remove_browser_extension_in_roots(std::slice::from_ref(&root), bad_id);
+        assert_eq!(removed.len(), 2);
+        assert!(!profile.join("Extensions").join(bad_id).exists());
+        assert!(!profile.join("Sync Extension Settings").join(bad_id).exists());
+        assert!(profile.join("Extensions").join(good_id).exists());
+
+        let invalid = remove_browser_extension_in_roots(std::slice::from_ref(&root), "../../etc/passwd");
+        assert!(invalid.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_round_trip_with_auto_remove_toggle() {
+        let root =
+            std::env::temp_dir().join(format!("consilium-sec-test-{}", uuid::Uuid::new_v4()));
+        let scanner = Scanner::open(&root);
+        let status = scanner.status();
+        assert!(status.auto_remove_malicious_extensions);
+
+        scanner
+            .save_settings(ScanSettings {
+                enabled: true,
+                interval_hours: 48,
+                auto_remove_malicious_extensions: false,
+            })
+            .unwrap();
+
+        let updated = scanner.status();
+        assert!(!updated.auto_remove_malicious_extensions);
+        assert_eq!(updated.interval_hours, 48);
+
+        let reloaded = Scanner::open(&root);
+        assert!(!reloaded.status().auto_remove_malicious_extensions);
+
         let _ = fs::remove_dir_all(root);
     }
 }

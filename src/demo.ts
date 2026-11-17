@@ -232,6 +232,7 @@ export const demoApi = {
     tool_path: "~/Library/Application Support/Consilium/security/zero-breach/zero-breach-toolkit.py",
     enabled: true,
     interval_hours: 168,
+    auto_remove_malicious_extensions: true,
     running: false,
     last_started_ms: 0,
     last_finished_ms: 0,
@@ -240,10 +241,15 @@ export const demoApi = {
     last_report: null,
     paused_reason: "Waiting for the approved Zero Breach install.",
   }),
-  securityScanSave: async (settings: { enabled: boolean; interval_hours: number }) => ({
+  securityScanSave: async (settings: {
+    enabled: boolean;
+    interval_hours: number;
+    auto_remove_malicious_extensions?: boolean;
+  }) => ({
     installed: false,
     verified: false,
     tool_path: "~/Library/Application Support/Consilium/security/zero-breach/zero-breach-toolkit.py",
+    auto_remove_malicious_extensions: true,
     ...settings,
     running: false,
     last_started_ms: 0,

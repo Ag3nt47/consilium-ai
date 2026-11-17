@@ -246,6 +246,7 @@ export interface SecurityScanStatus {
   tool_path: string;
   enabled: boolean;
   interval_hours: number;
+  auto_remove_malicious_extensions: boolean;
   running: boolean;
   last_started_ms: number;
   last_finished_ms: number;
@@ -509,8 +510,11 @@ const appApi = {
   /** Samples host PC CPU and memory pressure (0-100%). */
   systemPressure: () => invoke<SystemPressure>("system_pressure"),
   securityScanStatus: () => invoke<SecurityScanStatus>("security_scan_status"),
-  securityScanSave: (settings: { enabled: boolean; interval_hours: number }) =>
-    invoke<SecurityScanStatus>("security_scan_save", { settings }),
+  securityScanSave: (settings: {
+    enabled: boolean;
+    interval_hours: number;
+    auto_remove_malicious_extensions?: boolean;
+  }) => invoke<SecurityScanStatus>("security_scan_save", { settings }),
   securityScanRun: () => invoke<SecurityScanStatus>("security_scan_run"),
   messagingStatus: () => invoke<ConnectorStatus[]>("messaging_status"),
   /** Messaging settings, phone number masked. */

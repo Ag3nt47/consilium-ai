@@ -18,10 +18,20 @@ export function SecurityScanSettings() {
     return () => window.clearInterval(timer);
   }, []);
 
-  const save = async (enabled: boolean, intervalHours = status?.interval_hours ?? 168) => {
+  const save = async (
+    enabled: boolean,
+    intervalHours = status?.interval_hours ?? 168,
+    autoRemove = status?.auto_remove_malicious_extensions ?? true,
+  ) => {
     setBusy(true);
     try {
-      setStatus(await api.securityScanSave({ enabled, interval_hours: intervalHours }));
+      setStatus(
+        await api.securityScanSave({
+          enabled,
+          interval_hours: intervalHours,
+          auto_remove_malicious_extensions: autoRemove,
+        }),
+      );
       setNote("Saved on this computer.");
     } catch (e) {
       setNote(String(e));
@@ -58,6 +68,15 @@ export function SecurityScanSettings() {
           onChange={(e) => save(e.target.checked)}
         />
         Run low-priority spyware checks when idle
+      </label>
+      <label className="toggle">
+        <input
+          type="checkbox"
+          checked={status.auto_remove_malicious_extensions}
+          disabled={busy || !status.enabled}
+          onChange={(e) => save(status.enabled, status.interval_hours, e.target.checked)}
+        />
+        Automatically remove malicious browser extensions detected by Zero Breach
       </label>
       <label className="msg-field">
         <span>Repeat</span>
