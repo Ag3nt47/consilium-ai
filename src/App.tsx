@@ -515,6 +515,76 @@ function RequestActions({ answer, pending, onDecide, onAlways, onRespond }: { an
   );
 }
 
+type PendingItem =
+  | { kind: "request"; key: string; event: ChatEvent; text: string }
+  | { kind: "command"; key: string; event: ChatEvent; index: number; fence: Fence };
+
+/** The waiting requests and commands, one at a time, pinned above the message box. */
+function RequestTray({ items, index, agents, answered, deciding, decide, respond, commands, onFocus, onShow }: {
+  items: PendingItem[];
+  index: number;
+  agents: AgentInfo[];
+  answered: Map<string, RequestResolution>;
+  deciding: Set<string>;
+  decide: Decide;
+  respond: Respond;
+  commands: CommandActions;
+  onFocus: (index: number) => void;
+  onShow: (item: PendingItem) => void;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+  const item = items[index];
+  if (!item) return null;
+  const from = senderName(item.event.sender, agents);
+  const many = items.length > 1;
+  return (
+    <div className={`request-tray${collapsed ? " collapsed" : ""}`} role="region" aria-label="Waiting requests">
+      <div className="request-tray-head">
+        <span className="request-tray-count" aria-live="polite">
+          {items.length} waiting
+        </span>
+        <span className="request-tray-from">
+          {item.kind === "request" ? "Request" : "Command"} {index + 1} of {items.length} · from {from}
+        </span>
+        <span className="spacer" />
+        <button type="button" className="btn small-btn" disabled={!many} onClick={() => onFocus(index - 1)} title="Previous waiting request" aria-label="Previous request">‹</button>
+        <button type="button" className="btn small-btn" disabled={!many} onClick={() => onFocus(index + 1)} title="Next waiting request" aria-label="Next request">›</button>
+        <button type="button" className="btn small-btn" onClick={() => onShow(item)} title="Scroll the chat to this request so you can read the message around it">Show in chat</button>
+        <button type="button" className="btn small-btn" onClick={() => setCollapsed((c) => !c)} title={collapsed ? "Show the request" : "Hide the request; the count stays"} aria-expanded={!collapsed}>
+          {collapsed ? "▴" : "▾"}
+        </button>
+      </div>
+      {!collapsed && item.kind === "request" && (
+        <div className="request request-tray-body">
+          <div className="request-tray-text"><span className="request-label">REQUEST:</span> <Inline text={item.text} /></div>
+          <RequestActions
+            key={item.key}
+            answer={answered.get(item.key)}
+            pending={deciding.has(item.key)}
+            onDecide={(ok) => decide(item.key, item.text, item.event.sender, ok)}
+            onAlways={hasExactCommand(item.text) ? () => decide(item.key, item.text, item.event.sender, true, true) : undefined}
+            onRespond={(response) => respond(item.key, item.text, item.event.sender, response)}
+          />
+        </div>
+      )}
+      {!collapsed && item.kind === "command" && (
+        <div className="request-tray-body command-tray">
+          <pre><code>{item.fence.code}</code></pre>
+          <span className="request-actions">
+            <button type="button" className="btn small-btn approve" disabled={commands.running.has(item.key)} onClick={() => commands.run(item.event.id, item.index)}
+              title={needsAdmin(item.fence.code) ? "Run this now. Your computer asks for your password itself; Consilium never sees it." : "Run this now in the project folder. The output goes back to the AI that suggested it."}>
+              {commands.running.has(item.key) ? "Running…" : "Run"}
+            </button>
+            <button type="button" className="btn small-btn deny" disabled={commands.running.has(item.key)} onClick={() => commands.deny(item.event.id, item.index, item.event.sender)} title="Don't run it, and tell the AI that suggested it">
+              Deny
+            </button>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function agentState(a: AgentInfo): "ready" | "signin" | "missing" | "benched" {
   if (a.available && a.benched_until && a.benched_until > Date.now()) return "benched";
   return a.available ? "ready" : a.path ? "signin" : "missing";
@@ -1101,6 +1171,13 @@ export default function App() {
   };
   const [cli, setCli] = useState<CliInstall | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  // Follow new messages only while the human is at the bottom of the chat. Scrolling up to read
+  // (or jumping to a request) pins the view until they scroll back down or press "New messages".
+  const messagesRef = useRef<HTMLElement>(null);
+  const followRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+  const seenCountRef = useRef(0);
+  const [unseen, setUnseen] = useState(0);
 
   currentRef.current = current;
 
@@ -1299,8 +1376,44 @@ export default function App() {
   }, [current]);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: prefs.effects ? "smooth" : "auto" });
+    followRef.current = true;
+    seenCountRef.current = 0;
+    setUnseen(0);
+  }, [current]);
+
+  useEffect(() => {
+    const grew = events.length - seenCountRef.current;
+    const mine = events.length > 0 && events[events.length - 1].sender === "human" && grew > 0;
+    seenCountRef.current = events.length;
+    if (followRef.current || mine) {
+      followRef.current = true;
+      setUnseen(0);
+      endRef.current?.scrollIntoView({ behavior: prefs.effects ? "smooth" : "auto" });
+    } else if (grew > 0) {
+      setUnseen((n) => n + grew);
+    }
   }, [events, turn, prefs.effects]);
+
+  function onMessagesScroll() {
+    const el = messagesRef.current;
+    if (!el) return;
+    const top = el.scrollTop;
+    const nearBottom = el.scrollHeight - top - el.clientHeight < 80;
+    // Only an upward scroll unpins: smooth auto-scrolls and growing content never move scrollTop up.
+    if (nearBottom) {
+      followRef.current = true;
+      setUnseen(0);
+    } else if (top < lastScrollTopRef.current - 2) {
+      followRef.current = false;
+    }
+    lastScrollTopRef.current = top;
+  }
+
+  function scrollToLatest() {
+    followRef.current = true;
+    setUnseen(0);
+    endRef.current?.scrollIntoView({ behavior: prefs.effects ? "smooth" : "auto" });
+  }
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1686,46 +1799,67 @@ export default function App() {
   const answered = useMemo(() => answeredRequests(events), [events]);
   const unanswered = useMemo(() => pendingRequests(events, answered, requestFloor), [events, answered, requestFloor]);
   const unansweredCmds = useMemo(() => pendingCommands(events, ranCommands, requestFloor), [events, ranCommands, requestFloor]);
-  const totalUnanswered = unanswered.length + unansweredCmds.length;
   const typedActivity = TYPED_THEMES.has(prefs.theme);
 
-  // Scroll to the oldest request or command still waiting for a response, and flash it.
-  function jumpToRequest() {
-    let targetEl: HTMLElement | null = null;
+  // Every request and shell command still waiting for the human, in chat order.
+  const pendingItems = useMemo<PendingItem[]>(() => {
+    const req = new Set(unanswered);
+    const cmd = new Set(unansweredCmds);
+    if (!req.size && !cmd.size) return [];
+    const out: PendingItem[] = [];
     for (const e of events) {
-      if (requestFloor !== null && e.seq <= requestFloor) continue;
-      for (const line of e.text.split("\n").keys()) {
-        const rKey = requestKey(e.id, line);
-        if (unanswered.includes(rKey)) {
-          const el = document.getElementById(requestElementId(rKey));
-          if (el) {
-            targetEl = el;
-            break;
-          }
-        }
+      if (e.sender === "human" || (requestFloor !== null && e.seq <= requestFloor)) continue;
+      const found: [number, PendingItem][] = [];
+      for (const [line, text] of e.text.split("\n").entries()) {
+        const key = requestKey(e.id, line);
+        if (req.has(key)) found.push([line, { kind: "request", key, event: e, text: /^\s*REQUEST:\s*(.*)$/i.exec(text)?.[1] ?? text }]);
       }
-      if (targetEl) break;
-      const fences = fencedBlocks(e.text);
-      for (const [fi, fence] of fences.entries()) {
-        if (fence.closed && shellName(fence.lang)) {
-          const cKey = `${e.id}#${fi}`;
-          if (unansweredCmds.includes(cKey)) {
-            const el = document.getElementById(commandElementId(cKey));
-            if (el) {
-              targetEl = el;
-              break;
-            }
-          }
-        }
-      }
-      if (targetEl) break;
+      fencedBlocks(e.text).forEach((fence, index) => {
+        const key = `${e.id}#${index}`;
+        if (cmd.has(key)) found.push([fence.start, { kind: "command", key, event: e, index, fence }]);
+      });
+      found.sort((a, b) => a[0] - b[0]).forEach(([, item]) => out.push(item));
     }
-    if (!targetEl) return;
-    targetEl.scrollIntoView({ behavior: "smooth", block: "center" });
-    targetEl.classList.remove("request-flash");
-    void targetEl.offsetWidth;
-    targetEl.classList.add("request-flash");
-    window.setTimeout(() => targetEl?.classList.remove("request-flash"), 1800);
+    return out;
+  }, [events, unanswered, unansweredCmds, requestFloor]);
+  const totalUnanswered = pendingItems.length;
+
+  // The tray shows one item at a time. When the shown one is answered, the next one slides in.
+  const [trayFocus, setTrayFocus] = useState<{ key: string | null; index: number }>({ key: null, index: 0 });
+  const trayIndex = (() => {
+    const at = trayFocus.key ? pendingItems.findIndex((p) => p.key === trayFocus.key) : -1;
+    return at >= 0 ? at : Math.min(trayFocus.index, Math.max(pendingItems.length - 1, 0));
+  })();
+  const lastJumpRef = useRef<string | null>(null);
+
+  function focusTray(index: number) {
+    const n = pendingItems.length;
+    if (!n) return;
+    const i = ((index % n) + n) % n;
+    setTrayFocus({ key: pendingItems[i].key, index: i });
+  }
+
+  // Scroll the chat to one waiting item and flash it. The view then stays put until the human
+  // scrolls back down, so a new message doesn't yank them away.
+  function showInChat(item: PendingItem) {
+    const el = document.getElementById(item.kind === "request" ? requestElementId(item.key) : commandElementId(item.key));
+    if (!el) return;
+    followRef.current = false;
+    lastJumpRef.current = item.key;
+    el.scrollIntoView({ behavior: prefs.effects ? "smooth" : "auto", block: "center" });
+    el.classList.remove("request-flash");
+    void el.offsetWidth;
+    el.classList.add("request-flash");
+    window.setTimeout(() => el.classList.remove("request-flash"), 1800);
+  }
+
+  // "Next request": the first press goes to the item shown in the tray, each later press to the next one.
+  function jumpToNextRequest() {
+    const n = pendingItems.length;
+    if (!n) return;
+    const i = lastJumpRef.current === pendingItems[trayIndex]?.key ? (trayIndex + 1) % n : trayIndex;
+    setTrayFocus({ key: pendingItems[i].key, index: i });
+    showInChat(pendingItems[i]);
   }
 
   async function retryAgent(a: AgentInfo) {
@@ -2384,7 +2518,7 @@ export default function App() {
             people={[{ id: "human", name: "You" }, ...members.map((m) => ({ id: m.id, name: m.name }))]}
           />
         </div>
-        <section className="messages">
+        <section className="messages" ref={messagesRef} onScroll={onMessagesScroll}>
           {!events.length && (
             <div className="empty">
               <img src="/icon.png" alt="" />
@@ -2477,6 +2611,11 @@ export default function App() {
             </div>
           )}
           <div ref={endRef} />
+          {unseen > 0 && (
+            <button type="button" className="btn small new-messages" onClick={scrollToLatest} title="Jump to the newest message">
+              ↓ {unseen} new message{unseen > 1 ? "s" : ""}
+            </button>
+          )}
         </section>
 
         <footer className={`composer ${dropping ? "dropping" : ""}`}>
@@ -2484,6 +2623,20 @@ export default function App() {
             <div className="error" onClick={() => setError(null)}>
               {error}
             </div>
+          )}
+          {pendingItems.length > 0 && (
+            <RequestTray
+              items={pendingItems}
+              index={trayIndex}
+              agents={agents}
+              answered={answered}
+              deciding={decidingRequests}
+              decide={decide}
+              respond={respondToRequest}
+              commands={commandActions}
+              onFocus={focusTray}
+              onShow={showInChat}
+            />
           )}
           <div className="composer-controls">
             <span className="section-label">Ask</span>
@@ -2503,10 +2656,10 @@ export default function App() {
               type="button"
               className="btn small respond-request"
               disabled={totalUnanswered === 0}
-              onClick={jumpToRequest}
-              title={totalUnanswered ? `Scroll to the oldest request or command still waiting for a response${totalUnanswered > 1 ? ` (${totalUnanswered} waiting)` : ""}` : "No unanswered requests"}
+              onClick={jumpToNextRequest}
+              title={totalUnanswered ? `Scroll to the next request or command waiting for you in the chat (${totalUnanswered} waiting); press again for the one after` : "No unanswered requests"}
             >
-              Respond to request{totalUnanswered > 0 ? ` · ${totalUnanswered}` : ""}
+              Next request{totalUnanswered > 0 ? ` · ${totalUnanswered}` : ""}
             </button>
             <button
               type="button"

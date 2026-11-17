@@ -3617,3 +3617,64 @@ button.attachment {
 .failover-chip.standby .chip-role {
   color: var(--muted);
 }
+
+/* Waiting requests, pinned above the message box so answering them never moves the chat. */
+.request-tray {
+  border: 1px solid var(--request);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--request) 8%, var(--bg-2));
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.request-tray-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.request-tray-head .spacer {
+  flex: 1;
+}
+.request-tray-count {
+  background: var(--request);
+  color: #fff;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-weight: 600;
+}
+.request-tray-from {
+  color: var(--muted);
+}
+.request-tray-body {
+  margin: 0;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+.request-tray-text {
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
+}
+.request-tray-body .request-actions {
+  margin-left: 0;
+}
+.command-tray pre {
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--panel) 85%, black);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+/* Shown when new messages arrive while the human is reading further up. */
+.messages .new-messages {
+  position: sticky;
+  bottom: 4px;
+  align-self: center;
+  z-index: 2;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
