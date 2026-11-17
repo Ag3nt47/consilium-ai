@@ -273,6 +273,7 @@ export const demoApi = {
   setResetForecast: async () => undefined,
   setAutoContinue: async () => undefined,
   setIsolateAgents: async () => undefined,
+  setAutoRunCommands: async () => undefined,
   agentBranches: async () => [],
   mergeAgentBranch: async () => "0000000",
   discardAgentBranch: async () => undefined,

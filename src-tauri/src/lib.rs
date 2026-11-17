@@ -74,6 +74,9 @@ impl engine::Ui for Window {
     fn event(&self, e: &Event) {
         let _ = self.0.emit(EVENT, e);
         peer_sync::share(e);
+        if let Some(state) = self.0.try_state::<AppState>() {
+            auto_run_commands(state.engine.clone(), e);
+        }
     }
     fn turn(&self, t: TurnState) {
         let _ = self.0.emit(TURN, t);
@@ -205,6 +208,11 @@ fn forget_approval(state: State<AppState>, grant: String) -> Result<config::Coun
 #[tauri::command]
 fn set_auto_continue(state: State<AppState>, on: bool) -> Result<(), String> {
     state.engine.config.set_auto_continue(on).map(|_| ())
+}
+
+#[tauri::command]
+fn set_auto_run_commands(state: State<AppState>, on: bool) -> Result<(), String> {
+    state.engine.config.set_auto_run_commands(on).map(|_| ())
 }
 
 #[tauri::command]
@@ -732,7 +740,47 @@ fn remove_custom_ai(state: State<'_, AppState>, id: String) -> Result<(), String
 /// message, never taken from the screen, and each block runs at most once.
 #[tauri::command]
 async fn run_command(state: State<'_, AppState>, id: String, event_id: String, index: usize) -> Result<Event, String> {
-    let engine = state.engine.clone();
+    run_block(state.engine.clone(), &id, &event_id, index).await
+}
+
+/// "Always run" (Settings): once the human turned it on, command boxes in a reply from a
+/// Full-capacity AI run without a Run click, one after another, each reporting back as Run does.
+/// Boxes that need admin rights, install software or that Consilium refuses still wait for the
+/// human (`runcmd::auto_runnable`).
+fn auto_run_commands(engine: Arc<Engine>, e: &Event) {
+    if e.kind != "message" || e.sender == "human" || e.sender == "consilium" || !e.text.contains("```") {
+        return;
+    }
+    // Only replies arriving now: an old box shown again (a reload, another process's log) waits
+    // for the human, and a conversation another computer owns runs its commands there.
+    if store::now_ms().saturating_sub(e.ts) > 120_000 || peer_sync::is_mirror(&e.conversation) {
+        return;
+    }
+    let config = engine.config.get();
+    if !config.auto_run_commands || engine.config.access(&e.sender) != Access::Unrestricted {
+        return;
+    }
+    let runnable: Vec<usize> = runcmd::fenced_blocks(&e.text)
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| runcmd::auto_runnable(b))
+        .map(|(i, _)| i)
+        .collect();
+    if runnable.is_empty() {
+        return;
+    }
+    let (conversation, event_id) = (e.conversation.clone(), e.id.clone());
+    tauri::async_runtime::spawn(async move {
+        for index in runnable {
+            if let Err(err) = run_block(engine.clone(), &conversation, &event_id, index).await {
+                eprintln!("consilium: always-run skipped {event_id}#{index}: {err}");
+            }
+        }
+    });
+}
+
+async fn run_block(engine: Arc<Engine>, id: &str, event_id: &str, index: usize) -> Result<Event, String> {
+    let (id, event_id) = (id.to_string(), event_id.to_string());
     let events = engine.store.load(&id)?;
     let (event, block, guard) = runcmd::take(&events, &event_id, index)?;
     let cwd = engine
@@ -1126,6 +1174,7 @@ pub fn run() {
             set_reset_forecast,
             set_auto_continue,
             set_isolate_agents,
+            set_auto_run_commands,
             agent_branches,
             merge_agent_branch,
             discard_agent_branch,

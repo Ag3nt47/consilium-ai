@@ -1593,7 +1593,7 @@ fn streamed_command(kind: Kind, line: &str) -> Option<String> {
 
 /// Whether a command crosses the OS administrator/root boundary. Full capacity deliberately does
 /// not imply elevation: a matching, one-turn grant from an exact REQUEST is required separately.
-fn elevated_command(command: &str) -> bool {
+pub(crate) fn elevated_command(command: &str) -> bool {
     shell_segments(command).into_iter().any(elevated_segment)
 }
 

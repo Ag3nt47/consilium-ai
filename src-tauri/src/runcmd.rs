@@ -244,6 +244,23 @@ pub fn check(block: &Block) -> Result<(), String> {
     plan(shell, &block.code, std::env::consts::OS).map(|_| ())
 }
 
+/// Whether a command box may run on its own once the human turned on "Always run" (Settings), with
+/// no Run click. Everything `check` refuses is refused here too, and so is anything that crosses the
+/// administrator boundary or installs software onto the computer: those keep their own one-command
+/// approval, so "Always run" never widens what a Full-capacity AI could already do itself.
+pub fn auto_runnable(block: &Block) -> bool {
+    if check(block).is_err() || without_sudo(&block.code).is_some() {
+        return false;
+    }
+    let code = strip_prompts(&block.code);
+    let lower = code.to_ascii_lowercase();
+    if lower.contains("runas") || lower.contains("with administrator privileges") {
+        return false;
+    }
+    let whole = code.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>();
+    !whole.iter().any(|line| crate::agents::elevated_command(line) || crate::toolbox::install_command(line))
+}
+
 fn receipt_path(dir: &Path, conversation: &str, event_id: &str, index: usize) -> PathBuf {
     let safe = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>();
     dir.join(format!("{}_{}_{index}", safe(conversation), safe(event_id)))
@@ -386,6 +403,22 @@ mod tests {
             "id": id, "seq": 1, "ts": 0, "conversation": "c", "sender": sender, "kind": "message", "to": [], "text": text
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn always_run_skips_admin_install_and_other_os_commands() {
+        let block = |lang: &str, code: &str| Block { lang: lang.into(), code: code.into(), closed: true };
+        let native = if cfg!(windows) { "powershell" } else { "bash" };
+        assert!(auto_runnable(&block(native, "git status")));
+        assert!(!auto_runnable(&block(native, "sudo ls /")));
+        assert!(!auto_runnable(&block(native, "Start-Process powershell -Verb RunAs")));
+        assert!(!auto_runnable(&block(native, "npm install --global left-pad")));
+        assert!(!auto_runnable(&block(native, "")));
+        assert!(!auto_runnable(&Block { lang: native.into(), code: "git status".into(), closed: false }));
+        assert!(!auto_runnable(&block("text", "git status")));
+        // A box written for another system's shell can't run here, so it never runs on its own.
+        let foreign = if cfg!(windows) { "bash" } else { "cmd" };
+        assert!(!auto_runnable(&block(foreign, "git status")));
     }
 
     #[test]

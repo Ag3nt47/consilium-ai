@@ -1,6 +1,6 @@
 import { TypedText, TYPED_THEMES } from "./typed";
 import { commandElementId, fencedBlocks, handledCommands, needsAdmin, pendingCommands, shellName, deniedText, type Fence } from "./commands";
-import { dictationHint, paletteKey, paletteKeyWords } from "./platform";
+import { dictationHint, paletteKey, paletteKeyWords, terminalName } from "./platform";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -417,6 +417,10 @@ type CommandActions = {
   running: Set<string>;
   run: (eventId: string, index: number) => void;
   deny: (eventId: string, index: number, sender: string) => void;
+  /** Whether "Always run" can be offered for this AI's boxes (it has Full capacity). */
+  canAlwaysRun: (sender: string) => boolean;
+  /** Runs this box and turns "Always run" on, so later boxes run without a click. */
+  alwaysRun: (eventId: string, index: number) => void;
 };
 
 /** A fenced code block. Shell blocks from an AI get Run and Deny; every block gets Copy. */
@@ -445,6 +449,12 @@ function CommandBox({ event, fence, index, actions }: { event: ChatEvent; fence:
                 title={needsAdmin(fence.code) ? "Run this now. Your computer asks for your password itself; Consilium never sees it. The output goes back to the AI that suggested it." : "Run this now in the project folder. The output goes back to the AI that suggested it."}>
                 {running ? "Running…" : "Run"}
               </button>
+              {actions.canAlwaysRun(event.sender) && !needsAdmin(fence.code) && (
+                <button type="button" className="btn small-btn approve always" disabled={running} onClick={() => actions.alwaysRun(event.id, index)}
+                  title="Run this now, and from now on run command boxes from Full-capacity AIs on this computer without asking. Admin commands and software installs still ask. Turn it off in Settings.">
+                  Always run
+                </button>
+              )}
               <button type="button" className="btn small-btn deny" disabled={running} onClick={() => actions.deny(event.id, index, event.sender)} title="Don't run it, and tell the AI that suggested it">
                 Deny
               </button>
@@ -1773,9 +1783,17 @@ export default function App() {
   // sends the output to the AI that suggested it. Deny tells that AI not to run it.
   const [runningCommands, setRunningCommands] = useState<Set<string>>(() => new Set());
   const ranCommands = useMemo(() => handledCommands(events), [events]);
-  const commandActions = useMemo(() => ({
+  const commandActions = useMemo<CommandActions>(() => ({
     handled: ranCommands,
     running: runningCommands,
+    canAlwaysRun: (sender: string) =>
+      !council?.auto_run_commands && agents.some((a) => a.id === sender && a.access === "unrestricted"),
+    alwaysRun: (eventId: string, index: number) => {
+      api.setAutoRunCommands(true)
+        .then(() => setCouncil((c) => (c ? { ...c, auto_run_commands: true } : c)))
+        .catch((err) => setError(`Couldn't turn on Always run: ${err}`));
+      commandActions.run(eventId, index);
+    },
     run: (eventId: string, index: number) => {
       if (!current) return;
       const key = `${eventId}#${index}`;
@@ -1795,7 +1813,7 @@ export default function App() {
       const to = members.some((m) => m.id === sender) ? [sender] : [];
       api.send(current, deniedText(senderName(sender, agents), eventId, index), to, 1).catch((e) => setError(String(e)));
     },
-  }), [ranCommands, runningCommands, current, members, agents]);
+  }), [ranCommands, runningCommands, current, members, agents, council?.auto_run_commands]);
   const answered = useMemo(() => answeredRequests(events), [events]);
   const unanswered = useMemo(() => pendingRequests(events, answered, requestFloor), [events, answered, requestFloor]);
   const unansweredCmds = useMemo(() => pendingCommands(events, ranCommands, requestFloor), [events, ranCommands, requestFloor]);
@@ -2942,6 +2960,21 @@ export default function App() {
             </label>
             <p className="muted small">
               When on, Full-capacity AIs make changes in their own branch. Their edits don't touch your checkout until you review and merge them in the Branches panel.
+            </p>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={council?.auto_run_commands ?? false}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  api.setAutoRunCommands(on).then(() => setCouncil((c) => (c ? { ...c, auto_run_commands: on } : c))).catch((err) => setError(`Couldn't update setting: ${err}`));
+                }}
+              />
+              Always run command boxes from Full-capacity AIs on this computer
+            </label>
+            <p className="muted small">
+              {terminalName} commands an AI posts run by themselves and the output goes back to it, with no Run click.
+              Commands that need admin rights or install software, and ones Consilium refuses, still ask.
             </p>
             <div className="section-label">Council memory</div>
             <p className="muted small">

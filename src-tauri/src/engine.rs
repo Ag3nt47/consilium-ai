@@ -790,6 +790,12 @@ impl council::Host for RealHost {
         }
         // "Always allow" approvals saved on this computer apply to every AI, every turn.
         let saved_grants = self.config.get().saved_grants;
+        if access == Access::Unrestricted && self.config.get().auto_run_commands {
+            system.push_str(
+                "\n\nAlways run is on: command boxes you post run on this computer by themselves and the output comes back to you, \
+so the human isn't asked to click Run. Prefer running commands yourself; admin and install commands still wait for the human.",
+            );
+        }
         if access == Access::Unrestricted || access == Access::Own {
             system.push_str(&prompt::saved_grants_note(&saved_grants));
             for grant in saved_grants {

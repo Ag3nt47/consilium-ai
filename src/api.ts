@@ -100,6 +100,8 @@ export interface Council {
   auto_continue?: boolean;
   /** Full-capacity AIs work in their own git worktree (branch `consilium/<id>`). */
   isolate_agents?: boolean;
+  /** Command boxes from a Full-capacity AI run on their own on this computer (admin and installs still wait). */
+  auto_run_commands?: boolean;
 }
 
 export const ACCESS_LEVELS: { id: Access; name: string; note: string }[] = [
@@ -398,6 +400,7 @@ const appApi = {
   setResetForecast: (on: boolean) => invoke<void>("set_reset_forecast", { on }),
   setAutoContinue: (on: boolean) => invoke<void>("set_auto_continue", { on }),
   setIsolateAgents: (on: boolean) => invoke<void>("set_isolate_agents", { on }),
+  setAutoRunCommands: (on: boolean) => invoke<void>("set_auto_run_commands", { on }),
   agentBranches: (conversation?: string) => invoke<AgentBranch[]>("agent_branches", { conversation }),
   mergeAgentBranch: (repo: string, agent: string, conversation?: string) =>
     invoke<string>("merge_agent_branch", { conversation, repo, agent }),

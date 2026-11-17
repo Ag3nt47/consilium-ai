@@ -53,6 +53,10 @@ pub struct Council {
     /// branch `consilium/<id>`) instead of the project folder; see `worktree`. Off by default.
     #[serde(default)]
     pub isolate_agents: bool,
+    /// Command boxes from a Full-capacity AI run on their own on this computer, without a Run
+    /// click each time (see `runcmd::auto_runnable`). Admin commands still wait. Off by default.
+    #[serde(default)]
+    pub auto_run_commands: bool,
 }
 
 fn yes() -> bool {
@@ -70,6 +74,7 @@ impl Default for Council {
             saved_grants: Vec::new(),
             auto_continue: true,
             isolate_agents: false,
+            auto_run_commands: false,
         }
     }
 }
@@ -219,6 +224,15 @@ impl Config {
         let mut c = self.current();
         let mut next = c.clone();
         next.isolate_agents = on;
+        self.save(&next)?;
+        *c = next.clone();
+        Ok(next)
+    }
+
+    pub fn set_auto_run_commands(&self, on: bool) -> Result<Council, String> {
+        let mut c = self.current();
+        let mut next = c.clone();
+        next.auto_run_commands = on;
         self.save(&next)?;
         *c = next.clone();
         Ok(next)
