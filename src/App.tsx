@@ -932,7 +932,8 @@ const DraftBox = memo(
           placeholder="Message the council…  (Enter to send, Shift+Enter for a new line; drop or paste files to attach)"
           onChange={(e) => update(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            // Enter that finishes typing an accented or non-Latin character isn't a send.
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               onSend();
             }
@@ -1192,7 +1193,7 @@ export default function App() {
       const first = list[0] ?? (await api.create());
       if (!list.length) await refreshList();
       setCurrent(first.id);
-    });
+    }).catch((e) => setError(`Couldn't load your conversations: ${e}. Sending a message will try again.`));
     const un1 = onEvent((e) => {
       if (e.conversation === currentRef.current) {
         setEvents((prev) => (prev.some((p) => p.id === e.id) ? prev : [...prev, e]));
@@ -1358,18 +1359,36 @@ export default function App() {
   // Sending while the AIs are answering doesn't interrupt them: they read it and carry on. Stop interrupts.
   async function send() {
     const text = draftBox.current?.get() ?? "";
-    if (!current || (!text.trim() && !pending.length)) return;
+    if (!text.trim() && !pending.length) return;
+    // Enter used to do nothing at all when no conversation was open (for example when the list
+    // failed to load at startup). Open the newest one, or start one, and send there instead.
+    let id = current;
+    if (!id) {
+      try {
+        const list = await refreshList();
+        id = (list[0] ?? (await api.create())).id;
+        setCurrent(id);
+      } catch (e) {
+        setError(`Couldn't send: no conversation is open, and opening one failed (${e}). Your message is still in the box.`);
+        return;
+      }
+    }
     setError(null);
     const files = pending;
     setDraft("");
     setPending([]);
+    // If the app's engine doesn't answer, say so instead of leaving the box empty and silent.
+    const slow = window.setTimeout(() => setError("Your message is taking unusually long to send. It will appear here once Consilium accepts it."), 15000);
     try {
       const to = targets.filter((t) => members.some((m) => m.id === t));
-      await api.send(current, withPersona(text, persona), to, discuss ? rounds : 1, false, files);
+      await api.send(id, withPersona(text, persona), to, discuss ? rounds : 1, false, files);
+      setError((e) => (e?.startsWith("Your message is taking") ? null : e));
     } catch (e) {
       setDraft(text);
       setPending(files);
       setError(String(e));
+    } finally {
+      window.clearTimeout(slow);
     }
   }
 
