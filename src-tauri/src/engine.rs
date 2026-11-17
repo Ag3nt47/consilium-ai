@@ -385,15 +385,10 @@ impl Engine {
         self.begin(&mut running, Pending::new(id, targets, LINKED_ROUNDS), lock, event.seq);
     }
 
-    /// The council members a message is for: the chosen ones, plus any it @mentions.
+    /// The council members a message is for. A message that @mentions council members goes to
+    /// those only, whoever is ticked in the box; otherwise it goes to the ticked ones.
     fn addressed(&self, targets: Vec<String>, text: &str) -> Vec<String> {
-        let mut targets: Vec<String> = targets.into_iter().filter(|t| self.config.is_member(t)).collect();
-        for m in prompt::mentioned_agents(text) {
-            if self.config.is_member(&m) && !targets.contains(&m) {
-                targets.push(m);
-            }
-        }
-        targets
+        route(targets, prompt::mentioned_agents(text), |a| self.config.is_member(a))
     }
 
     /// Sets up the turn `pending` and runs it in the background. `cursor` is the newest event it
@@ -1256,5 +1251,47 @@ mod tests {
         until_idle(&[&app, &term], &conv).await;
         assert_eq!(said(&app, &conv).len(), 2, "one answer, not two");
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Who a message goes to: the council members it @mentions if it names any, else the ticked ones.
+/// Without this, "@claude ..." also started every other ticked AI.
+fn route(ticked: Vec<String>, mentioned: Vec<String>, is_member: impl Fn(&str) -> bool) -> Vec<String> {
+    let named: Vec<String> = mentioned.into_iter().filter(|m| is_member(m)).collect();
+    if !named.is_empty() {
+        return named;
+    }
+    ticked.into_iter().filter(|t| is_member(t)).collect()
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::route;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+    fn member(a: &str) -> bool {
+        matches!(a, "claude" | "gemini" | "gpt")
+    }
+
+    #[test]
+    fn a_mention_starts_only_the_mentioned_ai() {
+        assert_eq!(route(ids(&["claude", "gemini"]), ids(&["claude"]), member), ids(&["claude"]));
+    }
+
+    #[test]
+    fn no_mention_goes_to_the_ticked_ais() {
+        assert_eq!(route(ids(&["claude", "gemini"]), vec![], member), ids(&["claude", "gemini"]));
+    }
+
+    #[test]
+    fn mentions_of_non_members_are_ignored() {
+        assert_eq!(route(ids(&["claude", "frank"]), ids(&["grok"]), member), ids(&["claude"]));
+    }
+
+    #[test]
+    fn all_reaches_every_member() {
+        assert_eq!(route(ids(&["claude"]), ids(&["claude", "gemini", "gpt"]), member), ids(&["claude", "gemini", "gpt"]));
     }
 }
