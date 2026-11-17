@@ -205,10 +205,16 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
             }
             out.push(PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"));
         }
-        Kind::ClaudeCode => out.push(home.join(".claude/local/claude")),
+        Kind::ClaudeCode => {
+            for n in exe_names("claude") {
+                out.push(home.join(".claude/local").join(&n));
+            }
+        }
         Kind::GeminiCli | Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => {}
         Kind::Antigravity => {
-            out.push(home.join(".local/bin/agy"));
+            for n in exe_names("agy") {
+                out.push(home.join(".local/bin").join(&n));
+            }
             if let Some(local) = std::env::var_os("LOCALAPPDATA") {
                 out.push(PathBuf::from(local).join("agy").join("bin").join("agy.exe"));
             }
@@ -671,11 +677,14 @@ fn gemini_signed_in() -> bool {
 /// OS keyring; its presence, never its contents, is the check. Signing out (`/logout`) removes it.
 fn antigravity_signed_in() -> bool {
     // Roaming and local app data on Windows; Application Support on macOS; ~/.config and
-    // ~/.local/share on Linux.
-    [dirs::config_dir(), dirs::data_dir(), dirs::data_local_dir()]
+    // ~/.local/share on Linux; ~/.antigravity or ~/.config/antigravity fallback.
+    let home = dirs::home_dir();
+    let dot_antigravity = home.as_ref().map(|h| h.join(".antigravity"));
+    let dot_config = home.as_ref().map(|h| h.join(".config").join("antigravity"));
+    [dirs::config_dir(), dirs::data_dir(), dirs::data_local_dir(), dot_antigravity, dot_config]
         .into_iter()
         .flatten()
-        .any(|d| d.join("antigravity").join("credential-user-scope").is_file())
+        .any(|d| d.join("antigravity").join("credential-user-scope").is_file() || d.join("credential-user-scope").is_file())
 }
 
 /// Whether the AI's CLI reports a saved sign-in, or None when it couldn't say.
@@ -683,7 +692,9 @@ async fn signed_in_via(kind: Kind, path: &Path) -> Option<bool> {
     match kind {
         Kind::Codex => probe(path, &["login", "status"]).await.map(|s| s.contains("Logged in")),
         Kind::ClaudeCode => probe(path, &["auth", "status"]).await.and_then(|s| {
-            serde_json::from_str::<serde_json::Value>(&s).ok().and_then(|v| v["loggedIn"].as_bool())
+            let start = s.find('{')?;
+            let end = s.rfind('}')? + 1;
+            serde_json::from_str::<serde_json::Value>(&s[start..end]).ok().and_then(|v| v["loggedIn"].as_bool())
         }),
         Kind::GeminiCli => Some(gemini_signed_in()),
         Kind::Antigravity => Some(antigravity_signed_in()),
