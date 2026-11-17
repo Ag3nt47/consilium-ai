@@ -2773,7 +2773,7 @@ export default function App() {
             </div>
           )}
           <div ref={endRef} />
-          {unseen > 0 && (
+          {unseen > 0 && !awayFromLatest && (
             <button type="button" className="btn small new-messages" onClick={scrollToLatest} title="Jump to the newest message">
               ↓ {unseen} new message{unseen > 1 ? "s" : ""}
             </button>
