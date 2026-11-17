@@ -457,6 +457,8 @@ type CommandActions = {
   canAlwaysRun: (sender: string) => boolean;
   /** Runs this box and turns "Always run" on, so later boxes run without a click. */
   alwaysRun: (eventId: string, index: number) => void;
+  chatAutoRun?: boolean;
+  autoRunChat?: (eventId: string, index: number) => void;
 };
 
 /** A fenced code block. Shell blocks from an AI get Run and Deny; every block gets Copy. */
@@ -527,6 +529,12 @@ function CommandBox({ event, fence, index, actions }: { event: ChatEvent; fence:
                 <button type="button" className="btn small-btn approve always" disabled={running} onClick={() => actions.alwaysRun(event.id, index)}
                   title="Run this now, and from now on run command boxes from Full-capacity AIs on this computer without asking. Admin commands and software installs still ask. Turn it off in Settings.">
                   Always run
+                </button>
+              )}
+              {actions.autoRunChat && !actions.chatAutoRun && (
+                <button type="button" className="btn small-btn autorun-chat" disabled={running} onClick={() => actions.autoRunChat?.(event.id, index)}
+                  title="Run every command box in this chat without asking, after a warning. Only this chat; new chats start with it off.">
+                  Auto-run this chat
                 </button>
               )}
               <button type="button" className="btn small-btn deny" disabled={running} onClick={() => actions.deny(event.id, index, event.sender)} title="Don't run it, and tell the AI that suggested it">
@@ -1906,6 +1914,34 @@ export default function App() {
   }
   // Run on a command box: the engine reads the command from the stored message, runs it once and
   // sends the output to the AI that suggested it. Deny tells that AI not to run it.
+  // "Auto-run this chat": on only in chats where the human accepted its warning (auto_run.rs).
+  const [chatAutoRun, setChatAutoRunState] = useState(false);
+  const [autoRunAsk, setAutoRunAsk] = useState<{ eventId: string; index: number } | null>(null);
+  useEffect(() => {
+    setChatAutoRunState(false);
+    setAutoRunAsk(null);
+    if (!current) return;
+    let live = true;
+    api.chatAutoRun(current).then((on) => { if (live) setChatAutoRunState(on); }).catch(() => {});
+    return () => { live = false; };
+  }, [current]);
+  const confirmAutoRun = () => {
+    const ask = autoRunAsk;
+    setAutoRunAsk(null);
+    if (!current || !ask) return;
+    api.setChatAutoRun(current, true)
+      .then((on) => {
+        setChatAutoRunState(on);
+        commandActions.run(ask.eventId, ask.index);
+      })
+      .catch((err) => setError(`Couldn't turn on auto-run: ${err}`));
+  };
+  const stopAutoRun = () => {
+    if (!current) return;
+    api.setChatAutoRun(current, false)
+      .then((on) => setChatAutoRunState(on))
+      .catch((err) => setError(`Couldn't turn off auto-run: ${err}`));
+  };
   const [runningCommands, setRunningCommands] = useState<Set<string>>(() => new Set());
   const ranCommands = useMemo(() => handledCommands(events), [events]);
   const commandActions = useMemo<CommandActions>(() => ({
@@ -1919,6 +1955,8 @@ export default function App() {
         .catch((err) => setError(`Couldn't turn on Always run: ${err}`));
       commandActions.run(eventId, index);
     },
+    chatAutoRun,
+    autoRunChat: (eventId: string, index: number) => setAutoRunAsk({ eventId, index }),
     run: (eventId: string, index: number) => {
       if (!current) return;
       const key = `${eventId}#${index}`;
@@ -1938,7 +1976,7 @@ export default function App() {
       const to = members.some((m) => m.id === sender) ? [sender] : [];
       api.send(current, deniedText(senderName(sender, agents), eventId, index), to, 1).catch((e) => setError(String(e)));
     },
-  }), [ranCommands, runningCommands, current, members, agents, council?.auto_run_commands]);
+  }), [ranCommands, runningCommands, current, members, agents, council?.auto_run_commands, chatAutoRun]);
   const answered = useMemo(() => answeredRequests(events), [events]);
   const unanswered = useMemo(() => pendingRequests(events, answered, requestFloor), [events, answered, requestFloor]);
   const unansweredCmds = useMemo(() => pendingCommands(events, ranCommands, requestFloor, OS), [events, ranCommands, requestFloor]);
@@ -2680,6 +2718,33 @@ export default function App() {
             people={[{ id: "human", name: "You" }, ...members.map((m) => ({ id: m.id, name: m.name }))]}
           />
         </div>
+        {current && chatAutoRun && (
+          <button type="button" className="autorun-badge" onClick={stopAutoRun}
+            title="Every command box in this chat runs without asking. Click to turn auto-run off.">
+            Auto-run on (click to stop)
+          </button>
+        )}
+        {autoRunAsk && (
+          <div className="autorun-overlay" role="dialog" aria-modal="true">
+            <div className="autorun-dialog">
+              <h3>Auto-run every command in this chat?</h3>
+              <p>
+                Every command box an AI posts in this chat will run right away, without asking. That includes
+                commands that delete or overwrite files, rewrite git history, install or uninstall software,
+                stop programs or need admin rights (your computer still shows its own password prompt).
+              </p>
+              <p>
+                Anything that reaches this chat can propose a command, such as a pasted log or a web page an AI
+                reads, and it will run without you seeing it first. Only this chat is affected: every new chat
+                starts with auto-run off. Turn it off any time with the red Auto-run badge.
+              </p>
+              <div className="autorun-buttons">
+                <button type="button" className="btn deny" onClick={() => setAutoRunAsk(null)}>Cancel</button>
+                <button type="button" className="btn approve" onClick={confirmAutoRun}>Turn on and run this box</button>
+              </div>
+            </div>
+          </div>
+        )}
         <section className="messages" ref={messagesRef} onScroll={onMessagesScroll}>
           {!events.length && (
             <div className="empty">

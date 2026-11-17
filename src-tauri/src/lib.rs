@@ -9,6 +9,7 @@ mod autocontinue;
 mod bench;
 mod build_id;
 mod ci;
+pub mod auto_run;
 pub mod bridge;
 pub mod cli;
 mod config;
@@ -228,6 +229,25 @@ fn set_auto_continue(state: State<AppState>, on: bool) -> Result<(), String> {
 #[tauri::command]
 fn set_ai_on(state: State<AppState>, conversation: String, agent: String, on: bool) -> Result<Vec<String>, String> {
     state.engine.set_ai_on(&conversation, &agent, on)
+}
+
+/// "Auto-run this chat" on or off for one conversation (after the warning). A note tells the AIs.
+#[tauri::command]
+fn set_chat_auto_run(state: State<AppState>, conversation: String, on: bool) -> Result<bool, String> {
+    let now = auto_run::set(state.engine.store.dir(), &conversation, on)?;
+    let text = if now {
+        "Auto-run is on in this chat: every command box an AI posts here runs by itself, including ones that delete, overwrite, install or need admin rights, and the output goes back to it. The human can turn it off with the red Auto-run badge."
+    } else {
+        "Auto-run is off in this chat: command boxes wait for the human's Run click again."
+    };
+    let _ = state.engine.note(&conversation, text);
+    Ok(now)
+}
+
+/// Whether "Auto-run this chat" is on for `conversation`.
+#[tauri::command]
+fn chat_auto_run(state: State<AppState>, conversation: String) -> bool {
+    auto_run::is_on(state.engine.store.dir(), &conversation)
 }
 
 /// The AIs switched off in one conversation.
@@ -885,11 +905,19 @@ fn auto_run_commands(engine: Arc<Engine>, e: &Event) {
     if store::now_ms().saturating_sub(e.ts) > 120_000 || peer_sync::is_mirror(&e.conversation) {
         return;
     }
+    let blocks = runcmd::fenced_blocks(&e.text);
+    // "Auto-run this chat" (the human accepted its warning for this conversation): every box from an
+    // AI of this council runs, risky, admin and install ones included. Only what Consilium refuses
+    // outright (a shell this computer can't run, another computer's command) still waits.
+    if auto_run::is_on(engine.store.dir(), &e.conversation) && engine.config.is_member(&e.sender) {
+        let all: Vec<usize> = blocks.iter().enumerate().filter(|(_, b)| b.closed && runcmd::check(b).is_ok()).map(|(i, _)| i).collect();
+        run_in_turn(engine, e, all);
+        return;
+    }
     let config = engine.config.get();
     if !config.auto_run_commands || engine.config.access(&e.sender) != Access::Unrestricted {
         return;
     }
-    let blocks = runcmd::fenced_blocks(&e.text);
     let runnable: Vec<usize> = blocks.iter().enumerate().filter(|(_, b)| runcmd::auto_runnable(b)).map(|(i, _)| i).collect();
     // A box that could do lasting damage waits for a click even with Always run on, so a Deny can
     // never come too late; a note says which one and why.
@@ -905,6 +933,11 @@ fn auto_run_commands(engine: Arc<Engine>, e: &Event) {
             );
         }
     }
+    run_in_turn(engine, e, runnable);
+}
+
+/// Runs the chosen command boxes of `e` one after another, each reporting back as Run does.
+fn run_in_turn(engine: Arc<Engine>, e: &Event, runnable: Vec<usize>) {
     if runnable.is_empty() {
         return;
     }
@@ -1320,6 +1353,8 @@ pub fn run() {
             set_reset_forecast,
             set_auto_continue,
             set_ai_on,
+            set_chat_auto_run,
+            chat_auto_run,
             switched_off,
             set_isolate_agents,
             set_auto_run_commands,

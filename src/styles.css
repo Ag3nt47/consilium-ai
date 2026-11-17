@@ -3709,3 +3709,11 @@ button.attachment {
 .scroll-end-btn { position: absolute; right: 12px; bottom: 10px; width: 28px; height: 28px; border-radius: 14px; border: 1px solid var(--border); background: color-mix(in srgb, var(--bg-2) 92%, transparent); color: inherit; font-size: 14px; line-height: 1; cursor: pointer; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); }
 .scroll-end-btn:hover { border-color: var(--accent); }
 .command-box pre { max-height: 60vh; overflow: auto; }
+
+/* "Auto-run this chat" */
+.btn.small-btn.autorun-chat { border-color: #d92d20; color: #f04438; }
+.autorun-badge { position: fixed; right: 16px; bottom: 96px; z-index: 60; padding: 6px 12px; border-radius: 999px; border: 1px solid #b42318; background: #d92d20; color: #fff; font-weight: 600; cursor: pointer; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }
+.autorun-overlay { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.55); }
+.autorun-dialog { max-width: 540px; margin: 16px; padding: 20px 22px; border-radius: 10px; background: #1f1f1f; color: #f5f5f5; border: 2px solid #d92d20; }
+.autorun-dialog h3 { margin: 0 0 10px; color: #f04438; }
+.autorun-buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }

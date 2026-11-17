@@ -510,6 +510,8 @@ const appApi = {
   setMember: (agent: string, member: boolean) => invoke<void>("set_member", { agent, member }),
   /** Switches an AI on or off in one conversation; returns the AIs now off there. */
   setAiOn: (conversation: string, agent: string, on: boolean) => invoke<string[]>("set_ai_on", { conversation, agent, on }),
+  setChatAutoRun: (conversation: string, on: boolean) => invoke<boolean>("set_chat_auto_run", { conversation, on }),
+  chatAutoRun: (conversation: string) => invoke<boolean>("chat_auto_run", { conversation }),
   switchedOff: (conversation: string) => invoke<string[]>("switched_off", { conversation }),
   setAccess: (agent: string, access: Access) => invoke<void>("set_access", { agent, access }),
   setWorkspace: (id: string, folder: string | null) => invoke<Conversation>("set_workspace", { id, folder }),

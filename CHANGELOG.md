@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Auto-run this chat**: a red button on command boxes turns on, after a warning, running every
+  command box in that chat without asking, including deletes, overwrites, git history rewrites,
+  installs and admin commands (the computer still shows its own password prompt). Only that chat is
+  affected and every new chat starts with it off; a red "Auto-run on" badge turns it off. Commands
+  written by another linked computer's AI still never run here.
 - **Start/Stop each AI per chat**: a small green â–¶ / red â–  button next to each AI in the council
   boxes switches it on or off in this chat only. A stopped AI isn't asked by the box, an @mention,
   another AI's @mention or an auto-continue round until you press Start; Consilium notes who was
