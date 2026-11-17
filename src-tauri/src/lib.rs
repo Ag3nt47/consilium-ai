@@ -485,7 +485,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: you can now add AIs beyond Claude, ChatGPT and Gemini. In the Add AI window, which also opens on first launch, the new Add your own AI section has presets for Ollama and LM Studio (models on your own computer, no key needed), OpenRouter, Mistral, Groq, Together and the OpenAI API, or Other for any service that takes OpenAI-style requests. Added AIs chat in the council like Grok and DeepSeek. Linked computers also switch routes faster: if the cable or Wi-Fi drops, the link redials over the other routes within about 4 seconds, and each computer card in Settings lists its routes with a Refresh routes button.";
+const WHATS_NEW: &str = "What's new: each time Consilium starts, it checks Signal, your linked computers, each AI (installed, signed in, out of usage), the internet, GitHub's checks and waiting updates, then posts the result here and to your phone's Note to Self. Signal messages sent from your phone while Consilium is closed or restarting are no longer lost: they now wait on Signal's servers and arrive when it's back. Long phone messages and photos are no longer occasionally dropped, and if Signal's background program stops, Consilium starts it again. Pressing Enter in the message box now always sends, or says why it couldn't.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
