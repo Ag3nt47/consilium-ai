@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Start/Stop each AI per chat**: a small green â–¶ / red â–  button next to each AI in the council
+  boxes switches it on or off in this chat only. A stopped AI isn't asked by the box, an @mention,
+  another AI's @mention or an auto-continue round until you press Start; Consilium notes who was
+  skipped.
+- **Messages go only to who they name**: a message that @mentions council members is sent only to
+  them, so other AIs no longer start up for it.
+- **Claude reset history**: claude-resets.com's history of Claude usage resets (CC BY 4.0) shows
+  next to the Codex reset forecast. History only, no guessed chance.
+- **Jump to latest**: a floating â†“ button appears when the chat is scrolled up (with a count of new
+  messages), and long command boxes, now capped at 60% of the window, get a â†“ to jump to their end.
 - **Tools stay found after updates**: Consilium reads the current search path (Windows' saved
   PATH, or the Mac/Linux login shell's) plus the usual tool folders, instead of the one it was
   started with, so installed AIs and tools no longer look uninstalled after an update. Codex in
