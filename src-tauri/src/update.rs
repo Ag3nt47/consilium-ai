@@ -148,7 +148,9 @@ pub fn linux_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &Pa
          kill -9 {pid} 2>/dev/null; sleep 0.3\n\
          rm -f {old}\n\
          chmod 755 {s}\n\
-         if mv {t} {old} && mv {s} {t}; then rm -f {old}; else [ -e {t} ] || mv {old} {t}; fi\n\
+         for a in $(seq 1 30); do\n\
+             if mv {t} {old} && mv {s} {t}; then rm -f {old}; break; else [ -e {t} ] || mv {old} {t}; sleep 0.5; fi\n\
+         done\n\
          rm -rf {l}\n\
          nohup {t} >/dev/null 2>&1 &\n"
     )

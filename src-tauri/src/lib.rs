@@ -31,6 +31,7 @@ mod setup;
 mod signal_chat;
 mod signal_setup;
 mod startup_check;
+mod safety;
 mod security_scan;
 mod store;
 mod tasks;
@@ -512,7 +513,16 @@ fn announce_update(engine: &Engine, data: &std::path::Path) {
             ids.push(latest.id.clone());
         }
     }
-    let note = format!("Consilium was updated from {before} to {now} and restarted. {WHATS_NEW}");
+    let mut note = format!("Consilium was updated from {before} to {now} and restarted. {WHATS_NEW}");
+    if let Some(ledger) = safety::read_latest_ledger(data) {
+        if !ledger.snapshots.is_empty() {
+            let total: usize = ledger.snapshots.iter().map(|s| s.tracked_files.len() + s.untracked_files.len()).sum();
+            note.push_str(&format!(
+                " Session safety: preserved {total} uncommitted file(s) across {} project(s) on branch consilium/session-safety.",
+                ledger.snapshots.len()
+            ));
+        }
+    }
     for id in ids {
         let _ = engine.note(&id, &note);
     }
@@ -544,12 +554,23 @@ fn linux_package_kind() -> Option<&'static str> {
 fn update_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     let data = data_dir().ok_or("can't find Consilium's data folder")?;
     let staged = update::staged(&data).ok_or("no newer build is staged")?;
-    let note = format!(
+
+    // Save a snapshot of each project's uncommitted work before closing the app
+    let snapshots = safety::snapshot_all(&data, &state.engine, &staged.version);
+
+    let mut note = format!(
         "Update Now: Consilium is installing {} and restarting in a few seconds. Hold here: work in \
          progress is paused and resumes automatically after the restart, so stop at this point and \
          continue from `git status` and `git diff` when you come back.",
         staged.version
     );
+    if !snapshots.is_empty() {
+        let total: usize = snapshots.iter().map(|s| s.tracked_files.len() + s.untracked_files.len()).sum();
+        note.push_str(&format!(
+            " A safety snapshot of {total} uncommitted file(s) across {} project(s) was saved to branch consilium/session-safety.",
+            snapshots.len()
+        ));
+    }
     // Start the installer first: if it can't run, nobody is told to stop for an update that won't come.
     update::start_install(&data)?;
     for id in state.engine.running_ids() {
@@ -566,6 +587,24 @@ fn update_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
         app.exit(0);
     });
     Ok(())
+}
+
+/// Status of the most recent session safety snapshot.
+#[tauri::command]
+fn session_safety_status() -> Option<safety::SafetyLedger> {
+    let data = data_dir()?;
+    safety::read_latest_ledger(&data)
+}
+
+/// Restores a project's session safety snapshot (merges tracked stash and restores untracked files).
+#[tauri::command]
+fn session_safety_restore(repo: Option<String>) -> Result<String, String> {
+    let data = data_dir().ok_or("can't find data folder")?;
+    let path = match repo {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::env::current_dir().map_err(|e| e.to_string())?,
+    };
+    safety::restore_repo(&path, &data)
 }
 
 /// A screen-only update staged by `scripts/stage-ui.mjs` for this engine; applies without a restart.
@@ -1101,7 +1140,9 @@ pub fn run() {
             link_add_peer_route,
             link_refresh_routes,
             link_inbox,
-            link_send
+            link_send,
+            session_safety_status,
+            session_safety_restore
         ])
         .build(context)
         .expect("error while starting Consilium")

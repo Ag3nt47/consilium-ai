@@ -382,6 +382,8 @@ export const demoApi = {
   linkRefreshRoutes: async () => ["192.168.1.157:8470", "192.168.1.170:8470"],
   linkInbox: async () => [],
   linkSend: async () => "demo-pkt-1",
+  sessionSafetyStatus: async () => null,
+  sessionSafetyRestore: async () => "Demo: restored session safety snapshot",
 };
 
 export const demoTurn: TurnState | null = state.thinking

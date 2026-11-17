@@ -470,7 +470,25 @@ const appApi = {
   uiLoaded: () => invoke<string | null>("ui_loaded"),
   /** Fetches today's Bing wallpaper metadata and image data URL. */
   getDailyWallpaper: () => invoke<DailyWallpaper | null>("get_daily_wallpaper"),
+  /** Reads the most recent session safety snapshot ledger. */
+  sessionSafetyStatus: () => invoke<SafetyLedger | null>("session_safety_status"),
+  /** Restores a repository's session safety snapshot (merges tracked stash and restores untracked files). */
+  sessionSafetyRestore: (repo?: string) => invoke<string>("session_safety_restore", { repo }),
 };
+
+export interface SnapshotReport {
+  repo: string;
+  name: string;
+  commit: string | null;
+  tracked_files: string[];
+  untracked_files: string[];
+}
+
+export interface SafetyLedger {
+  timestamp: number;
+  version: string;
+  snapshots: SnapshotReport[];
+}
 
 export interface DailyWallpaper {
   data_url: string;
