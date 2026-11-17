@@ -117,6 +117,8 @@ export interface AgentInfo {
   member: boolean;
   access: Access;
   transport: string;
+  /** An AI the person added themselves (it can be deleted). */
+  custom?: boolean;
   tool: string;
   available: boolean;
   signed_in: boolean | null;
@@ -425,6 +427,9 @@ const appApi = {
   setup: (agent: string, action: "install" | "signin") => invoke<string>("setup_agent", { agent, action }),
   /** Saves an API-key AI's key on this computer (empty removes it). The key is never returned. */
   setApiKey: (agent: string, key: string) => invoke<void>("set_api_key", { agent, key }),
+  addCustomAi: (name: string, baseUrl: string, model: string, local: boolean, key: string) =>
+    invoke<string>("add_custom_ai", { name, baseUrl, model, local, key }),
+  removeCustomAi: (id: string) => invoke<void>("remove_custom_ai", { id }),
   /** Samples host PC CPU and memory pressure (0-100%). */
   systemPressure: () => invoke<SystemPressure>("system_pressure"),
   securityScanStatus: () => invoke<SecurityScanStatus>("security_scan_status"),

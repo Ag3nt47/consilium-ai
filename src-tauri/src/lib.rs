@@ -11,6 +11,7 @@ mod ci;
 pub mod bridge;
 pub mod cli;
 mod config;
+mod customai;
 mod council;
 mod engine;
 mod link;
@@ -90,7 +91,7 @@ async fn agents_status(state: State<'_, AppState>) -> Result<Vec<agents::AgentIn
     let config = state.engine.config.clone();
     // Every AI is checked at the same time, so a slow CLI doesn't hold up the others.
     let mut tasks = tokio::task::JoinSet::new();
-    for agent in agents::AGENTS.iter() {
+    for agent in agents::all().into_iter() {
         let member = config.is_member(agent.id);
         let access = config.access(agent.id);
         tasks.spawn(async move { agents::status(agent, member, access).await });
@@ -110,7 +111,7 @@ async fn agents_status(state: State<'_, AppState>) -> Result<Vec<agents::AgentIn
 /// Members first, in council order; then everyone else in the fixed catalogue order, since the
 /// parallel status checks finish in whatever order they happen to.
 fn sort_agents<T>(items: &mut [T], members: &[String], id: impl Fn(&T) -> &str) {
-    let catalogue = |id: &str| agents::AGENTS.iter().position(|a| a.id == id).unwrap_or(usize::MAX);
+    let catalogue = |id: &str| agents::all().into_iter().position(|a| a.id == id).unwrap_or(usize::MAX);
     items.sort_by_key(|a| {
         let id = id(a);
         (members.iter().position(|m| m == id).unwrap_or(usize::MAX), catalogue(id))
@@ -653,10 +654,37 @@ fn setup_agent(agent: String, action: String) -> Result<String, String> {
 #[tauri::command]
 fn set_api_key(agent: String, key: String) -> Result<(), String> {
     let a = agents::by_id(&agent).ok_or("unknown agent")?;
-    if agents::api_provider(a.kind).is_none() {
+    if !agents::is_api(a.kind) {
         return Err(format!("{} signs in through its own app, not a key", a.name));
     }
     apiagent::set_key(a.id, &key)
+}
+
+/// Adds an AI of the person's own: any OpenAI-compatible API, or a model on this computer or the
+/// home network. The key, if any, is stored like the other API keys and never sent back.
+#[tauri::command]
+fn add_custom_ai(name: String, base_url: String, model: String, local: bool, key: String) -> Result<String, String> {
+    let id = customai::add(&name, &base_url, &model, local)?;
+    if !key.trim().is_empty() {
+        if let Err(e) = apiagent::set_key(&id, &key) {
+            let _ = customai::remove(&id);
+            return Err(e);
+        }
+    }
+    Ok(id)
+}
+
+/// Deletes an AI the person added, with its key. It leaves the council first.
+#[tauri::command]
+fn remove_custom_ai(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    if customai::by_id(&id).is_none() {
+        return Err("Only AIs you added yourself can be deleted.".into());
+    }
+    if state.engine.config.is_member(&id) {
+        state.engine.config.set_member(&id, false)?;
+    }
+    let _ = apiagent::set_key(&id, "");
+    customai::remove(&id)
 }
 
 /// Runs block `index` of AI message `event_id` (the human clicked Run on its command box), then
@@ -1006,6 +1034,8 @@ pub fn run() {
             running,
             setup_agent,
             set_api_key,
+            add_custom_ai,
+            remove_custom_ai,
             system_pressure,
             security_scan_status,
             security_scan_save,

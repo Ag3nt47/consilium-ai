@@ -38,6 +38,18 @@ pub enum Kind {
     XaiApi,
     /// DeepSeek through its OpenAI-compatible API, with the person's own key.
     DeepSeekApi,
+    /// An AI the person added: any OpenAI-compatible API or a local model (see `customai`).
+    CustomApi,
+}
+
+/// Whether the agent is reached over an HTTP API rather than a command-line tool.
+pub fn is_api(kind: Kind) -> bool {
+    matches!(kind, Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi)
+}
+
+/// The HTTP provider behind an API agent, or None for the CLI agents.
+pub fn provider_of(agent: &Agent) -> Option<&'static crate::apiagent::Provider> {
+    agent.provider.or_else(|| api_provider(agent.kind))
 }
 
 /// The HTTP provider behind an API-key agent, or None for the CLI agents.
@@ -51,7 +63,7 @@ pub fn api_provider(kind: Kind) -> Option<&'static crate::apiagent::Provider> {
 
 /// Whether the agent can be started at all: its CLI is installed, or its API key is set.
 pub fn installed(agent: &Agent) -> bool {
-    match api_provider(agent.kind) {
+    match provider_of(agent) {
         Some(p) => crate::apiagent::has_key(agent.id, p),
         None => find(effective_kind(agent)).is_some(),
     }
@@ -64,6 +76,8 @@ pub struct AgentInfo {
     pub company: String,
     /// Always "local-cli" for now; API-backed agents will say "api".
     pub transport: String,
+    /// An AI the person added themselves (it can be deleted).
+    pub custom: bool,
     pub tool: String,
     pub member: bool,
     pub access: Access,
@@ -118,18 +132,30 @@ pub struct Agent {
     pub name: &'static str,
     pub company: &'static str,
     pub kind: Kind,
+    /// Set only for AIs the person added; the built-in API AIs get theirs from `kind`.
+    pub provider: Option<&'static crate::apiagent::Provider>,
 }
 
 pub const AGENTS: [Agent; 5] = [
-    Agent { id: "gpt", name: "ChatGPT", company: "OpenAI", kind: Kind::Codex },
-    Agent { id: "claude", name: "Claude", company: "Anthropic", kind: Kind::ClaudeCode },
-    Agent { id: "gemini", name: "Gemini", company: "Google", kind: Kind::Antigravity },
-    Agent { id: "grok", name: "Grok", company: "xAI", kind: Kind::XaiApi },
-    Agent { id: "deepseek", name: "DeepSeek", company: "DeepSeek", kind: Kind::DeepSeekApi },
+    Agent { id: "gpt", name: "ChatGPT", company: "OpenAI", kind: Kind::Codex, provider: None },
+    Agent { id: "claude", name: "Claude", company: "Anthropic", kind: Kind::ClaudeCode, provider: None },
+    Agent { id: "gemini", name: "Gemini", company: "Google", kind: Kind::Antigravity, provider: None },
+    Agent { id: "grok", name: "Grok", company: "xAI", kind: Kind::XaiApi, provider: None },
+    Agent { id: "deepseek", name: "DeepSeek", company: "DeepSeek", kind: Kind::DeepSeekApi, provider: None },
 ];
 
-pub fn by_id(id: &str) -> Option<&'static Agent> {
+/// A built-in AI only.
+pub fn builtin(id: &str) -> Option<&'static Agent> {
     AGENTS.iter().find(|a| a.id == id)
+}
+
+/// Every AI Consilium knows: the built-in ones, then the ones the person added.
+pub fn all() -> Vec<&'static Agent> {
+    AGENTS.iter().chain(crate::customai::list()).collect()
+}
+
+pub fn by_id(id: &str) -> Option<&'static Agent> {
+    builtin(id).or_else(|| crate::customai::by_id(id))
 }
 
 fn base_name(kind: Kind) -> &'static str {
@@ -138,7 +164,7 @@ fn base_name(kind: Kind) -> &'static str {
         Kind::ClaudeCode => "claude",
         Kind::GeminiCli => "gemini",
         Kind::Antigravity => "agy",
-        Kind::XaiApi | Kind::DeepSeekApi => "",
+        Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => "",
     }
 }
 
@@ -153,7 +179,7 @@ fn exe_names(base: &str) -> Vec<String> {
 /// Apps started from the Dock or Start menu don't get the shell's PATH, so well-known install
 /// locations are checked as well as PATH.
 fn candidates(kind: Kind) -> Vec<PathBuf> {
-    if api_provider(kind).is_some() {
+    if is_api(kind) {
         return Vec::new(); // reached over HTTP, there is no program to find
     }
     let home = dirs::home_dir().unwrap_or_default();
@@ -180,7 +206,7 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
             out.push(PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"));
         }
         Kind::ClaudeCode => out.push(home.join(".claude/local/claude")),
-        Kind::GeminiCli | Kind::XaiApi | Kind::DeepSeekApi => {}
+        Kind::GeminiCli | Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => {}
         Kind::Antigravity => {
             out.push(home.join(".local/bin/agy"));
             if let Some(local) = std::env::var_os("LOCALAPPDATA") {
@@ -616,7 +642,7 @@ async fn usage(path: &Path, kind: Kind, last_model: Option<&str>) -> Option<Usag
             antigravity_usage_from_output(&output)
         }
         // The legacy Gemini CLI does not expose subscription quota in supported machine output.
-        Kind::GeminiCli | Kind::XaiApi | Kind::DeepSeekApi => None,
+        Kind::GeminiCli | Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => None,
     }
 }
 
@@ -651,7 +677,7 @@ fn antigravity_signed_in() -> bool {
 }
 
 pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
-    if let Some(provider) = api_provider(agent.kind) {
+    if let Some(provider) = provider_of(agent) {
         return api_status(agent, provider, member).await;
     }
     let kind = effective_kind(agent);
@@ -676,13 +702,14 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
             "Install Google's Antigravity CLI from antigravity.google.",
             "Run `agy` in a terminal, choose Google OAuth and sign in in your browser, then type /quit.",
         ),
-        Kind::XaiApi | Kind::DeepSeekApi => unreachable!("API agents return above"),
+        Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => unreachable!("API agents return above"),
     };
     let mut info = AgentInfo {
         id: agent.id.into(),
         name: agent.name.into(),
         company: agent.company.into(),
         transport: "local-cli".into(),
+        custom: false,
         tool: tool.into(),
         member,
         access,
@@ -706,7 +733,7 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
             }),
             Kind::GeminiCli => Some(gemini_signed_in()),
             Kind::Antigravity => Some(antigravity_signed_in()),
-            Kind::XaiApi | Kind::DeepSeekApi => None,
+            Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => None,
         }
     };
     let (version, signed_in) = tokio::join!(version_probe, sign_in_probe);
@@ -731,6 +758,7 @@ async fn api_status(agent: &Agent, provider: &crate::apiagent::Provider, member:
         name: agent.name.into(),
         company: agent.company.into(),
         transport: "api".into(),
+        custom: matches!(agent.kind, Kind::CustomApi),
         tool: format!("{} API", agent.company),
         member,
         access: Access::Chat,
@@ -738,7 +766,11 @@ async fn api_status(agent: &Agent, provider: &crate::apiagent::Provider, member:
         signed_in: Some(false),
         version: None,
         path: None,
-        hint: format!("Create an API key at {} and paste it here. It stays on this computer.", provider.key_page),
+        hint: if provider.local {
+            format!("Start your model server at {} and press Check again.", provider.base_url)
+        } else {
+            format!("Create an API key at {} and paste it here. It stays on this computer.", provider.key_page)
+        },
         benched_until: None,
         reset_known: false,
     };
@@ -950,7 +982,7 @@ pub fn plan_with_files(
             });
             format!("{message}\n")
         }
-        Kind::XaiApi | Kind::DeepSeekApi => String::new(), // not a program; see `apiagent::run`
+        Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => String::new(), // not a program; see `apiagent::run`
     };
     Plan { args, input }
 }
@@ -1007,7 +1039,7 @@ pub async fn run_with_files_observed(
     activity: Option<ActivitySink>,
     elevated_commands: Vec<String>,
 ) -> Result<AgentReply, String> {
-    if let Some(provider) = api_provider(agent.kind) {
+    if let Some(provider) = provider_of(agent) {
         // Attached files aren't sent: the API agents see only the conversation text.
         if let Some(sink) = &activity {
             sink(ActivitySignal {
@@ -1317,7 +1349,7 @@ async fn execute(
             Err(_) => String::new(),
         },
         Kind::Antigravity => antigravity_reply(&stdout)?,
-        Kind::XaiApi | Kind::DeepSeekApi => String::new(),
+        Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => String::new(),
     };
     if !status.success() || reply.trim().is_empty() {
         let detail = if stderr.trim().is_empty() { stdout } else { stderr };
@@ -1438,7 +1470,7 @@ fn token_usage_from_output(kind: Kind, stdout: &str) -> Option<TokenUsage> {
             }),
         // The fallback Gemini CLI's JSON token statistics have changed between releases. Do not
         // guess at fields: record them only after a stable machine-readable schema is documented.
-        Kind::GeminiCli | Kind::XaiApi | Kind::DeepSeekApi => None,
+        Kind::GeminiCli | Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => None,
     }
 }
 
@@ -1479,6 +1511,7 @@ fn tool_name(kind: Kind) -> &'static str {
         Kind::Antigravity => "Antigravity CLI",
         Kind::XaiApi => "xAI API",
         Kind::DeepSeekApi => "DeepSeek API",
+        Kind::CustomApi => "API",
     }
 }
 
@@ -1491,7 +1524,7 @@ fn activity_from_line(kind: Kind, line: &str) -> Option<ActivitySignal> {
         Kind::Codex => codex_activity(&v),
         Kind::ClaudeCode => claude_activity(&v),
         Kind::Antigravity => antigravity_activity(&v),
-        Kind::GeminiCli | Kind::XaiApi | Kind::DeepSeekApi => None,
+        Kind::GeminiCli | Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => None,
     }
 }
 

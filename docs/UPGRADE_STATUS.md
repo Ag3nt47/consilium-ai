@@ -16,6 +16,7 @@ Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasi
 | Interactive prompt interception → REQUEST | ✅ | Stalled CLI prompts become a REQUEST |
 | Unbuffered streams | ✅ | CLIs run with stream-json/JSON output, read as it arrives |
 | Pre-flight auth check | ✅ | Add AI / setup checks each CLI's sign-in before use |
+| Add any AI, not just the built-in ones | 🔨 | Add AI has an "Add your own AI" form: any OpenAI-compatible service with the person's own key (presets for OpenRouter, Mistral, Groq, Together, OpenAI API) or a local model (Ollama, LM Studio; plain http only to this computer or the home network). Saved in `custom-ais.json`, keys kept apart in `api-keys.json`; added AIs can be deleted. Tests pass; not yet tried against a real service. |
 | Devil's advocate in round 3+ | ✅ | Rotating reviewer |
 | Context sliding window (summarise long sessions) | ✅ | Over 120k prompt characters, older turns become a bounded local digest prioritising human intent, REQUEST decisions and concrete outcomes; the newest 104k remain verbatim. Current file diffs are separately hashed and bounded |
 | File-state hashing / git diff in each turn | ✅ | Bounded, redacted status/diff snapshot with a hard Git subprocess timeout before each editable turn |

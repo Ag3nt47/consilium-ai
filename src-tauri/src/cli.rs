@@ -122,8 +122,8 @@ fn agent_ids(list: &str) -> Result<Vec<String>, String> {
         if w == "all" || w == "everyone" {
             return Ok(vec![]);
         }
-        let a = agents::AGENTS
-            .iter()
+        let a = agents::all()
+            .into_iter()
             .find(|a| a.id == w || a.name.to_lowercase() == w || (a.id == "gpt" && (w == "openai" || w == "codex")))
             .ok_or_else(|| format!("no AI called {word} (try gpt, claude or gemini)"))?;
         if !out.iter().any(|x| x == a.id) {
@@ -614,7 +614,7 @@ async fn stop(engine: &Arc<Engine>, o: Opts) -> Result<i32, String> {
 async fn status(engine: &Arc<Engine>, p: Paint) -> Result<i32, String> {
     let council = engine.config.get();
     let mut tasks = tokio::task::JoinSet::new();
-    for a in agents::AGENTS.iter() {
+    for a in agents::all().into_iter() {
         let (member, access) = (engine.config.is_member(a.id), engine.config.access(a.id));
         tasks.spawn(agents::status(a, member, access));
     }
@@ -623,7 +623,7 @@ async fn status(engine: &Arc<Engine>, p: Paint) -> Result<i32, String> {
         infos.push(i);
     }
     infos.sort_by_key(|i| {
-        (council.members.iter().position(|m| *m == i.id).unwrap_or(usize::MAX), agents::AGENTS.iter().position(|a| a.id == i.id))
+        (council.members.iter().position(|m| *m == i.id).unwrap_or(usize::MAX), agents::all().into_iter().position(|a| a.id == i.id))
     });
     print(&p.c("1", "Council\n"));
     for i in &infos {

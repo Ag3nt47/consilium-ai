@@ -3497,3 +3497,28 @@ button.attachment {
   font-size: 12px;
   margin-bottom: 8px;
 }
+
+/* Add your own AI */
+.custom-ai-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+.custom-ai-presets .active {
+  border-color: var(--accent);
+}
+.custom-ai-fields {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0;
+}
+.custom-ai-fields label {
+  display: grid;
+  gap: 4px;
+}
+.custom-ai-fields label.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

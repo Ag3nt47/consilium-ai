@@ -401,7 +401,7 @@ fn capped(text: String) -> String {
 
 /// Only the human and known AIs may appear in a copied conversation.
 fn known_sender(sender: &str) -> bool {
-    sender == "human" || crate::agents::AGENTS.iter().any(|a| a.id == sender)
+    sender == "human" || crate::agents::all().into_iter().any(|a| a.id == sender)
 }
 
 /// Starts syncing with `engine`'s store. Call once, after the link has opened.

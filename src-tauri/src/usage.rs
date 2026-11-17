@@ -90,7 +90,7 @@ fn save(data: &Path, s: &Snapshot) {
 pub async fn refresh(engine: &Engine) -> Snapshot {
     let last = engine.last_models();
     let mut tasks = tokio::task::JoinSet::new();
-    for agent in agents::AGENTS.iter().filter(|a| engine.config.is_member(a.id)) {
+    for agent in agents::all().into_iter().filter(|a| engine.config.is_member(a.id)) {
         let model = last.get(agent.id).cloned();
         tasks.spawn(async move { (agent.id.to_string(), agents::usage_of(agent, model.as_deref()).await) });
     }

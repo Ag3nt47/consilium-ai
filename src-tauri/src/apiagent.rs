@@ -30,6 +30,8 @@ pub struct Provider {
     pub prefer: &'static [&'static str],
     /// Only ids containing this are considered at all.
     pub family: &'static str,
+    /// A model on this computer or the home network: a key is optional.
+    pub local: bool,
 }
 
 pub const XAI: Provider = Provider {
@@ -39,6 +41,7 @@ pub const XAI: Provider = Provider {
     // Cheapest capable models first: the person is on xAI's free allowance.
     prefer: &["grok-4-fast", "grok-3-mini", "mini", "fast"],
     family: "grok",
+    local: false,
 };
 
 pub const DEEPSEEK: Provider = Provider {
@@ -47,6 +50,7 @@ pub const DEEPSEEK: Provider = Provider {
     key_page: "platform.deepseek.com",
     prefer: &["deepseek-chat"],
     family: "deepseek",
+    local: false,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -98,7 +102,20 @@ fn save(all: &HashMap<String, Entry>) -> Result<(), String> {
 
 fn key(agent: &str, provider: &Provider) -> Option<String> {
     let stored = load().get(agent).map(|e| e.key.trim().to_string()).filter(|k| !k.is_empty());
-    stored.or_else(|| std::env::var(provider.env_var).ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty()))
+    let env = || {
+        (!provider.env_var.is_empty())
+            .then(|| std::env::var(provider.env_var).ok())
+            .flatten()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+    };
+    // A local model server usually wants no key at all; an empty one means "send none".
+    stored.or_else(env).or_else(|| provider.local.then(String::new))
+}
+
+/// Adds the key to a request, unless there is none (a local model server).
+fn auth(req: reqwest::RequestBuilder, key: &str) -> reqwest::RequestBuilder {
+    if key.is_empty() { req } else { req.bearer_auth(key) }
 }
 
 pub fn has_key(agent: &str, provider: &Provider) -> bool {
@@ -162,9 +179,7 @@ fn http_error(name: &str, status: reqwest::StatusCode, body: &str) -> String {
 
 /// The account's model ids, from the provider's `/models` list.
 async fn models(name: &str, provider: &Provider, key: &str) -> Result<Vec<String>, String> {
-    let resp = client()?
-        .get(format!("{}/models", provider.base_url))
-        .bearer_auth(key)
+    let resp = auth(client()?.get(format!("{}/models", provider.base_url)), key)
         .timeout(CHECK_TIMEOUT)
         .send()
         .await
@@ -197,6 +212,11 @@ pub fn choose_model(provider: &Provider, ids: &[String]) -> Option<String> {
 pub async fn check(agent: &str, name: &str, provider: &Provider) -> Result<String, String> {
     let key = key(agent, provider).ok_or_else(|| format!("No {name} API key yet."))?;
     let ids = models(name, provider, &key).await?;
+    if provider.family.is_empty() {
+        if let Some(m) = provider.prefer.first() {
+            return Ok(m.to_string()); // reachable, and the person named the model
+        }
+    }
     let model = choose_model(provider, &ids).ok_or_else(|| format!("{name}: no usable model on this account"))?;
     remember_model(agent, &model);
     Ok(model)
@@ -205,6 +225,11 @@ pub async fn check(agent: &str, name: &str, provider: &Provider) -> Result<Strin
 async fn model_for(agent: &str, name: &str, provider: &Provider, key: &str) -> Result<String, String> {
     if let Some(m) = load().get(agent).and_then(|e| e.model.clone()) {
         return Ok(m);
+    }
+    if provider.family.is_empty() {
+        if let Some(m) = provider.prefer.first() {
+            return Ok(m.to_string()); // the person named the model when adding this AI
+        }
     }
     let ids = models(name, provider, key).await?;
     let model = choose_model(provider, &ids).ok_or_else(|| format!("{name}: no usable model on this account"))?;
@@ -263,9 +288,7 @@ pub async fn run(
         ],
         "stream": false,
     });
-    let request = client()?
-        .post(format!("{}/chat/completions", provider.base_url))
-        .bearer_auth(&key)
+    let request = auth(client()?.post(format!("{}/chat/completions", provider.base_url)), &key)
         .json(&body)
         .timeout(timeout)
         .send();

@@ -44,6 +44,7 @@ import { CiBadge, ProjectVersions } from "./projects";
 import { TaskBoardPanel } from "./tasks";
 import { RepoDrawer } from "./repo";
 import { BranchesDrawer } from "./branches";
+import { CustomAiForm } from "./customai";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const THEMES = [
@@ -2887,7 +2888,8 @@ export default function App() {
             <h2>Add AI</h2>
             <p className="muted small">
               Most AIs join through their company's official command-line tool and your own account. Grok and DeepSeek
-              have no such tool, so they use an API key you paste here: it is saved only on this computer, never in the chat.
+              have no such tool, so they use an API key you paste here. You can also add any other AI below: a
+              service that takes your own key, or a model running on your computer: it is saved only on this computer, never in the chat.
               You decide who joins; an AI in the conversation can suggest one, but only you can add it.
             </p>
             <p className="setup-boundary">
@@ -2907,6 +2909,15 @@ export default function App() {
                       {a.company} · {a.tool}
                       {a.version ? ` · ${a.version}` : ""}
                     </span>
+                    {a.custom && (
+                      <button
+                        title="Delete this AI you added, and its saved key"
+                        className="link danger-link"
+                        onClick={() => api.removeCustomAi(a.id).then(refreshAgents).catch((e) => setError(String(e)))}
+                      >
+                        delete
+                      </button>
+                    )}
                   </div>
                   {a.transport === "api" ? (
                   <ol className="addai-steps">
@@ -2972,6 +2983,14 @@ export default function App() {
                 </div>
               );
             })}
+            <CustomAiForm
+              onAdded={(id) => {
+                refreshAgents();
+                setToast(`Added @${id}. Press "Add" on its card to bring it into the council.`);
+                setTimeout(() => setToast(null), 7000);
+              }}
+              onError={(e) => setError(e)}
+            />
             <div className="section-label">In the council</div>
             {members.map((a) => (
               <div key={a.id} className="member-row">

@@ -168,6 +168,7 @@ impl Engine {
     /// An engine on the data folder `data` (the same for the app and the terminal command).
     pub fn open(data: &std::path::Path, ui: Arc<dyn Ui>, spawn: Box<Spawn>) -> std::io::Result<Self> {
         crate::apiagent::init(data.join("api-keys.json"));
+        crate::customai::init(data.join("custom-ais.json"));
         let agent_slot_limit = crate::pressure::parallel_agent_limit();
         Ok(Engine {
             data: data.to_path_buf(),
@@ -826,7 +827,7 @@ impl council::Host for RealHost {
         let ui = self.ui.clone();
         let conversation = self.conversation.clone();
         let id = agent.id.to_string();
-        let local_process = agents::api_provider(agents::effective_kind(agent)).is_none();
+        let local_process = !agents::is_api(agents::effective_kind(agent));
         let initial_slot = local_process.then(|| try_agent_slot(&self.agent_slot_dir, self.agent_slot_limit));
         let agent_slot_dir = self.agent_slot_dir.clone();
         let agent_slot_limit = self.agent_slot_limit;
@@ -963,6 +964,7 @@ fn agent_tool_label(agent: &Agent) -> &'static str {
         agents::Kind::Antigravity => "Antigravity CLI",
         agents::Kind::XaiApi => "xAI API",
         agents::Kind::DeepSeekApi => "DeepSeek API",
+        agents::Kind::CustomApi => "API",
     }
 }
 
