@@ -1152,7 +1152,17 @@ export default function App() {
       .then(([nextAgents, nextCouncil]) => {
         // Keep the last known usage on screen until the fresh reading arrives.
         setAgents((prev) => {
-          const next = nextAgents.map((a) => ({ ...a, usage: prev.find((p) => p.id === a.id)?.usage ?? null }));
+          const next = nextAgents.map((a) => {
+            const old = prev.find((p) => p.id === a.id);
+            // A check that couldn't answer (signed_in null: the CLI was slow or the keychain busy)
+            // isn't a sign-out. Keep the last confirmed sign-in instead of asking to sign in again.
+            const keep = a.path && a.signed_in == null && old?.signed_in === true;
+            return {
+              ...a,
+              ...(keep ? { signed_in: true, available: true, hint: "" } : {}),
+              usage: old?.usage ?? null,
+            };
+          });
           saveCachedAgents(next);
           return next;
         });
