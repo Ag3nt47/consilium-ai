@@ -48,6 +48,8 @@ const MINUTE_MS: u64 = 60_000;
 const HISTORY_LIMIT: usize = 200;
 /// Largest total text in one history packet, well under the link's 3 MB line limit.
 const HISTORY_BYTES: usize = 1_500_000;
+/// Turns another computer's AIs may start here by addressing AIs here by handle, per human message.
+const MENTION_TURNS: u32 = 3;
 /// How many of this computer's most recent conversations are sent to a newly linked computer.
 const CATCH_UP: usize = 20;
 /// How often to check for conversations a linked computer hasn't been sent yet.
@@ -85,6 +87,8 @@ pub struct Sync {
     /// Per conversation: the human message the AIs here last started a turn of their own to react
     /// to another computer's answer for (its sequence number).
     reacted: Mutex<HashMap<String, u64>>,
+    /// Per conversation: the human message, and how many turns handles have started since it.
+    addressed: Mutex<HashMap<String, (u64, u32)>>,
 }
 
 /// Why an incoming message was turned away.
@@ -155,27 +159,40 @@ impl Sync {
             relay: OnceLock::new(),
             wake: OnceLock::new(),
             reacted: Mutex::new(HashMap::new()),
+            addressed: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The newest human message in `conversation` (its sequence number).
+    fn last_human(&self, conversation: &str) -> Option<u64> {
+        self.store.load(conversation).unwrap_or_default().into_iter().rev().find(|e| e.sender == "human" && e.kind == "message").map(|e| e.seq)
+    }
+
+    /// Whether another computer's AI addressing AIs here by handle may start a turn for them:
+    /// up to `MENTION_TURNS` times per human message, so two councils can't keep calling each other.
+    fn may_address(&self, conversation: &str) -> bool {
+        let Some(human) = self.last_human(conversation) else { return false };
+        let mut a = self.addressed.lock().unwrap();
+        let entry = a.entry(conversation.to_string()).or_insert((human, 0));
+        if entry.0 != human {
+            *entry = (human, 0);
+        }
+        if entry.1 >= MENTION_TURNS {
+            return false;
+        }
+        entry.1 += 1;
+        true
     }
 
     /// Whether the AIs here may start a turn of their own to react to another computer's AI in
     /// `conversation`: once per human message there.
     fn may_react(&self, conversation: &str) -> bool {
-        let Some(human) = self
-            .store
-            .load(conversation)
-            .unwrap_or_default()
-            .into_iter()
-            .rev()
-            .find(|e| e.sender == "human" && e.kind == "message")
-        else {
-            return false;
-        };
+        let Some(human) = self.last_human(conversation) else { return false };
         let mut reacted = self.reacted.lock().unwrap();
-        if reacted.get(conversation) == Some(&human.seq) {
+        if reacted.get(conversation) == Some(&human) {
             return false;
         }
-        reacted.insert(conversation.to_string(), human.seq);
+        reacted.insert(conversation.to_string(), human);
         true
     }
 
@@ -183,7 +200,8 @@ impl Sync {
     fn notify(&self, conversation: &str, e: &Event) {
         if let Some(wake) = self.wake.get() {
             let human = e.sender == "human";
-            wake(conversation, e, &|| human || self.may_react(conversation));
+            let addressed = !human && !crate::prompt::mentioned_here(&e.text).is_empty();
+            wake(conversation, e, &|| human || if addressed { self.may_address(conversation) } else { self.may_react(conversation) });
         }
     }
 
@@ -576,6 +594,8 @@ pub fn init(engine: Arc<crate::engine::Engine>, link_dir: &Path) {
     let s = Sync::new(engine.store.clone(), link_dir);
     if let Some(link) = crate::link_handle() {
         *s.me.lock().unwrap() = link.node_id();
+        // So "@claude-<this computer>" from another computer reaches this computer's Claude.
+        crate::prompt::set_here(&link.status().name);
     }
     let relaying = engine.clone();
     let _ = s.relay.set(Box::new(move |conversation: &str, text: &str, targets: Vec<String>, computer: &str| {
@@ -892,6 +912,30 @@ mod tests {
         let texts: Vec<String> = b.store.load(&mirror).unwrap().into_iter().map(|e| e.text).collect();
         assert_eq!(texts, vec!["first", "second"], "each message once");
         assert!(b.catch_up(&["node-a".to_string()]).is_empty(), "copies aren't sent back");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn addressing_ais_here_by_handle_starts_at_most_three_turns_per_human_message() {
+        crate::prompt::set_here("Windows PC");
+        let root = std::env::temp_dir().join(format!("peer-sync-handle-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        let b_woke = record_wakes(&b);
+        let conv = a.store.create("Plans").unwrap();
+        let ask = a.store.append(&conv.id, "human", "message", vec![], "split the work").unwrap();
+        b.file(&packet("node-a", "p0", a.outgoing(&ask).unwrap()), "MacBook").unwrap().unwrap();
+        for i in 0..5 {
+            let m = a.store.append(&conv.id, "claude", "message", vec![], &format!("@gemini-windows-pc take part {i}")).unwrap();
+            b.file(&packet("node-a", &format!("p{}", i + 1), a.outgoing(&m).unwrap()), "MacBook").unwrap().unwrap();
+        }
+        let starts: Vec<bool> = b_woke.lock().unwrap().iter().skip(1).map(|w| w.2).collect();
+        assert_eq!(starts, vec![true, true, true, false, false]);
+        // A plain @gemini from there means that computer's Gemini: only the usual one reaction.
+        let plain = a.store.append(&conv.id, "claude", "message", vec![], "@gemini what do you think?").unwrap();
+        b.file(&packet("node-a", "p9", a.outgoing(&plain).unwrap()), "MacBook").unwrap().unwrap();
+        assert_eq!(b_woke.lock().unwrap().last().map(|w| w.2), Some(true), "its one reaction for this human message");
         let _ = std::fs::remove_dir_all(&root);
     }
 

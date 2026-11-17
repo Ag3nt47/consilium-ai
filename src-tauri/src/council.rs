@@ -220,6 +220,49 @@ impl Council {
         true
     }
 
+    /// Another computer's AI addressed `ids` (this computer's AIs) by handle in `message`. Like an
+    /// @mention between AIs here: each gets one more answer and joins in if it isn't taking part,
+    /// within the turn's limit on AIs brought in this way. Returns false if the turn has ended.
+    pub fn mentioned(&self, message: &Event, ids: &[String]) -> bool {
+        let s = &self.shared;
+        let rounds = s.turn.rounds;
+        let mut start = Vec::new();
+        {
+            let mut st = s.state.lock().unwrap();
+            if st.closed || s.cancel.is_cancelled() {
+                return false;
+            }
+            let who = format!("{}@{}", message.sender, message.via.as_deref().unwrap_or("linked"));
+            st.latest.insert(who, message.seq);
+            let limit = MAX_PULLED_IN * rounds as usize;
+            let now = now_ms();
+            for m in ids {
+                if st.pulled_in >= limit {
+                    break;
+                }
+                if agents::by_id(m).is_none() || s.bench.until(m, now).is_some() {
+                    continue;
+                }
+                let used = st.answered.get(m).copied().unwrap_or(0);
+                if used >= rounds + st.extra.get(m).copied().unwrap_or(0) {
+                    *st.extra.entry(m.clone()).or_default() += 1;
+                }
+                st.passed.remove(m);
+                st.pulled_in += 1;
+                if !st.live.contains(m) {
+                    st.live.insert(m.clone());
+                    st.joined.insert(m.clone());
+                    start.push(m.clone());
+                }
+            }
+        }
+        for m in start {
+            tokio::spawn(worker(s.clone(), m, Some(message.seq.saturating_sub(1))));
+        }
+        s.wake.notify_waiters();
+        true
+    }
+
     /// Runs the turn to its end.
     pub async fn run(&self) {
         let shared = self.shared.clone();
@@ -758,6 +801,24 @@ mod tests {
         assert!(asked.contains(&("claude".into(), 1)), "claude answers for the first time");
         assert!(!asked.contains(&("gpt".into(), 1)), "gpt's first answer isn't repeated");
         assert_eq!(said(&ev).iter().filter(|(_, t)| t == "gpt #1").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_ai_addressed_by_handle_from_another_computer_joins_and_answers_once() {
+        let (store, c) = setup();
+        let mut f = fake(|id, _, _| Ok(format!("{id} here")));
+        f.delay.insert("gpt", 400);
+        let turn = Turn { conversation: c.clone(), targets: ids(&["gpt"]), rounds: 1, members: ids(&["gpt", "gemini"]) };
+        let council = Arc::new(Council::new(turn, store.clone(), Arc::new(Bench::new()), Arc::new(f), CancellationToken::new()));
+        let runner = council.clone();
+        let done = tokio::spawn(async move { runner.run().await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let ask = store.append_imported(&c, "claude", "message", vec![], "@gemini-pc can you check?", Some("MacBook".into())).unwrap();
+        assert!(council.mentioned(&ask, &ids(&["gemini"])));
+        tokio::time::timeout(Duration::from_secs(10), done).await.expect("the turn ends").unwrap();
+        let s = said(&store.load(&c).unwrap());
+        assert_eq!(s.iter().filter(|(a, _)| a == "gemini").count(), 1, "gemini was brought in once: {s:?}");
+        assert_eq!(s.iter().filter(|(a, _)| a == "gpt").count(), 1);
     }
 
     #[tokio::test]
