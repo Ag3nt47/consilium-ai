@@ -203,25 +203,43 @@ pub fn linux_package_kind() -> Option<&'static str> {
 }
 
 /// The Windows helper. A running .exe can be renamed but not overwritten, so the same
-/// rename-aside swap works once the old process has exited.
-pub fn windows_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &Path) -> String {
-    let (s, t, l) = (ps_quote(staged), ps_quote(target), ps_quote(leftover));
+/// rename-aside swap works once the old process has exited. A setup installer is run silently
+/// and the app is reopened from where the installer put it (its uninstall entry's DisplayIcon),
+/// which can differ from the copy that was running. Every step goes to `log`, so a failed
+/// update can be explained afterwards.
+pub fn windows_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &Path, log: &Path) -> String {
+    let (s, t, l, g) = (ps_quote(staged), ps_quote(target), ps_quote(leftover), ps_quote(log));
     let old = ps_quote(&PathBuf::from(format!("{}.old", target.display())));
     format!(
         "$ErrorActionPreference = 'SilentlyContinue'\n\
+         function Log($m) {{ Add-Content -LiteralPath {g} -Value ((Get-Date -Format o) + ' ' + $m) }}\n\
+         Set-Content -LiteralPath {g} -Value ((Get-Date -Format o) + ' update helper started for pid {pid}')\n\
          for ($i = 0; $i -lt 60; $i++) {{ if (-not (Get-Process -Id {pid})) {{ break }}; Start-Sleep -Milliseconds 500 }}\n\
-         Stop-Process -Id {pid} -Force; Start-Sleep -Milliseconds 300\n\
+         if (Get-Process -Id {pid}) {{ Log 'app still running after 30 s; stopping it'; Stop-Process -Id {pid} -Force }}\n\
+         Start-Sleep -Milliseconds 500\n\
+         $run = {t}\n\
          if ({s} -like '*-Setup.exe' -or {s} -like '*-setup.exe') {{\n\
-             Start-Process -FilePath {s} -ArgumentList '/S' -Wait\n\
-             Remove-Item -LiteralPath {l} -Recurse -Force\n\
+             $p = Start-Process -FilePath {s} -ArgumentList '/S' -Wait -PassThru\n\
+             Log ('installer exit code ' + $p.ExitCode)\n\
+             $keys = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*', 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'\n\
+             $icon = Get-ItemProperty -Path $keys | Where-Object {{ $_.DisplayName -eq 'Consilium' -and $_.DisplayIcon }} | Select-Object -First 1 -ExpandProperty DisplayIcon\n\
+             if ($icon) {{ $icon = $icon.Trim([char]34).Split(',')[0] }}\n\
+             if ($icon -and (Test-Path -LiteralPath $icon)) {{ $run = $icon }}\n\
+             if ($p.ExitCode -eq 0) {{ Remove-Item -LiteralPath {l} -Recurse -Force }}\n\
          }} else {{\n\
              Remove-Item -LiteralPath {old} -Force\n\
-             try {{ Move-Item -LiteralPath {t} -Destination {old} -ErrorAction Stop; Move-Item -LiteralPath {s} -Destination {t} -ErrorAction Stop; Remove-Item -LiteralPath {old} -Force }}\n\
-             catch {{ if (-not (Test-Path -LiteralPath {t})) {{ Move-Item -LiteralPath {old} -Destination {t} }} }}\n\
+             try {{ Move-Item -LiteralPath {t} -Destination {old} -ErrorAction Stop; Move-Item -LiteralPath {s} -Destination {t} -ErrorAction Stop; Remove-Item -LiteralPath {old} -Force; Log 'swapped the program file' }}\n\
+             catch {{ Log ('swap failed: ' + $_); if (-not (Test-Path -LiteralPath {t})) {{ Move-Item -LiteralPath {old} -Destination {t} }} }}\n\
              Remove-Item -LiteralPath {l} -Recurse -Force\n\
          }}\n\
-         Start-Process -FilePath {t}\n"
+         Log ('reopening ' + $run)\n\
+         try {{ Start-Process -FilePath $run -ErrorAction Stop }} catch {{ Log ('reopen failed: ' + $_) }}\n"
     )
+}
+
+/// Where the Windows helper writes what it did.
+pub fn install_log(data: &Path) -> PathBuf {
+    data.join("update").join("install.log")
 }
 
 /// Downloads and stages a release binary into `<data>/update/next`.
@@ -314,7 +332,7 @@ pub fn start_install(data: &Path) -> Result<Staged, String> {
         if cfg!(windows) {
             cmd = Command::new("powershell.exe");
             cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command"])
-                .arg(windows_helper_script(pid, &staged, &target, &staged_dir(data)));
+                .arg(windows_helper_script(pid, &staged, &target, &staged_dir(data), &install_log(data)));
         } else {
             cmd = Command::new("/bin/sh");
             let pkg = matches!(staged.extension().and_then(|e| e.to_str()), Some("deb" | "rpm"));
@@ -337,6 +355,15 @@ pub fn start_install(data: &Path) -> Result<Staged, String> {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        // If Consilium was started inside a job that ends its children when it exits (some
+        // launchers and terminals do this), the helper must leave that job or it dies with the
+        // app and nothing reopens. A job that forbids leaving refuses the flag, so retry without.
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
+        if let Ok(child) = cmd.spawn() {
+            drop(child);
+            return Ok(s);
+        }
         cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
     }
     cmd.spawn().map_err(|e| format!("couldn't start the installer: {e}"))?;
@@ -426,20 +453,26 @@ mod tests {
             Path::new(r"C:\Users\O'Neil\AppData\Roaming\c\update\next\consilium.exe"),
             Path::new(r"C:\Users\O'Neil\AppData\Local\Consilium\Consilium.exe"),
             Path::new(r"C:\Users\O'Neil\AppData\Roaming\c\update\next"),
+            Path::new(r"C:\Users\O'Neil\AppData\Roaming\c\update\install.log"),
         );
         assert!(s.contains("Get-Process -Id 9"));
+        assert!(s.contains(r"Add-Content -LiteralPath 'C:\Users\O''Neil\AppData\Roaming\c\update\install.log'"));
         assert!(s.contains(r"Move-Item -LiteralPath 'C:\Users\O''Neil\AppData\Local\Consilium\Consilium.exe' -Destination 'C:\Users\O''Neil\AppData\Local\Consilium\Consilium.exe.old'"));
-        assert!(s.contains("catch { if (-not (Test-Path"));
-        assert!(s.trim_end().ends_with(r"Start-Process -FilePath 'C:\Users\O''Neil\AppData\Local\Consilium\Consilium.exe'"));
+        assert!(s.contains("if (-not (Test-Path -LiteralPath"));
+        assert!(s.contains(r"$run = 'C:\Users\O''Neil\AppData\Local\Consilium\Consilium.exe'"));
+        assert!(s.contains("Start-Process -FilePath $run"));
 
         let setup = windows_helper_script(
             9,
             Path::new(r"C:\Users\O'Neil\AppData\Roaming\c\update\next\Consilium-Windows-Setup.exe"),
             Path::new(r"C:\Users\O'Neil\AppData\Local\Consilium\Consilium.exe"),
             Path::new(r"C:\Users\O'Neil\AppData\Roaming\c\update\next"),
+            Path::new(r"C:\Users\O'Neil\AppData\Roaming\c\update\install.log"),
         );
-        assert!(setup.contains("Start-Process -FilePath 'C:\\Users\\O''Neil\\AppData\\Roaming\\c\\update\\next\\Consilium-Windows-Setup.exe' -ArgumentList '/S' -Wait"));
-        assert!(setup.trim_end().ends_with(r"Start-Process -FilePath 'C:\Users\O''Neil\AppData\Local\Consilium\Consilium.exe'"));
+        assert!(setup.contains("Start-Process -FilePath 'C:\\Users\\O''Neil\\AppData\\Roaming\\c\\update\\next\\Consilium-Windows-Setup.exe' -ArgumentList '/S' -Wait -PassThru"));
+        assert!(setup.contains("DisplayIcon"));
+        assert!(setup.contains("if ($p.ExitCode -eq 0)"));
+        assert!(setup.trim_end().ends_with("catch { Log ('reopen failed: ' + $_) }"));
     }
 
     #[test]
