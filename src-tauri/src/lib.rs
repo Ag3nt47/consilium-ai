@@ -34,6 +34,7 @@ mod signal_chat;
 mod signal_setup;
 mod startup_check;
 mod safety;
+mod searchpath;
 mod security_scan;
 mod store;
 mod tasks;
@@ -496,7 +497,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: Consilium now installs updates and restarts by itself (Settings → Updates, on by default), waiting for any running command first, and linked computers move to the newest build together. AIs can withdraw requests that are no longer needed with WITHDRAW: <request> or WITHDRAW: all, and requests older than a day leave the request tray. A communication stress test moves the link onto each route in turn, checks it, and posts the results here; it also runs after every restart.";
+const WHATS_NEW: &str = "What's new: installed AIs and tools no longer look uninstalled after an update (Consilium reads your current PATH instead of the one it was started with). When one linked computer installs an update it tells the others, which follow right away. Command boxes are system-aware: PowerShell and Command Prompt boxes only get Run on Windows, bash and zsh only on Mac and Linux, and a command written by another computer's AI is marked for that computer and never runs here, so write boxes for the computer you are on. Also: updates install and restart by themselves (Settings → Updates), AIs can withdraw requests with WITHDRAW:, and a communication stress test runs after every restart.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -588,7 +589,12 @@ fn install_staged(app: &AppHandle, engine: &Arc<Engine>) -> Result<(), String> {
         ));
     }
     // Start the installer first: if it can't run, nobody is told to stop for an update that won't come.
+    let build = update::staged_build(&data);
     update::start_install(&data)?;
+    // The linked computers update too (queued durably, so it goes out after the restart at worst).
+    if let Some(b) = &build {
+        peer_sync::announce_update(b);
+    }
     for id in engine.running_ids() {
         let _ = engine.note(&id, &note);
     }
@@ -683,6 +689,12 @@ fn stress_test_after_start(engine: Arc<Engine>) {
             }
         }
     });
+}
+
+/// Whether a linked computer announced an update since the last call, so the window checks GitHub now.
+#[tauri::command]
+fn release_check_requested() -> bool {
+    follow::take_release_check()
 }
 
 /// Turns automatic install-and-restart on or off (Settings → Updates).
@@ -1287,6 +1299,7 @@ pub fn run() {
             set_auto_run_commands,
             set_auto_install_updates,
             stress_test_link,
+            release_check_requested,
             agent_branches,
             merge_agent_branch,
             discard_agent_branch,

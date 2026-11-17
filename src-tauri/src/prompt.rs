@@ -469,7 +469,10 @@ commands or use tools: answer in text, and say what you would check rather than 
     }
     s.push_str(
         "\n\nCommand boxes: when you want the human to run a command, put it alone in a fenced block tagged with its \
-shell (```bash, ```zsh, ```powershell or ```cmd). Consilium shows it with Run, Deny and Copy buttons; Run executes it \
+shell (```bash or ```zsh on macOS and Linux, ```powershell or ```cmd on Windows). Write it for the computer you are \
+running on (see above): a box for another system shows no Run button, and the human never sees a PowerShell box \
+on a Mac. On a linked computer's conversation, a command for that computer goes to an AI there (by handle), not into a \
+box here. Consilium shows it with Run, Deny and Copy buttons; Run executes it \
 once in the project folder with no terminal to type into, and the output comes back to you as the human's message. \
 Use `sudo` lines (macOS/Linux) or `Start-Process -Verb RunAs` (Windows) when admin rights are needed: the computer \
 shows its own password prompt. Use other tags (```text, ```rust …) for anything that shouldn't be run.",

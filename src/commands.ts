@@ -41,6 +41,24 @@ export function shellName(lang: string): string | null {
   return SHELLS[lang] ?? null;
 }
 
+const WINDOWS_SHELLS = new Set(["PowerShell", "Command Prompt"]);
+
+/**
+ * Whether a box in this shell can run on `os`: PowerShell and Command Prompt on Windows, the
+ * Mac/Linux terminal shells elsewhere. A box for another system gets no Run button and stays out
+ * of the request tray, so a Mac never shows "Run PowerShell". Must match `plan` in runcmd.rs.
+ */
+export function runsOn(lang: string, os: "mac" | "windows" | "linux"): boolean {
+  const shell = shellName(lang);
+  if (!shell) return false;
+  return WINDOWS_SHELLS.has(shell) === (os === "windows");
+}
+
+/** Which system a shell's boxes are for, to label a box that can't run here. */
+export function shellSystem(lang: string): string {
+  return WINDOWS_SHELLS.has(shellName(lang) ?? "") ? "Windows" : "Mac/Linux";
+}
+
 /** Whether a block would ask for admin rights (and so show the computer's own password prompt). */
 export function needsAdmin(code: string): boolean {
   return /^\s*(\$\s+)?sudo\s/m.test(code) || /-Verb\s+RunAs/i.test(code);
@@ -74,17 +92,19 @@ export function commandElementId(key: string): string {
 
 /** Runnable shell command blocks from an AI that haven't been run or denied yet, oldest first. */
 export function pendingCommands(
-  events: { id: string; seq: number; sender: string; kind: string; text: string }[],
+  events: { id: string; seq: number; sender: string; kind: string; text: string; via?: string | null }[],
   handled: Map<string, "ran" | "denied">,
   afterSeq: number | null,
+  os: "mac" | "windows" | "linux",
 ): string[] {
   if (afterSeq === null) return [];
   const out: string[] = [];
   for (const e of events) {
-    if (e.seq <= afterSeq || e.kind !== "message" || e.sender === "human") continue;
+    // Another linked computer's AIs write commands for that computer: they run there.
+    if (e.seq <= afterSeq || e.kind !== "message" || e.sender === "human" || e.via) continue;
     const fences = fencedBlocks(e.text);
     fences.forEach((fence, index) => {
-      if (fence.closed && shellName(fence.lang)) {
+      if (fence.closed && runsOn(fence.lang, os)) {
         const key = `${e.id}#${index}`;
         if (!handled.has(key)) out.push(key);
       }

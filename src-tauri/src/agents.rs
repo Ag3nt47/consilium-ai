@@ -188,18 +188,9 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
         return Vec::new(); // reached over HTTP, there is no program to find
     }
     let home = dirs::home_dir().unwrap_or_default();
-    let mut dirs_: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    dirs_.extend(
-        [".local/bin", ".local/node/bin", ".npm-global/bin", ".volta/bin", "bin"]
-            .iter()
-            .map(|d| home.join(d)),
-    );
-    dirs_.extend(["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"].iter().map(PathBuf::from));
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        dirs_.push(PathBuf::from(appdata).join("npm"));
-    }
+    // The human's current search path and the usual tool folders, not just the PATH this copy
+    // was started with, so an AI installed or added to PATH since is still found after an update.
+    let dirs_: Vec<PathBuf> = crate::searchpath::dirs();
     let mut out: Vec<PathBuf> = Vec::new();
     match kind {
         Kind::Codex => {
@@ -220,6 +211,7 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
                 win_bases.push(p.join("Programs").join("OpenAI").join("ChatGPT"));
                 win_bases.push(p.join("OpenAI").join("ChatGPT"));
                 win_bases.push(p.join("Programs").join("Codex"));
+                win_bases.push(p.join("Programs").join("OpenAI").join("Codex"));
                 win_bases.push(p.join("OpenAI").join("Codex"));
             }
             if let Some(pf) = std::env::var_os("ProgramFiles") {
@@ -321,9 +313,8 @@ fn command(path: &Path) -> Command {
     // the Dock have a minimal PATH; putting the tool's own folder first lets it find its runtime.
     if let Some(dir) = path.parent() {
         let mut parts: Vec<PathBuf> = vec![dir.to_path_buf()];
-        if let Some(existing) = std::env::var_os("PATH") {
-            parts.extend(std::env::split_paths(&existing));
-        }
+        // The human's current search path, so the tools an AI uses are there after an update too.
+        parts.extend(crate::searchpath::dirs());
         if let Ok(joined) = std::env::join_paths(parts) {
             cmd.env("PATH", joined);
         }

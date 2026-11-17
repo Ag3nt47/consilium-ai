@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Tools stay found after updates**: Consilium reads the current search path (Windows' saved
+  PATH, or the Mac/Linux login shell's) plus the usual tool folders, instead of the one it was
+  started with, so installed AIs and tools no longer look uninstalled after an update. Codex in
+  `AppData\Local\Programs\OpenAI\Codex` is found even off PATH.
+- **Linked computers update together**: a computer installing an update tells the others, which
+  prepare or download the same build at once and install it.
+- **System-aware command boxes**: PowerShell and Command Prompt boxes get Run only on Windows, bash
+  and zsh only on Mac and Linux; others are marked "for Windows" or "for Mac/Linux" with Copy. A
+  command written by another linked computer's AI is marked for that computer and never runs here.
 - **Updates install and restart by themselves**: a new setting (Settings → Updates, on by default,
   including for existing installs) installs a newer build as soon as it is ready and restarts;
   the AIs' work resumes after. It waits while a command you started is running. Consilium checks

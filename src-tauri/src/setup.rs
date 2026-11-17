@@ -22,9 +22,7 @@ fn sh_quote(p: &Path) -> String {
 /// Finds npm (needed to install the Codex and Gemini CLIs) where agents::find looks for tools.
 fn npm() -> Option<std::path::PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
-    let mut dirs_: Vec<std::path::PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
+    let mut dirs_: Vec<std::path::PathBuf> = crate::searchpath::dirs();
     dirs_.extend([".local/node/bin", ".volta/bin", ".npm-global/bin"].iter().map(|d| home.join(d)));
     dirs_.extend(["/usr/local/bin", "/opt/homebrew/bin"].iter().map(std::path::PathBuf::from));
     if let Some(pf) = std::env::var_os("ProgramFiles") {

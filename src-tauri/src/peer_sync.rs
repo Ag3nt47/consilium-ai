@@ -285,6 +285,33 @@ impl Sync {
         }
     }
 
+    /// `computer` is installing an update and restarting: this computer follows (see
+    /// `follow::announced`), and a note in its newest conversation says so.
+    fn take_update(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
+        {
+            let mut m = self.mirrors.lock().unwrap();
+            if !m.filed.insert(packet.id.clone()) {
+                return Ok(None);
+            }
+            self.save(&m)?;
+        }
+        let Some(build) = serde_json::from_str::<Value>(&shared.text).ok().and_then(|v| crate::build_id::Build::from_peer(&v)) else {
+            return Ok(None);
+        };
+        let this = crate::build_id::Build::this();
+        let what = if !build.newer_than(&this) {
+            format!("This computer already runs {}, so it stays as it is.", this.label())
+        } else if build.reproducible() {
+            "This computer is preparing the same build now and installs it as soon as it is ready.".to_string()
+        } else {
+            "This computer is checking GitHub for that release and installs it as soon as it is downloaded.".to_string()
+        };
+        crate::follow::announced(computer, build.clone());
+        let Some(conv) = self.store.list().into_iter().find(|c| !self.is_mirror(&c.id)) else { return Ok(None) };
+        let note = format!("{computer} is installing Consilium {} and restarting. {what}", build.label());
+        self.store.append(&conv.id, crate::council::CONSILIUM, "system", vec![], &note).map(Some)
+    }
+
     /// An AI on `computer` answered in a copy of one of this computer's conversations: files the
     /// answer there as "<AI> (<computer>)" for the AIs here to see.
     fn take_contribution(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
@@ -471,6 +498,9 @@ impl Sync {
             return Ok(None);
         }
         let shared: Shared = serde_json::from_value(packet.payload.clone()).map_err(|e| e.to_string())?;
+        if shared.kind == "update" {
+            return self.take_update(packet, shared, computer);
+        }
         if shared.owner.is_some() {
             if shared.sender == "human" {
                 return self.take_reply(packet, shared, computer);
@@ -675,6 +705,27 @@ pub fn reply(conversation: &str, text: &str, targets: &[String]) -> Result<Event
     let (event, payload) = s.reply(conversation, text, targets)?;
     link.send(PacketKind::Chat, payload)?;
     Ok(event)
+}
+
+/// Tells every linked computer that this one is installing `build` and restarting, so they update
+/// too. Queued durably, so it still goes out after the restart if the app quits first.
+pub fn announce_update(build: &crate::build_id::Build) {
+    let Some(link) = crate::link_handle().filter(|l| l.enabled() && l.has_peers()) else { return };
+    let payload = serde_json::to_value(Shared {
+        conversation: String::new(),
+        title: String::new(),
+        id: uuid::Uuid::new_v4().to_string(),
+        sender: "human".into(),
+        kind: "update".into(),
+        to: vec![],
+        text: serde_json::to_string(build).unwrap_or_default(),
+        via: None,
+        owner: None,
+        history: vec![],
+    });
+    if let Ok(p) = payload {
+        let _ = link.send(PacketKind::Chat, p);
+    }
 }
 
 /// Files a packet that just arrived from a paired computer.
@@ -948,6 +999,30 @@ mod tests {
         let plain = a.store.append(&conv.id, "claude", "message", vec![], "@gemini what do you think?").unwrap();
         b.file(&packet("node-a", "p9", a.outgoing(&plain).unwrap()), "MacBook").unwrap().unwrap();
         assert_eq!(b_woke.lock().unwrap().last().map(|w| w.2), Some(true), "its one reaction for this human message");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_update_on_one_computer_tells_the_others_to_follow() {
+        let root = std::env::temp_dir().join(format!("peer-sync-update-{}", uuid::Uuid::new_v4()));
+        let b = Sync::new(Arc::new(Store::new(root.join("c")).unwrap()), &root);
+        let conv = b.store.create("Plans").unwrap();
+        let this = crate::build_id::Build::this();
+        let newer = crate::build_id::Build { version: this.version.clone(), number: this.number + 3, commit: "abcdef123456".into() };
+        let announce = |id: &str, build: &crate::build_id::Build| {
+            packet(
+                "node-a",
+                id,
+                serde_json::json!({"conversation": "", "title": "", "id": id, "sender": "human", "kind": "update", "text": serde_json::to_string(build).unwrap()}),
+            )
+        };
+        let note = b.file(&announce("u1", &newer), "MacBook").unwrap().expect("a note");
+        assert_eq!(note.conversation, conv.id);
+        assert!(note.text.starts_with("MacBook is installing Consilium") && note.text.contains("preparing the same build"), "{}", note.text);
+        assert!(b.file(&announce("u1", &newer), "MacBook").unwrap().is_none(), "once");
+        assert!(crate::follow::take_release_check(), "the window checks GitHub at once");
+        let older = b.file(&announce("u2", &this), "MacBook").unwrap().unwrap();
+        assert!(older.text.contains("already runs"), "{}", older.text);
         let _ = std::fs::remove_dir_all(&root);
     }
 

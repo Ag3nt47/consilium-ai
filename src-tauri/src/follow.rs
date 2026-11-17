@@ -41,6 +41,29 @@ pub struct Status {
 }
 
 static STATUS: Mutex<Option<Status>> = Mutex::new(None);
+/// Builds other computers said they are installing (see `announced`), as (computer, build).
+static ANNOUNCED: Mutex<Vec<(String, Build)>> = Mutex::new(Vec::new());
+/// Wakes the check at once instead of at the next minute.
+static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+/// Set when another computer announced an update: the window checks GitHub for it at once.
+static CHECK_RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Another computer is installing `build` and restarting: this one moves to it too, right away,
+/// without waiting for that computer to come back and report it.
+pub fn announced(computer: &str, build: Build) {
+    {
+        let mut a = ANNOUNCED.lock().unwrap();
+        a.retain(|(c, _)| c != computer);
+        a.push((computer.to_string(), build));
+    }
+    CHECK_RELEASE.store(true, std::sync::atomic::Ordering::SeqCst);
+    WAKE.notify_one();
+}
+
+/// Whether the window should check GitHub for a release now (once per announcement).
+pub fn take_release_check() -> bool {
+    CHECK_RELEASE.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
 /// The build that last failed, and when.
 static FAILED: Mutex<Option<(Build, u64)>> = Mutex::new(None);
 
@@ -73,7 +96,10 @@ pub fn start(engine: Arc<crate::engine::Engine>, data: PathBuf) {
     let e = engine.clone();
     engine.spawn_task(Box::pin(async move {
         loop {
-            tokio::time::sleep(CHECK_EVERY).await;
+            tokio::select! {
+                _ = tokio::time::sleep(CHECK_EVERY) => {}
+                _ = WAKE.notified() => {}
+            }
             check(&e, &data).await;
         }
     }));
@@ -84,9 +110,12 @@ async fn check(engine: &Arc<crate::engine::Engine>, data: &Path) {
     if !link.enabled() {
         return;
     }
-    let peers: Vec<(String, Build)> =
+    let mut peers: Vec<(String, Build)> =
         link.status().peers.into_iter().filter(|p| p.connected).filter_map(|p| Some((p.name, p.build?))).collect();
     let this = Build::this();
+    // Builds announced by computers that are installing them (and may be restarting right now).
+    ANNOUNCED.lock().unwrap().retain(|(_, b)| b.newer_than(&this));
+    peers.extend(ANNOUNCED.lock().unwrap().iter().cloned());
     let staged = crate::update::staged_build(data).filter(|s| s.newer_than(&this));
     let Some((from, build)) = target(&this, staged.as_ref(), &peers) else {
         // Nothing to do, but keep showing a staged build until it is installed.

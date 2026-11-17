@@ -176,9 +176,7 @@ INSTALL_COMMAND_JSON when a task calls for one; the human can also install them 
 
 fn search_dirs() -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
-    let mut dirs_: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
+    let mut dirs_: Vec<PathBuf> = crate::searchpath::dirs();
     dirs_.extend(
         [".local/bin", ".local/node/bin", ".cargo/bin", ".npm-global/bin", ".volta/bin", "go/bin", "scoop/shims"]
             .iter()

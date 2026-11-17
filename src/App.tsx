@@ -1,6 +1,6 @@
 import { TypedText, TYPED_THEMES } from "./typed";
-import { commandElementId, fencedBlocks, handledCommands, needsAdmin, pendingCommands, shellName, deniedText, type Fence } from "./commands";
-import { dictationHint, paletteKey, paletteKeyWords, terminalName } from "./platform";
+import { commandElementId, fencedBlocks, handledCommands, needsAdmin, pendingCommands, runsOn, shellName, shellSystem, deniedText, type Fence } from "./commands";
+import { OS, dictationHint, paletteKey, paletteKeyWords, terminalName } from "./platform";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -461,6 +461,9 @@ type CommandActions = {
 function CommandBox({ event, fence, index, actions }: { event: ChatEvent; fence: Fence; index: number; actions?: CommandActions }) {
   const [copied, setCopied] = useState(false);
   const shell = shellName(fence.lang);
+  // Only a box written for this computer, by an AI on this computer, can run here; any other box
+  // says where it belongs and keeps Copy.
+  const elsewhere = shell ? (event.via && event.sender !== "human" ? event.via : !runsOn(fence.lang, OS) ? shellSystem(fence.lang) : null) : null;
   const key = `${event.id}#${index}`;
   const state = actions?.handled.get(key);
   const running = actions?.running.has(key);
@@ -473,9 +476,13 @@ function CommandBox({ event, fence, index, actions }: { event: ChatEvent; fence:
   return (
     <div id={commandElementId(key)} className={`command-box${shell ? " shell" : ""}`}>
       <div className="command-head">
-        <span className="command-lang">{shell ?? (fence.lang || "code")}{shell && needsAdmin(fence.code) ? " · admin" : ""}</span>
+        <span className="command-lang">
+          {shell ?? (fence.lang || "code")}
+          {shell && needsAdmin(fence.code) ? " · admin" : ""}
+          {elsewhere ? ` · for ${elsewhere}` : ""}
+        </span>
         <span className="command-actions">
-          {shell && actions && (state ? (
+          {shell && !elsewhere && actions && (state ? (
             <span className={`request-answer ${state === "ran" ? "approved" : "denied"}`}>{state === "ran" ? "✓ Ran" : "✕ Denied"}</span>
           ) : (
             <>
@@ -1177,6 +1184,10 @@ export default function App() {
   const pollStaged = useCallback(() => {
     api.updateAvailable().then(setStaged).catch(() => undefined);
     api.uiUpdateAvailable().then(setStagedUi).catch(() => undefined);
+    // A linked computer is installing an update: look for the release now, so this one follows.
+    api.releaseCheckRequested()
+      .then((now) => (now ? checkForUpdate(true).then(setUpdate) : undefined))
+      .catch(() => undefined);
   }, []);
   useEffect(() => {
     pollStaged();
@@ -1857,7 +1868,7 @@ export default function App() {
   }), [ranCommands, runningCommands, current, members, agents, council?.auto_run_commands]);
   const answered = useMemo(() => answeredRequests(events), [events]);
   const unanswered = useMemo(() => pendingRequests(events, answered, requestFloor), [events, answered, requestFloor]);
-  const unansweredCmds = useMemo(() => pendingCommands(events, ranCommands, requestFloor), [events, ranCommands, requestFloor]);
+  const unansweredCmds = useMemo(() => pendingCommands(events, ranCommands, requestFloor, OS), [events, ranCommands, requestFloor]);
   const typedActivity = TYPED_THEMES.has(prefs.theme);
 
   // Every request and shell command still waiting for the human, in chat order.

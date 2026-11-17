@@ -156,7 +156,8 @@ fn plan(shell: Shell, code: &str, os: &str) -> Result<Plan, String> {
     };
     match (shell, os) {
         (Shell::Pwsh, "windows") => Ok(p("powershell.exe", &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "{script}"], code, "ps1")),
-        (Shell::Pwsh, _) => Ok(p("pwsh", &["-NoProfile", "-NonInteractive", "-File", "{script}"], code, "ps1")),
+        // PowerShell boxes are written for Windows; a Mac or Linux box is ```bash or ```zsh.
+        (Shell::Pwsh, _) => Err("this is a Windows PowerShell command, and this computer isn't Windows".into()),
         (Shell::Cmd, "windows") => Ok(p("cmd.exe", &["/d", "/c", "{script}"], format!("@echo off\r\n{}", code.replace('\n', "\r\n")), "cmd")),
         (Shell::Cmd, _) => Err("this is a Windows Command Prompt command, and this computer isn't Windows".into()),
         (Shell::Posix | Shell::Zsh, "windows") => Err("this is a Mac/Linux terminal command; on Windows, ask for a PowerShell version".into()),
@@ -399,6 +400,10 @@ pub async fn run(block: &Block, cwd: &Path, scratch: &Path) -> Result<Outcome, S
 
     let mut cmd = tokio::process::Command::new(&plan.program);
     cmd.args(&args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    // The human's current search path, so installed tools are found after an update too.
+    if let Some(path) = crate::searchpath::joined() {
+        cmd.env("PATH", path);
+    }
     #[cfg(unix)]
     cmd.process_group(0);
     #[cfg(windows)]
@@ -478,6 +483,10 @@ pub fn take(events: &[Event], event_id: &str, index: usize) -> Result<(Event, Bl
     let event = events.iter().find(|e| e.id == event_id).ok_or("that message isn't in this conversation")?;
     if event.sender == "human" || (event.kind != "message" && event.kind != "error") {
         return Err("only commands an AI suggested can be run from here".into());
+    }
+    // A command an AI on another linked computer wrote is for that computer, and runs there.
+    if let Some(computer) = event.via.as_deref().filter(|_| event.sender != "human") {
+        return Err(format!("this command is for {computer} and runs there, not on this computer"));
     }
     let block = fenced_blocks(&event.text).into_iter().nth(index).ok_or("that command box isn't in the message")?;
     check(&block)?;
@@ -593,6 +602,7 @@ mod tests {
         assert_eq!(plan(Shell::Pwsh, "Get-Date", "windows").unwrap().program, "powershell.exe");
         assert!(plan(Shell::Cmd, "dir", "windows").unwrap().script.contains("dir"));
         assert!(plan(Shell::Cmd, "dir", "macos").is_err());
+        assert!(plan(Shell::Pwsh, "Get-Date", "macos").is_err(), "PowerShell boxes are for Windows");
         assert!(plan(Shell::Posix, "ls", "windows").is_err());
     }
 
@@ -600,6 +610,15 @@ mod tests {
     fn refuses_password_pipes() {
         assert!(refuse("echo pw | sudo -S rm x").is_some());
         assert!(refuse("ls -la").is_none());
+    }
+
+    #[test]
+    fn a_command_from_another_computers_ai_never_runs_here() {
+        let lang = if cfg!(windows) { "powershell" } else { "bash" };
+        let mut theirs = ev("e9", "claude", &format!("```{lang}\necho hi\n```"));
+        theirs.via = Some("Lukes-MBP".into());
+        let err = take(&[theirs], "e9", 0).err().unwrap();
+        assert!(err.contains("for Lukes-MBP"), "{err}");
     }
 
     #[test]
