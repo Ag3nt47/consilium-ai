@@ -1545,6 +1545,23 @@ export default function App() {
   );
   const readyIds = useMemo(() => new Set(agents.filter((a) => a.available).map((a) => a.id)), [agents]);
   const members = useMemo(() => agents.filter((a) => a.member), [agents]);
+  // AIs switched off in this conversation with the Start/Stop button in their council box.
+  const [offHere, setOffHere] = useState<string[]>([]);
+  useEffect(() => {
+    if (!current) {
+      setOffHere([]);
+      return;
+    }
+    api.switchedOff(current).then(setOffHere).catch(() => setOffHere([]));
+  }, [current]);
+  async function toggleOn(id: string) {
+    if (!current) return;
+    try {
+      setOffHere(await api.setAiOn(current, id, offHere.includes(id)));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   // Everyone in the council is asked by default: after a restart, and when an AI joins.
   useEffect(() => {
@@ -2400,19 +2417,34 @@ export default function App() {
             const isFrozen = Boolean(
               isWorking && lastSignal && Date.now() - lastSignal > 25_000 && agentLoad !== undefined && agentLoad < 1,
             );
+            const off = offHere.includes(a.id);
             return (
-              <AgentDot
-                key={a.id}
-                agent={a}
-                onSetup={setupAgent}
-                onRetry={retryAgent}
-                check={checks[a.id]}
-                forecast={forecast}
-                claudeResets={claudeResets}
-                isWorking={isWorking}
-                isFrozen={isFrozen}
-                load={agentLoad}
-              />
+              <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 4, opacity: off ? 0.55 : 1 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <AgentDot
+                    agent={a}
+                    onSetup={setupAgent}
+                    onRetry={retryAgent}
+                    check={checks[a.id]}
+                    forecast={forecast}
+                    claudeResets={claudeResets}
+                    isWorking={isWorking}
+                    isFrozen={isFrozen}
+                    load={agentLoad}
+                  />
+                </div>
+                <button
+                  type="button"
+                  className="link"
+                  disabled={!current}
+                  onClick={() => void toggleOn(a.id)}
+                  title={off ? `Start ${a.name} in this chat` : `Stop ${a.name} in this chat: it won't be asked here, even when @mentioned or by auto-continue`}
+                  aria-label={off ? `Start ${a.name} in this chat` : `Stop ${a.name} in this chat`}
+                  style={{ color: off ? "#2e9d4f" : "#d64545", fontSize: 11, lineHeight: 1, padding: "2px 4px", flex: "none" }}
+                >
+                  {off ? "\u25B6" : "\u25A0"}
+                </button>
+              </div>
             );
           })}
           </div>

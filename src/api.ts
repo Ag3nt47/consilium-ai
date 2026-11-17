@@ -508,6 +508,9 @@ const appApi = {
   getMemory: () => invoke<string>("get_memory"),
   setMemory: (text: string) => invoke<void>("set_memory", { text }),
   setMember: (agent: string, member: boolean) => invoke<void>("set_member", { agent, member }),
+  /** Switches an AI on or off in one conversation; returns the AIs now off there. */
+  setAiOn: (conversation: string, agent: string, on: boolean) => invoke<string[]>("set_ai_on", { conversation, agent, on }),
+  switchedOff: (conversation: string) => invoke<string[]>("switched_off", { conversation }),
   setAccess: (agent: string, access: Access) => invoke<void>("set_access", { agent, access }),
   setWorkspace: (id: string, folder: string | null) => invoke<Conversation>("set_workspace", { id, folder }),
   /** Shows the system folder picker; returns the chosen folder or null. */

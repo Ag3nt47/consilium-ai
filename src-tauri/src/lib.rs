@@ -42,6 +42,7 @@ mod toolbox;
 mod update;
 mod usage;
 mod claude_resets;
+mod switched;
 pub mod wallpaper;
 mod worktree;
 
@@ -221,6 +222,18 @@ fn forget_approval(state: State<AppState>, grant: String) -> Result<config::Coun
 #[tauri::command]
 fn set_auto_continue(state: State<AppState>, on: bool) -> Result<(), String> {
     state.engine.config.set_auto_continue(on).map(|_| ())
+}
+
+/// Switches an AI on or off in one conversation (the Start/Stop button in its council box).
+#[tauri::command]
+fn set_ai_on(state: State<AppState>, conversation: String, agent: String, on: bool) -> Result<Vec<String>, String> {
+    state.engine.set_ai_on(&conversation, &agent, on)
+}
+
+/// The AIs switched off in one conversation.
+#[tauri::command]
+fn switched_off(state: State<AppState>, conversation: String) -> Vec<String> {
+    state.engine.switched_off(&conversation)
 }
 
 #[tauri::command]
@@ -1306,6 +1319,8 @@ pub fn run() {
             claude_reset_history,
             set_reset_forecast,
             set_auto_continue,
+            set_ai_on,
+            switched_off,
             set_isolate_agents,
             set_auto_run_commands,
             set_auto_install_updates,

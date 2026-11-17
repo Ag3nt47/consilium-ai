@@ -263,11 +263,22 @@ impl Engine {
         };
         let text = text.as_str();
         let targets = self.addressed(targets, text);
+        // AIs switched off in this chat aren't asked, even when @mentioned.
+        let off = crate::switched::off(self.store.dir(), id);
+        let stopped: Vec<String> = targets.iter().filter(|t| off.contains(t)).cloned().collect();
+        let targets: Vec<String> = targets.into_iter().filter(|t| !off.contains(t)).collect();
         let rounds = rounds.clamp(1, MAX_ROUNDS);
         let mut running = self.running.lock().unwrap();
         let event = self.store.append_with_attachments_via(id, targets.clone(), text, attachments, via)?;
         self.mine.lock().unwrap().insert(event.id.clone());
         self.ui.event(&event);
+        if !stopped.is_empty() {
+            let names: Vec<String> = stopped.iter().map(|s| format!("@{s}")).collect();
+            let _ = self.note(id, &format!(
+                "{} is switched off in this chat, so it wasn't asked. Press the green \u{25B6} next to it in the council box to switch it back on.",
+                names.join(" and ")
+            ));
+        }
         let lock = match running.get(id) {
             Some(r) => {
                 if r.council.join(&event, &targets) {
@@ -647,7 +658,14 @@ don't repeat changes that are already made.",
     /// member. Used when GitHub's checks fail, so the AIs pick up the fix without being asked.
     /// When a turn is already running the note is only posted; the AIs read it in that turn.
     pub fn note_for_council(self: &Arc<Self>, conversation: &str, text: &str) -> Result<Event, String> {
-        let members = self.config.get().members;
+        // Auto-continue and failed-check rounds skip AIs switched off in this chat.
+        let members: Vec<String> = self
+            .config
+            .get()
+            .members
+            .into_iter()
+            .filter(|m| !crate::switched::is_off(self.store.dir(), conversation, m))
+            .collect();
         let mut running = self.running.lock().unwrap();
         let e = self.store.append(conversation, council::CONSILIUM, "system", members.clone(), text)?;
         self.ui.event(&e);
@@ -657,6 +675,22 @@ don't repeat changes that are already made.",
         let Some(lock) = self.store.try_turn_lock(conversation) else { return Ok(e) };
         self.begin(&mut running, Pending::new(conversation, members, 1), Arc::new(lock), e.seq);
         Ok(e)
+    }
+
+    /// The AIs switched off in this conversation with the Stop button in their council box.
+    pub fn switched_off(&self, conversation: &str) -> Vec<String> {
+        crate::switched::off(self.store.dir(), conversation)
+    }
+
+    /// Switches an AI on or off in this conversation only. Returns the AIs now off there.
+    pub fn set_ai_on(&self, conversation: &str, agent: &str, on: bool) -> Result<Vec<String>, String> {
+        if !crate::store::valid_id(conversation) {
+            return Err("unknown conversation".into());
+        }
+        if crate::agents::by_id(agent).is_none() {
+            return Err("unknown AI".into());
+        }
+        crate::switched::set(self.store.dir(), conversation, agent, on)
     }
 
     /// A note from Consilium itself, which the human and the AIs see.

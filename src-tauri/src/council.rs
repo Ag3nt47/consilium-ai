@@ -484,7 +484,11 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                     let limit = MAX_PULLED_IN * rounds as usize;
                     let now = now_ms();
                     for m in to.iter().filter(|m| {
-                        **m != id && s.turn.members.contains(m) && agents::by_id(m).is_some() && s.bench.until(m, now).is_none()
+                        **m != id
+                            && s.turn.members.contains(m)
+                            && agents::by_id(m).is_some()
+                            && s.bench.until(m, now).is_none()
+                            && !crate::switched::is_off(s.store.dir(), &s.turn.conversation, m)
                     }) {
                         if st.pulled_in >= limit {
                             break;
