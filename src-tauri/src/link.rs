@@ -357,7 +357,10 @@ impl Link {
             token
         };
         // Bind now, so a pairing code is only shown once the other computer can actually reach us.
-        let bound = std::net::TcpListener::bind(("0.0.0.0", self.0.port))
+        // Tests listen on loopback only: every rebuilt test binary that listened on all interfaces
+        // made the macOS firewall (and Windows Defender) ask the user to allow incoming connections.
+        let host = if cfg!(test) { "127.0.0.1" } else { "0.0.0.0" };
+        let bound = std::net::TcpListener::bind((host, self.0.port))
             .and_then(|l| l.set_nonblocking(true).map(|_| l))
             .and_then(TcpListener::from_std);
         match bound {
