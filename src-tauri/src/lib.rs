@@ -496,7 +496,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: linked computers work together—AIs across paired computers collaborate in the same conversation with answers flowing between machines seamlessly. On Windows, command boxes from Full-capacity AIs can run automatically with Always Run to avoid repeated approval prompts, the update helper retries file replacement with backoff to prevent file lock errors, and AI process tracking handles PID reuse and Windows CLI discovery reliably. Test runs on macOS now bind to loopback so firewall incoming connection prompts are eliminated.";
+const WHATS_NEW: &str = "What's new: AIs on linked computers can address each other by handle (for example @claude-lukes-mbp), and the link panel shows which AIs on each computer have heard each other. Messages typed in a linked computer's conversation from the terminal now reach that computer. Always Run now holds back commands that could do lasting damage, such as deleting files, rewriting git history or uninstalling software, until you click, so a Deny can never arrive too late.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
