@@ -670,10 +670,25 @@ fn gemini_signed_in() -> bool {
 /// (`antigravity/credential-user-scope` in the user config folder) next to the token it keeps in the
 /// OS keyring; its presence, never its contents, is the check. Signing out (`/logout`) removes it.
 fn antigravity_signed_in() -> bool {
-    [dirs::config_dir(), dirs::data_dir()]
+    // Roaming and local app data on Windows; Application Support on macOS; ~/.config and
+    // ~/.local/share on Linux.
+    [dirs::config_dir(), dirs::data_dir(), dirs::data_local_dir()]
         .into_iter()
         .flatten()
         .any(|d| d.join("antigravity").join("credential-user-scope").is_file())
+}
+
+/// Whether the AI's CLI reports a saved sign-in, or None when it couldn't say.
+async fn signed_in_via(kind: Kind, path: &Path) -> Option<bool> {
+    match kind {
+        Kind::Codex => probe(path, &["login", "status"]).await.map(|s| s.contains("Logged in")),
+        Kind::ClaudeCode => probe(path, &["auth", "status"]).await.and_then(|s| {
+            serde_json::from_str::<serde_json::Value>(&s).ok().and_then(|v| v["loggedIn"].as_bool())
+        }),
+        Kind::GeminiCli => Some(gemini_signed_in()),
+        Kind::Antigravity => Some(antigravity_signed_in()),
+        Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => None,
+    }
 }
 
 pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
@@ -725,18 +740,13 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
     info.path = Some(path.display().to_string());
     // The version and sign-in checks are independent, so they run at the same time.
     let version_probe = probe(&path, &["--version"]);
-    let sign_in_probe = async {
-        match kind {
-            Kind::Codex => probe(&path, &["login", "status"]).await.map(|s| s.contains("Logged in")),
-            Kind::ClaudeCode => probe(&path, &["auth", "status"]).await.and_then(|s| {
-                serde_json::from_str::<serde_json::Value>(&s).ok().and_then(|v| v["loggedIn"].as_bool())
-            }),
-            Kind::GeminiCli => Some(gemini_signed_in()),
-            Kind::Antigravity => Some(antigravity_signed_in()),
-            Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => None,
-        }
-    };
-    let (version, signed_in) = tokio::join!(version_probe, sign_in_probe);
+    let sign_in_probe = signed_in_via(kind, &path);
+    let (version, mut signed_in) = tokio::join!(version_probe, sign_in_probe);
+    // A CLI that couldn't answer (slow start while several launch together, a busy keychain) is
+    // asked once more instead of being reported as signed out, which sent people to sign in again.
+    if signed_in.is_none() && matches!(kind, Kind::Codex | Kind::ClaudeCode) {
+        signed_in = signed_in_via(kind, &path).await;
+    }
     info.version = version.and_then(|v| v.lines().next().map(str::to_string));
     info.signed_in = signed_in;
     info.available = signed_in == Some(true);

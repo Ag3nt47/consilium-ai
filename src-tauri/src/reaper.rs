@@ -97,25 +97,38 @@ fn windows_agent(image: &str, cmdline: &str) -> bool {
 /// Windows has no reparenting to pid 1: a turn is orphaned when the process that started it
 /// (an earlier Consilium) is gone.
 #[cfg(windows)]
-fn orphaned_agent(pid: u32) -> bool {
+fn orphaned(pids: &[u32]) -> Vec<u32> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    if pids.is_empty() {
+        return Vec::new();
+    }
+    // One process snapshot for every pid: reading every process's command line is slow on Windows
+    // (it held up startup for each pid when taken one at a time).
     let mut sys = System::new();
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
         ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
     );
-    let Some(p) = sys.process(Pid::from_u32(pid)) else {
-        return false;
-    };
-    let parent_alive = p.parent().is_some_and(|pp| sys.process(pp).is_some());
-    let cmdline = p.cmd().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ");
-    !parent_alive && windows_agent(&p.name().to_string_lossy(), &cmdline)
+    pids.iter()
+        .copied()
+        .filter(|&pid| {
+            let Some(p) = sys.process(Pid::from_u32(pid)) else { return false };
+            let parent_alive = p.parent().is_some_and(|pp| sys.process(pp).is_some());
+            let cmdline = p.cmd().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ");
+            !parent_alive && windows_agent(&p.name().to_string_lossy(), &cmdline)
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn orphaned(pids: &[u32]) -> Vec<u32> {
+    pids.iter().copied().filter(|&pid| orphaned_agent(pid)).collect()
 }
 
 #[cfg(not(any(unix, windows)))]
-fn orphaned_agent(_pid: u32) -> bool {
-    false
+fn orphaned(_pids: &[u32]) -> Vec<u32> {
+    Vec::new()
 }
 
 /// Ends a turn and everything it started: its process group on Unix, its process tree on Windows.
@@ -150,19 +163,15 @@ fn end_turn(pid: u32, force: bool) {
 pub fn reap_orphans(data: &Path) -> usize {
     let path = data.join(FILE);
     let _g = LOCK.lock();
-    let mut ended = 0;
-    for pid in read(&path) {
-        if orphaned_agent(pid) {
-            end_turn(pid, cfg!(windows)); // Windows console programs ignore a polite taskkill
-            ended += 1;
-        }
+    let found = orphaned(&read(&path));
+    for &pid in &found {
+        end_turn(pid, cfg!(windows)); // Windows console programs ignore a polite taskkill
     }
+    let ended = found.len();
     if ended > 0 {
         std::thread::sleep(std::time::Duration::from_millis(1500));
-        for pid in read(&path) {
-            if orphaned_agent(pid) {
-                end_turn(pid, true); // it ignored the polite request
-            }
+        for pid in orphaned(&found) {
+            end_turn(pid, true); // it ignored the polite request
         }
     }
     let _ = std::fs::remove_file(&path);

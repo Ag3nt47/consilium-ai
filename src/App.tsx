@@ -949,9 +949,30 @@ function folderName(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
+// The AIs' last known status, shown the moment the window opens so the council doesn't start
+// empty or "signed out" while the CLIs are asked again in the background.
+const AGENTS_CACHE_KEY = "consilium.agents.v1";
+
+function loadCachedAgents(): AgentInfo[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(AGENTS_CACHE_KEY) || "[]");
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCachedAgents(agents: AgentInfo[]) {
+  try {
+    localStorage.setItem(AGENTS_CACHE_KEY, JSON.stringify(agents));
+  } catch {
+    /* storage full or unavailable: the next start just checks from scratch */
+  }
+}
+
 export default function App() {
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [agents, setAgents] = useState<AgentInfo[]>(loadCachedAgents);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
   const [events, setEvents] = useState<ChatEvent[]>([]);
@@ -1130,9 +1151,11 @@ export default function App() {
     const request = Promise.all([api.agents(), api.getCouncil()])
       .then(([nextAgents, nextCouncil]) => {
         // Keep the last known usage on screen until the fresh reading arrives.
-        setAgents((prev) =>
-          nextAgents.map((a) => ({ ...a, usage: prev.find((p) => p.id === a.id)?.usage ?? null })),
-        );
+        setAgents((prev) => {
+          const next = nextAgents.map((a) => ({ ...a, usage: prev.find((p) => p.id === a.id)?.usage ?? null }));
+          saveCachedAgents(next);
+          return next;
+        });
         setCouncil(nextCouncil);
         // Usage probes take several seconds; they update the meters when done without holding up
         // sign-in state or the refresh spinner.

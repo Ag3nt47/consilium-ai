@@ -996,8 +996,6 @@ pub fn run() {
                 Some(d) => d,
                 None => app.path().app_data_dir()?,
             };
-            // End AI turns orphaned by a force-quit or freeze before resuming them.
-            reaper::reap_orphans(&data);
             let ui = Arc::new(Window(app.handle().clone()));
             let spawn = Box::new(|task: engine::Task| {
                 tauri::async_runtime::spawn(task);
@@ -1005,7 +1003,16 @@ pub fn run() {
             let engine = Arc::new(Engine::open(&data, ui, spawn)?);
             let security = security_scan::Scanner::open(&data);
             announce_update(&engine, &data);
-            engine.resume_interrupted(None);
+            // End AI turns orphaned by a force-quit or freeze, then resume them. Off the setup
+            // thread: checking processes (and the 1.5 s grace period when one is found) used to
+            // hold the window back on every start.
+            {
+                let (engine, data) = (engine.clone(), data.clone());
+                std::thread::spawn(move || {
+                    reaper::reap_orphans(&data);
+                    engine.resume_interrupted(None);
+                });
+            }
             // Keeps the window in step with the terminal command.
             tauri::async_runtime::spawn(engine.clone().watch(true));
             tauri::async_runtime::spawn(security.clone().watch(engine.clone()));

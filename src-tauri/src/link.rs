@@ -1715,7 +1715,8 @@ mod tests {
         let (joiner, _) = node(&dir, "joiner-test");
         joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
 
-        let report = host.test_peer(&joiner.0.cfg.lock().unwrap().node_id).await.unwrap();
+        let joiner_id = joiner.0.cfg.lock().unwrap().node_id.clone();
+        let report = host.test_peer(&joiner_id).await.unwrap();
         assert_eq!(report.name, joiner.0.cfg.lock().unwrap().name);
         assert!(!report.routes.is_empty());
 
