@@ -270,6 +270,7 @@ export const demoApi = {
   getMemory: async () => "- The human prefers short, direct answers (Claude, 2026-11-14)\n- Thumbnails are immutable per image id (ChatGPT, 2026-11-14)\n",
   setMemory: async () => undefined,
   resetForecast: async () => null,
+  claudeResetHistory: async () => null,
   attachFiles: async () => [],
   attachData: async (_id: string, name: string) => ({ name, path: name, kind: "image", size: 1 }),
   openAttachment: async () => undefined,

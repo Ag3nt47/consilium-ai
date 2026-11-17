@@ -8,6 +8,7 @@ import {
   ACCESS_LEVELS,
   api,
   FORECAST_SITE,
+  CLAUDE_RESETS_SITE,
   IN_APP,
   onActivity,
   onEvent,
@@ -24,6 +25,7 @@ import {
   type Conversation,
   type DailyWallpaper,
   type ResetForecast,
+  type ClaudeResetHistory,
   type SystemPressure,
   type StagedUpdate,
   type TokenUsageReport,
@@ -747,7 +749,7 @@ function ApiKeyField({ agent, onSaved, onError }: { agent: AgentInfo; onSaved: (
   );
 }
 
-function UsageMeter({ agent, forecast }: { agent: AgentInfo; forecast?: ResetForecast | null }) {
+function UsageMeter({ agent, forecast, claudeResets }: { agent: AgentInfo; forecast?: ResetForecast | null; claudeResets?: ClaudeResetHistory | null }) {
   const usage = agent.usage;
   if (!usage) {
     return (
@@ -799,6 +801,19 @@ function UsageMeter({ agent, forecast }: { agent: AgentInfo; forecast?: ResetFor
           </button>
         </div>
       )}
+      {claudeResets && claudeResets.last_reset_at != null && (
+        <div
+          className="usage-forecast"
+          title={`Claude Code resets announced by Anthropic${claudeResets.reset_count != null ? ` (${claudeResets.reset_count} so far)` : ""}. History only, not a forecast. Data: claude-resets.com, CC BY 4.0. Not affiliated with Anthropic.`}
+        >
+          {`Last reset ${((Date.now() - claudeResets.last_reset_at) / 86_400_000).toFixed(1)} days ago`}
+          {claudeResets.mean_gap_days != null ? ` \u00b7 avg gap ${claudeResets.mean_gap_days.toFixed(1)} days` : ""}
+          {" \u00b7 "}
+          <button title="Open claude-resets.com, the unofficial source of the Claude reset history" className="link" onClick={() => openUrl(CLAUDE_RESETS_SITE)}>
+            data: claude-resets.com
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -816,6 +831,7 @@ function AgentDot({
   onRetry,
   check,
   forecast,
+  claudeResets,
   isWorking,
   isFrozen,
   load,
@@ -825,6 +841,7 @@ function AgentDot({
   onRetry: (a: AgentInfo) => void;
   check?: CheckResult | "running";
   forecast?: ResetForecast | null;
+  claudeResets?: ClaudeResetHistory | null;
   isWorking?: boolean;
   isFrozen?: boolean;
   /** Share of the whole PC (0-100) this AI's processes are using right now; undefined when none run. */
@@ -917,7 +934,7 @@ function AgentDot({
               : `✗ ${check.detail.split("\n")[0].slice(0, 90)}`}
         </span>
       )}
-      <UsageMeter agent={agent} forecast={agent.id === "gpt" ? forecast : null} />
+      <UsageMeter agent={agent} forecast={agent.id === "gpt" ? forecast : null} claudeResets={agent.id === "claude" ? claudeResets : null} />
       <span className="agent-kind">
         {agent.tool}
         {agent.access !== "chat" && <span className="access-tag"> · {ACCESS_LEVELS.find((l) => l.id === agent.access)?.name}</span>}
@@ -1163,6 +1180,7 @@ export default function App() {
   const agentRefreshRef = useRef<Promise<void> | null>(null);
   const usageRefreshRef = useRef(false);
   const [forecast, setForecast] = useState<ResetForecast | null>(null);
+  const [claudeResets, setClaudeResets] = useState<ClaudeResetHistory | null>(null);
   const [pressure, setPressure] = useState<SystemPressure | null>(null);
   const [staged, setStaged] = useState<StagedUpdate | null>(null);
   const [updating, setUpdating] = useState(false);
@@ -1309,6 +1327,8 @@ export default function App() {
           .then((byId) => setAgents((prev) => prev.map((a) => ({ ...a, usage: byId[a.id] ?? null }))))
           .then(() => api.resetForecast())
           .then((f) => setForecast(f ?? null))
+          .then(() => api.claudeResetHistory())
+          .then((r) => setClaudeResets(r ?? null))
           .catch(() => undefined)
           .finally(() => {
             usageRefreshRef.current = false;
@@ -2096,7 +2116,7 @@ export default function App() {
   async function toggleForecast(on: boolean) {
     try {
       await api.setResetForecast(on);
-      if (!on) setForecast(null);
+      if (!on) { setForecast(null); setClaudeResets(null); }
       refreshAgents();
     } catch (e) {
       setError(`Couldn't change the setting: ${e}`);
@@ -2388,6 +2408,7 @@ export default function App() {
                 onRetry={retryAgent}
                 check={checks[a.id]}
                 forecast={forecast}
+                claudeResets={claudeResets}
                 isWorking={isWorking}
                 isFrozen={isFrozen}
                 load={agentLoad}

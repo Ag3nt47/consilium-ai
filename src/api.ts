@@ -176,6 +176,19 @@ export interface ResetForecast {
 
 export const FORECAST_SITE = "https://codex-reset.com/";
 
+/** claude-resets.com's history of announced Claude Code usage resets (history, not a forecast; CC BY 4.0). */
+export interface ClaudeResetHistory {
+  last_reset_at: number | null;
+  last_reset_scope: string | null;
+  last_reset_url: string | null;
+  reset_count: number | null;
+  mean_gap_days: number | null;
+  banked: { date: number | null; scope: string | null; usable_until: number | null }[];
+  fetched_at: number;
+}
+
+export const CLAUDE_RESETS_SITE = "https://claude-resets.com/";
+
 /** The `consilium` terminal command. */
 export interface CliInstall {
   installed: boolean;
@@ -461,6 +474,8 @@ const appApi = {
   /** The forecast of the next global Codex reset, when that setting is on. */
   resetForecast: () => invoke<ResetForecast | null>("reset_forecast"),
   setResetForecast: (on: boolean) => invoke<void>("set_reset_forecast", { on }),
+  /** claude-resets.com's history of Claude Code resets, when the reset-forecast setting is on. */
+  claudeResetHistory: () => invoke<ClaudeResetHistory | null>("claude_reset_history"),
   setAutoContinue: (on: boolean) => invoke<void>("set_auto_continue", { on }),
   setIsolateAgents: (on: boolean) => invoke<void>("set_isolate_agents", { on }),
   setAutoRunCommands: (on: boolean) => invoke<void>("set_auto_run_commands", { on }),

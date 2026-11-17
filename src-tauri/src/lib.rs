@@ -41,6 +41,7 @@ mod tasks;
 mod toolbox;
 mod update;
 mod usage;
+mod claude_resets;
 pub mod wallpaper;
 mod worktree;
 
@@ -174,6 +175,15 @@ mod tests {
 async fn agents_usage(state: State<'_, AppState>) -> Result<HashMap<String, agents::UsageStatus>, String> {
     // Saved for the AIs too, and for the terminal command (see `usage`).
     Ok(usage::refresh(&state.engine).await.agents)
+}
+
+/// claude-resets.com's history of Claude Code resets, when the reset-forecast setting is on.
+#[tauri::command]
+fn claude_reset_history(state: State<AppState>) -> Option<claude_resets::ClaudeResets> {
+    if !state.engine.config.get().reset_forecast {
+        return None;
+    }
+    usage::load(&state.engine.data).claude_resets
 }
 
 /// codex-reset.com's forecast of the next global Codex reset, when that setting is on.
@@ -1293,6 +1303,7 @@ pub fn run() {
             cli_status,
             install_cli,
             reset_forecast,
+            claude_reset_history,
             set_reset_forecast,
             set_auto_continue,
             set_isolate_agents,

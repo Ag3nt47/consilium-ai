@@ -27,6 +27,9 @@ pub struct Snapshot {
     pub agents: HashMap<String, UsageStatus>,
     #[serde(default)]
     pub forecast: Option<Forecast>,
+    /// claude-resets.com's history of Claude Code resets (no forecast), when the setting is on.
+    #[serde(default)]
+    pub claude_resets: Option<crate::claude_resets::ClaudeResets>,
 }
 
 /// codex-reset.com's forecast of the next global Codex usage reset (a goodwill reset OpenAI grants
@@ -105,6 +108,14 @@ pub async fn refresh(engine: &Engine) -> Snapshot {
         match before {
             Some(f) if now_ms().saturating_sub(f.fetched_at) < FORECAST_EVERY_MS => Some(f),
             old => fetch_forecast().await.or(old),
+        }
+    } else {
+        None
+    };
+    snapshot.claude_resets = if engine.config.get().reset_forecast {
+        match load(&engine.data).claude_resets {
+            Some(r) if now_ms().saturating_sub(r.fetched_at) < crate::claude_resets::EVERY_MS => Some(r),
+            old => crate::claude_resets::fetch().await.or(old),
         }
     } else {
         None
@@ -224,7 +235,7 @@ pub fn for_prompt(s: &Snapshot, members: &[String], me: &str, now: u64) -> Optio
             lines.push(format!("- {who}: {}", parts.join("; ")));
         }
     }
-    if lines.is_empty() && s.forecast.is_none() {
+    if lines.is_empty() && s.forecast.is_none() && s.claude_resets.is_none() {
         return None;
     }
     let age = now.saturating_sub(s.at) / 60_000;
@@ -255,6 +266,9 @@ splitting work, and tell the human when someone will be back if it matters.",
         }
         line.push_str(". It's an estimate, not a promise.");
         out.push_str(&line);
+    }
+    if let Some(r) = &s.claude_resets {
+        out.push_str(&crate::claude_resets::prompt_line(r, now));
     }
     Some(out)
 }
@@ -326,7 +340,7 @@ mod tests {
         let f = parse_forecast(json, 5).unwrap();
         assert_eq!((f.chance_24h, f.chance_48h, f.confidence.as_deref(), f.official.as_deref(), f.fetched_at), (Some(17), Some(31), Some("low"), None, 5));
         assert!(f.last_reset_at.is_some());
-        let s = Snapshot { at: 0, agents: HashMap::new(), forecast: Some(f) };
+        let s = Snapshot { at: 0, agents: HashMap::new(), forecast: Some(f), claude_resets: None };
         let text = for_prompt(&s, &[], "gpt", 1_795_000_000_000).unwrap();
         assert!(text.contains("17% chance within 24 h, 31% within 48 h (low confidence)"), "{text}");
         assert!(parse_forecast("not json", 0).is_none());
