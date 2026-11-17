@@ -35,13 +35,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 
 pub const PORT: u16 = 8470;
-const HEARTBEAT: Duration = Duration::from_secs(3);
-const DEAD_AFTER_MS: u64 = 10_000;
-const RETRY_MIN: Duration = Duration::from_secs(2);
+const HEARTBEAT: Duration = Duration::from_millis(1500);
+const DEAD_AFTER_MS: u64 = 4_000;
+const RETRY_MIN: Duration = Duration::from_millis(1000);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -145,7 +145,7 @@ pub fn answers_signal(me: SignalCandidate, others: &[SignalCandidate]) -> bool {
     })
 }
 /// The higher node id dials too once its peer has been unreachable this long.
-const BACKUP_DIAL_AFTER_MS: u64 = 20_000;
+const BACKUP_DIAL_AFTER_MS: u64 = 2_500;
 const PAIR_ID: &[u8] = b"consilium-link-pair-v1";
 
 pub type Handler = Arc<dyn Fn(&PeerPacket) -> Result<(), String> + Send + Sync>;
@@ -180,6 +180,8 @@ pub struct PeerView {
     pub activity: Vec<String>,
     /// Its project folder's git state, e.g. "consilium-ai · main · 2 changed".
     pub git: Option<String>,
+    /// All known candidate routes (wired Ethernet, Wi-Fi, direct cable) for failover.
+    pub addrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -268,6 +270,7 @@ struct Inner {
     seq: AtomicU64,
     running: Mutex<Option<CancellationToken>>,
     error: Mutex<Option<String>>,
+    wake_dial: Notify,
 }
 
 #[derive(Clone)]
@@ -314,6 +317,7 @@ impl Link {
             seq: AtomicU64::new(now_ms()),
             running: Mutex::new(None),
             error: Mutex::new(None),
+            wake_dial: Notify::new(),
         })))
     }
 
@@ -423,6 +427,7 @@ impl Link {
                         // Only while connected: an old heartbeat's activity would be stale.
                         activity: s.filter(|s| s.tx.is_some()).map(|s| s.activity.clone()).unwrap_or_default(),
                         git: s.and_then(|s| s.git.clone()),
+                        addrs: p.addrs.clone(),
                     }
                 })
                 .collect(),
@@ -477,6 +482,77 @@ impl Link {
             s.tx = None;
         }
         self.persist_outbox(&states)
+    }
+
+    /// Manually registers an additional failover route (IP:port) for a paired computer.
+    pub fn add_peer_route(&self, node_id: &str, address: &str) -> Result<Vec<String>, String> {
+        let addr = with_port(address.trim(), PORT);
+        let parsed = addr.parse::<SocketAddr>().map_err(|e| format!("invalid address: {e}"))?;
+        if !route_ip_allowed(parsed.ip()) {
+            return Err("only local LAN, direct cable/Bluetooth, or Tailscale addresses are allowed".into());
+        }
+        let mut cfg = self.0.cfg.lock().unwrap();
+        let peer = cfg
+            .peers
+            .iter_mut()
+            .find(|p| p.node_id == node_id)
+            .ok_or_else(|| format!("computer {node_id} not found"))?;
+        let should_save = if !peer.addrs.contains(&addr) {
+            peer.addrs.push(addr);
+            true
+        } else {
+            false
+        };
+        let addrs = peer.addrs.clone();
+        if should_save {
+            let snapshot = cfg.clone();
+            self.save(&snapshot)?;
+        }
+        drop(cfg);
+        self.0.wake_dial.notify_waiters();
+        Ok(addrs)
+    }
+
+    /// Re-evaluates local interfaces, broadcasts current reachable endpoints in a heartbeat, and wakes the dialer.
+    pub fn refresh_routes(&self, node_id: &str) -> Result<Vec<String>, String> {
+        let (me, _) = self.me();
+        let key = {
+            let cfg = self.0.cfg.lock().unwrap();
+            let peer = cfg
+                .peers
+                .iter()
+                .find(|p| p.node_id == node_id)
+                .ok_or_else(|| format!("computer {node_id} not found"))?;
+            peer_key(peer)?
+        };
+        let states = self.0.peers.lock().unwrap();
+        if let Some(s) = states.get(node_id) {
+            if let Some(tx) = &s.tx {
+                let ping = PeerPacket::signed(
+                    &me,
+                    now_ms(),
+                    PacketKind::Heartbeat,
+                    self.0.seq.fetch_add(1, Ordering::SeqCst),
+                    json!({
+                        "ping": now_ms(),
+                        "signal": SIGNAL_ON.load(Ordering::SeqCst),
+                        "active": LOCAL_ACTIVE_MS.load(Ordering::SeqCst),
+                        "working": local_activity(),
+                        "git": GIT_SUMMARY.lock().unwrap().clone(),
+                        "addrs": local_addrs(self.0.port),
+                    }),
+                    &key,
+                );
+                if let Ok(line) = ping.and_then(|p| seal(&me, &key, &p)) {
+                    let _ = tx.send(line);
+                }
+            }
+        }
+        drop(states);
+        self.0.wake_dial.notify_waiters();
+        let cfg = self.0.cfg.lock().unwrap();
+        let addrs = cfg.peers.iter().find(|p| p.node_id == node_id).map(|p| p.addrs.clone()).unwrap_or_default();
+        Ok(addrs)
     }
 
     /// Tests connectivity, route latency, and sync alignment for a paired computer.
@@ -916,6 +992,7 @@ impl Link {
             tokio::select! {
                 _ = token.cancelled() => return,
                 _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                _ = self.0.wake_dial.notified() => {}
             }
             let (me, peers) = {
                 let cfg = self.0.cfg.lock().unwrap();
@@ -933,6 +1010,10 @@ impl Link {
                 };
                 if connected || peer.addrs.is_empty() {
                     continue;
+                }
+                // Freshly dropped links immediately clear accumulated backoff for instant failover.
+                if now.saturating_sub(down_since) <= RETRY_MIN.as_millis() as u64 {
+                    backoff.remove(&peer.node_id);
                 }
                 // The lower id dials; the higher one also dials once the link has been down a while,
                 // in case only one direction gets through a firewall.
@@ -1056,7 +1137,21 @@ impl Link {
                     if !current(self) { break; }
                     let silent = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| now_ms().saturating_sub(s.last_seen_ms));
                     if silent > DEAD_AFTER_MS { break; }
-                    let ping = PeerPacket::signed(&me, now_ms(), PacketKind::Heartbeat, self.0.seq.fetch_add(1, Ordering::SeqCst), json!({ "ping": now_ms(), "signal": SIGNAL_ON.load(Ordering::SeqCst), "active": LOCAL_ACTIVE_MS.load(Ordering::SeqCst), "working": local_activity(), "git": GIT_SUMMARY.lock().unwrap().clone() }), &key);
+                    let ping = PeerPacket::signed(
+                        &me,
+                        now_ms(),
+                        PacketKind::Heartbeat,
+                        self.0.seq.fetch_add(1, Ordering::SeqCst),
+                        json!({
+                            "ping": now_ms(),
+                            "signal": SIGNAL_ON.load(Ordering::SeqCst),
+                            "active": LOCAL_ACTIVE_MS.load(Ordering::SeqCst),
+                            "working": local_activity(),
+                            "git": GIT_SUMMARY.lock().unwrap().clone(),
+                            "addrs": local_addrs(self.0.port),
+                        }),
+                        &key,
+                    );
                     if let Ok(line) = ping.and_then(|p| seal(&me, &key, &p)) {
                         if w.write_all(format!("{line}\n").as_bytes()).await.is_err() { break; }
                     }
@@ -1071,6 +1166,8 @@ impl Link {
                 s.down_since_ms = now_ms();
             }
         }
+        drop(states);
+        self.0.wake_dial.notify_waiters();
     }
 
     fn receive(&self, me: &str, key: &[u8], from: &str, packet: PeerPacket, tx: &mpsc::UnboundedSender<String>) {
@@ -1082,6 +1179,9 @@ impl Link {
                         s.active_ms = packet.payload.get("active").and_then(Value::as_u64).unwrap_or(0);
                         s.activity = read_activity(packet.payload.get("working"));
                         s.git = packet.payload.get("git").and_then(Value::as_str).map(clean_status).filter(|g| !g.is_empty());
+                    }
+                    if packet.payload.get("addrs").is_some() {
+                        self.learn_addrs(from, &packet.payload, None);
                     }
                 }
             }
@@ -1613,6 +1713,30 @@ mod tests {
         let report = host.test_peer(&joiner.0.cfg.lock().unwrap().node_id).await.unwrap();
         assert_eq!(report.name, joiner.0.cfg.lock().unwrap().name);
         assert!(!report.routes.is_empty());
+
+        host.stop();
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failover_routes_can_be_added_and_refreshed() {
+        let dir = std::env::temp_dir().join(format!("link-test-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host-failover");
+        let code = host.begin_pairing().unwrap();
+        let (joiner, _) = node(&dir, "joiner-failover");
+        joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
+
+        let joiner_id = joiner.0.cfg.lock().unwrap().node_id.clone();
+        let routes = host.add_peer_route(&joiner_id, "192.168.1.200:8470").unwrap();
+        assert!(routes.contains(&"192.168.1.200:8470".to_string()));
+
+        // Invalid or public IP refused
+        assert!(host.add_peer_route(&joiner_id, "8.8.8.8:8470").is_err());
+
+        // Refresh routes succeeds
+        let refreshed = host.refresh_routes(&joiner_id).unwrap();
+        assert!(refreshed.contains(&"192.168.1.200:8470".to_string()));
 
         host.stop();
         joiner.stop();

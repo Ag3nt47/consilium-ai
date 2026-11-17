@@ -915,6 +915,16 @@ async fn link_test_peer(node_id: String) -> Result<link::PeerTestReport, String>
     the_link()?.test_peer(&node_id).await
 }
 
+#[tauri::command]
+async fn link_add_peer_route(node_id: String, address: String) -> Result<Vec<String>, String> {
+    the_link()?.add_peer_route(&node_id, &address)
+}
+
+#[tauri::command]
+async fn link_refresh_routes(node_id: String) -> Result<Vec<String>, String> {
+    the_link()?.refresh_routes(&node_id)
+}
+
 /// Everything received from paired computers, oldest first, saved before it was acknowledged.
 #[tauri::command]
 async fn link_inbox() -> Result<Vec<peer_protocol::PeerPacket>, String> {
@@ -1084,6 +1094,8 @@ pub fn run() {
             link_pair_join,
             link_unpair,
             link_test_peer,
+            link_add_peer_route,
+            link_refresh_routes,
             link_inbox,
             link_send
         ])

@@ -3522,3 +3522,98 @@ button.attachment {
   align-items: center;
   gap: 8px;
 }
+
+/* Failover & Redundant Routes */
+.failover-intro-callout {
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: rgba(52, 152, 219, 0.1);
+  border: 1px solid rgba(52, 152, 219, 0.3);
+  margin-bottom: 8px;
+}
+.failover-intro-callout strong {
+  color: #3498db;
+}
+.failover-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+.failover-badge.ready {
+  background: rgba(46, 204, 113, 0.15);
+  color: #2ecc71;
+  border: 1px solid rgba(46, 204, 113, 0.3);
+}
+.failover-badge.single {
+  background: rgba(241, 196, 15, 0.15);
+  color: #f1c40f;
+  border: 1px solid rgba(241, 196, 15, 0.3);
+}
+.failover-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+.failover-header {
+  margin-bottom: 8px;
+}
+.failover-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+.failover-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.add-route-row {
+  margin-bottom: 8px;
+  padding: 6px;
+  background: var(--bg-deep, rgba(0, 0, 0, 0.15));
+  border-radius: 4px;
+}
+.add-route-input {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-input, rgba(0, 0, 0, 0.2));
+  color: inherit;
+}
+.failover-routes-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.failover-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  background: var(--bg-deep, rgba(0, 0, 0, 0.1));
+}
+.failover-chip.active {
+  border-color: rgba(46, 204, 113, 0.4);
+  background: rgba(46, 204, 113, 0.1);
+}
+.failover-chip.standby {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+.chip-kind {
+  color: var(--muted);
+  font-size: 10px;
+}
+.chip-role {
+  font-size: 10px;
+  font-weight: 500;
+}
+.failover-chip.active .chip-role {
+  color: #2ecc71;
+}
+.failover-chip.standby .chip-role {
+  color: var(--muted);
+}

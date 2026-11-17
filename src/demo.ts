@@ -378,6 +378,8 @@ export const demoApi = {
     queued_outgoing: 0,
     summary: "✔ Handshake verified (4 ms via 192.168.1.157:8470) · Chats aligned (0 queued)",
   }),
+  linkAddPeerRoute: async (_nodeId: string, address: string) => ["192.168.1.157:8470", address],
+  linkRefreshRoutes: async () => ["192.168.1.157:8470", "192.168.1.170:8470"],
   linkInbox: async () => [],
   linkSend: async () => "demo-pkt-1",
 };

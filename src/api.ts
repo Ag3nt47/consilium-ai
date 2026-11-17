@@ -309,6 +309,8 @@ export type LinkPeer = {
   activity: string[];
   /** Its project folder's git state, e.g. "consilium-ai · main · 2 changed". */
   git: string | null;
+  /** Known candidate routes (wired Ethernet, Wi-Fi, direct cable) for failover. */
+  addrs: string[];
 };
 
 export type RouteTest = {
@@ -375,6 +377,10 @@ const appApi = {
   linkPairJoin: (address: string, code: string) => invoke<LinkPeer>("link_pair_join", { address, code }),
   linkUnpair: (nodeId: string) => invoke<LinkStatus>("link_unpair", { nodeId }),
   linkTestPeer: (nodeId: string) => invoke<PeerTestReport>("link_test_peer", { nodeId }),
+  linkAddPeerRoute: (nodeId: string, address: string) =>
+    invoke<string[]>("link_add_peer_route", { nodeId, address }),
+  linkRefreshRoutes: (nodeId: string) =>
+    invoke<string[]>("link_refresh_routes", { nodeId }),
   linkInbox: () => invoke<unknown[]>("link_inbox"),
   linkSend: (payload: unknown) => invoke<string>("link_send", { payload }),
   runCommand: (id: string, eventId: string, index: number) => invoke<ChatEvent>("run_command", { id, eventId, index }),
