@@ -222,6 +222,8 @@ impl Sync {
         let (owner, conversation) = self.origin(mirror).ok_or("this isn't another computer's conversation")?;
         let event = self.store.append_imported(mirror, "human", "message", targets.to_vec(), text, None)?;
         self.sent.lock().unwrap().push((mirror.to_string(), text.to_string()));
+        // Sent here, so `outgoing` doesn't send it a second time when the window shows it.
+        self.first_time(&event.id);
         let payload = serde_json::to_value(Shared {
             conversation,
             title: String::new(),
@@ -294,6 +296,21 @@ impl Sync {
         Ok(Some(event))
     }
 
+    /// Records that event `id` is being sent; false if it already was.
+    fn first_time(&self, id: &str) -> bool {
+        let mut recent = self.recent.lock().unwrap();
+        if !recent.0.insert(id.to_string()) {
+            return false;
+        }
+        recent.1.push_back(id.to_string());
+        if recent.1.len() > RECENT {
+            if let Some(old) = recent.1.pop_front() {
+                recent.0.remove(&old);
+            }
+        }
+        true
+    }
+
     /// The payload to send for `e`, or None if it shouldn't leave this computer.
     fn outgoing(&self, e: &Event) -> Option<Value> {
         if e.kind != "message" || e.text.trim().is_empty() {
@@ -304,24 +321,21 @@ impl Sync {
             return None;
         }
         let origin = self.origin(&e.conversation);
-        // In a copy, only this computer's own AIs' answers go back, to the owner; what the human
-        // types there goes through `reply`, and what was copied in is never sent back.
-        if origin.is_some() && (e.sender == "human" || !known_sender(&e.sender)) {
+        // In a copy, what was copied in (a human message carries the computer it came from) is
+        // never sent back. What the human types there goes to the owner: from the window through
+        // `reply`, and from the terminal, which has no link of its own, here, once the window shows
+        // it. This computer's own AIs' answers go back to the owner too.
+        if origin.is_some() && ((e.sender == "human" && e.via.is_some()) || !known_sender(&e.sender)) {
             return None;
         }
-        {
-            let mut recent = self.recent.lock().unwrap();
-            if !recent.0.insert(e.id.clone()) {
-                return None;
-            }
-            recent.1.push_back(e.id.clone());
-            if recent.1.len() > RECENT {
-                if let Some(old) = recent.1.pop_front() {
-                    recent.0.remove(&old);
-                }
-            }
+        if !self.first_time(&e.id) {
+            return None;
         }
         if let Some((owner, conversation)) = origin {
+            if e.sender == "human" {
+                // Its copy coming back from the owner is already shown here.
+                self.sent.lock().unwrap().push((e.conversation.clone(), e.text.trim().to_string()));
+            }
             return serde_json::to_value(Shared {
                 conversation,
                 title: String::new(),
@@ -878,6 +892,39 @@ mod tests {
         let texts: Vec<String> = b.store.load(&mirror).unwrap().into_iter().map(|e| e.text).collect();
         assert_eq!(texts, vec!["first", "second"], "each message once");
         assert!(b.catch_up(&["node-a".to_string()]).is_empty(), "copies aren't sent back");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_message_typed_in_a_copy_from_the_terminal_reaches_the_owner_once() {
+        let root = std::env::temp_dir().join(format!("peer-sync-terminal-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        *a.me.lock().unwrap() = "node-a".into();
+        *b.me.lock().unwrap() = "node-b".into();
+        let relayed = Arc::new(Mutex::new(Vec::new()));
+        let r = relayed.clone();
+        let store = a.store.clone();
+        let _ = a.relay.set(Box::new(move |c: &str, t: &str, to: Vec<String>, pc: &str| {
+            r.lock().unwrap().push(t.to_string());
+            store.append_with_attachments_via(c, to, t, vec![], Some(pc))
+        }));
+        let conv = a.store.create("Plans").unwrap();
+        let ask = a.store.append(&conv.id, "human", "message", vec![], "hello").unwrap();
+        let mirror = b.file(&packet("node-a", "p1", a.outgoing(&ask).unwrap()), "MacBook").unwrap().unwrap();
+        assert!(b.outgoing(&mirror).is_none(), "what was copied in isn't sent back");
+
+        // The terminal writes straight into the copy; the window then shows it and it is sent.
+        let typed = b.store.append(&mirror.conversation, "human", "message", vec![], "please update").unwrap();
+        let payload = b.outgoing(&typed).expect("sent to the owner");
+        assert!(b.outgoing(&typed).is_none(), "once");
+        a.file(&packet("node-b", "r1", payload), "PC").unwrap().unwrap();
+        assert_eq!(relayed.lock().unwrap().clone(), vec!["please update".to_string()], "the owner records it and runs its turn");
+
+        // Typed in the window instead: `reply` sends it, and showing it doesn't send it again.
+        let (shown, _) = b.reply(&mirror.conversation, "and restart", &[]).unwrap();
+        assert!(b.outgoing(&shown).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
