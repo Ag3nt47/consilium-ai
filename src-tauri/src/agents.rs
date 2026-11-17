@@ -170,7 +170,12 @@ fn base_name(kind: Kind) -> &'static str {
 
 fn exe_names(base: &str) -> Vec<String> {
     if cfg!(windows) {
-        vec![format!("{base}.exe"), format!("{base}.cmd"), base.to_string()]
+        vec![
+            format!("{base}.exe"),
+            format!("{base}.cmd"),
+            format!("{base}.bat"),
+            base.to_string(),
+        ]
     } else {
         vec![base.to_string()]
     }
@@ -204,6 +209,40 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
                 out.push(home.join(app.trim_start_matches('/')).join("Contents/Resources/codex-cli/bin/codex"));
             }
             out.push(PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"));
+            for n in exe_names("codex") {
+                out.push(home.join(".codex/bin").join(&n));
+            }
+            let mut win_bases = Vec::new();
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                let p = PathBuf::from(local);
+                win_bases.push(p.join("Programs").join("ChatGPT"));
+                win_bases.push(p.join("ChatGPT"));
+                win_bases.push(p.join("Programs").join("OpenAI").join("ChatGPT"));
+                win_bases.push(p.join("OpenAI").join("ChatGPT"));
+                win_bases.push(p.join("Programs").join("Codex"));
+                win_bases.push(p.join("OpenAI").join("Codex"));
+            }
+            if let Some(pf) = std::env::var_os("ProgramFiles") {
+                let p = PathBuf::from(pf);
+                win_bases.push(p.join("ChatGPT"));
+                win_bases.push(p.join("OpenAI").join("ChatGPT"));
+                win_bases.push(p.join("Codex"));
+            }
+            if let Some(pfx86) = std::env::var_os("ProgramFiles(x86)") {
+                let p = PathBuf::from(pfx86);
+                win_bases.push(p.join("ChatGPT"));
+                win_bases.push(p.join("OpenAI").join("ChatGPT"));
+                win_bases.push(p.join("Codex"));
+            }
+            for base in win_bases {
+                for n in exe_names("codex") {
+                    out.push(base.join("resources").join("codex-cli").join("bin").join(&n));
+                    out.push(base.join("resources").join("codex").join("bin").join(&n));
+                    out.push(base.join("resources").join("codex").join(&n));
+                    out.push(base.join("bin").join(&n));
+                    out.push(base.join(&n));
+                }
+            }
         }
         Kind::ClaudeCode => {
             for n in exe_names("claude") {
@@ -216,7 +255,12 @@ fn candidates(kind: Kind) -> Vec<PathBuf> {
                 out.push(home.join(".local/bin").join(&n));
             }
             if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                out.push(PathBuf::from(local).join("agy").join("bin").join("agy.exe"));
+                let p = PathBuf::from(local);
+                out.push(p.join("agy").join("bin").join("agy.exe"));
+                out.push(p.join("Programs").join("Antigravity").join("bin").join("agy.exe"));
+            }
+            if let Some(pf) = std::env::var_os("ProgramFiles") {
+                out.push(PathBuf::from(pf).join("Antigravity").join("bin").join("agy.exe"));
             }
         }
     }
@@ -677,14 +721,32 @@ fn gemini_signed_in() -> bool {
 /// OS keyring; its presence, never its contents, is the check. Signing out (`/logout`) removes it.
 fn antigravity_signed_in() -> bool {
     // Roaming and local app data on Windows; Application Support on macOS; ~/.config and
-    // ~/.local/share on Linux; ~/.antigravity or ~/.config/antigravity fallback.
+    // ~/.local/share on Linux; ~/.antigravity, ~/.gemini, or ~/.config/antigravity fallback.
     let home = dirs::home_dir();
     let dot_antigravity = home.as_ref().map(|h| h.join(".antigravity"));
     let dot_config = home.as_ref().map(|h| h.join(".config").join("antigravity"));
-    [dirs::config_dir(), dirs::data_dir(), dirs::data_local_dir(), dot_antigravity, dot_config]
-        .into_iter()
-        .flatten()
-        .any(|d| d.join("antigravity").join("credential-user-scope").is_file() || d.join("credential-user-scope").is_file())
+    let dot_gemini = home.as_ref().map(|h| h.join(".gemini"));
+    let dot_gemini_cli = home.as_ref().map(|h| h.join(".gemini").join("antigravity-cli"));
+    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
+    let localappdata = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    [
+        dirs::config_dir(),
+        dirs::data_dir(),
+        dirs::data_local_dir(),
+        appdata,
+        localappdata,
+        dot_antigravity,
+        dot_config,
+        dot_gemini,
+        dot_gemini_cli,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|d| {
+        d.join("antigravity").join("credential-user-scope").is_file()
+            || d.join("credential-user-scope").is_file()
+            || d.join("oauth_creds.json").is_file()
+    })
 }
 
 /// Whether the AI's CLI reports a saved sign-in, or None when it couldn't say.

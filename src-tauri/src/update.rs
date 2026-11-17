@@ -216,26 +216,56 @@ pub fn windows_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &
         "$ErrorActionPreference = 'SilentlyContinue'\n\
          function Log($m) {{ Add-Content -LiteralPath {g} -Value ((Get-Date -Format o) + ' ' + $m) }}\n\
          Set-Content -LiteralPath {g} -Value ((Get-Date -Format o) + ' update helper started for pid {pid}')\n\
-         for ($i = 0; $i -lt 60; $i++) {{ if (-not (Get-Process -Id {pid})) {{ break }}; Start-Sleep -Milliseconds 500 }}\n\
-         if (Get-Process -Id {pid}) {{ Log 'app still running after 30 s; stopping it'; Stop-Process -Id {pid} -Force }}\n\
-         Start-Sleep -Milliseconds 500\n\
+         for ($i = 0; $i -lt 60; $i++) {{ if (-not (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ break }}; Start-Sleep -Milliseconds 500 }}\n\
+         if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ Log 'app still running after 30 s; stopping it'; Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue }}\n\
+         for ($i = 0; $i -lt 10; $i++) {{ if (-not (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ break }}; Start-Sleep -Milliseconds 500 }}\n\
          $run = {t}\n\
          if ({s} -like '*-Setup.exe' -or {s} -like '*-setup.exe') {{\n\
              $p = Start-Process -FilePath {s} -ArgumentList '/S' -Wait -PassThru\n\
              Log ('installer exit code ' + $p.ExitCode)\n\
-             $keys = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*', 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'\n\
-             $icon = Get-ItemProperty -Path $keys | Where-Object {{ $_.DisplayName -eq 'Consilium' -and $_.DisplayIcon }} | Select-Object -First 1 -ExpandProperty DisplayIcon\n\
-             if ($icon) {{ $icon = $icon.Trim([char]34).Split(',')[0] }}\n\
-             if ($icon -and (Test-Path -LiteralPath $icon)) {{ $run = $icon }}\n\
-             if ($p.ExitCode -eq 0) {{ Remove-Item -LiteralPath {l} -Recurse -Force }}\n\
+             $keys = @('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',\n\
+                       'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',\n\
+                       'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*')\n\
+             $entry = Get-ItemProperty -Path $keys -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -eq 'Consilium' }} | Select-Object -First 1\n\
+             if ($entry) {{\n\
+                 if ($entry.DisplayIcon) {{\n\
+                     $icon = $entry.DisplayIcon.Trim([char]34).Split(',')[0]\n\
+                     if (Test-Path -LiteralPath $icon) {{ $run = $icon }}\n\
+                 }} elseif ($entry.InstallLocation) {{\n\
+                     $locExe = Join-Path $entry.InstallLocation 'consilium.exe'\n\
+                     if (Test-Path -LiteralPath $locExe) {{ $run = $locExe }}\n\
+                 }}\n\
+             }}\n\
+             if ($p.ExitCode -eq 0) {{ Remove-Item -LiteralPath {l} -Recurse -Force -ErrorAction SilentlyContinue }}\n\
          }} else {{\n\
-             Remove-Item -LiteralPath {old} -Force\n\
-             try {{ Move-Item -LiteralPath {t} -Destination {old} -ErrorAction Stop; Move-Item -LiteralPath {s} -Destination {t} -ErrorAction Stop; Remove-Item -LiteralPath {old} -Force; Log 'swapped the program file' }}\n\
-             catch {{ Log ('swap failed: ' + $_); if (-not (Test-Path -LiteralPath {t})) {{ Move-Item -LiteralPath {old} -Destination {t} }} }}\n\
-             Remove-Item -LiteralPath {l} -Recurse -Force\n\
+             Remove-Item -LiteralPath {old} -Force -ErrorAction SilentlyContinue\n\
+             $swapped = $false\n\
+             for ($a = 0; $a -lt 30; $a++) {{\n\
+                 try {{\n\
+                     if (Test-Path -LiteralPath {old}) {{ Remove-Item -LiteralPath {old} -Force -ErrorAction Stop }}\n\
+                     Move-Item -LiteralPath {t} -Destination {old} -ErrorAction Stop\n\
+                     Move-Item -LiteralPath {s} -Destination {t} -ErrorAction Stop\n\
+                     Remove-Item -LiteralPath {old} -Force -ErrorAction SilentlyContinue\n\
+                     Log 'swapped the program file'\n\
+                     $swapped = $true\n\
+                     break\n\
+                 }} catch {{\n\
+                     Log ('swap attempt ' + ($a + 1) + ' failed: ' + $_)\n\
+                     if (-not (Test-Path -LiteralPath {t}) -and (Test-Path -LiteralPath {old})) {{\n\
+                         try {{ Move-Item -LiteralPath {old} -Destination {t} -ErrorAction Stop }} catch {{}}\n\
+                     }}\n\
+                     Start-Sleep -Milliseconds 500\n\
+                 }}\n\
+             }}\n\
+             if ($swapped) {{\n\
+                 Remove-Item -LiteralPath {l} -Recurse -Force -ErrorAction SilentlyContinue\n\
+             }} else {{\n\
+                 Log 'all swap attempts failed; preserved staged folder'\n\
+             }}\n\
          }}\n\
          Log ('reopening ' + $run)\n\
-         try {{ Start-Process -FilePath $run -ErrorAction Stop }} catch {{ Log ('reopen failed: ' + $_) }}\n"
+         $workDir = Split-Path -Parent $run\n\
+         try {{ Start-Process -FilePath $run -WorkingDirectory $workDir -ErrorAction Stop }} catch {{ Log ('reopen failed: ' + $_) }}\n"
     )
 }
 

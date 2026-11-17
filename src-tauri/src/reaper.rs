@@ -82,16 +82,23 @@ fn orphaned_agent(pid: u32) -> bool {
 }
 
 /// Whether a Windows process is an AI CLI: its image is one (`claude.exe`, `node.exe`, …), or it
-/// is the `cmd.exe` that runs an npm `.cmd` shim for one.
+/// is `cmd.exe` or `powershell.exe` that runs an npm shim or script for one.
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 fn windows_agent(image: &str, cmdline: &str) -> bool {
     let image = image.to_ascii_lowercase();
     let stem = image.strip_suffix(".exe").unwrap_or(&image);
-    if AGENT_NAMES.iter().any(|n| n.eq_ignore_ascii_case(stem)) {
+    let direct_agent = ["claude", "codex", "agy", "gemini", "codexcli"]
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(stem));
+    if direct_agent {
         return true;
     }
     let line = cmdline.to_ascii_lowercase();
-    stem == "cmd" && ["claude", "codex", "agy", "gemini"].iter().any(|n| line.contains(&format!("{n}.cmd")))
+    let is_wrapper = matches!(stem, "cmd" | "powershell" | "pwsh" | "node");
+    is_wrapper
+        && ["claude", "codex", "agy", "gemini"]
+            .iter()
+            .any(|n| line.contains(n))
 }
 
 /// Windows has no reparenting to pid 1: a turn is orphaned when the process that started it
@@ -110,11 +117,23 @@ fn orphaned(pids: &[u32]) -> Vec<u32> {
         true,
         ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
     );
+    let my_pid = std::process::id();
     pids.iter()
         .copied()
         .filter(|&pid| {
             let Some(p) = sys.process(Pid::from_u32(pid)) else { return false };
-            let parent_alive = p.parent().is_some_and(|pp| sys.process(pp).is_some());
+            let parent_alive = p.parent().is_some_and(|pp| {
+                if pp.as_u32() == my_pid {
+                    return false;
+                }
+                if let Some(parent) = sys.process(pp) {
+                    let name = parent.name().to_string_lossy().to_ascii_lowercase();
+                    let is_consilium = name == "consilium.exe" || name == "consilium";
+                    is_consilium && parent.start_time() <= p.start_time()
+                } else {
+                    false
+                }
+            });
             let cmdline = p.cmd().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ");
             !parent_alive && windows_agent(&p.name().to_string_lossy(), &cmdline)
         })
@@ -187,7 +206,10 @@ mod portable_tests {
         assert!(windows_agent("claude.exe", "claude.exe -p"));
         assert!(windows_agent("Node.EXE", "node codex.js"));
         assert!(windows_agent("cmd.exe", r"C:\Windows\system32\cmd.exe /c C:\Users\username\AppData\Roaming\npm\codex.cmd exec")); // consilium-allow-secret-scan (dummy Windows test path)
+        assert!(windows_agent("cmd.exe", r"C:\Windows\system32\cmd.exe /c C:\Users\username\claude.bat")); // consilium-allow-secret-scan
+        assert!(windows_agent("powershell.exe", r"powershell -File C:\Users\username\agy.ps1")); // consilium-allow-secret-scan
         assert!(!windows_agent("cmd.exe", "cmd.exe /c build.bat"));
+        assert!(!windows_agent("node.exe", "node vite.js --port 3000"));
         assert!(!windows_agent("explorer.exe", "explorer.exe"));
     }
 }
