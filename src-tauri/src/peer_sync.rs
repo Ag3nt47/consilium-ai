@@ -8,11 +8,21 @@
 //! here: it goes back to the computer that owns the conversation, which records it as
 //! "You (<this computer>)" and runs the turn, so requests can be answered from either computer.
 //!
+//! Joint turns: both computers' AIs answer in one conversation.
+//! - The human's message arriving in a mirror starts a turn there, with this computer's council.
+//!   Their answers are sent back to the computer that owns the conversation and filed there as
+//!   "<AI> (<computer>)", so the owner's AIs see them too (`take_contribution`).
+//! - An AI answer from the other computer is read by a turn still running here (`Council::heard`).
+//!   If none is, the AIs here get one turn of their own to react, at most once per human message
+//!   on each computer (`may_react`), so two councils can never keep each other going.
+//! - A conversation started before the computers were linked, or before a new computer was
+//!   paired, is sent to it in full (`catch_up`), so its AIs can join in from the next message.
+//!
 //! Fail-safes, because AIs on two computers may both be working:
 //! - Each AI from another computer is named "<AI> (<computer>)", e.g. "Claude (MacBook)", on
 //!   screen and in every AI's transcript, so two Claudes are never mistaken for one another.
-//! - Imported messages never act here: no REQUEST, ADD_AI, TASK or REMEMBER takes effect, and
-//!   they never start a turn. Only the human's own message in a conversation does.
+//! - Imported messages never act here: no REQUEST, ADD_AI, TASK or REMEMBER takes effect. Only a
+//!   human message starts a turn freely; an AI's answer starts at most one per human message.
 //! - Only the human and known AIs are accepted as senders; text is capped in size.
 //! - A computer that sends more than `MAX_PER_MINUTE` messages in a minute is paused for the
 //!   rest of that minute, with one note in the mirror, so a runaway loop can't flood this one.
@@ -38,6 +48,10 @@ const MINUTE_MS: u64 = 60_000;
 const HISTORY_LIMIT: usize = 200;
 /// Largest total text in one history packet, well under the link's 3 MB line limit.
 const HISTORY_BYTES: usize = 1_500_000;
+/// How many of this computer's most recent conversations are sent to a newly linked computer.
+const CATCH_UP: usize = 20;
+/// How often to check for conversations a linked computer hasn't been sent yet.
+const CATCH_UP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Default, Serialize, Deserialize)]
 struct Mirrors {
@@ -49,6 +63,9 @@ struct Mirrors {
     /// This computer's conversations whose earlier messages have been sent to linked computers.
     #[serde(default)]
     backfilled: HashSet<String>,
+    /// This computer's conversations -> the linked computers (node ids) sent all of it.
+    #[serde(default)]
+    shared_with: HashMap<String, HashSet<String>>,
 }
 
 pub struct Sync {
@@ -64,6 +81,10 @@ pub struct Sync {
     /// coming back is skipped once.
     sent: Mutex<Vec<(String, String)>>,
     relay: OnceLock<Relay>,
+    wake: OnceLock<Wake>,
+    /// Per conversation: the human message the AIs here last started a turn of their own to react
+    /// to another computer's answer for (its sequence number).
+    reacted: Mutex<HashMap<String, u64>>,
 }
 
 /// Why an incoming message was turned away.
@@ -115,6 +136,10 @@ struct Earlier {
 /// (conversation, text, targets, sending computer's name).
 type Relay = Box<dyn Fn(&str, &str, Vec<String>, &str) -> Result<Event, String> + Send + std::marker::Sync>;
 
+/// Lets this computer's AIs answer a message filed from a linked computer:
+/// (conversation, the event, whether they may start a turn of their own). See `Engine::from_linked`.
+type Wake = Box<dyn Fn(&str, &Event, &dyn Fn() -> bool) + Send + std::marker::Sync>;
+
 impl Sync {
     pub fn new(store: Arc<Store>, link_dir: &Path) -> Self {
         let path = link_dir.join("mirrors.json");
@@ -128,6 +153,37 @@ impl Sync {
             me: Mutex::new(String::new()),
             sent: Mutex::new(Vec::new()),
             relay: OnceLock::new(),
+            wake: OnceLock::new(),
+            reacted: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Whether the AIs here may start a turn of their own to react to another computer's AI in
+    /// `conversation`: once per human message there.
+    fn may_react(&self, conversation: &str) -> bool {
+        let Some(human) = self
+            .store
+            .load(conversation)
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .find(|e| e.sender == "human" && e.kind == "message")
+        else {
+            return false;
+        };
+        let mut reacted = self.reacted.lock().unwrap();
+        if reacted.get(conversation) == Some(&human.seq) {
+            return false;
+        }
+        reacted.insert(conversation.to_string(), human.seq);
+        true
+    }
+
+    /// Hands `e`, just filed in `conversation` from a linked computer, to this computer's AIs.
+    fn notify(&self, conversation: &str, e: &Event) {
+        if let Some(wake) = self.wake.get() {
+            let human = e.sender == "human";
+            wake(conversation, e, &|| human || self.may_react(conversation));
         }
     }
 
@@ -209,9 +265,48 @@ impl Sync {
         }
     }
 
+    /// An AI on `computer` answered in a copy of one of this computer's conversations: files the
+    /// answer there as "<AI> (<computer>)" for the AIs here to see.
+    fn take_contribution(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
+        let mut m = self.mirrors.lock().unwrap();
+        if m.filed.contains(&packet.id) || shared.owner.as_deref() != Some(self.me.lock().unwrap().as_str()) {
+            return Ok(None);
+        }
+        let seen = format!("ev:{}/{}", packet.node_id, shared.id);
+        let valid = shared.kind == "message"
+            && shared.sender != "human"
+            && known_sender(&shared.sender)
+            && !m.filed.contains(&seen)
+            && !m.map.values().any(|v| *v == shared.conversation)
+            && self.store.meta(&shared.conversation).is_ok()
+            && !shared.text.trim().is_empty();
+        // Recorded before acting, so a crash can't file the same answer twice.
+        m.filed.insert(packet.id.clone());
+        m.filed.insert(seen);
+        self.save(&m)?;
+        drop(m);
+        if !valid || self.admit(&packet.node_id, packet.timestamp_ms) != Verdict::Accept {
+            return Ok(None);
+        }
+        let via = shown_via(&shared.sender, &None, computer);
+        let event = self.store.append_imported(&shared.conversation, &shared.sender, "message", shared.to, &capped(shared.text), via)?;
+        self.notify(&shared.conversation, &event);
+        Ok(Some(event))
+    }
+
     /// The payload to send for `e`, or None if it shouldn't leave this computer.
     fn outgoing(&self, e: &Event) -> Option<Value> {
-        if e.kind != "message" || e.text.trim().is_empty() || self.is_mirror(&e.conversation) {
+        if e.kind != "message" || e.text.trim().is_empty() {
+            return None;
+        }
+        // Another computer's AI, filed here: it has already been everywhere it needs to be.
+        if e.sender != "human" && e.via.is_some() {
+            return None;
+        }
+        let origin = self.origin(&e.conversation);
+        // In a copy, only this computer's own AIs' answers go back, to the owner; what the human
+        // types there goes through `reply`, and what was copied in is never sent back.
+        if origin.is_some() && (e.sender == "human" || !known_sender(&e.sender)) {
             return None;
         }
         {
@@ -225,6 +320,21 @@ impl Sync {
                     recent.0.remove(&old);
                 }
             }
+        }
+        if let Some((owner, conversation)) = origin {
+            return serde_json::to_value(Shared {
+                conversation,
+                title: String::new(),
+                id: e.id.clone(),
+                sender: e.sender.clone(),
+                kind: e.kind.clone(),
+                to: e.to.clone(),
+                text: e.text.clone(),
+                via: None,
+                owner: Some(owner),
+                history: vec![],
+            })
+            .ok();
         }
         let title = self.store.meta(&e.conversation).map(|m| m.title).unwrap_or_default();
         serde_json::to_value(Shared {
@@ -255,10 +365,16 @@ impl Sync {
             }
             let _ = self.save(&m);
         }
-        let events = self.store.load(&e.conversation).ok()?;
+        self.history(&e.conversation, Some(&e.id), &format!("history-{}", e.id))
+    }
+
+    /// A history packet with `conversation`'s earlier messages (up to `HISTORY_LIMIT`, newest
+    /// kept), leaving out `except`; None if there are none.
+    fn history(&self, conversation: &str, except: Option<&str>, id: &str) -> Option<Value> {
+        let events = self.store.load(conversation).ok()?;
         let mut earlier: Vec<Earlier> = Vec::new();
         let mut bytes = 0;
-        for ev in events.iter().rev().filter(|ev| ev.kind == "message" && ev.id != e.id && !ev.text.trim().is_empty()) {
+        for ev in events.iter().rev().filter(|ev| ev.kind == "message" && Some(ev.id.as_str()) != except && !ev.text.trim().is_empty()) {
             bytes += ev.text.len();
             if earlier.len() >= HISTORY_LIMIT || bytes > HISTORY_BYTES {
                 break;
@@ -269,11 +385,11 @@ impl Sync {
             return None;
         }
         earlier.reverse();
-        let title = self.store.meta(&e.conversation).map(|m| m.title).unwrap_or_default();
+        let title = self.store.meta(conversation).map(|m| m.title).unwrap_or_default();
         serde_json::to_value(Shared {
-            conversation: e.conversation.clone(),
+            conversation: conversation.to_string(),
             title,
-            id: format!("history-{}", e.id),
+            id: id.to_string(),
             sender: "human".into(),
             kind: "history".into(),
             to: vec![],
@@ -285,6 +401,37 @@ impl Sync {
         .ok()
     }
 
+    /// History packets for this computer's recent conversations that one of `peers` (node ids of
+    /// the paired computers) hasn't been sent in full, so a conversation started before they
+    /// were linked shows up there too. Each is sent once per computer; the receiver files every
+    /// message once however often it arrives.
+    fn catch_up(&self, peers: &[String]) -> Vec<Value> {
+        if peers.is_empty() {
+            return vec![];
+        }
+        let mut convs: Vec<_> = self.store.list().into_iter().filter(|c| !self.is_mirror(&c.id)).collect();
+        convs.sort_by_key(|c| std::cmp::Reverse(c.updated));
+        let mut out = Vec::new();
+        for c in convs.into_iter().take(CATCH_UP) {
+            let missing = {
+                let m = self.mirrors.lock().unwrap();
+                let had = m.shared_with.get(&c.id);
+                peers.iter().any(|p| !had.is_some_and(|h| h.contains(p)))
+            };
+            if !missing {
+                continue;
+            }
+            if let Some(packet) = self.history(&c.id, None, &format!("catch-up-{}-{}", c.id, crate::store::now_ms())) {
+                out.push(packet);
+            }
+            let mut m = self.mirrors.lock().unwrap();
+            m.shared_with.entry(c.id.clone()).or_default().extend(peers.iter().cloned());
+            m.backfilled.insert(c.id);
+            let _ = self.save(&m);
+        }
+        out
+    }
+
     /// Files a received chat packet in its mirror conversation. Returns the new event, if any.
     /// `computer` is the sending computer's name.
     pub fn file(&self, packet: &PeerPacket, computer: &str) -> Result<Option<Event>, String> {
@@ -293,7 +440,10 @@ impl Sync {
         }
         let shared: Shared = serde_json::from_value(packet.payload.clone()).map_err(|e| e.to_string())?;
         if shared.owner.is_some() {
-            return self.take_reply(packet, shared, computer);
+            if shared.sender == "human" {
+                return self.take_reply(packet, shared, computer);
+            }
+            return self.take_contribution(packet, shared, computer);
         }
         if !matches!(shared.kind.as_str(), "message" | "history") || !crate::store::valid_id(&shared.conversation) || !known_sender(&shared.sender) {
             return Ok(None);
@@ -350,6 +500,9 @@ impl Sync {
         m.filed.insert(packet.id.clone());
         m.filed.insert(seen);
         self.save(&m)?;
+        drop(m);
+        // The AIs here answer the human's message too, and read the other computer's AIs.
+        self.notify(&local, &event);
         Ok(Some(event))
     }
 
@@ -410,8 +563,27 @@ pub fn init(engine: Arc<crate::engine::Engine>, link_dir: &Path) {
     if let Some(link) = crate::link_handle() {
         *s.me.lock().unwrap() = link.node_id();
     }
+    let relaying = engine.clone();
     let _ = s.relay.set(Box::new(move |conversation: &str, text: &str, targets: Vec<String>, computer: &str| {
-        engine.send_via(conversation, text, vec![], targets, 1, Some(computer))
+        relaying.send_via(conversation, text, vec![], targets, 1, Some(computer))
+    }));
+    let waking = engine.clone();
+    let _ = s.wake.set(Box::new(move |conversation: &str, e: &Event, may_start: &dyn Fn() -> bool| {
+        waking.from_linked(conversation, e, may_start)
+    }));
+    // Sends conversations a linked computer doesn't have yet, now and whenever one is paired.
+    engine.spawn_task(Box::pin(async {
+        loop {
+            if let (Some(s), Some(link)) = (SYNC.get(), crate::link_handle()) {
+                if link.enabled() && link.has_peers() {
+                    let peers: Vec<String> = link.status().peers.into_iter().map(|p| p.node_id).collect();
+                    for packet in s.catch_up(&peers) {
+                        let _ = link.send(PacketKind::Chat, packet);
+                    }
+                }
+            }
+            tokio::time::sleep(CATCH_UP_EVERY).await;
+        }
     }));
     let _ = SYNC.set(s);
     // Files anything saved in the inbox but not filed before the last quit or crash.
@@ -444,7 +616,8 @@ pub fn share(e: &Event) {
 }
 
 /// Sends what the human typed in the mirror `conversation` to the computer that owns it, and
-/// returns it as shown here. That computer answers; this one never runs a turn in a mirror.
+/// returns it as shown here. That computer answers, and so do this computer's AIs (see
+/// `Engine::from_linked`), whose answers go back to it.
 pub fn reply(conversation: &str, text: &str, targets: &[String]) -> Result<Event, String> {
     let s = SYNC.get().ok_or("linking isn't running")?;
     let link = crate::link_handle().filter(|l| l.enabled() && l.has_peers());
@@ -600,6 +773,111 @@ mod tests {
         let big = "a".repeat(MAX_TEXT + 10);
         let e = b.file(&at("big", 10 * MINUTE_MS, msg("gemini", &big)), "PC").unwrap().unwrap();
         assert!(e.text.chars().count() < MAX_TEXT + 200 && e.text.contains("cut short"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Records what the AIs on one computer were woken for: (conversation, sender, may start).
+    fn record_wakes(s: &Sync) -> Arc<Mutex<Vec<(String, String, bool)>>> {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let l = log.clone();
+        let _ = s.wake.set(Box::new(move |c: &str, e: &Event, may_start: &dyn Fn() -> bool| {
+            l.lock().unwrap().push((c.to_string(), e.sender.clone(), may_start()));
+        }));
+        log
+    }
+
+    #[test]
+    fn both_computers_ais_answer_in_one_conversation_without_looping() {
+        let root = std::env::temp_dir().join(format!("peer-sync-joint-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        *a.me.lock().unwrap() = "node-a".into();
+        *b.me.lock().unwrap() = "node-b".into();
+        let (a_woke, b_woke) = (record_wakes(&a), record_wakes(&b));
+
+        // The human asks on A; B's AIs are woken to answer it in their copy.
+        let conv = a.store.create("Plans").unwrap();
+        let ask = a.store.append(&conv.id, "human", "message", vec![], "How should we build it?").unwrap();
+        let mirror = b.file(&packet("node-a", "p1", a.outgoing(&ask).unwrap()), "PC").unwrap().unwrap().conversation;
+        assert_eq!(b_woke.lock().unwrap().clone(), vec![(mirror.clone(), "human".to_string(), true)]);
+
+        // B's Claude answers in the copy; the answer goes back to A's own conversation, named for B.
+        let answer = b.store.append(&mirror, "claude", "message", vec![], "Start with the supervisor.").unwrap();
+        let back = b.outgoing(&answer).expect("an answer made in a copy goes back to its owner");
+        let filed = a.file(&packet("node-b", "c1", back.clone()), "MacBook").unwrap().expect("filed on the owner");
+        assert_eq!((filed.conversation.as_str(), filed.sender.as_str(), filed.via.as_deref()), (conv.id.as_str(), "claude", Some("MacBook")));
+        assert!(a.file(&packet("node-b", "c1", back), "MacBook").unwrap().is_none(), "filed once");
+        assert!(a.outgoing(&filed).is_none(), "never echoed back to the computer it came from");
+        assert_eq!(a_woke.lock().unwrap().last().cloned(), Some((conv.id.clone(), "claude".to_string(), true)));
+
+        // A second answer from B for the same human message can't start another turn on A.
+        let more = b.store.append(&mirror, "gemini", "message", vec![], "Agreed.").unwrap();
+        a.file(&packet("node-b", "c2", b.outgoing(&more).unwrap()), "MacBook").unwrap().unwrap();
+        assert_eq!(a_woke.lock().unwrap().last().map(|w| w.2), Some(false), "one reaction per human message");
+
+        // A's own answer reaches B's copy; B may react once too, then no more.
+        let reply = a.store.append(&conv.id, "gpt", "message", vec![], "I'll take the tests.").unwrap();
+        b.file(&packet("node-a", "p2", a.outgoing(&reply).unwrap()), "PC").unwrap().unwrap();
+        let again = a.store.append(&conv.id, "claude", "message", vec![], "And I the docs.").unwrap();
+        b.file(&packet("node-a", "p3", a.outgoing(&again).unwrap()), "PC").unwrap().unwrap();
+        let reacts: Vec<bool> = b_woke.lock().unwrap().iter().skip(1).map(|w| w.2).collect();
+        assert_eq!(reacts, vec![true, false]);
+        // What was copied into B's copy never goes anywhere from B.
+        let copied = b.store.load(&mirror).unwrap();
+        assert!(copied.iter().filter(|e| e.via.is_some()).all(|e| b.outgoing(e).is_none()));
+
+        // The human's next message lets each side react once more.
+        let next = a.store.append(&conv.id, "human", "message", vec![], "Go ahead.").unwrap();
+        b.file(&packet("node-a", "p4", a.outgoing(&next).unwrap()), "PC").unwrap().unwrap();
+        let late = b.store.append(&mirror, "claude", "message", vec![], "On it.").unwrap();
+        a.file(&packet("node-b", "c3", b.outgoing(&late).unwrap()), "MacBook").unwrap().unwrap();
+        assert_eq!(a_woke.lock().unwrap().last().map(|w| w.2), Some(true));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn answers_only_go_to_the_owner_and_only_from_known_ais() {
+        let root = std::env::temp_dir().join(format!("peer-sync-owner-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        *a.me.lock().unwrap() = "node-a".into();
+        let conv = a.store.create("Plans").unwrap();
+        let ask = a.store.append(&conv.id, "human", "message", vec![], "hi").unwrap();
+        let mirror = b.file(&packet("node-a", "p1", a.outgoing(&ask).unwrap()), "PC").unwrap().unwrap().conversation;
+        let answer = b.store.append(&mirror, "claude", "message", vec![], "hello").unwrap();
+        let mut forged = b.outgoing(&answer).unwrap();
+        forged["owner"] = "node-x".into();
+        assert!(a.file(&packet("node-b", "c1", forged), "MacBook").unwrap().is_none(), "meant for another computer");
+        let mut stranger = b.outgoing(&b.store.append(&mirror, "claude", "message", vec![], "again").unwrap()).unwrap();
+        stranger["sender"] = "intruder".into();
+        assert!(a.file(&packet("node-b", "c2", stranger), "MacBook").unwrap().is_none(), "unknown sender");
+        let note = b.store.append(&mirror, "consilium", "system", vec![], "a note").unwrap();
+        assert!(b.outgoing(&note).is_none(), "status notes stay local");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_conversation_from_before_linking_reaches_each_computer_once() {
+        let root = std::env::temp_dir().join(format!("peer-sync-catchup-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        let conv = a.store.create("Old plans").unwrap();
+        a.store.append(&conv.id, "human", "message", vec![], "first").unwrap();
+        a.store.append(&conv.id, "claude", "message", vec![], "second").unwrap();
+        let sent = a.catch_up(&["node-b".to_string()]);
+        assert_eq!(sent.len(), 1);
+        assert!(a.catch_up(&["node-b".to_string()]).is_empty(), "sent once per computer");
+        assert_eq!(a.catch_up(&["node-b".to_string(), "node-c".to_string()]).len(), 1, "a newly paired computer gets it too");
+        b.file(&packet("node-a", "h1", sent[0].clone()), "PC").unwrap();
+        b.file(&packet("node-a", "h2", sent[0].clone()), "PC").unwrap();
+        let mirror = b.mirrors.lock().unwrap().map.values().next().cloned().unwrap();
+        assert_eq!(b.store.meta(&mirror).unwrap().title, "Old plans (PC)");
+        let texts: Vec<String> = b.store.load(&mirror).unwrap().into_iter().map(|e| e.text).collect();
+        assert_eq!(texts, vec!["first", "second"], "each message once");
+        assert!(b.catch_up(&["node-a".to_string()]).is_empty(), "copies aren't sent back");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

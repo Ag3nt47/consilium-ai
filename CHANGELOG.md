@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Linked computers work together**: the AIs on every linked computer now answer in the same
+  conversation. Your message reaches the other computer's AIs, their answers come back into your
+  conversation as "Claude (MacBook)" and so on, and each side's AIs read the other's answers. When
+  a side's AIs have finished, they get one more turn to react, at most once per message you send,
+  so two councils can never keep each other going. Conversations started before the computers were
+  linked, or before a new one was paired, are copied over in full, so its AIs can join in.
 - **Attachments**: attach documents, Word files, pictures, PDFs, code or anything else to a message:
   📎 in the message box, drag and drop onto the window, or paste a screenshot; `--attach FILE` and
   `/attach` in the terminal. Consilium keeps its own copy with the conversation. Text files, and the

@@ -30,6 +30,9 @@ use tokio_util::sync::CancellationToken;
 /// Upper bound on discussion rounds, whatever the UI asks for, so agents can't loop indefinitely.
 pub const MAX_ROUNDS: u32 = 8;
 
+/// Answers each AI gives in a turn started by a linked computer's message (see `from_linked`).
+const LINKED_ROUNDS: u32 = 1;
+
 /// How long Stop waits for a turn's AIs to shut down before letting it go anyway, so the
 /// conversation is never stuck as "still answering".
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
@@ -239,6 +242,9 @@ impl Engine {
             }
             let event = crate::peer_sync::reply(id, text, &targets)?;
             self.ui.event(&event);
+            // That computer answers it, and so do this computer's AIs, here in the copy; their
+            // answers go back to it (see `peer_sync`).
+            self.from_linked(id, &event, &|| true);
             return Ok(event);
         }
         if via.is_none() {
@@ -330,6 +336,43 @@ impl Engine {
         self.mine.lock().unwrap().insert(event.id.clone());
         self.ui.event(&event);
         Ok(event)
+    }
+
+    /// A message from a linked computer was filed in `id`: the human's message in another
+    /// computer's conversation copied here, or another computer's AI answering in either kind of
+    /// conversation (see `peer_sync`). A turn running here takes it in, the human's message as
+    /// `join` and an AI's as `heard`. Otherwise this computer's council members answer it in a
+    /// turn of their own, if `may_start` allows (it limits how often AIs alone can start one).
+    pub fn from_linked(self: &Arc<Self>, id: &str, event: &Event, may_start: &dyn Fn() -> bool) {
+        let members = self.config.get().members;
+        let mut running = self.running.lock().unwrap();
+        if let Some(r) = running.get(id) {
+            let taken = if event.sender == "human" {
+                let joined = r.council.join(event, &members);
+                if joined {
+                    self.journal.join(id, &r.turn, &members);
+                }
+                joined
+            } else {
+                r.council.heard(event)
+            };
+            if taken {
+                return;
+            }
+        }
+        if members.is_empty() || !may_start() {
+            return;
+        }
+        let lock = match running.get(id) {
+            // That turn has just ended; this one starts under the same lock.
+            Some(r) => r.lock.clone(),
+            None => match self.store.try_turn_lock(id) {
+                Some(l) => Arc::new(l),
+                // The other process is running this conversation's AIs; it reads this message.
+                None => return,
+            },
+        };
+        self.begin(&mut running, Pending::new(id, members, LINKED_ROUNDS), lock, event.seq);
     }
 
     /// The council members a message is for: the chosen ones, plus any it @mentions.

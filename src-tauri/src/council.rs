@@ -200,6 +200,26 @@ impl Council {
         true
     }
 
+    /// Another computer's AI said `message` in this conversation (see `peer_sync`). AIs waiting
+    /// for something new read it and may answer, within the answers they have left; unlike `join`
+    /// it gives no new answers and brings nobody in, so two computers can't keep each other going.
+    /// Returns false if the turn has already ended.
+    pub fn heard(&self, message: &Event) -> bool {
+        let s = &self.shared;
+        {
+            let mut st = s.state.lock().unwrap();
+            if st.closed || s.cancel.is_cancelled() {
+                return false;
+            }
+            // Keyed apart from this computer's own AI of the same name, so "Claude (MacBook)"
+            // counts as someone else to this computer's Claude.
+            let who = format!("{}@{}", message.sender, message.via.as_deref().unwrap_or("linked"));
+            st.latest.insert(who, message.seq);
+        }
+        s.wake.notify_waiters();
+        true
+    }
+
     /// Runs the turn to its end.
     pub async fn run(&self) {
         let shared = self.shared.clone();
@@ -738,6 +758,32 @@ mod tests {
         assert!(asked.contains(&("claude".into(), 1)), "claude answers for the first time");
         assert!(!asked.contains(&("gpt".into(), 1)), "gpt's first answer isn't repeated");
         assert_eq!(said(&ev).iter().filter(|(_, t)| t == "gpt #1").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn another_computers_answer_is_read_by_the_running_turn() {
+        let (store, c) = setup();
+        let mut f = fake(|id, _, ev| {
+            let remote = ev.iter().any(|e| e.via.as_deref() == Some("MacBook"));
+            Ok(format!("{id} {}", if remote { "read MacBook" } else { "alone" }))
+        });
+        f.delay.insert("gpt", 400);
+        let turn = Turn { conversation: c.clone(), targets: ids(&["gpt"]), rounds: 2, members: ids(&["gpt"]) };
+        let council = Arc::new(Council::new(turn, store.clone(), Arc::new(Bench::new()), Arc::new(f), CancellationToken::new()));
+        let runner = council.clone();
+        let done = tokio::spawn(async move { runner.run().await });
+        // While ChatGPT is answering, the MacBook's Claude answers; ChatGPT reads it next.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let remote = store.append_imported(&c, "claude", "message", vec![], "from the Mac", Some("MacBook".into())).unwrap();
+        assert!(council.heard(&remote));
+        tokio::time::timeout(Duration::from_secs(10), done).await.expect("the turn ends").unwrap();
+        let s = said(&store.load(&c).unwrap());
+        assert_eq!(
+            s.iter().filter(|(a, _)| a == "gpt").map(|(_, t)| t.as_str()).collect::<Vec<_>>(),
+            vec!["gpt alone", "gpt read MacBook"],
+            "no extra answers beyond the turn's two: {s:?}"
+        );
+        assert!(!council.heard(&remote), "an ended turn starts nothing");
     }
 
     #[tokio::test]
