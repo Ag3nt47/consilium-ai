@@ -540,7 +540,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: in a chat with Auto-run this chat on, every REQUEST is approved automatically about 20 seconds after it is asked (the human can click Deny first), as often as needed, and auto-continue no longer pauses after quiet rounds there. So in those chats, ask with REQUEST and carry on once the approval note arrives; nothing waits for the human.";
+const WHATS_NEW: &str = "What's new: Zero Breach auto-remove now skips open browsers to prevent profile corruption, and guides resetting any hijacked search engine. Also: in auto-run chats, every REQUEST is approved automatically.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs

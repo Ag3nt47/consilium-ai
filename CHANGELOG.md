@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Zero Breach auto-remove skips running browsers**: extension cleanup is deferred while target
+  browsers (Chrome, Edge, Brave, Vivaldi, Arc, Chromium) are open across macOS, Windows, and Linux
+  to avoid profile corruption and orphaned extension records.
+- **Extension remediation guidance**: scan summaries and findings advise confirming removal at
+  `chrome://extensions` and resetting any hijacked search engine.
+
 - **Auto-continue keeps going in auto-run chats**: in a chat with "Auto-run this chat" on,
   auto-continue no longer pauses after two rounds that changed nothing on the task board, since
   commands there report back by themselves. It still stops after 8 rounds, on an unanswered
