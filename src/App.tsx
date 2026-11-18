@@ -2003,6 +2003,7 @@ export default function App() {
   const typedActivity = TYPED_THEMES.has(prefs.theme);
 
   // Every request and shell command still waiting for the human, in chat order.
+  const autoApproves = chatAutoRun && (council?.auto_continue ?? true);
   const pendingItems = useMemo<PendingItem[]>(() => {
     const req = new Set(unanswered);
     const cmd = new Set(unansweredCmds);
@@ -2016,6 +2017,10 @@ export default function App() {
       const found: [number, PendingItem][] = [];
       for (const [line, text] of e.text.split("\n").entries()) {
         const key = requestKey(e.id, line);
+        // In an auto-run chat Consilium approves ordinary requests itself when the turn ends
+        // (autocontinue.rs), so they don't wait for the human. Install and administrator
+        // requests still need the human's own click, so they stay.
+        if (autoApproves && !/(INSTALL|ELEVATED)_COMMAND_JSON:/.test(text)) continue;
         if (req.has(key)) found.push([line, { kind: "request", key, event: e, text: /^\s*REQUEST:\s*(.*)$/i.exec(text)?.[1] ?? text }]);
       }
       fencedBlocks(e.text).forEach((fence, index) => {
@@ -2025,7 +2030,7 @@ export default function App() {
       found.sort((a, b) => a[0] - b[0]).forEach(([, item]) => out.push(item));
     }
     return out;
-  }, [events, unanswered, unansweredCmds, requestFloor]);
+  }, [events, unanswered, unansweredCmds, requestFloor, autoApproves]);
   const totalUnanswered = pendingItems.length;
 
   // The tray shows one item at a time. When the shown one is answered, the next one slides in.
@@ -2738,12 +2743,6 @@ export default function App() {
             people={[{ id: "human", name: "You" }, ...members.map((m) => ({ id: m.id, name: m.name }))]}
           />
         </div>
-        {current && chatAutoRun && (
-          <button type="button" className="autorun-badge" onClick={stopAutoRun}
-            title="Every command box in this chat runs without asking. Click to turn auto-run off.">
-            Auto-run on (click to stop)
-          </button>
-        )}
         {autoRunAsk && (
           <div className="autorun-overlay" role="dialog" aria-modal="true">
             <div className="autorun-dialog">
@@ -2756,7 +2755,7 @@ export default function App() {
               <p>
                 Anything that reaches this chat can propose a command, such as a pasted log or a web page an AI
                 reads, and it will run without you seeing it first. Only this chat is affected: every new chat
-                starts with auto-run off. Turn it off any time with the red Auto-run badge.
+                starts with auto-run off. Turn it off any time with the red Auto-run button next to Request App Update.
               </p>
               <div className="autorun-buttons">
                 <button type="button" className="btn deny" onClick={() => setAutoRunAsk(null)}>Cancel</button>
@@ -2949,6 +2948,16 @@ export default function App() {
                 title={`Pause the AIs, install ${staged.version} (now ${staged.current}) and restart. Their work resumes after the restart.`}
               >
                 {updating ? "Updating…" : `Update Now · ${staged.version}`}
+              </button>
+            )}
+            {current && chatAutoRun && (
+              <button
+                type="button"
+                className="btn small autorun-toggle"
+                onClick={stopAutoRun}
+                title="Every command box in this chat runs without asking, and Consilium approves ordinary requests for you. Click to turn auto-run off."
+              >
+                Auto-run on · stop
               </button>
             )}
             <button

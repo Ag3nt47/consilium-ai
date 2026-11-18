@@ -3712,7 +3712,8 @@ button.attachment {
 
 /* "Auto-run this chat" */
 .btn.small-btn.autorun-chat { border-color: #d92d20; color: #f04438; }
-.autorun-badge { position: fixed; right: 16px; bottom: 96px; z-index: 60; padding: 6px 12px; border-radius: 999px; border: 1px solid #b42318; background: #d92d20; color: #fff; font-weight: 600; cursor: pointer; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }
+.btn.small.autorun-toggle { border-color: #b42318; background: #d92d20; color: #fff; font-weight: 600; }
+.btn.small.autorun-toggle:hover { background: #b42318; }
 .autorun-overlay { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.55); }
 .autorun-dialog { max-width: 540px; margin: 16px; padding: 20px 22px; border-radius: 10px; background: #1f1f1f; color: #f5f5f5; border: 2px solid #d92d20; }
 .autorun-dialog h3 { margin: 0 0 10px; color: #f04438; }
