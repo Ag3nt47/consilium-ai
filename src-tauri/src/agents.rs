@@ -160,6 +160,16 @@ pub fn by_id(id: &str) -> Option<&'static Agent> {
     builtin(id).or_else(|| crate::customai::by_id(id))
 }
 
+/// Whether this agent is a local offline model (Ollama, llama.cpp, etc.) rather than a cloud model.
+pub fn is_local(agent: &Agent) -> bool {
+    agent.provider.is_some_and(|p| p.local)
+}
+
+/// Whether the agent identified by `id` is a local offline model.
+pub fn is_local_id(id: &str) -> bool {
+    by_id(id).is_some_and(is_local)
+}
+
 fn base_name(kind: Kind) -> &'static str {
     match kind {
         Kind::Codex => "codex",
@@ -2861,5 +2871,14 @@ exit 1"#,
                 .unwrap(),
             "1/1/0"
         );
+    }
+
+    #[test]
+    fn built_in_flagship_agents_are_not_local() {
+        for id in ["gpt", "claude", "gemini"] {
+            let a = by_id(id).expect("builtin agent exists");
+            assert!(!is_local(a), "{id} should be cloud/flagship, not local");
+            assert!(!is_local_id(id), "{id} id check should not be local");
+        }
     }
 }

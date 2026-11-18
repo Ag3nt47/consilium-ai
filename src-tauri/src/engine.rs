@@ -267,6 +267,13 @@ impl Engine {
         let off = crate::switched::off(self.store.dir(), id);
         let stopped: Vec<String> = targets.iter().filter(|t| off.contains(t)).cloned().collect();
         let targets: Vec<String> = targets.into_iter().filter(|t| !off.contains(t)).collect();
+        // If the human message didn't explicitly @mention any agent, apply AI tiering:
+        // Tier 1 flagship models take the work first; Tier 2 local models act as standby fallback.
+        let targets = if prompt::mentioned_agents(text).is_empty() {
+            self.tier_targets(&targets)
+        } else {
+            targets
+        };
         let rounds = rounds.clamp(1, MAX_ROUNDS);
         let mut running = self.running.lock().unwrap();
         let event = self.store.append_with_attachments_via(id, targets.clone(), text, attachments, via)?;
@@ -400,6 +407,41 @@ impl Engine {
     /// those only, whoever is ticked in the box; otherwise it goes to the ticked ones.
     fn addressed(&self, targets: Vec<String>, text: &str) -> Vec<String> {
         route(targets, prompt::mentioned_agents(text), |a| self.config.is_member(a))
+    }
+
+    /// Whether an agent can answer right now: known, installed, and not benched / out of quota.
+    pub fn is_available(&self, agent_id: &str) -> bool {
+        let Some(a) = crate::agents::by_id(agent_id) else { return false };
+        crate::agents::installed(a) && self.bench.until(agent_id, store::now_ms()).is_none()
+    }
+
+    /// Tiered candidate selection: flagship paid models take work first; local offline models act
+    /// as silent standby fallback when all active flagship models exhaust their quota or rate limits.
+    pub fn tier_targets(&self, candidates: &[String]) -> Vec<String> {
+        let (flagship, local): (Vec<String>, Vec<String>) = candidates
+            .iter()
+            .cloned()
+            .partition(|id| !crate::agents::is_local_id(id));
+
+        let available_flagship: Vec<String> = flagship
+            .into_iter()
+            .filter(|id| self.is_available(id))
+            .collect();
+
+        if !available_flagship.is_empty() {
+            return available_flagship;
+        }
+
+        let available_local: Vec<String> = local
+            .into_iter()
+            .filter(|id| self.is_available(id))
+            .collect();
+
+        if !available_local.is_empty() {
+            available_local
+        } else {
+            candidates.to_vec()
+        }
     }
 
     /// Sets up the turn `pending` and runs it in the background. `cursor` is the newest event it
@@ -666,14 +708,15 @@ don't repeat changes that are already made.",
             .into_iter()
             .filter(|m| !crate::switched::is_off(self.store.dir(), conversation, m))
             .collect();
+        let targets = self.tier_targets(&members);
         let mut running = self.running.lock().unwrap();
-        let e = self.store.append(conversation, council::CONSILIUM, "system", members.clone(), text)?;
+        let e = self.store.append(conversation, council::CONSILIUM, "system", targets.clone(), text)?;
         self.ui.event(&e);
-        if members.is_empty() || running.contains_key(conversation) {
+        if targets.is_empty() || running.contains_key(conversation) {
             return Ok(e);
         }
         let Some(lock) = self.store.try_turn_lock(conversation) else { return Ok(e) };
-        self.begin(&mut running, Pending::new(conversation, members, 1), Arc::new(lock), e.seq);
+        self.begin(&mut running, Pending::new(conversation, targets, 1), Arc::new(lock), e.seq);
         Ok(e)
     }
 
@@ -1295,6 +1338,24 @@ mod tests {
         assert!(!app.running_here(&conv), "the terminal's turn is left to the terminal");
         until_idle(&[&app, &term], &conv).await;
         assert_eq!(said(&app, &conv).len(), 2, "one answer, not two");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tier_targets_prefers_flagship_and_falls_back_to_local_when_exhausted() {
+        let (app, _term, dir) = pair(0);
+        let candidates = vec!["gpt".to_string(), "claude".to_string()];
+        let selected = app.tier_targets(&candidates);
+        assert!(!selected.is_empty());
+        assert!(selected.iter().all(|id| !crate::agents::is_local_id(id)));
+
+        // Bench all flagship models
+        let now = crate::store::now_ms();
+        app.bench.bench("gpt", now + 100_000, true);
+        app.bench.bench("claude", now + 100_000, true);
+
+        let exhausted = app.tier_targets(&candidates);
+        assert_eq!(exhausted, candidates, "falls back cleanly when all candidates are benched");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

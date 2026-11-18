@@ -60,17 +60,23 @@ impl Bench {
     }
 
     /// After a new usage reading: an AI already sitting out whose plan is used up until later
-    /// stays out until then; one whose reading shows usage left again is let back in.
+    /// stays out until then; an AI whose quota has reached 0% is benched; one whose reading
+    /// shows usage left again is let back in.
     pub fn update_from(&self, snapshot: &crate::usage::Snapshot, now: u64) {
         let mut map = self.until.lock().unwrap();
-        for (agent, until) in map.iter_mut() {
+        for (agent, u) in &snapshot.agents {
             match exhausted_until(snapshot, agent, now) {
                 Some(t) => {
-                    *until = (*until).max(t);
+                    let entry = map.entry(agent.clone()).or_insert(t);
+                    *entry = (*entry).max(t);
                     self.known.lock().unwrap().insert(agent.clone());
                 }
-                None if snapshot.agents.get(agent).is_some_and(|u| plan_meter(u).0 > 0) && *until > now + DEFAULT_COOLDOWN_MS => {
-                    *until = now
+                None if plan_meter(u).0 > 0 => {
+                    if let Some(until) = map.get_mut(agent) {
+                        if *until > now + DEFAULT_COOLDOWN_MS {
+                            *until = now;
+                        }
+                    }
                 }
                 None => {}
             }
@@ -86,7 +92,16 @@ impl Bench {
                 map.remove(agent);
                 None
             }
-            None => None,
+            None => {
+                if let Some(data) = &self.data {
+                    if let Some(t) = exhausted_until(&crate::usage::load(data), agent, now) {
+                        map.insert(agent.to_string(), t);
+                        self.known.lock().unwrap().insert(agent.to_string());
+                        return Some(t);
+                    }
+                }
+                None
+            }
         }
     }
 
