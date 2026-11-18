@@ -535,7 +535,9 @@ impl Engine {
         }
         let events = self.store.load(conv).unwrap_or_default();
         let board = crate::tasks::load(self.store.dir(), conv);
-        match crate::autocontinue::decide(&events, &board, crate::auto_run::is_on(self.store.dir(), conv)) {
+        let auto_run = crate::auto_run::is_on(self.store.dir(), conv);
+        let pending = auto_run && crate::autocontinue::pending_boxes(&events, crate::store::now_ms());
+        match crate::autocontinue::decide_with(&events, &board, auto_run, pending) {
             crate::autocontinue::Decision::Continue(note) => {
                 let _ = self.note_for_council(conv, &note);
             }

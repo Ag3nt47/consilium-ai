@@ -68,11 +68,61 @@ fn unanswered(since_human: &[Event]) -> Vec<String> {
     asked
 }
 
+/// How Consilium words a run, or a Deny, of a command box when it reports back in the human's
+/// name (`runcmd::report` and the Deny button). That isn't the human writing, so it doesn't
+/// restart the round count.
+pub const RAN: &str = "Ran command from ";
+pub const DENIED: &str = "Denied command from ";
+/// A box with no result after this long has timed out (`runcmd::TIMEOUT` is 10 minutes), been
+/// skipped or been left for the human, so it stops holding rounds back.
+pub const PENDING_MS: u64 = 12 * 60 * 1000;
+/// Boxes older than this aren't run when Auto-run is turned on later; they wait for a click.
+pub const CATCH_UP_MS: u64 = 30 * 60 * 1000;
+
+fn is_human_message(e: &Event) -> bool {
+    e.sender == "human" && e.kind == "message" && !e.text.starts_with(RAN) && !e.text.starts_with(DENIED)
+}
+
+/// Where the events since the human last wrote begin.
+pub fn since_human_start(events: &[Event]) -> usize {
+    events.iter().rposition(is_human_message).map_or(0, |i| i + 1)
+}
+
+/// Command boxes from AIs on this computer in `events[from..]`, under `max_age` ms old, that can
+/// run here and have neither run nor been denied (a running one counts too): `(event id, index)`.
+pub fn waiting_boxes(events: &[Event], from: usize, now: u64, max_age: u64) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    for e in events.iter().skip(from) {
+        if e.kind != "message" || e.sender == "human" || e.sender == CONSILIUM || e.via.is_some() {
+            continue;
+        }
+        if now.saturating_sub(e.ts) >= max_age {
+            continue;
+        }
+        for (i, b) in crate::runcmd::fenced_blocks(&e.text).iter().enumerate() {
+            if b.closed && crate::runcmd::check(b).is_ok() && !crate::runcmd::handled(events, &e.id, i) {
+                out.push((e.id.clone(), i));
+            }
+        }
+    }
+    out
+}
+
+/// Whether an AI's command box is running, or about to, and will report back by itself.
+pub fn pending_boxes(events: &[Event], now: u64) -> bool {
+    !waiting_boxes(events, 0, now, PENDING_MS).is_empty()
+}
+
 pub fn decide(events: &[Event], board: &Board, auto_run: bool) -> Decision {
+    decide_with(events, board, auto_run, false)
+}
+
+/// `decide`, knowing whether a command box is still due to report back (`pending_boxes`).
+pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pending: bool) -> Decision {
     let open: Vec<_> = board.tasks.iter().filter(|t| matches!(t.status, Status::Todo | Status::Doing)).collect();
     let since_human = events
         .iter()
-        .rposition(|e| e.sender == "human" && e.kind == "message")
+        .rposition(is_human_message)
         .map_or(events, |i| &events[i + 1..]);
     let waiting = unanswered(since_human);
     if open.is_empty() && (waiting.is_empty() || !auto_run) {
@@ -86,6 +136,11 @@ pub fn decide(events: &[Event], board: &Board, auto_run: bool) -> Decision {
     if !waiting.is_empty() {
         let approved = waiting.iter().map(|r| format!("{APPROVED}{}", r.trim())).collect::<Vec<_>>().join("\n");
         return Decision::Continue(format!("{PREFIX}: {AUTO_APPROVED}:\n{approved}\nGo ahead with what you asked."));
+    }
+    // In an auto-run chat a box that is running, or about to, reports back by itself and starts
+    // its AI's next turn; a round now would only have every AI say it's waiting.
+    if auto_run && boxes_pending {
+        return Decision::Stop;
     }
     let notes: Vec<&Event> = since_human.iter().filter(|e| is_auto_note(e) && !e.text.contains(AUTO_APPROVED)).collect();
     // A pause note is the last word until the human writes again.
@@ -151,6 +206,52 @@ mod tests {
 
     fn auto(seq: u64, ts: u64) -> Event {
         ev(seq, ts, CONSILIUM, "system", &format!("{PREFIX} (round x)"), vec![])
+    }
+
+    #[test]
+    fn command_boxes_hold_rounds_back_only_while_they_are_due_to_report() {
+        let events = vec![ev(1, 10, "human", "message", "go", vec![]), boxed(2, 20)];
+        let b = board(Status::Doing, 15);
+        let now = 20 + 1000;
+        assert!(pending_boxes(&events, now));
+        assert_eq!(decide_with(&events, &b, true, true), Decision::Stop, "an auto-run chat waits for the box");
+        assert!(matches!(decide_with(&events, &b, false, true), Decision::Continue(_)), "a normal chat isn't held back");
+        let mut done = events.clone();
+        done.push(ran(3, 30, "e2"));
+        assert!(!pending_boxes(&done, now), "a box with a result is finished");
+        assert!(!pending_boxes(&events, 20 + PENDING_MS), "a box that never reported stops holding rounds back");
+        let notes = vec![ev(1, 10, "claude", "message", "plan\n```text\nnot a command\n```", vec![])];
+        assert!(!pending_boxes(&notes, 20), "a text block isn't a command");
+    }
+
+    #[test]
+    fn command_results_and_denials_dont_restart_the_round_count() {
+        let mut events = vec![ev(1, 10, "human", "message", "go", vec![])];
+        for i in 0..MAX_ROUNDS as u64 {
+            events.push(auto(2 + 2 * i, 20 + 2 * i));
+            events.push(ran(3 + 2 * i, 21 + 2 * i, "x"));
+        }
+        events.push(ev(100, 100, "human", "message", &format!("{DENIED}Claude's message.\n(command ref x#1)"), vec![]));
+        assert!(matches!(decide(&events, &board(Status::Doing, 1000), false), Decision::Pause(t) if t.contains("rounds on its own")));
+    }
+
+    #[test]
+    fn catch_up_picks_only_waiting_boxes_since_the_human_wrote() {
+        let events = vec![boxed(1, 5), ev(2, 10, "human", "message", "go", vec![]), boxed(3, 20), boxed(4, 30), ran(5, 40, "e4")];
+        let from = since_human_start(&events);
+        assert_eq!(waiting_boxes(&events, from, 50, CATCH_UP_MS), vec![("e3".to_string(), 0)]);
+        assert!(waiting_boxes(&events, from, 20 + CATCH_UP_MS, CATCH_UP_MS).is_empty(), "too old to run unasked");
+    }
+
+    const SHELL: &str = if cfg!(windows) { "powershell" } else { "bash" };
+
+    fn boxed(seq: u64, ts: u64) -> Event {
+        ev(seq, ts, "claude", "message", &format!("checking\n```{SHELL}\nls\n```"), vec![])
+    }
+
+    fn ran(seq: u64, ts: u64, of: &str) -> Event {
+        let text = format!("{RAN}Claude's message (exit 0, succeeded, 1.0 s):\nok\n{}", crate::runcmd::reference(of, 0));
+        ev(seq, ts, "human", "message", &text, vec![])
     }
 
     #[test]
