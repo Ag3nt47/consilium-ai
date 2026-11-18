@@ -987,7 +987,8 @@ impl Link {
                 let their_nonce = h.get("nonce").and_then(Value::as_str).unwrap_or_default().to_string();
                 self.learn_addrs(&peer.node_id, h, Some(from));
                 let (me, _) = self.me();
-                let reply = self.hello(&me, &key, &their_nonce, "")?;
+                let mine = random_hex(16);
+                let reply = self.hello(&me, &key, &their_nonce, &mine)?;
                 let line = seal(&me, &key, &reply)?;
                 w.write_all(format!("{line}\n").as_bytes()).await.map_err(|e| e.to_string())?;
                 self.session(peer, key, r, w, from.to_string(), None, token).await;
