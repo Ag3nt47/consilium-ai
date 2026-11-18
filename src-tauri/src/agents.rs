@@ -2518,7 +2518,8 @@ mod plan_tests {
         assert!(has(&args(Kind::Antigravity, Access::Edit), &["--mode", "accept-edits"]));
         let read_rule = r#"{"permissions":{"allow":["read_file(*)"]}}"#;
         assert!(has(&args(Kind::Antigravity, Access::Read), &["--settings", read_rule]));
-        assert!(has(&args(Kind::Antigravity, Access::Edit), &["--settings", read_rule]));
+        let edit_rule = r#"{\"permissions\":{\"allow\":[\"read_file(*)\",\"edit_file(*)\",\"write_file(*)\"]}}\"#;
+          assert!(has(&args(Kind::Antigravity, Access::Edit), &["--settings", edit_rule]));
         assert!(!args(Kind::Antigravity, Access::Chat).iter().any(|x| x == "--settings"));
         assert!(!args(Kind::Antigravity, Access::Own).iter().any(|x| x == "--settings"));
         assert_eq!(
