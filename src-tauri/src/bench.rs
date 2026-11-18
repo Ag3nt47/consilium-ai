@@ -23,6 +23,10 @@ pub struct Bench {
     known: Mutex<HashSet<String>>,
     /// Consilium's data folder, whose usage.json says when each AI's plan limits reset.
     data: Option<PathBuf>,
+    /// Agents taken off the bench (a successful answer, or Retry in the UI) since the last usage
+    /// reading. The saved reading may still show them used up, so it mustn't bench them again
+    /// until a new reading arrives.
+    cleared: Mutex<HashSet<String>>,
 }
 
 impl Bench {
@@ -44,6 +48,7 @@ impl Bench {
         let later = self.data.as_ref().and_then(|d| exhausted_until(&crate::usage::load(d), agent, now));
         let until = later.map_or(until_ms, |t| t.max(until_ms));
         self.until.lock().unwrap().insert(agent.to_string(), until);
+        self.cleared.lock().unwrap().remove(agent);
         let known = reported || later.is_some();
         let mut set = self.known.lock().unwrap();
         if known {
@@ -63,6 +68,7 @@ impl Bench {
     /// stays out until then; an AI whose quota has reached 0% is benched; one whose reading
     /// shows usage left again is let back in.
     pub fn update_from(&self, snapshot: &crate::usage::Snapshot, now: u64) {
+        self.cleared.lock().unwrap().clear();
         let mut map = self.until.lock().unwrap();
         for (agent, u) in &snapshot.agents {
             match exhausted_until(snapshot, agent, now) {
@@ -92,6 +98,7 @@ impl Bench {
                 map.remove(agent);
                 None
             }
+            None if self.cleared.lock().unwrap().contains(agent) => None,
             None => {
                 if let Some(data) = &self.data {
                     if let Some(t) = exhausted_until(&crate::usage::load(data), agent, now) {
@@ -108,6 +115,7 @@ impl Bench {
     pub fn clear(&self, agent: &str) {
         self.until.lock().unwrap().remove(agent);
         self.known.lock().unwrap().remove(agent);
+        self.cleared.lock().unwrap().insert(agent.to_string());
     }
 }
 
@@ -300,5 +308,25 @@ mod tests {
         // Usage back early (an early reset): it's let back in.
         b.update_from(&usage(100, 100, friday), NOW);
         assert_eq!(b.until("gpt", NOW + 1), None);
+    }
+
+    #[test]
+    fn retry_or_an_answer_isnt_undone_by_the_saved_reading_until_a_new_one_arrives() {
+        let now = crate::store::now_ms();
+        let reset = now + 3 * 86_400_000;
+        let dir = std::env::temp_dir().join(format!("consilium-bench-{}-{now}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut snap = usage(0, 0, reset);
+        for w in snap.agents.get_mut("gpt").unwrap().overall.as_mut().unwrap().windows.iter_mut() {
+            w.resets_at = w.resets_at.map(|_| reset);
+        }
+        std::fs::write(dir.join("usage.json"), serde_json::to_vec(&snap).unwrap()).unwrap();
+        let b = Bench::with_usage(dir.clone());
+        assert_eq!(b.until("gpt", now), Some(reset), "the saved reading benches a used-up AI");
+        b.clear("gpt");
+        assert_eq!(b.until("gpt", now), None, "Retry lets it be asked now, despite the saved reading");
+        b.update_from(&snap, now);
+        assert_eq!(b.until("gpt", now), Some(reset), "a new reading that still shows it used up benches it again");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
