@@ -558,13 +558,21 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
             st.waiting.remove(&id);
             if failed && st.live.is_empty() && !st.paused && !s.cancel.is_cancelled() {
                 let now = now_ms();
-                let pick = s
+                let available = |a: &&'static agents::Agent| s.bench.until(a.id, now).is_none() && s.host.installed(a);
+                let unjoined: Vec<&'static agents::Agent> = s
                     .turn
                     .members
                     .iter()
                     .filter(|m| !st.joined.contains(*m))
                     .filter_map(|m| agents::by_id(m))
-                    .find(|a| s.bench.until(a.id, now).is_none() && s.host.installed(a));
+                    .collect();
+                // Tier 1 (cloud flagship) models take priority as stand-ins; Tier 2 (local models) act as fallback.
+                let pick = unjoined
+                    .iter()
+                    .filter(|a| !agents::is_local(a))
+                    .find(|a| available(a))
+                    .or_else(|| unjoined.iter().filter(|a| agents::is_local(a)).find(|a| available(a)))
+                    .copied();
                 if let Some(a) = pick {
                     st.live.insert(a.id.to_string());
                     st.joined.insert(a.id.to_string());
