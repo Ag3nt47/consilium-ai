@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Auto-run catches up**: turning on "Auto-run this chat", and every start of Consilium, runs that
+  chat's command boxes from the last two hours that were waiting for a click (posted while it was
+  off, or missed during a restart), one at a time, oldest first. A box that was run, denied or
+  already started never runs again.
+- **Auto-continue doesn't nag AIs that are waiting on a command**: when every open task's owner has a
+  command box still waiting or running, auto-continue stops quietly; the box's result starts the
+  next turn. Command results no longer count as the human writing, so they don't restart the
+  8-round count.
 - **Zero Breach auto-remove skips running browsers**: extension cleanup is deferred while target
   browsers (Chrome, Edge, Brave, Vivaldi, Arc, Chromium) are open across macOS, Windows, and Linux
   to avoid profile corruption and orphaned extension records.

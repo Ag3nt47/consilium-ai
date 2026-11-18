@@ -68,12 +68,24 @@ fn unanswered(since_human: &[Event]) -> Vec<String> {
     asked
 }
 
+/// Command boxes older than this no longer hold back auto-continue for their AI.
+const BOX_WAIT_MS: u64 = 24 * 60 * 60 * 1000;
+
 pub fn decide(events: &[Event], board: &Board, auto_run: bool) -> Decision {
     let open: Vec<_> = board.tasks.iter().filter(|t| matches!(t.status, Status::Todo | Status::Doing)).collect();
+    // Command results and Deny clicks arrive as the human's messages, but aren't the human
+    // writing: they don't restart the round count.
     let since_human = events
         .iter()
-        .rposition(|e| e.sender == "human" && e.kind == "message")
+        .rposition(|e| e.sender == "human" && e.kind == "message" && !crate::runcmd::is_command_report(e))
         .map_or(events, |i| &events[i + 1..]);
+    // Every open task is owned by an AI with a command box still waiting or running: another round
+    // would only have them say they are waiting. The box's result starts the next turn by itself.
+    let newest = events.last().map_or(0, |e| e.ts);
+    let boxed = crate::runcmd::senders_with_open_boxes(events, newest.saturating_sub(BOX_WAIT_MS));
+    if !open.is_empty() && open.iter().all(|t| t.owner.as_ref().is_some_and(|o| boxed.contains(o))) {
+        return Decision::Stop;
+    }
     let waiting = unanswered(since_human);
     if open.is_empty() && (waiting.is_empty() || !auto_run) {
         return Decision::Stop;
@@ -211,6 +223,27 @@ mod tests {
         ];
         let Decision::Continue(note) = decide(&asked, &b, true) else { panic!("an auto-run chat approves it") };
         assert!(note.contains("auto-approved") && note.lines().any(|l| l == "Approved: ok?"), "{note}");
+    }
+
+    #[test]
+    fn waits_quietly_when_every_owner_is_waiting_on_a_command_box() {
+        let lang = if cfg!(windows) { "powershell" } else { "bash" };
+        let boxed = ev(2, 20, "claude", "message", &format!("```{lang}\necho hi\n```"), vec![]);
+        let events = vec![ev(1, 10, "human", "message", "go", vec![]), boxed];
+        assert_eq!(decide(&events, &board(Status::Doing, 15), true), Decision::Stop, "claude owns the task and waits on its box");
+        // Once it has run, the result doesn't count as the human writing, and work goes on.
+        let mut ran = events.clone();
+        ran.push(ev(
+            3,
+            30,
+            "human",
+            "message",
+            &format!("Ran command from Claude's message (exit 0, succeeded, 0.1 s):\n```text\nhi\n```\n{}", crate::runcmd::reference("e2", 0)),
+            vec![],
+        ));
+        ran.push(auto(4, 40));
+        let Decision::Continue(note) = decide(&ran, &board(Status::Doing, 15), true) else { panic!("should continue") };
+        assert!(note.contains("round 2 of"), "the result didn't restart the count: {note}");
     }
 
     #[test]

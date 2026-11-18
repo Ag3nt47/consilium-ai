@@ -240,6 +240,10 @@ fn set_ai_on(state: State<AppState>, conversation: String, agent: String, on: bo
 #[tauri::command]
 fn set_chat_auto_run(state: State<AppState>, conversation: String, on: bool) -> Result<bool, String> {
     let now = auto_run::set(state.engine.store.dir(), &conversation, on)?;
+    if now {
+        // Boxes posted while it was off would otherwise wait for a click forever.
+        catch_up_auto_run(state.engine.clone(), &conversation);
+    }
     let text = if now {
         "Auto-run is on in this chat: every command box an AI posts here runs by itself, including ones that delete, overwrite, install or need admin rights, and the output goes back to it. The human can turn it off with the red Auto-run badge."
     } else {
@@ -1004,6 +1008,48 @@ fn auto_run_commands(engine: Arc<Engine>, e: &Event) {
 }
 
 /// Runs the chosen command boxes of `e` one after another, each reporting back as Run does.
+/// How far back the catch-up looks for command boxes nobody has run.
+const CATCH_UP_MS: u64 = 2 * 60 * 60 * 1000;
+
+/// In an auto-run chat, runs the command boxes from this council's AIs on this computer, from the
+/// last two hours, that nobody has run or denied and that never started here: boxes posted while
+/// Auto-run was off, or missed while Consilium was closed or restarting. Called when Auto-run is
+/// turned on and after every start. One at a time, oldest first, as `run_in_turn` does; each result
+/// goes back to its AI.
+fn catch_up_auto_run(engine: Arc<Engine>, conversation: &str) {
+    if !auto_run::is_on(engine.store.dir(), conversation) || peer_sync::is_mirror(conversation) {
+        return;
+    }
+    let Ok(events) = engine.store.load(conversation) else { return };
+    let since = store::now_ms().saturating_sub(CATCH_UP_MS);
+    let receipts = engine.data.join("run-started");
+    let mut queue: Vec<(String, usize)> = Vec::new();
+    for e in events.iter().filter(|e| {
+        e.ts >= since && e.kind == "message" && e.sender != "human" && e.sender != "consilium" && e.via.is_none() && engine.config.is_member(&e.sender)
+    }) {
+        for (i, b) in runcmd::fenced_blocks(&e.text).iter().enumerate() {
+            if b.closed && runcmd::check(b).is_ok() && !runcmd::handled(&events, &e.id, i) && !runcmd::was_started(&receipts, conversation, &e.id, i) {
+                queue.push((e.id.clone(), i));
+            }
+        }
+    }
+    if queue.is_empty() {
+        return;
+    }
+    let _ = engine.note(
+        conversation,
+        &format!("Auto-run is catching up: running {} command box(es) that were waiting for a click, oldest first.", queue.len()),
+    );
+    let conversation = conversation.to_string();
+    tauri::async_runtime::spawn(async move {
+        for (event_id, index) in queue {
+            if let Err(err) = run_block(engine.clone(), &conversation, &event_id, index).await {
+                eprintln!("consilium: auto-run catch-up skipped {event_id}#{index}: {err}");
+            }
+        }
+    });
+}
+
 fn run_in_turn(engine: Arc<Engine>, e: &Event, runnable: Vec<usize>) {
     if runnable.is_empty() {
         return;
@@ -1337,6 +1383,16 @@ pub fn run() {
             start_auto_install(app.handle().clone(), app.state::<AppState>().engine.clone());
             // Tests every route to the linked computers after each start and posts the result.
             stress_test_after_start(app.state::<AppState>().engine.clone());
+            // Auto-run chats: run boxes missed while Consilium was closed, once resumed turns settle.
+            {
+                let engine = app.state::<AppState>().engine.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                    for c in engine.store.list() {
+                        catch_up_auto_run(engine.clone(), &c.id);
+                    }
+                });
+            }
             // Falls back to the built-in page if an instantly applied one never starts.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {

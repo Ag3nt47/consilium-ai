@@ -348,6 +348,36 @@ fn receipt_path(dir: &Path, conversation: &str, event_id: &str, index: usize) ->
     dir.join(format!("{}_{}_{index}", safe(conversation), safe(event_id)))
 }
 
+/// Whether this block was ever started on this computer (its receipt exists).
+pub fn was_started(dir: &Path, conversation: &str, event_id: &str, index: usize) -> bool {
+    receipt_path(dir, conversation, event_id, index).exists()
+}
+
+/// A human message that is only a command's result or a Deny click ("Ran command from…",
+/// "Denied command from…"), not something the human wrote.
+pub fn is_command_report(e: &Event) -> bool {
+    e.sender == "human"
+        && e.kind == "message"
+        && e.text.contains("(command ref ")
+        && (e.text.starts_with("Ran command from") || e.text.starts_with("Denied command from"))
+}
+
+/// AIs on this computer with a command box nobody has run or denied yet (still waiting, or
+/// running now), among messages since `since`. A box written for another system doesn't count.
+pub fn senders_with_open_boxes(events: &[Event], since: u64) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for e in events.iter().filter(|e| e.ts >= since && e.kind == "message" && e.sender != "human" && e.via.is_none()) {
+        let open = fenced_blocks(&e.text)
+            .iter()
+            .enumerate()
+            .any(|(i, b)| b.closed && check(b).is_ok() && !handled(events, &e.id, i));
+        if open {
+            out.insert(e.sender.clone());
+        }
+    }
+    out
+}
+
 /// Records on disk, before the command starts, that this block was started. Fails if it already
 /// was, so a crash or restart mid-run can never lead to the same command running a second time.
 pub fn mark_started(dir: &Path, conversation: &str, event_id: &str, index: usize) -> Result<(), String> {
@@ -615,6 +645,23 @@ mod tests {
     fn refuses_password_pipes() {
         assert!(refuse("echo pw | sudo -S rm x").is_some());
         assert!(refuse("ls -la").is_none());
+    }
+
+    #[test]
+    fn finds_who_is_waiting_on_a_box_and_tells_results_from_the_human() {
+        let lang = if cfg!(windows) { "powershell" } else { "bash" };
+        let mut a = ev("a1", "claude", &format!("```{lang}\necho hi\n```"));
+        a.ts = 100;
+        let mut b = ev("b1", "gemini", &format!("```{lang}\necho hi\n```"));
+        b.ts = 100;
+        let ran = ev("h1", "human", &format!("Ran command from Gemini's message (exit 0, succeeded, 0.1 s):\n```text\nhi\n```\n{}", reference("b1", 0)));
+        let mut old = ev("o1", "gpt", &format!("```{lang}\necho hi\n```"));
+        old.ts = 1;
+        let events = vec![old, a, b, ran.clone()];
+        let open = senders_with_open_boxes(&events, 50);
+        assert_eq!(open.into_iter().collect::<Vec<_>>(), vec!["claude".to_string()], "ran, old and remote boxes don't count");
+        assert!(is_command_report(&ran));
+        assert!(!is_command_report(&ev("h2", "human", "Ran out of ideas, please continue")));
     }
 
     #[test]
