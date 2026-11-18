@@ -1019,36 +1019,53 @@ function useSidebarFit(ref: { current: HTMLElement | null }) {
     let lastWidth = -1;
     let lastHeight = -1;
     const overflows = () => el.scrollHeight > el.clientHeight + 1;
-    // Full refit: the least compact level that fits. Used on window resizes and, throttled,
-    // once the content has been quiet for a while, so the sidebar can grow back.
+    const level = () => Number(el.dataset.fit ?? 0) || 0;
+    // Writes the level only when it changes: rewriting the same value still restyles the sidebar.
+    const setLevel = (n: number) => {
+      if (el.dataset.fit !== String(n)) el.dataset.fit = String(n);
+    };
+    // Full refit: the least compact level that fits. Used on real window resizes.
     const refit = () => {
-      for (let level = 0; level <= SIDEBAR_FIT_MAX; level++) {
-        el.dataset.fit = String(level);
+      for (let n = 0; n <= SIDEBAR_FIT_MAX; n++) {
+        setLevel(n);
         if (!overflows()) return;
       }
+    };
+    // Growing back, throttled: try one level less compact and keep it only if it fits. A full
+    // refit here forced up to five layouts every 4 s for as long as usage meters and countdowns
+    // kept ticking, which they always do.
+    const loosen = () => {
+      const now = level();
+      if (now === 0) return;
+      setLevel(now - 1);
+      if (overflows()) setLevel(now);
     };
     // Content changes (usage polls, Working…, load badges) only ever make the sidebar more
     // compact straight away. Re-testing every lower level on each change made the council
     // cards flip between levels, showing and hiding meters several times a second.
     const tighten = () => {
-      let level = Number(el.dataset.fit ?? 0) || 0;
-      while (overflows() && level < SIDEBAR_FIT_MAX) el.dataset.fit = String(++level);
+      let n = level();
+      while (overflows() && n < SIDEBAR_FIT_MAX) setLevel(++n);
     };
+    // The sidebar's outer size, scrollbar included. A scrollbar appearing or going away changes
+    // clientWidth but not this, so it no longer counts as a window resize that sets off a full
+    // refit, which could flip the scrollbar back and keep the window busy.
+    const size = () => [el.offsetWidth, el.offsetHeight] as const;
     const run = () => {
       frame = 0;
-      const resized = el.clientWidth !== lastWidth || el.clientHeight !== lastHeight;
-      lastWidth = el.clientWidth;
-      lastHeight = el.clientHeight;
+      const [w, h] = size();
+      const resized = w !== lastWidth || h !== lastHeight;
+      lastWidth = w;
+      lastHeight = h;
       if (resized) refit(); else tighten();
     };
     const schedule = () => {
       if (!frame) frame = requestAnimationFrame(run);
-      // At most one full refit every 4 s, even while the content keeps changing.
-      if (!relax) relax = window.setTimeout(() => { relax = 0; refit(); }, 4000);
+      // At most one step back toward full size every 4 s, and none when already at full size.
+      if (!relax && level() > 0) relax = window.setTimeout(() => { relax = 0; loosen(); }, 4000);
     };
     refit();
-    lastWidth = el.clientWidth;
-    lastHeight = el.clientHeight;
+    [lastWidth, lastHeight] = size();
     const ro = new ResizeObserver(schedule);
     ro.observe(el);
     const mo = new MutationObserver(schedule);
