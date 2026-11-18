@@ -672,6 +672,7 @@ pub fn transcript(events: &[Event], me: &str) -> String {
         out.push_str("\n\nRECENT MESSAGES (verbatim)\n\n");
     }
     out.push_str(&parts.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n\n"));
+    out.push_str(&command_boxes_note(events, me, crate::runcmd::is_running));
     out.push_str(&open_requests_note(events, me));
     out.push_str(&format!("\n\nEND OF CONVERSATION. Write your next message as {} now.", label(me)));
     out
@@ -745,6 +746,50 @@ fn open_requests_note(events: &[Event], me: &str) -> String {
         "\n\nYOUR REQUESTS STILL WAITING FOR THE HUMAN\n{list}\nIf any of these is no longer needed (done another way, \
          superseded by a newer request, or out of date), withdraw it so the human isn't asked about it: write a line \
          `WITHDRAW: <the request's text>`, or `WITHDRAW: all`. Don't repeat a request that is still waiting."
+    )
+}
+
+/// How many of the AI's own recent command boxes the per-turn status list covers.
+const COMMAND_BOXES_LISTED: usize = 8;
+
+/// The state of the AI's own recent command boxes on this computer, newest last: finished (with
+/// the result line from the human's Ran message), denied, running now, or not run yet. Without it
+/// AIs kept writing "still waiting on the output" after the output had already arrived.
+fn command_boxes_note(events: &[Event], me: &str, running: impl Fn(&str, usize) -> bool) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for e in events.iter().filter(|e| e.sender == me && e.kind == "message" && e.via.is_none()) {
+        for (i, b) in crate::runcmd::fenced_blocks(&e.text).iter().enumerate() {
+            if crate::runcmd::shell_for(&b.lang).is_none() || crate::runcmd::check(b).is_err() {
+                continue;
+            }
+            let r = crate::runcmd::reference(&e.id, i);
+            let answer = events.iter().rev().find(|h| h.sender == "human" && h.kind == "message" && h.text.contains(&r));
+            let state = match answer {
+                Some(h) => {
+                    let first = h.text.lines().next().unwrap_or("").trim().trim_end_matches(':');
+                    if first.starts_with("Denied") {
+                        "DENIED by the human".to_string()
+                    } else {
+                        let result = first.find('(').map(|p| first[p..].to_string()).unwrap_or_default();
+                        format!("FINISHED {result}; its output is in the human's message above")
+                    }
+                }
+                None if running(&e.id, i) => "RUNNING now; its output arrives when it ends".to_string(),
+                None => "NOT RUN yet (waiting for the human or for auto-run)".to_string(),
+            };
+            let first_line = b.code.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+            let preview: String = first_line.chars().take(60).collect();
+            lines.push(format!("- ref {}#{i} ({}, starts `{preview}`): {state}", &e.id[..e.id.len().min(8)], b.lang));
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    let skip = lines.len().saturating_sub(COMMAND_BOXES_LISTED);
+    format!(
+        "\n\nYOUR COMMAND BOXES ON THIS COMPUTER (newest last)\n{}\nTrust this list over your memory: don't say you're \
+         waiting on a box marked FINISHED, and don't repost a box that is RUNNING or NOT RUN.",
+        lines[skip..].join("\n")
     )
 }
 
@@ -893,6 +938,25 @@ mod tests {
         assert!(t.contains("[Claude (MacBook)] remote reply"));
         assert!(t.contains("They are not you"));
         assert!(!transcript(&[ev("human", "hi")], "claude").contains("They are not you"));
+    }
+
+    #[test]
+    fn command_boxes_note_reports_each_box_state() {
+        let with_id = |id: &str, sender: &str, text: &str| Event { id: id.into(), ..ev(sender, text) };
+        let mine = "Check:\n```bash\nls -la\n```\nThen:\n```bash\ngit status\n```\nSketch:\n```text\nnot a command\n```\nLast:\n```bash\ndate\n```";
+        let events = vec![
+            with_id("abcdef1234", "claude", mine),
+            with_id("h1", "human", "Ran command from Claude's message (exit 0, succeeded, 1.2 s):\n```text\nok\n```\n(command ref abcdef1234#0)"),
+            with_id("h2", "human", "Denied command from Claude's message.\n(command ref abcdef1234#1)"),
+            with_id("other", "gemini", "```bash\nwhoami\n```"),
+        ];
+        let note = command_boxes_note(&events, "claude", |id, i| id == "abcdef1234" && i == 3);
+        assert!(note.contains("#0 (bash, starts `ls -la`): FINISHED (exit 0, succeeded, 1.2 s)"), "{note}");
+        assert!(note.contains("#1 (bash, starts `git status`): DENIED"), "{note}");
+        assert!(!note.contains("not a command"), "text blocks aren't commands");
+        assert!(note.contains("#3 (bash, starts `date`): RUNNING"), "{note}");
+        assert!(!note.contains("whoami"), "other AIs' boxes are theirs");
+        assert!(command_boxes_note(&events, "gpt", |_, _| false).is_empty());
     }
 
     fn ev(sender: &str, text: &str) -> Event {

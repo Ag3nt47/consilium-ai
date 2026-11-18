@@ -224,6 +224,11 @@ impl Drop for RunGuard {
     }
 }
 
+/// Whether block `index` of message `event_id` is running right now on this computer.
+pub fn is_running(event_id: &str, index: usize) -> bool {
+    RUNNING.lock().unwrap().as_ref().is_some_and(|set| set.contains(&format!("{event_id}#{index}")))
+}
+
 fn claim(key: &str) -> Option<RunGuard> {
     let mut guard = RUNNING.lock().unwrap();
     let set = guard.get_or_insert_with(HashSet::new);
