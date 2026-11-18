@@ -694,10 +694,13 @@ impl Link {
             let (route, packets) = {
                 let states = self.0.peers.lock().unwrap();
                 let Some(s) = states.get(&peer.node_id) else { continue };
+                // Only a session over one of the routes under test counts. The other computer may
+                // dial in meanwhile, and that session's route is its own outgoing port: crediting
+                // it passed a dead route, or reported the working one under the wrong address.
                 if s.generation <= generation || s.tx.is_none() {
                     (None, 0)
                 } else {
-                    (s.route.clone(), s.packets_in)
+                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in)
                 }
             };
             if let Some(route) = route {
