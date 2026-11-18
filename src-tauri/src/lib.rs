@@ -27,6 +27,7 @@ pub mod resources;
 mod peer_sync;
 mod pressure;
 mod projects;
+pub mod watchdog;
 mod prompt;
 mod reaper;
 mod repo;
