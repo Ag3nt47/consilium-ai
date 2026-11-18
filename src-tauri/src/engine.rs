@@ -842,7 +842,11 @@ impl council::Host for RealHost {
             .and_then(|m| m.workspace)
             .or_else(|| self.config.get().default_workspace)
             .filter(|w| std::path::Path::new(w).is_dir());
-        let access = if workspace.is_some() { self.config.access(agent.id) } else { Access::Chat };
+        let access = agents::effective_access(
+            agent.id,
+            if workspace.is_some() { self.config.access(agent.id) } else { Access::Chat },
+            workspace.is_some(),
+        );
         let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w)));
         let shared = self.memory.for_prompt();
         let members = self.config.get().members;

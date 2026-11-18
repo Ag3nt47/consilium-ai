@@ -1255,6 +1255,16 @@ async fn execute(
     let mut watch_output = true;
 
     let mut check_stream = |line: &str| -> Result<(), String> {
+        // Read access only reads files; plan mode isn't documented to block shell tools, so stop here.
+        if access == Access::Read && kind == Kind::Antigravity {
+            if let Some(command) = streamed_command(kind, line) {
+                return Err(format!(
+                    "{} can only read files at this access level, so Consilium stopped its command. Post it as a command box for the human instead: {}",
+                    tool_name(kind),
+                    crate::redact::scrub(&command)
+                ));
+            }
+        }
         if matches!(access, Access::Own | Access::Unrestricted) {
             if let Some(command) = streamed_command(kind, line) {
                 if elevated_command(&command) {
@@ -1592,6 +1602,17 @@ fn tool_name(kind: Kind) -> &'static str {
 /// Turns one complete structured-output line into a compact, safe activity description. Provider
 /// schemas evolve, so unknown events are ignored rather than guessed at. Reasoning text and model
 /// prose are never copied into activity details.
+/// The access an AI actually runs with. Gemini gets read-only file tools at every level once the
+/// conversation has a project folder: at Chat it reads that folder in plan mode (no shell, no edits),
+/// so its `read_file` finds the project instead of an empty folder.
+pub fn effective_access(agent_id: &str, access: Access, has_workspace: bool) -> Access {
+    if agent_id == "gemini" && has_workspace && access == Access::Chat {
+        Access::Read
+    } else {
+        access
+    }
+}
+
 fn activity_from_line(kind: Kind, line: &str) -> Option<ActivitySignal> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     match kind {
@@ -2380,6 +2401,15 @@ mod plan_tests {
         assert!(!c.iter().any(|a| a == "--tools" || a == "--permission-mode"));
         let g = args(Kind::GeminiCli, Access::Own);
         assert!(!g.iter().any(|a| a == "--approval-mode"));
+    }
+
+    #[test]
+    fn gemini_reads_the_project_folder_at_chat_but_others_stay_in_chat() {
+        assert!(effective_access("gemini", Access::Chat, true) == Access::Read);
+        assert!(effective_access("gemini", Access::Chat, false) == Access::Chat);
+        assert!(effective_access("claude", Access::Chat, true) == Access::Chat);
+        assert!(effective_access("gemini", Access::Edit, true) == Access::Edit);
+        assert!(has(&args(Kind::Antigravity, Access::Read), &["--mode", "plan"]));
     }
 
     #[test]
