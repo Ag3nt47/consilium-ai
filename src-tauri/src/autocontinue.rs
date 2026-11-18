@@ -113,6 +113,8 @@ pub fn pending_boxes(events: &[Event], now: u64) -> bool {
     !waiting_boxes(events, 0, now, PENDING_MS).is_empty()
 }
 
+/// The old signature, kept for the tests; the engine calls `decide_with`.
+#[cfg(test)]
 pub fn decide(events: &[Event], board: &Board, auto_run: bool) -> Decision {
     decide_with(events, board, auto_run, false)
 }
