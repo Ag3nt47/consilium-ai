@@ -5,6 +5,22 @@
 
 Consilium is an elite, cross-platform desktop application and command-line environment that transforms your local hardware network into an autonomous Hive Mind home server. Effortlessly link any mix of computers running Windows, macOS, or Linux into a seamless, offline LAN cluster where each node hosts its own dedicated AI instances—uniting heavyweights like ChatGPT, Claude, Gemini, Grok, and DeepSeek alongside local powerhouses like Llama 3, Qwen 2.5 Coder, and DeepSeek-R1—to tackle massive, complex projects faster than ever, entirely on your own terms and completely air-gapped from the cloud.
 
+<p align="center"><img src="docs/media/demo.gif" width="860" alt="Consilium animated demo: multi-agent council in Discuss mode with real-time debating, code execution, and interactive approvals"></p>
+<p align="center"><sub>Interactive multi-agent council in Discuss mode: real-time peer debate, automated cross-examination, and human-in-the-loop approvals.</sub></p>
+
+| | |
+| --- | --- |
+| ![Conversation in the visionOS Glass theme](docs/media/conversation.png) | ![The Netrunner cyberpunk theme, the default for new installs](docs/media/netrunner.png) |
+| **visionOS Glass** theme (title bar icons, CI light, task checklist, Seen receipts) | **Netrunner** cyberpunk theme (crisp REQUEST callouts, typewriter effects) |
+| ![Voice Chat and per-AI audio visualizers](docs/media/voice.png) | ![The Retro '84 theme](docs/media/retro84.png) |
+| **Voice Chat** & dual audio visualizers | **Retro '84** theme (neon grid, scanlines; effects can be turned off) |
+| ![First run: the Set up AIs card for a missing sign-in](docs/media/first-run-setup.png) | ![Settings: theme picker, effects, update checks](docs/media/settings.png) |
+| First run: **Set up AIs** (zero-config CLI agent discovery) | Settings: themes, Signal messaging, Bing wallpaper |
+| ![Add AI: Gemini's install, sign-in and add steps](docs/media/add-ai.png) | |
+| **+ Add AI** (dynamic local & cloud model onboarding) | |
+
+<sub>Screenshots use invented demo data. To see the UI in a browser without the app, run `npm run dev` and open `http://127.0.0.1:1420/?step=5` (`step` 0–5 walks through the demo; add `&theme=netrunner`, `&theme=retro84`, `&voice=1`, `&settings=1` or `&setup=1`).</sub>
+
 ---
 
 ## Why Use the Hive Mind?
