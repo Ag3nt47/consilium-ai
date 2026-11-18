@@ -1417,6 +1417,29 @@ pre {
   --c-gemini: #ff3cac;
 }
 
+/* Grok, DeepSeek and Llama (API and Ollama AIs) get their own colours like the built-in three. */
+:root {
+  --c-grok: #c4c9d4;
+  --c-deepseek: #6b8cff;
+  --c-llama: #b07cff;
+}
+
+[data-theme="glass"] {
+  --c-grok: #e5e7eb;
+  --c-deepseek: #818cf8;
+  --c-llama: #c084fc;
+}
+
+.from-grok { --sender: var(--c-grok); }
+.from-deepseek { --sender: var(--c-deepseek); }
+.from-llama { --sender: var(--c-llama); }
+.agent-grok .agent-name, .from-grok .who { color: var(--c-grok); }
+.agent-deepseek .agent-name, .from-deepseek .who { color: var(--c-deepseek); }
+.agent-llama .agent-name, .from-llama .who { color: var(--c-llama); }
+.chip-grok.on { border-color: var(--c-grok); }
+.chip-deepseek.on { border-color: var(--c-deepseek); }
+.chip-llama.on { border-color: var(--c-llama); }
+
 .access-tag {
   color: var(--accent);
 }
