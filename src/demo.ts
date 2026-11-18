@@ -8,7 +8,9 @@
 import type { AgentInfo, ChatEvent, Conversation, TaskBoard, TurnState } from "./api";
 
 const params = new URLSearchParams(location.search);
-export const demoStep = Math.max(0, Math.min(5, Number(params.get("step") ?? 5)));
+// `scene=build` swaps in a six-AI council building an app together (the README's animated demo).
+export const demoScene = params.get("scene") === "build" ? "build" : "default";
+export const demoStep = Math.max(0, Math.min(demoScene === "build" ? 99 : 5, Number(params.get("step") ?? 99)));
 export const demoSettings = params.get("settings") === "1";
 export const demoTheme = params.get("theme");
 export const demoVoice = params.get("voice") === "1";
@@ -157,14 +159,102 @@ const demoBoard: TaskBoard = {
   ],
 };
 
-const demoCouncilForApprovals = { members: ["gpt", "claude", "gemini"], access: {}, default_workspace: null, default_access: "chat" as const, saved_grants: [] };
+// ---- scene=build: six AIs planning, splitting and shipping an app together ----------------------
+const BUILD = "00000000-0000-4000-8000-000000000010";
+const u = (pct: number, week: number) => ({ remaining_percent: Math.min(pct, week), windows: [{ label: "5-hour limit", remaining_percent: pct }, { label: "Weekly limit", remaining_percent: week }] });
+const buildAgents: AgentInfo[] = [
+  { ...agents[0], usage: u(81, 90) },
+  { ...agents[1], available: true, signed_in: true, hint: "", usage: u(76, 64) },
+  { ...agents[2], member: true, available: true, signed_in: true, tool: "Antigravity CLI", version: "agy", path: "agy", hint: "", usage: u(69, 85) },
+  { id: "grok", name: "Grok", company: "xAI", member: true, access: "edit", transport: "api", custom: false, tool: "xAI API", available: true, signed_in: true, version: "grok-4", path: null, usage: u(88, 93), hint: "" },
+  { id: "deepseek", name: "DeepSeek", company: "DeepSeek", member: true, access: "edit", transport: "api", custom: false, tool: "DeepSeek API", available: true, signed_in: true, version: "deepseek-reasoner", path: null, usage: u(95, 97), hint: "" },
+  { id: "llama", name: "Llama 3", company: "Meta · Ollama", member: true, access: "edit", transport: "openai-compatible", custom: true, tool: "Ollama (Computer B)", available: true, signed_in: true, version: "llama3.1:8b", path: "http://localhost:11434/v1", usage: null, hint: "" },
+];
+const buildConversations: Conversation[] = [
+  { id: BUILD, title: "Fieldline v1: plan, build, ship", created: T0, updated: T0 + 95 * 60e3, workspace: "/projects/fieldline" },
+  ...conversations.map((c) => ({ ...c, id: c.id, updated: c.updated - 864e5 })),
+];
+const tok = (i: number, o: number) => ({ input_tokens: i, output_tokens: o, cache_read_tokens: 0, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: i + o });
+let bseq = 100;
+const bev = (sender: string, text: string, minutes: number, kind: ChatEvent["kind"] = "message", to: string[] = [], seen: string[] = []): ChatEvent => ({
+  id: `build-${++bseq}`,
+  seq: bseq,
+  ts: T0 + minutes * 60e3,
+  conversation: BUILD,
+  sender,
+  kind,
+  to,
+  text,
+  requests: [...text.matchAll(/^\s*REQUEST:\s*(.+)$/gim)].map((m) => m[1]),
+  add_ai: [],
+  seen,
+  usage: kind === "message" && sender !== "human" ? tok(1800 + text.length * 3, 200 + text.length) : null,
+});
+const ALL = ["gpt", "claude", "gemini", "grok", "deepseek", "llama"];
+const buildScript: ChatEvent[] = [
+  bev("human", "Let's build Fieldline: a field-service app with a web dashboard, an iOS/Android app, a REST API and Stripe billing. Plan it, split the work between you, and ship v1 behind green CI.", 0.1, "message", ALL),
+  bev("claude", "", 0.2, "seen", [], ["build-101"]),
+  bev("claude", "Plan: one monorepo, six tracks, one git worktree each. Nothing merges to main without CI passing on macOS, Windows and Linux.\n\n- **API + data model** (Rust/axum, Postgres): me\n- **Web dashboard**: @gpt\n- **Mobile app** (Expo, offline-first): @gemini\n- **Billing** (Stripe): @grok\n- **Scheduling + route optimizer**: @deepseek\n- **Seed data + API docs**, local only: @llama\n\nTASK: take API and data model", 1.5),
+  bev("gpt", "TASK: take Web dashboard\nI'll generate the TypeScript client from Claude's OpenAPI spec, so the dashboard and the API can't drift apart.", 2.4),
+  bev("gemini", "TASK: take Mobile app\nJobs, photos and signatures queue on the device and sync when the technician gets signal back.", 3.1),
+  bev("grok", "TASK: take Stripe billing\nPer-seat subscriptions plus metered SMS. Webhooks are verified with the signing secret, and no keys go in the repo.", 3.8),
+  bev("deepseek", "TASK: take Route optimizer\nI'll treat each day as a vehicle-routing problem with time windows. Target: 200 jobs per day planned in under 300 ms.", 4.6),
+  bev("llama", "TASK: take Seed data and API docs\nI run on Computer B through Ollama, so the sample customers I generate never leave this network.", 5.2),
+  bev("claude", "API is on main: 42 endpoints, 186 tests passing. @gpt the spec is at `/openapi.json`; @deepseek the job-queue contract is in `docs/jobs.md`.", 38),
+  bev("gpt", "Reviewing @grok's billing branch: the webhook handler has no idempotency key, so a retried `invoice.paid` would credit the account twice. Please key on `event.id`.", 52),
+  bev("grok", "Good catch. Fixed in `3f1c2ab`: events are stored by id and replays are ignored, with a test that sends the same webhook twice. Merged.", 58),
+  bev("deepseek", "Optimizer merged: 7.4% less drive time than nearest-neighbour on the sample week, 212 ms for 200 jobs.", 71),
+  bev("consilium", "GitHub checks passed for fieldline main @9c41e07 (macOS, Windows, Linux).", 88, "system"),
+  bev("claude", "All six tracks are merged and CI is green on all three systems. v1 is ready.\n\nREQUEST: Tag v1.0.0 and deploy it to staging?", 95),
+];
+// Each step reveals the next message; the AI that speaks after it shows as "thinking".
+const buildMsgIdx = buildScript.flatMap((e, i) => (e.kind === "seen" ? [] : [i]));
+const buildMaxStep = buildMsgIdx.length;
+function buildState(step: number): { events: ChatEvent[]; thinking: string | null } {
+  const n = Math.min(step, buildMaxStep);
+  const end = n === 0 ? 0 : buildMsgIdx[n - 1] + 1;
+  const events = buildScript.slice(0, end + (buildScript[end]?.kind === "seen" ? 1 : 0));
+  const next = buildScript[buildMsgIdx[n]];
+  return { events, thinking: n > 0 && next && next.sender !== "consilium" ? next.sender : null };
+}
+// Task board follows the conversation: claimed when its owner says so, done when merged.
+const buildTasks: [string, string, number, number][] = [
+  ["API and data model", "claude", 2, 8],
+  ["Web dashboard", "gpt", 3, 12],
+  ["Mobile app", "gemini", 4, 12],
+  ["Stripe billing", "grok", 5, 10],
+  ["Route optimizer", "deepseek", 6, 11],
+  ["Seed data and API docs", "llama", 7, 12],
+];
+function buildBoard(step: number): TaskBoard {
+  const shown = step >= 2 ? buildTasks : [];
+  return {
+    next: shown.length + 1,
+    tasks: shown.map(([title, owner, take, done], i) => ({
+      id: i + 1,
+      title,
+      owner: step >= take ? owner : null,
+      status: step >= done ? "done" : step >= take ? "doing" : "todo",
+      by: step >= take ? owner : "claude",
+      updated: 0,
+    })),
+  };
+}
+const isBuild = demoScene === "build";
+const buildNow = isBuild ? buildState(demoStep) : null;
+const activeState = buildNow ?? state;
+const activeAgents = isBuild ? buildAgents : agents;
+const activeBoard: TaskBoard = isBuild ? buildBoard(demoStep) : demoBoard;
+const ACTIVE_CONV = isBuild ? BUILD : CONV;
+
+const demoCouncilForApprovals = { members: isBuild ? ALL : ["gpt", "claude", "gemini"], access: {}, default_workspace: null, default_access: "chat" as const, saved_grants: [] };
 
 export const demoApi = {
-  agents: async () => agents,
-  usage: async () => Object.fromEntries(agents.flatMap((a) => (a.usage ? [[a.id, a.usage]] : []))),
-  list: async () => (demoStep === 0 ? [{ ...conversations[0], title: "New conversation" }, ...conversations.slice(1)] : conversations),
-  create: async () => conversations[0],
-  load: async () => state.events,
+  agents: async () => activeAgents,
+  usage: async () => Object.fromEntries(activeAgents.flatMap((a) => (a.usage ? [[a.id, a.usage]] : []))),
+  list: async () => (isBuild ? (demoStep === 0 ? [{ ...buildConversations[0], title: "New conversation" }, ...buildConversations.slice(1)] : buildConversations) : demoStep === 0 ? [{ ...conversations[0], title: "New conversation" }, ...conversations.slice(1)] : conversations),
+  create: async () => (isBuild ? buildConversations[0] : conversations[0]),
+  load: async () => activeState.events,
   tokenUsage: async () => ({
     conversation: {
       gpt: { input_tokens: 3520, output_tokens: 690, cache_read_tokens: 0, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 4210 },
@@ -182,7 +272,7 @@ export const demoApi = {
     ev("consilium", on ? "Voice chat is on." : "Voice chat is off.", 6, "system"),
   send: async () => state.events[0],
   stop: async () => true,
-  running: async () => (state.thinking ? [CONV] : []),
+  running: async () => (activeState.thinking ? [ACTIVE_CONV] : []),
   setup: async () => "Demo",
   setApiKey: async () => undefined,
   addCustomAi: async (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, ""),
@@ -264,7 +354,7 @@ export const demoApi = {
   setAccess: async () => undefined,
   setWorkspace: async () => conversations[0],
   pickFolder: async () => null,
-  getCouncil: async () => ({ members: ["gpt", "claude"], access: {}, default_workspace: "/projects", default_access: "edit" as const }),
+  getCouncil: async () => ({ members: isBuild ? ALL : ["gpt", "claude"], access: {}, default_workspace: "/projects", default_access: "edit" as const }),
   setDefaultAccess: async () => undefined,
   setDefaultWorkspace: async () => "/projects",
   getMemory: async () => "- The human prefers short, direct answers (Claude, 2026-11-14)\n- Thumbnails are immutable per image id (ChatGPT, 2026-11-14)\n",
@@ -284,16 +374,16 @@ export const demoApi = {
   agentBranches: async () => [],
   mergeAgentBranch: async () => "0000000",
   discardAgentBranch: async () => undefined,
-  tasksGet: async () => demoBoard,
+  tasksGet: async () => activeBoard,
   tasksApply: async (_id: string, op: { op: string; task?: string; title?: string; to?: string }) => {
     const num = Number((op.task ?? "").replace("#", ""));
-    const t = demoBoard.tasks.find((x) => x.id === num);
-    if (op.op === "add" && op.title) demoBoard.tasks.push({ id: ++demoBoard.next, title: op.title, owner: null, status: "todo", by: "human", updated: Date.now() });
+    const t = activeBoard.tasks.find((x) => x.id === num);
+    if (op.op === "add" && op.title) activeBoard.tasks.push({ id: ++activeBoard.next, title: op.title, owner: null, status: "todo", by: "human", updated: Date.now() });
     if (t && op.op === "done") t.status = "done";
     if (t && op.op === "reopen") t.status = t.owner ? "doing" : "todo";
     if (t && op.op === "hand" && op.to) Object.assign(t, { owner: op.to, status: "doing" });
-    if (t && op.op === "drop") demoBoard.tasks = demoBoard.tasks.filter((x) => x !== t);
-    return { ...demoBoard, tasks: [...demoBoard.tasks] };
+    if (t && op.op === "drop") activeBoard.tasks = activeBoard.tasks.filter((x) => x !== t);
+    return { ...activeBoard, tasks: [...activeBoard.tasks] };
   },
   saveApproval: async () => ({ ...demoCouncilForApprovals }),
   forgetApproval: async () => ({ ...demoCouncilForApprovals }),
@@ -392,10 +482,26 @@ export const demoApi = {
   linkSend: async () => "demo-pkt-1",
   sessionSafetyStatus: async () => null,
   sessionSafetyRestore: async () => "Demo: restored session safety snapshot",
+  // Calls the app gained after demo mode was written; harmless no-ops in the browser preview.
+  chatAutoRun: async () => false,
+  setChatAutoRun: async (_c: string, on: boolean) => on,
+  switchedOff: async () => [] as string[],
+  setAiOn: async () => [] as string[],
+  setModel: async () => undefined,
+  listModels: async () => [],
+  unbench: async () => undefined,
+  probeOllama: async () => [],
+  importOllamaModel: async () => "llama",
+  linuxPackageKind: async () => null,
+  releaseCheckRequested: async () => false,
+  requestPeerUpdate: async () => 0,
+  setAutoInstallUpdates: async () => undefined,
+  stageReleaseUpdate: async () => undefined,
+  stressTestLink: async () => [],
 };
 
-export const demoTurn: TurnState | null = state.thinking
-  ? { conversation: CONV, state: "running", agent: state.thinking, round: demoStep >= 3 ? 2 : 1, rounds: 3 }
+export const demoTurn: TurnState | null = activeState.thinking
+  ? { conversation: ACTIVE_CONV, state: "running", agent: activeState.thinking, round: isBuild ? 1 : demoStep >= 3 ? 2 : 1, rounds: isBuild ? 1 : 3 }
   : null;
 
-export const demoDraft = demoStep === 0 ? "Our image service re-renders thumbnails on every request and p95 latency is 900 ms…" : "";
+export const demoDraft = demoStep !== 0 ? "" : isBuild ? "Let's build Fieldline: a field-service app with a web dashboard, an iOS/Android app…" : demoStep === 0 ? "Our image service re-renders thumbnails on every request and p95 latency is 900 ms…" : "";
