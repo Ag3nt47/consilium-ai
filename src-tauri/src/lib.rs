@@ -573,7 +573,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: Zero Breach auto-remove now skips open browsers to prevent profile corruption, and guides resetting any hijacked search engine. Also: in auto-run chats, every REQUEST is approved automatically.";
+const WHATS_NEW: &str = "What's new: conversations no longer vanish or split in two after a failed save (a damaged title file is rebuilt from the messages); in Auto-run chats, command boxes that were waiting for a click run when Auto-run is turned on, auto-continue waits quietly while every open task's owner has a box running, and command results no longer restart the round count; the sidebar stops re-laying itself out on every scrollbar change, and the Mac window reuses its date and number formatters, cutting CPU; the link stress test only credits the route under test.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
