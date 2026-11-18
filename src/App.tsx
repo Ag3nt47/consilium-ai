@@ -339,6 +339,18 @@ function answeredRequests(events: ChatEvent[]): Map<string, RequestResolution> {
   // Who asked each waiting request (sender and computer), so an AI only withdraws its own.
   const asker = new Map<string, string>();
   for (const e of events) {
+    // In an auto-run chat, Consilium approves waiting requests on the human's behalf, one
+    // "Approved: <request>" line each in an auto-continue note (src-tauri/src/autocontinue.rs).
+    if (e.sender === "consilium" && e.text.startsWith("Auto-continue")) {
+      for (const line of e.text.split("\n")) {
+        const request = /^Approved:\s*(.+)$/.exec(line.trim())?.[1].trim();
+        const key = request ? waiting.get(request)?.shift() : undefined;
+        if (!key) continue;
+        out.set(key, "approved");
+        if (!waiting.get(request!)?.length) waiting.delete(request!);
+      }
+      continue;
+    }
     if (e.kind !== "message" && e.kind !== "error") continue;
     if (e.sender !== "human") {
       const me = `${e.sender}|${e.via ?? ""}`;
