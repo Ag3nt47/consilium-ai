@@ -12,6 +12,7 @@ mod ci;
 pub mod auto_run;
 pub mod bridge;
 pub mod cli;
+pub mod escalation;
 mod config;
 mod customai;
 mod council;
