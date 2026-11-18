@@ -59,6 +59,59 @@ Consilium solves the disruptive problem of cloud API rate limits, hourly cooldow
 
 ---
 
+## Dynamic Swarms: Adding, Mentoring, and Spawning AI Workers
+
+Consilium is not limited to a static list of models. It functions as an extensible agency where models train, assist, and scale one another dynamically.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        COUNCIL OF MINDS (CORE)                         │
+│               Claude  •  GPT-4o  •  Gemini  •  DeepSeek                │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Mentoring, Test Suites & Delegation
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                   PEER COACHING & DYNAMIC SWARMS                       │
+│  ┌──────────────────────────┐         ┌─────────────────────────────┐  │
+│  │   TRAIN & GUIDE PEERS    │         │     SPAWN WORKER BOTS       │  │
+│  │  • Formulate test specs  │         │  • Shard multi-file edits   │  │
+│  │  • Debug compile errors  │         │  • Isolated git worktrees   │  │
+│  │  • Coach local 3B/8B AIs │         │  • Parallel bug sweeps      │  │
+│  └──────────────────────────┘         └─────────────────────────────┘  │
+│                                   │                                    │
+│                                   ▼                                    │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │                     EXTENSIBLE SKILLSETS                         │  │
+│  │  Reverse Engineering (REA) • Zero Breach Security • AnonRouter   │  │
+│  │  Ghidra Native Decompilation • JADX Android • Playwright Browser │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### 1. Seamless Model Onboarding (`ADD_AI` & Open Standards)
+- **Universal Endpoint Support:** Connect any model running locally via Ollama, LM Studio, vLLM, or llama.cpp, as well as cloud endpoints from OpenAI, Anthropic, Google, xAI, Groq, Mistral, and OpenRouter.
+- **Dynamic In-Chat Addition:** Any participant can introduce new models on the fly with declarative `ADD_AI: <name>` directives. The user approves the addition and connects credentials with a single click.
+
+### 2. Peer Mentoring: Training & Helping Smaller Models
+- **Frontier AI as Force Multiplier:** Frontier flagship models (Claude 3.5, GPT-4o, Gemini Pro) act as technical leads and mentors to smaller, highly-efficient local models (Llama 3, Qwen 2.5 Coder, DeepSeek-R1-8B).
+- **Test-Driven Scaffolding:** Senior models write strict unit tests and boundary assertions before delegating execution to local coding models, providing a tight automated feedback loop.
+- **Error Coaching & Root Cause Debugging:** When a local model encounters syntax errors or compiler diagnostic warnings, senior models analyze the compiler trace, explain the root cause, and coach the local model on the exact patch pattern.
+
+### 3. Dynamic Worker Bot Spawning
+- **Autonomous Swarm Scaling:** When confronting large-scale refactoring passes, multi-module migrations, or deep security audits, the council can spawn transient worker bots.
+- **Per-Bot Worktree Isolation:** Spawned workers execute in isolated git worktrees (`consilium-<feature> -b ai/<worker>/<task>`), ensuring independent builds, private compiler caches, and zero file collision with the primary workspace.
+- **Unified Board Coordination:** All spawned workers report status to the central distributed task board (`TASK: take/done/blocked/hand`), keeping the human and other AIs aware of parallel progress.
+
+### 4. Modular Skillsets & Granular Access Control
+- **Domain-Specific Tooling:** Equip any model or spawned bot with specialized capabilities:
+  - **Reverse Engineering & Binary Analysis:** Native reverse-engineering via REA, Ghidra headless decompilation, and JADX APK decompilation.
+  - **Security & Integrity Auditing:** Offline compromise and spyware scanning with Zero Breach Toolkit.
+  - **Confidential AI Routing:** Zero-data-retention network routing via AnonRouter.
+  - **Browser & Web Automation:** Headless scenario capture, DOM tree evaluation, and network waterfall analysis.
+- **Least-Privilege Guardrails:** Assign strict per-AI permission levels (Chat, Read, Edit, Own, Full) ensuring external models and auxiliary workers only operate within their authorized boundaries.
+
+---
+
 ## PeerLink: Offline Multi-Workstation Mesh Network
 
 Consilium links multiple physical computers—such as a macOS developer laptop and a high-powered Windows or Linux workstation—into a synchronized, multi-node hive mind that works **completely offline without requiring an internet connection**.
@@ -180,6 +233,7 @@ Consilium's development directly implements the scope established across the fou
 | **Dual-Node Workstation Division** | ✅ Built | Asymmetric role mapping: macOS laptop as primary UI/packager/CI coordinator; Windows workstation for heavy compute/drives. |
 | **Self-Improvement Ledger** | ✅ Built | Automated tracking and recording of system issues, test regressions, and AI-authored patches in `self-improvement/ledger.json`. |
 | **Reproducible Cross-Platform Test Suites** | ✅ Built | Matrix verification across macOS (Apple Silicon/Intel), Windows, and Linux via GitHub Actions CI and CodeQL security analyzers. |
+| **Dynamic Swarm Spawning & Worker Mentoring** | ✅ Built | Autonomous orchestration allowing flagship models to train, coach, and spawn parallel worker bots with dedicated skillsets. |
 | **Algorithmic Video Production Pipeline** | 🕓 Scheduled | Structured storyboards, visual asset generators, and automated video rendering pipelines for ecosystem demonstrations. |
 
 ---
