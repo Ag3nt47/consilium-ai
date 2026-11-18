@@ -271,6 +271,32 @@ pub struct Context<'a> {
     pub project_notes: Option<&'a str>,
 }
 
+/// For AIs reached over a chat API (local models through Ollama, Grok, DeepSeek): no tools of their
+/// own, so they code through command boxes, which run by themselves in an Auto-run chat.
+pub fn command_box_coding(workspace: &str, os: &str, auto_run: bool) -> String {
+    let (shell, read, write) = if os == "windows" {
+        (
+            "powershell",
+            "Get-Content -Raw path\\to\\file",
+            "Set-Content -Encoding utf8 -Path path\\to\\file -Value @'<newline><whole file><newline>'@",
+        )
+    } else {
+        ("bash", "cat path/to/file", "cat > path/to/file <<'EOF'<newline><whole file><newline>EOF")
+    };
+    let runs = if auto_run { " by itself, because Auto-run is on in this chat," } else { " when the human clicks Run" };
+    format!(
+        "\n\nCODING THROUGH COMMAND BOXES\nYou can still work on the project in {workspace}: every command box you post \
+runs there{runs} and its output comes back to you as the next message. Work in small steps, one command per \
+```{shell} box:\n\
+- Look first: list files (`git status`, `git ls-files`) and read what you'll change ({read}).\n\
+- Change a file by writing it whole ({write}). Never write a file you haven't read this turn.\n\
+- Then build or run the tests, and fix what fails before saying it's done.\n\
+- Work on a branch of your own (`git switch -c ai/<you>/<task>`) and commit with a clear message; leave pushing \
+and merging to an AI with tools or the human.\n\
+Keep boxes short and never put placeholders in one: a box runs exactly as written."
+    )
+}
+
 /// Native terminal guidance shared by every CLI-backed AI with shell access. Keeping this in the
 /// system prompt makes the capability portable across providers while preserving the operating
 /// system's own UAC / administrator authentication boundary.
@@ -463,8 +489,9 @@ message with a short list of what you changed or ran, and why."
 the human has already approved for you. Other AI participants may change the same folder in their turns, so \
 re-read files before changing them. End your message with a short list of what you changed or ran, and why."
         ),
-        _ => "You have no tools, files, or internet access here; you see only this transcript. Don't try to run \
-commands or use tools: answer in text, and say what you would check rather than guessing."
+        _ => "You have no tools of your own here; you see only this transcript. You can't run anything directly: \
+when a command needs running (to read a file, change one, build or test), put it in a command box (see below) and \
+its output comes back to you. Otherwise answer in text, and say what you would check rather than guessing."
             .to_string(),
     });
     if let Some(capability) = terminal_capability(std::env::consts::OS, ctx.access) {
@@ -928,6 +955,15 @@ mod tests {
     }
 
     #[test]
+    fn local_ais_are_told_how_to_code_through_command_boxes() {
+        let win = command_box_coding("C:\proj", "windows", true);
+        assert!(win.contains("```powershell") && win.contains("Set-Content") && win.contains("by itself"));
+        let mac = command_box_coding("/proj", "macos", false);
+        assert!(mac.contains("```bash") && mac.contains("cat > path/to/file") && mac.contains("clicks Run"));
+        assert!(mac.contains("/proj"));
+    }
+
+    #[test]
     fn ais_on_other_computers_are_reached_by_handle() {
         set_here("Windows PC");
         assert_eq!(slug("Luke's MacBook Pro · 1a2b"), "luke-s-macbook-pro-1a2b");
@@ -1122,7 +1158,7 @@ mod tests {
         assert!(s.contains("You are ChatGPT"));
         assert!(s.contains("Claude (@claude), Gemini (@gemini)"));
         assert!(s.contains("round 2 of 3"));
-        assert!(s.contains("no tools"));
+        assert!(s.contains("no tools of your own") && s.contains("command box"));
         assert!(!system("gpt", 1, 1, &ctx).contains("round"));
         let m = members(&["gpt", "claude"]);
         let two = system("gpt", 1, 1, &Context { members: &m, workspace: None, access: Access::Chat, memory: None, project_notes: None });
