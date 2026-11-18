@@ -1034,11 +1034,15 @@ checking what it would remove (list the folder first), so everything else still 
 
     fn tasks(&self, agent: &'static Agent, reply: &str) -> Option<String> {
         let ops = crate::tasks::task_lines(reply);
-        let mut notes: Vec<String> = crate::tasks::apply(self.store.dir(), &self.conversation, agent.id, &ops)
-            .ok()
-            .flatten()
-            .into_iter()
-            .collect();
+        // In a copy whose board the owning computer keeps, the answer goes there and counts there.
+        let mut notes: Vec<String> = if crate::peer_sync::board_owner(&self.conversation).is_some() {
+            vec![]
+        } else {
+            crate::tasks::apply(self.store.dir(), &self.conversation, agent.id, &ops).ok().flatten().into_iter().collect()
+        };
+        if !notes.is_empty() {
+            crate::peer_sync::share_board(&self.conversation);
+        }
         if let Some(title) = crate::tasks::title_line(reply) {
             let before = self.store.meta(&self.conversation).map(|m| m.title).unwrap_or_default();
             if let Ok(meta) = self.store.rename(&self.conversation, &title) {

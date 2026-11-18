@@ -439,7 +439,7 @@ mod tests {
         let launcher = root.join("bin");
         std::fs::create_dir_all(&launcher).unwrap();
         std::fs::write(launcher.join(exe("analyzeHeadless")), "").unwrap();
-        assert_eq!(detect(CATALOG.iter().find(|t| t.name == "Ghidra").unwrap(), &[launcher.clone()], None), Some(launcher.join(exe("analyzeHeadless"))));
+        assert_eq!(detect(CATALOG.iter().find(|t| t.name == "Ghidra").unwrap(), std::slice::from_ref(&launcher), None), Some(launcher.join(exe("analyzeHeadless"))));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

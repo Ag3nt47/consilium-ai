@@ -5,6 +5,11 @@
 //! `<conversation>.tasks.json` beside the conversation's log, posts a short note in the chat for
 //! each change (who did what, and overall progress), and gives the list to every AI each answer,
 //! so nobody has to scroll back to learn who is doing what.
+//!
+//! Linked computers share one board per conversation. The computer that owns the conversation
+//! keeps it: TASK lines from another computer's AIs are applied there (as "<agent>-<computer>",
+//! the same id as the AI's handle), and every change is sent back as a snapshot that replaces the
+//! copy's board (see `peer_sync`). So a task number means the same task on every computer.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -98,6 +103,47 @@ pub fn load(conversations: &Path, conversation: &str) -> Board {
         .unwrap_or_default()
 }
 
+/// Replaces the conversation's board with `board` (a snapshot from the computer that owns it).
+/// Returns whether anything changed.
+pub fn replace(conversations: &Path, conversation: &str, board: &Board) -> Result<bool, String> {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if load(conversations, conversation) == *board {
+        return Ok(false);
+    }
+    save(conversations, conversation, board)?;
+    Ok(true)
+}
+
+/// Owner and author ids as seen from this computer, for a board kept on the computer `from`
+/// (its handle slug, e.g. "msi-agent47"): that computer's own AIs ("claude") become
+/// "claude-msi-agent47", and this computer's AIs ("claude-lukes-mbp") become "claude".
+/// With `from` None only the second step runs, for ids written on this computer.
+pub fn localize(board: &mut Board, here: &str, from: Option<&str>) {
+    let fix = |id: &str| -> String {
+        if let Some(from) = from {
+            if crate::agents::by_id(id).is_some() {
+                return format!("{id}-{from}");
+            }
+        }
+        match split_remote(id) {
+            Some((agent, computer)) if !here.is_empty() && computer == here => agent.to_string(),
+            _ => id.to_string(),
+        }
+    };
+    for t in &mut board.tasks {
+        t.owner = t.owner.as_deref().map(fix);
+        t.by = fix(&t.by);
+    }
+}
+
+/// "claude-lukes-mbp" -> ("claude", "lukes-mbp"), for a known AI on another computer.
+fn split_remote(id: &str) -> Option<(&str, &str)> {
+    id.match_indices('-').find_map(|(i, _)| {
+        let (agent, rest) = (&id[..i], &id[i + 1..]);
+        (crate::agents::by_id(agent).is_some() && !rest.is_empty()).then_some((agent, rest))
+    })
+}
+
 fn save(conversations: &Path, conversation: &str, board: &Board) -> Result<(), String> {
     let p = path(conversations, conversation);
     let tmp = p.with_extension("json.tmp");
@@ -128,6 +174,8 @@ pub fn apply(
         return Ok(None);
     }
     board.trim();
+    // A hand-off to "@claude-<this computer>" means this computer's own Claude.
+    localize(&mut board, &crate::prompt::here_slug(), None);
     save(conversations, conversation, &board)?;
     Ok(Some(format!(
         "Tasks: {} {}. {}",
@@ -350,9 +398,11 @@ fn name(id: &str) -> String {
     match id {
         "human" => "The human".into(),
         "consilium" => "Consilium".into(),
-        _ => crate::agents::by_id(id)
-            .map(|a| a.name.to_string())
-            .unwrap_or_else(|| id.to_string()),
+        _ => match (crate::agents::by_id(id), split_remote(id)) {
+            (Some(a), _) => a.name.to_string(),
+            (None, Some((agent, computer))) => format!("{} ({computer})", name(agent)),
+            _ => id.to_string(),
+        },
     }
 }
 
@@ -447,6 +497,8 @@ Say what you take, finish, hand off or are blocked on with lines of their own, i
 `TASK: take <title or #n>` (a new title adds it), `TASK: done <title or #n>`, `TASK: blocked <#n> - <why>`, \
 `TASK: hand <#n> to @name`, `TASK: add <title>` (for someone to pick up), `TASK: drop <#n>`. \
 Take a task before starting work, don't take one someone else is doing unless they hand it to you, and mark it done when it's committed and checked. \
+Linked computers share this one board: a task number means the same task on every computer, an owner shown as \"<AI> (<computer>)\" is on another computer, \
+and your TASK lines count wherever the conversation is open. Check the board before planning work, so nobody builds the same thing twice. \
 If the conversation's title no longer fits the project, rename it with a line `TITLE: <short new title>` (60 characters at most; the human can also rename it).",
     );
     if board.tasks.is_empty() {
@@ -510,6 +562,21 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn owners_are_named_as_seen_from_each_computer() {
+        let mut b = Board::default();
+        let now = 1;
+        b.apply("claude", &Op::Take { task: "Fix helper".into() }, now);
+        b.apply("gemini-lukes-mbp", &Op::Take { task: "Shared board".into() }, now);
+        b.apply("claude", &Op::Hand { task: "#1".into(), to: "@gpt-lukes-mbp".into() }, now);
+        let mut copy = b.clone();
+        localize(&mut copy, "lukes-mbp", Some("msi-agent47"));
+        let owners: Vec<_> = copy.tasks.iter().map(|t| t.owner.clone().unwrap()).collect();
+        assert_eq!(owners, vec!["gpt", "gemini"]);
+        assert_eq!(copy.tasks[0].by, "claude-msi-agent47");
+        assert_eq!(name("gemini-lukes-mbp"), "Gemini (lukes-mbp)");
     }
 
     #[test]

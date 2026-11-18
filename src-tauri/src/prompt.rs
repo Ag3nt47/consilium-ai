@@ -211,6 +211,11 @@ fn here() -> String {
     HERE.lock().unwrap().clone()
 }
 
+/// This computer's name as it appears in handles ("lukes-mbp"); empty until linking starts.
+pub fn here_slug() -> String {
+    here()
+}
+
 /// A computer name as it appears in a handle: lowercase letters and digits, words joined by "-".
 pub fn slug(name: &str) -> String {
     let mut out = String::new();

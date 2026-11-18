@@ -21,8 +21,12 @@
 //! Fail-safes, because AIs on two computers may both be working:
 //! - Each AI from another computer is named "<AI> (<computer>)", e.g. "Claude (MacBook)", on
 //!   screen and in every AI's transcript, so two Claudes are never mistaken for one another.
-//! - Imported messages never act here: no REQUEST, ADD_AI, TASK or REMEMBER takes effect. Only a
+//! - Imported messages never act here: no REQUEST, ADD_AI or REMEMBER takes effect. Only a
 //!   human message starts a turn freely; an AI's answer starts at most one per human message.
+//!   The one exception is TASK lines in an answer filed in the conversation's owner: one task board
+//!   per conversation is kept there for every computer (`take_contribution`), and each change is
+//!   sent to the copies as a snapshot (`share_board`, `take_board`), so task numbers match
+//!   everywhere and two computers' AIs don't take the same work.
 //! - Only the human and known AIs are accepted as senders; text is capped in size.
 //! - A computer that sends more than `MAX_PER_MINUTE` messages in a minute is paused for the
 //!   rest of that minute, with one note in the mirror, so a runaway loop can't flood this one.
@@ -68,6 +72,16 @@ struct Mirrors {
     /// This computer's conversations -> the linked computers (node ids) sent all of it.
     #[serde(default)]
     shared_with: HashMap<String, HashSet<String>>,
+    /// Mirrors whose board comes from the owner: mirror id -> when the newest snapshot was taken.
+    #[serde(default)]
+    boards: HashMap<String, u64>,
+}
+
+/// The text of a "tasks" packet: the owner's board for the conversation.
+#[derive(Serialize, Deserialize)]
+struct BoardSnapshot {
+    at: u64,
+    board: crate::tasks::Board,
 }
 
 pub struct Sync {
@@ -357,9 +371,69 @@ impl Sync {
             return Ok(None);
         }
         let via = shown_via(&shared.sender, &None, computer);
-        let event = self.store.append_imported(&shared.conversation, &shared.sender, "message", shared.to, &capped(shared.text), via)?;
+        let text = capped(shared.text);
+        let event = self.store.append_imported(&shared.conversation, &shared.sender, "message", shared.to, &text, via)?;
+        // The shared board lives here: the other computer's AI's TASK lines count, under its handle.
+        let ops = crate::tasks::task_lines(&text);
+        let who = format!("{}-{}", shared.sender, crate::prompt::slug(computer));
+        if let Ok(Some(note)) = crate::tasks::apply(self.store.dir(), &shared.conversation, &who, &ops) {
+            let _ = self.store.append(&shared.conversation, crate::council::CONSILIUM, "system", vec![], &note);
+            if let Some(packet) = self.board_packet(&shared.conversation) {
+                if let Some(link) = crate::link_handle() {
+                    let _ = link.send(PacketKind::Chat, packet);
+                }
+            }
+        }
         self.notify(&shared.conversation, &event);
         Ok(Some(event))
+    }
+
+    /// The packet carrying this computer's board for `conversation` to its copies, if it has been
+    /// shared with a linked computer.
+    fn board_packet(&self, conversation: &str) -> Option<Value> {
+        {
+            let m = self.mirrors.lock().unwrap();
+            if m.map.values().any(|v| v == conversation) || !(m.backfilled.contains(conversation) || m.shared_with.contains_key(conversation)) {
+                return None;
+            }
+        }
+        let snapshot = BoardSnapshot { at: crate::store::now_ms(), board: crate::tasks::load(self.store.dir(), conversation) };
+        serde_json::to_value(Shared {
+            conversation: conversation.to_string(),
+            title: String::new(),
+            id: uuid::Uuid::new_v4().to_string(),
+            sender: "human".into(),
+            kind: "tasks".into(),
+            to: vec![],
+            text: serde_json::to_string(&snapshot).ok()?,
+            via: None,
+            owner: None,
+            history: vec![],
+        })
+        .ok()
+    }
+
+    /// The owner `computer` sent its board for a conversation: it replaces this copy's board, with
+    /// each owner shown as seen from here. Older snapshots than the one already taken are ignored.
+    fn take_board(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
+        let Ok(mut snapshot) = serde_json::from_str::<BoardSnapshot>(&shared.text) else { return Ok(None) };
+        let local = {
+            let mut m = self.mirrors.lock().unwrap();
+            let key = format!("{}/{}", packet.node_id, shared.conversation);
+            let Some(local) = m.map.get(&key).filter(|id| self.store.meta(id).is_ok()).cloned() else { return Ok(None) };
+            if m.boards.get(&local).is_some_and(|&at| at >= snapshot.at) {
+                return Ok(None);
+            }
+            m.boards.insert(local.clone(), snapshot.at);
+            self.save(&m)?;
+            local
+        };
+        crate::tasks::localize(&mut snapshot.board, &crate::prompt::here_slug(), Some(&crate::prompt::slug(computer)));
+        if !crate::tasks::replace(self.store.dir(), &local, &snapshot.board)? {
+            return Ok(None);
+        }
+        let note = format!("Tasks: the shared board was updated on {computer}. {}", snapshot.board.progress());
+        self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None).map(Some)
     }
 
     /// Records that event `id` is being sent; false if it already was.
@@ -504,10 +578,15 @@ impl Sync {
             if let Some(packet) = self.history(&c.id, None, &format!("catch-up-{}-{}", c.id, crate::store::now_ms())) {
                 out.push(packet);
             }
-            let mut m = self.mirrors.lock().unwrap();
-            m.shared_with.entry(c.id.clone()).or_default().extend(peers.iter().cloned());
-            m.backfilled.insert(c.id);
-            let _ = self.save(&m);
+            {
+                let mut m = self.mirrors.lock().unwrap();
+                m.shared_with.entry(c.id.clone()).or_default().extend(peers.iter().cloned());
+                m.backfilled.insert(c.id.clone());
+                let _ = self.save(&m);
+            }
+            if !crate::tasks::load(self.store.dir(), &c.id).tasks.is_empty() {
+                out.extend(self.board_packet(&c.id));
+            }
         }
         out
     }
@@ -524,6 +603,9 @@ impl Sync {
         }
         if shared.kind == "update_request" {
             return self.take_update_request(packet, computer);
+        }
+        if shared.kind == "tasks" {
+            return self.take_board(packet, shared, computer);
         }
         if shared.owner.is_some() {
             if shared.sender == "human" {
@@ -709,6 +791,9 @@ pub fn share(e: &Event) {
     }
     if let Some(history) = s.history_for(e) {
         let _ = link.send(PacketKind::Chat, history);
+        if let Some(board) = s.board_packet(&e.conversation) {
+            let _ = link.send(PacketKind::Chat, board);
+        }
     }
     if let Some(payload) = s.outgoing(e) {
         let _ = link.send(PacketKind::Chat, payload);
@@ -729,6 +814,29 @@ pub fn reply(conversation: &str, text: &str, targets: &[String]) -> Result<Event
     let (event, payload) = s.reply(conversation, text, targets)?;
     link.send(PacketKind::Chat, payload)?;
     Ok(event)
+}
+
+/// Sends `conversation`'s task board to the linked computers with a copy of it, after it changed
+/// here. Does nothing for a copy (its owner keeps the board) or a conversation not shared yet.
+pub fn share_board(conversation: &str) {
+    let (Some(s), Some(link)) = (SYNC.get(), crate::link_handle()) else { return };
+    if !link.enabled() || !link.has_peers() {
+        return;
+    }
+    if let Some(packet) = s.board_packet(conversation) {
+        let _ = link.send(PacketKind::Chat, packet);
+    }
+}
+
+/// The name of the computer that keeps `conversation`'s board, if it is a copy whose board comes
+/// from there. TASK lines and board edits here then go to that computer instead of a local board.
+pub fn board_owner(conversation: &str) -> Option<String> {
+    let s = SYNC.get()?;
+    let (node, _) = s.origin(conversation)?;
+    if !s.mirrors.lock().unwrap().boards.contains_key(conversation) {
+        return None;
+    }
+    Some(crate::link_handle().map(|l| l.peer_name(&node)).unwrap_or(node))
 }
 
 /// Tells every linked computer that this one is installing `build` and restarting, so they update
@@ -977,6 +1085,45 @@ mod tests {
         a.file(&packet("node-b", "c3", b.outgoing(&late).unwrap()), "MacBook").unwrap().unwrap();
         assert_eq!(a_woke.lock().unwrap().last().map(|w| w.2), Some(true));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn one_task_board_is_kept_by_the_owner_and_copied_to_every_linked_computer() {
+        let root = std::env::temp_dir().join(format!("peer-sync-board-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        *a.me.lock().unwrap() = "node-a".into();
+        *b.me.lock().unwrap() = "node-b".into();
+        let conv = a.store.create("Plans").unwrap();
+        let ask = a.store.append(&conv.id, "human", "message", vec![], "Build it").unwrap();
+        let mirror = b.file(&packet("node-a", "p1", a.outgoing(&ask).unwrap()), "PC").unwrap().unwrap().conversation;
+        a.mirrors.lock().unwrap().backfilled.insert(conv.id.clone());
+        assert!(b.board_packet(&mirror).is_none(), "a copy never sends its board");
+        assert!(board_owner_of(&b, &mirror).is_none(), "no snapshot yet, so the copy still keeps its own");
+
+        // A's Gemini takes a task on A; B's Claude, answering in the copy, takes another.
+        crate::tasks::apply(a.store.dir(), &conv.id, "gemini", &crate::tasks::task_lines("TASK: take Fix the helper")).unwrap();
+        let answer = b.store.append(&mirror, "claude", "message", vec![], "I'll do it.\nTASK: take Shared board").unwrap();
+        a.file(&packet("node-b", "c1", b.outgoing(&answer).unwrap()), "MacBook").unwrap().unwrap();
+        let owned = crate::tasks::load(a.store.dir(), &conv.id);
+        let owners: Vec<_> = owned.tasks.iter().map(|t| (t.id, t.owner.clone().unwrap())).collect();
+        assert_eq!(owners, vec![(1, "gemini".to_string()), (2, "claude-macbook".to_string())]);
+
+        // The owner's snapshot replaces the copy's board, with A's own AIs named for A.
+        let snap = a.board_packet(&conv.id).expect("shared conversations send their board");
+        let note = b.file(&packet("node-a", "t1", snap.clone()), "PC").unwrap().expect("board replaced");
+        assert!(note.text.contains("2 in progress"), "{}", note.text);
+        let copy = crate::tasks::load(b.store.dir(), &mirror);
+        assert_eq!(copy.tasks[0].owner.as_deref(), Some("gemini-pc"));
+        assert_eq!(copy.tasks.len(), 2);
+        assert!(b.file(&packet("node-a", "t1b", snap), "PC").unwrap().is_none(), "an older or equal snapshot changes nothing");
+        assert!(board_owner_of(&b, &mirror).is_some(), "now the owner keeps it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn board_owner_of(s: &Sync, conversation: &str) -> Option<String> {
+        s.origin(conversation).filter(|_| s.mirrors.lock().unwrap().boards.contains_key(conversation)).map(|(n, _)| n)
     }
 
     #[test]

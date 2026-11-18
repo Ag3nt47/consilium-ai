@@ -437,9 +437,13 @@ fn tasks_apply(state: State<AppState>, id: String, op: tasks::Op) -> Result<task
     if !store::valid_id(&id) {
         return Err("Unknown conversation.".into());
     }
+    if let Some(owner) = peer_sync::board_owner(&id) {
+        return Err(format!("This board is kept on {owner}, so every computer sees the same tasks. Change it there, or ask an AI here with a TASK line."));
+    }
     let dir = state.engine.store.dir();
     if let Some(note) = tasks::apply(dir, &id, "human", &[op])? {
         state.engine.note(&id, &note)?;
+        peer_sync::share_board(&id);
     }
     Ok(tasks::load(dir, &id))
 }
