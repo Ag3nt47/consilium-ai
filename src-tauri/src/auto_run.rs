@@ -29,10 +29,8 @@ pub fn set(dir: impl AsRef<Path>, conversation: &str, on: bool) -> Result<bool, 
     } else {
         all.remove(conversation);
     }
-    let path = dir.join(FILE);
-    let tmp = dir.join(format!("{FILE}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&all).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    crate::store::replace_file(&tmp, &path).map_err(|e| e.to_string())?;
+    let data = serde_json::to_vec_pretty(&all).map_err(|e| e.to_string())?;
+    crate::store::write_atomic(&dir.join(FILE), &data).map_err(|e| e.to_string())?;
     Ok(on)
 }
 

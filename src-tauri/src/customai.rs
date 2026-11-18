@@ -65,9 +65,8 @@ fn save(all: &[CustomAi]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(all).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    let data = serde_json::to_vec_pretty(all).map_err(|e| e.to_string())?;
+    crate::store::write_atomic(path, &data).map_err(|e| e.to_string())
 }
 
 pub fn list() -> Vec<&'static Agent> {
