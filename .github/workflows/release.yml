@@ -31,7 +31,7 @@ jobs:
       sha: ${{ steps.v.outputs.sha }}
       id: ${{ steps.v.outputs.id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - id: v
@@ -77,13 +77,13 @@ jobs:
             args: ""
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           # Full history: build.rs stamps the build number from `git rev-list --count HEAD`, and a
           # shallow clone made every release "#1", so linked computers could never match it.
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: lts/*
           cache: npm
