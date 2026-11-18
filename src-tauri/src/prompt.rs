@@ -953,19 +953,20 @@ mod tests {
 
     #[test]
     fn command_boxes_note_reports_each_box_state() {
+        let shell = if cfg!(windows) { "powershell" } else { "bash" };
         let with_id = |id: &str, sender: &str, text: &str| Event { id: id.into(), ..ev(sender, text) };
-        let mine = "Check:\n```bash\nls -la\n```\nThen:\n```bash\ngit status\n```\nSketch:\n```text\nnot a command\n```\nLast:\n```bash\ndate\n```";
+        let mine = format!("Check:\n```{shell}\nls -la\n```\nThen:\n```{shell}\ngit status\n```\nSketch:\n```text\nnot a command\n```\nLast:\n```{shell}\ndate\n```");
         let events = vec![
-            with_id("abcdef1234", "claude", mine),
+            with_id("abcdef1234", "claude", &mine),
             with_id("h1", "human", "Ran command from Claude's message (exit 0, succeeded, 1.2 s):\n```text\nok\n```\n(command ref abcdef1234#0)"),
             with_id("h2", "human", "Denied command from Claude's message.\n(command ref abcdef1234#1)"),
-            with_id("other", "gemini", "```bash\nwhoami\n```"),
+            with_id("other", "gemini", &format!("```{shell}\nwhoami\n```")),
         ];
         let note = command_boxes_note(&events, "claude", |id, i| id == "abcdef1234" && i == 3);
-        assert!(note.contains("#0 (bash, starts `ls -la`): FINISHED (exit 0, succeeded, 1.2 s)"), "{note}");
-        assert!(note.contains("#1 (bash, starts `git status`): DENIED"), "{note}");
+        assert!(note.contains(&format!("#0 ({shell}, starts `ls -la`): FINISHED (exit 0, succeeded, 1.2 s)")), "{note}");
+        assert!(note.contains(&format!("#1 ({shell}, starts `git status`): DENIED")), "{note}");
         assert!(!note.contains("not a command"), "text blocks aren't commands");
-        assert!(note.contains("#3 (bash, starts `date`): RUNNING"), "{note}");
+        assert!(note.contains(&format!("#3 ({shell}, starts `date`): RUNNING")), "{note}");
         assert!(!note.contains("whoami"), "other AIs' boxes are theirs");
         assert!(command_boxes_note(&events, "gpt", |_, _| false).is_empty());
     }
