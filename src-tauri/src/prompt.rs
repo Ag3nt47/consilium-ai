@@ -956,7 +956,7 @@ mod tests {
 
     #[test]
     fn local_ais_are_told_how_to_code_through_command_boxes() {
-        let win = command_box_coding("C:\proj", "windows", true);
+        let win = command_box_coding(r"C:\proj", "windows", true);
         assert!(win.contains("```powershell") && win.contains("Set-Content") && win.contains("by itself"));
         let mac = command_box_coding("/proj", "macos", false);
         assert!(mac.contains("```bash") && mac.contains("cat > path/to/file") && mac.contains("clicks Run"));
