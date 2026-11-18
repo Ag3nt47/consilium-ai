@@ -24,6 +24,9 @@ snap=$(mktemp -d "${TMPDIR:-/tmp}/consilium-precommit.XXXXXX")
 trap 'rm -rf "$snap"' EXIT INT TERM
 git checkout-index -a --prefix="$snap/"
 ln -s "$root/node_modules" "$snap/node_modules"
+# Git sets these for hooks. Left in place, a test that runs `git init` in a scratch folder would
+# re-initialise this repository instead, and switch core.bare on.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
 cd "$snap"
 if ! node node_modules/typescript/bin/tsc --noEmit -p .; then
   echo "pre-commit: the staged screen code does not type-check (see above). Stage the missing files, or unstage the unfinished ones." >&2

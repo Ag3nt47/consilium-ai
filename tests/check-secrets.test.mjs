@@ -7,16 +7,19 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const SCANNER = resolve("scripts/check-secrets.mjs");
+// Run inside a git hook, GIT_DIR and GIT_INDEX_FILE point at the real repository: `git init` here
+// would then re-initialise that repository from outside its working tree and switch core.bare on.
+const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
 
 function repoWith(files) {
   const dir = mkdtempSync(join(tmpdir(), "consilium-scan-"));
-  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["init", "-q"], { cwd: dir, env });
   for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
   return dir;
 }
 
 function scan(dir) {
-  return spawnSync(process.execPath, [SCANNER], { cwd: dir, encoding: "utf8" });
+  return spawnSync(process.execPath, [SCANNER], { cwd: dir, env, encoding: "utf8" });
 }
 
 // Test values are assembled at runtime so this file itself never contains a real-looking secret.
