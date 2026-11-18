@@ -1,4 +1,4 @@
-//! Local CLI agents: ChatGPT through OpenAI's Codex CLI, Claude through Anthropic's Claude Code CLI,
+﻿//! Local CLI agents: ChatGPT through OpenAI's Codex CLI, Claude through Anthropic's Claude Code CLI,
 //! and Gemini through Google's Antigravity CLI (`agy`). Google stopped serving the Gemini CLI to
 //! personal accounts in June 2026; it is still used for Gemini when `agy` isn't installed, for
 //! company plans and API keys that keep access.
@@ -2099,8 +2099,14 @@ fn interactive_prompt(output: &str) -> Option<String> {
 fn antigravity_allow_rules(access: Access) -> Option<Vec<&'static str>> {
     match access {
         Access::Chat | Access::Own => None,
-        Access::Read | Access::Edit => Some(vec!["read_file(*)"]),
-        Access::Unrestricted if cfg!(windows) => Some(vec!["read_file(*)", "write_file(*)"]),
+        Access::Read => Some(vec!["read_file(*)"]),
+        Access::Edit => Some(vec!["read_file(*)", "edit_file(*)", "write_file(*)"]),
+        Access::Unrestricted if cfg!(windows) => Some(vec![
+            "read_file(*)",
+            "write_file(*)",
+            "edit_file(*)",
+            "run_command(*)",
+        ]),
         Access::Unrestricted => None,
     }
 }
@@ -2510,10 +2516,11 @@ mod plan_tests {
         assert_eq!(line["event"], "user");
         assert_eq!(line["message"]["content"], "SYS\n\nP");
         assert!(has(&args(Kind::Antigravity, Access::Edit), &["--mode", "accept-edits"]));
-        let read_rule = r#"{"permissions":{"allow":["read_file(*)"]}}"#;
-        assert!(has(&args(Kind::Antigravity, Access::Read), &["--settings", read_rule]));
-        assert!(has(&args(Kind::Antigravity, Access::Edit), &["--settings", read_rule]));
-        assert!(!args(Kind::Antigravity, Access::Chat).iter().any(|x| x == "--settings"));
+          let read_rule = &serde_json::json!({ "permissions": { "allow": ["read_file(*)"] } }).to_string();
+          let edit_rule = &serde_json::json!({ "permissions": { "allow": ["read_file(*)", "edit_file(*)", "write_file(*)"] } }).to_string();
+          assert!(has(&args(Kind::Antigravity, Access::Read), &["--settings", read_rule]));
+          assert!(has(&args(Kind::Antigravity, Access::Edit), &["--settings", edit_rule]));
+          assert!(!args(Kind::Antigravity, Access::Chat).iter().any(|x| x == "--settings"));
         assert!(!args(Kind::Antigravity, Access::Own).iter().any(|x| x == "--settings"));
         assert_eq!(
             args(Kind::Antigravity, Access::Unrestricted).iter().any(|x| x == "--settings"),
