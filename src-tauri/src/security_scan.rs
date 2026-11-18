@@ -343,13 +343,20 @@ impl Scanner {
                         .map(|s| s.auto_remove_malicious_extensions)
                         .unwrap_or(true);
                     if auto_remove && json.is_file() {
-                        if let Ok(removed) = auto_remove_malicious_extensions(&json) {
-                            if !removed.is_empty() {
+                        if let Ok(outcome) = auto_remove_malicious_extensions(&json) {
+                            if !outcome.removed_ids.is_empty() {
                                 summary = format!(
-                                    "{} Automatically removed {} malicious browser extension(s): {}.",
+                                    "{} Automatically removed {} malicious browser extension(s): {}. Open chrome://extensions and confirm it's gone; reset your search engine if it was changed.",
                                     summary,
-                                    removed.len(),
-                                    removed.join(", ")
+                                    outcome.removed_ids.len(),
+                                    outcome.removed_ids.join(", ")
+                                );
+                            }
+                            if !outcome.skipped_browsers.is_empty() {
+                                summary = format!(
+                                    "{} Removal of malicious extension(s) in {} deferred until the browser is closed.",
+                                    summary,
+                                    outcome.skipped_browsers.join(", ")
                                 );
                             }
                         }
@@ -602,21 +609,121 @@ pub fn remove_browser_extension_in_roots(roots: &[PathBuf], extension_id: &str) 
     removed
 }
 
-pub fn auto_remove_malicious_extensions(report_path: &Path) -> Result<Vec<String>, String> {
+pub fn browser_for_root(root: &Path) -> &'static str {
+    let s = root.to_string_lossy().to_ascii_lowercase();
+    if s.contains("edge") {
+        "Microsoft Edge"
+    } else if s.contains("brave") {
+        "Brave"
+    } else if s.contains("vivaldi") {
+        "Vivaldi"
+    } else if s.contains("arc") {
+        "Arc"
+    } else if s.contains("chromium") {
+        "Chromium"
+    } else {
+        "Google Chrome"
+    }
+}
+
+pub fn browser_process_names(browser: &str) -> &'static [&'static str] {
+    match browser {
+        "Microsoft Edge" => &[
+            "msedge",
+            "msedge.exe",
+            "microsoft edge",
+            "microsoft-edge",
+            "microsoft edge dev",
+            "microsoft edge canary",
+        ],
+        "Brave" => &["brave", "brave.exe", "brave browser", "brave-browser"],
+        "Vivaldi" => &["vivaldi", "vivaldi.exe"],
+        "Arc" => &["arc", "arc.exe"],
+        "Chromium" => &["chromium", "chromium.exe", "chromium-browser"],
+        _ => &[
+            "chrome",
+            "chrome.exe",
+            "google chrome",
+            "google-chrome",
+            "google-chrome-beta",
+            "google-chrome-unstable",
+            "google chrome canary",
+        ],
+    }
+}
+
+pub fn is_browser_running(browser: &str, active_processes: &[String]) -> bool {
+    let targets = browser_process_names(browser);
+    active_processes.iter().any(|proc_name| {
+        let p_lower = proc_name.to_ascii_lowercase();
+        let trimmed = p_lower.strip_suffix(".exe").unwrap_or(&p_lower);
+        targets.iter().any(|&target| {
+            let t_trimmed = target.strip_suffix(".exe").unwrap_or(target);
+            trimmed == t_trimmed || p_lower.starts_with(target)
+        })
+    })
+}
+
+pub fn running_processes() -> Vec<String> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    sys.processes()
+        .values()
+        .map(|p| p.name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RemovalOutcome {
+    pub removed_ids: Vec<String>,
+    pub skipped_browsers: Vec<String>,
+}
+
+pub fn remove_browser_extensions_safe(
+    roots: &[PathBuf],
+    extension_ids: &[String],
+    active_processes: &[String],
+) -> RemovalOutcome {
+    let mut outcome = RemovalOutcome::default();
+    for root in roots {
+        let browser = browser_for_root(root);
+        if is_browser_running(browser, active_processes) {
+            if !outcome.skipped_browsers.iter().any(|b| b == browser) {
+                outcome.skipped_browsers.push(browser.to_string());
+            }
+            continue;
+        }
+        for id in extension_ids {
+            let paths = remove_browser_extension_in_roots(std::slice::from_ref(root), id);
+            if !paths.is_empty() && !outcome.removed_ids.iter().any(|r| r == id) {
+                outcome.removed_ids.push(id.clone());
+            }
+        }
+    }
+    outcome
+}
+
+pub fn auto_remove_malicious_extensions_with_processes(
+    report_path: &Path,
+    active_processes: &[String],
+) -> Result<RemovalOutcome, String> {
     let content = fs::read_to_string(report_path).map_err(|e| e.to_string())?;
     let ids = parse_malicious_extension_ids(&content);
     if ids.is_empty() {
-        return Ok(Vec::new());
+        return Ok(RemovalOutcome::default());
     }
     let roots = chromium_user_data_roots();
-    let mut successfully_removed = Vec::new();
-    for id in &ids {
-        let paths = remove_browser_extension_in_roots(&roots, id);
-        if !paths.is_empty() {
-            successfully_removed.push(id.clone());
-        }
-    }
-    Ok(successfully_removed)
+    Ok(remove_browser_extensions_safe(&roots, &ids, active_processes))
+}
+
+pub fn auto_remove_malicious_extensions(report_path: &Path) -> Result<RemovalOutcome, String> {
+    let procs = running_processes();
+    auto_remove_malicious_extensions_with_processes(report_path, &procs)
 }
 
 #[cfg(test)]
@@ -767,6 +874,42 @@ mod tests {
 
         let reloaded = Scanner::open(&root);
         assert!(!reloaded.status().auto_remove_malicious_extensions);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skips_extension_cleanup_when_browser_is_running() {
+        let root =
+            std::env::temp_dir().join(format!("consilium-running-browser-test-{}", uuid::Uuid::new_v4()));
+        let profile = root.join("Default");
+        let bad_id = "dkcjihabohaldgjkdmenepolojcjdaah";
+
+        let bad_ext = profile.join("Extensions").join(bad_id).join("1.0.0");
+        fs::create_dir_all(&bad_ext).unwrap();
+        fs::write(bad_ext.join("manifest.json"), b"{}").unwrap();
+
+        // When browser process (e.g. "Google Chrome") is active, nothing is deleted.
+        let active = vec!["Google Chrome".to_string()];
+        let outcome = remove_browser_extensions_safe(
+            std::slice::from_ref(&root),
+            &[bad_id.to_string()],
+            &active,
+        );
+        assert!(outcome.removed_ids.is_empty());
+        assert_eq!(outcome.skipped_browsers, vec!["Google Chrome".to_string()]);
+        assert!(bad_ext.exists(), "Extension files must not be deleted while browser is running");
+
+        // When browser is closed, cleanup proceeds.
+        let closed: Vec<String> = Vec::new();
+        let outcome_closed = remove_browser_extensions_safe(
+            std::slice::from_ref(&root),
+            &[bad_id.to_string()],
+            &closed,
+        );
+        assert_eq!(outcome_closed.removed_ids, vec![bad_id.to_string()]);
+        assert!(outcome_closed.skipped_browsers.is_empty());
+        assert!(!bad_ext.exists(), "Extension files should be removed once browser is closed");
 
         let _ = fs::remove_dir_all(root);
     }
