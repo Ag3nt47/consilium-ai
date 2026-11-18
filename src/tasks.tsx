@@ -25,6 +25,9 @@ export function TaskBoardPanel({
   const [board, setBoard] = useState<TaskBoard>({ tasks: [], next: 0 });
   // Pinned open by a click; otherwise it opens while the pointer or keyboard focus is on it.
   const [pinned, setPinned] = useState(false);
+  // Closed by a click: hover and focus don't reopen it until the pointer leaves, so the second
+  // click really closes it instead of leaving the hover peek showing.
+  const [closed, setClosed] = useState(false);
   const [title, setTitle] = useState("");
   const [error, setError] = useState("");
 
@@ -55,14 +58,21 @@ export function TaskBoardPanel({
 
   return (
     <div
-      className={`task-float${pinned ? " pinned" : ""}`}
+      className={`task-float${pinned ? " pinned" : ""}${closed ? " closed" : ""}`}
+      onMouseLeave={() => setClosed(false)}
       onKeyDown={(e) => {
-        if (e.key === "Escape") setPinned(false);
+        if (e.key === "Escape") {
+          setPinned(false);
+          setClosed(true);
+        }
       }}
     >
       <button
         className="task-chip"
-        onClick={() => setPinned(!pinned)}
+        onClick={() => {
+          setClosed(pinned);
+          setPinned(!pinned);
+        }}
         aria-expanded={pinned}
         title={pinned ? "Close the task checklist" : "Shared task checklist: hover to peek, click to keep it open"}
       >
