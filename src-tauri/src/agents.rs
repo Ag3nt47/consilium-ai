@@ -1,4 +1,4 @@
-//! Local CLI agents: ChatGPT through OpenAI's Codex CLI, Claude through Anthropic's Claude Code CLI,
+﻿//! Local CLI agents: ChatGPT through OpenAI's Codex CLI, Claude through Anthropic's Claude Code CLI,
 //! and Gemini through Google's Antigravity CLI (`agy`). Google stopped serving the Gemini CLI to
 //! personal accounts in June 2026; it is still used for Gemini when `agy` isn't installed, for
 //! company plans and API keys that keep access.
@@ -2101,9 +2101,12 @@ fn antigravity_allow_rules(access: Access) -> Option<Vec<&'static str>> {
         Access::Chat | Access::Own => None,
         Access::Read => Some(vec!["read_file(*)"]),
         Access::Edit => Some(vec!["read_file(*)", "edit_file(*)", "write_file(*)"]),
-        Access::Unrestricted if cfg!(windows) => Some(vec!["read_file(*)", "write_file(*)", "edit_file(*)", "run_command(*)"]),
-        Access::Unrestricted => None,
-        Access::Unrestricted if cfg!(windows) => Some(vec!["read_file(*)", "write_file(*)", "edit_file(*)", "run_command(*)"]),
+        Access::Unrestricted if cfg!(windows) => Some(vec![
+            "read_file(*)",
+            "write_file(*)",
+            "edit_file(*)",
+            "run_command(*)",
+        ]),
         Access::Unrestricted => None,
     }
 }
