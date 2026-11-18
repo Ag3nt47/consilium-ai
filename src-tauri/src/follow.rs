@@ -302,6 +302,19 @@ pub fn start(engine: Arc<crate::engine::Engine>, data: PathBuf) {
     }));
 }
 
+static TOLD_PREPARING: std::sync::Mutex<Option<Build>> = std::sync::Mutex::new(None);
+
+/// Pure helper: returns true if a preparing notification should be posted for `target`,
+/// recording `target` into `told`. Returns false if `told` already matches `target`.
+pub fn should_notify_preparing(told: &mut Option<Build>, target: &Build) -> bool {
+    if told.as_ref() == Some(target) {
+        false
+    } else {
+        *told = Some(target.clone());
+        true
+    }
+}
+
 async fn check(engine: &Arc<crate::engine::Engine>, data: &Path) {
     let Some(link) = crate::link_handle() else { return };
     if !link.enabled() {
@@ -324,15 +337,23 @@ async fn check(engine: &Arc<crate::engine::Engine>, data: &Path) {
     if FAILED.lock().unwrap().as_ref().is_some_and(|(b, at)| *b == build && crate::store::now_ms() < at + RETRY_AFTER_MS) {
         return;
     }
-    tell(engine, &format!("{from} runs Consilium {}, newer than this computer's {}. Preparing the same build here so the computers stay in step; it installs like any update, and the AIs carry on after the restart.", build.label(), this.label()));
-    set("preparing", &build, &from, "Getting the code");
+    if should_notify_preparing(&mut TOLD_PREPARING.lock().unwrap(), &build) {
+        tell(engine, &format!("{from} runs Consilium {}, newer than this computer's {}. Preparing the same build here so the computers stay in step; it installs like any update, and the AIs carry on after the restart.", build.label(), this.label()));
+        #[cfg(not(windows))]
+        set("preparing", &build, &from, "Getting the code");
+    }
     match prepare(data, &build, &from).await {
         Ok(true) => {
+            *TOLD_PREPARING.lock().unwrap() = None;
             set("staged", &build, &from, "Ready to install");
             tell(engine, &format!("Consilium {} is ready to install on this computer, matching {from}.", build.label()));
         }
+        #[cfg(windows)]
+        Ok(false) => {}
+        #[cfg(not(windows))]
         Ok(false) => set("waiting", &build, &from, "That commit isn't on GitHub yet; trying again in a minute"),
         Err(why) => {
+            *TOLD_PREPARING.lock().unwrap() = None;
             *FAILED.lock().unwrap() = Some((build.clone(), crate::store::now_ms()));
             set("failed", &build, &from, why.clone());
             tell(engine, &format!("Couldn't prepare Consilium {} to match {from}: {why}. Trying again in 30 minutes; see update/follow.log in Consilium's data folder.", build.label()));
@@ -476,6 +497,25 @@ mod tests {
             ]
         });
         assert_eq!(pick_windows_asset(&rel), Some(("https://example.com/setup.exe", "sha256:2")));
+    }
+
+    #[test]
+    fn test_should_notify_preparing_once_per_build() {
+        let b1 = Build { version: "0.3.47".into(), number: 1, commit: "abcdef0".into() };
+        let b2 = Build { version: "0.3.48".into(), number: 2, commit: "1234567".into() };
+        let mut told = None;
+
+        assert!(should_notify_preparing(&mut told, &b1));
+        assert_eq!(told.as_ref(), Some(&b1));
+
+        assert!(!should_notify_preparing(&mut told, &b1));
+        assert_eq!(told.as_ref(), Some(&b1));
+
+        assert!(should_notify_preparing(&mut told, &b2));
+        assert_eq!(told.as_ref(), Some(&b2));
+
+        told = None;
+        assert!(should_notify_preparing(&mut told, &b2));
     }
     use super::*;
 
