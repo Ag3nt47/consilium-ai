@@ -20,6 +20,7 @@ mod follow;
 mod link;
 mod liveui;
 mod memory;
+pub mod ollama;
 pub mod peer_protocol;
 mod peer_sync;
 mod pressure;
@@ -899,6 +900,19 @@ fn remove_custom_ai(state: State<'_, AppState>, id: String) -> Result<(), String
     customai::remove(&id)
 }
 
+/// Probes a local Ollama daemon for installed models via its `/api/tags` endpoint.
+#[tauri::command]
+async fn probe_ollama(base_url: Option<String>) -> Result<Vec<ollama::OllamaTagModel>, String> {
+    ollama::list_models(base_url.as_deref()).await
+}
+
+/// Registers an Ollama model as a Custom AI council member.
+#[tauri::command]
+fn import_ollama_model(model: ollama::OllamaTagModel, base_url: Option<String>) -> Result<String, String> {
+    let custom = ollama::to_custom_ai(&model, base_url.as_deref())?;
+    customai::add(&custom.name, &custom.base_url, &custom.model, custom.local)
+}
+
 /// Runs block `index` of AI message `event_id` (the human clicked Run on its command box), then
 /// sends the output to that AI as the human's message. The command text is read from the stored
 /// message, never taken from the screen, and each block runs at most once.
@@ -1337,6 +1351,8 @@ pub fn run() {
             set_api_key,
             add_custom_ai,
             remove_custom_ai,
+            probe_ollama,
+            import_ollama_model,
             system_pressure,
             security_scan_status,
             security_scan_save,

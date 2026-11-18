@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "./api";
+import { api, type OllamaModel } from "./api";
 
 /** Common services and local model servers. Each only fills in the form; the person can change anything. */
 const PRESETS: { label: string; name: string; url: string; local: boolean; model?: string; hint: string }[] = [
@@ -22,6 +22,8 @@ export function CustomAiForm({ onAdded, onError }: { onAdded: (id: string) => vo
   const [local, setLocal] = useState(false);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
+  const [ollamaModels, setOllamaModels] = useState<OllamaModel[]>([]);
+  const [probingOllama, setProbingOllama] = useState(false);
 
   function pick(i: number) {
     setPreset(i);
@@ -31,6 +33,40 @@ export function CustomAiForm({ onAdded, onError }: { onAdded: (id: string) => vo
     setUrl(p.url);
     setModel(p.model ?? "");
     setLocal(p.local);
+    setOllamaModels([]);
+    if (p.label.startsWith("Ollama")) {
+      scanOllama(p.url);
+    }
+  }
+
+  async function scanOllama(customUrl?: string) {
+    setProbingOllama(true);
+    try {
+      const target = customUrl ?? (url.trim() ? url.trim() : undefined);
+      const models = await api.probeOllama(target);
+      setOllamaModels(models);
+      if (models.length === 0 && !customUrl) {
+        onError("Ollama connected, but no models found. Run `ollama pull llama3.2`.");
+      }
+    } catch (e) {
+      if (!customUrl) {
+        onError(String(e));
+      }
+    } finally {
+      setProbingOllama(false);
+    }
+  }
+
+  async function importModel(m: OllamaModel) {
+    setBusy(true);
+    try {
+      const id = await api.importOllamaModel(m, url.trim() ? url.trim() : undefined);
+      onAdded(id);
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function add() {
@@ -73,6 +109,32 @@ export function CustomAiForm({ onAdded, onError }: { onAdded: (id: string) => vo
           API address
           <input value={url} spellCheck={false} onChange={(e) => setUrl(e.target.value)} placeholder="https://api.example.com/v1" />
         </label>
+        {(preset === 0 || url.includes("11434")) && (
+          <div className="ollama-scan-box" style={{ marginTop: "4px", marginBottom: "4px" }}>
+            <div className="row wrap" style={{ gap: "6px", alignItems: "center" }}>
+              <button
+                type="button"
+                className="btn ghost small-btn"
+                disabled={probingOllama || busy}
+                onClick={() => scanOllama()}
+              >
+                {probingOllama ? "Scanning Ollama…" : "Scan Installed Ollama Models"}
+              </button>
+              {ollamaModels.map((m) => (
+                <button
+                  key={m.name}
+                  type="button"
+                  title={`Import ${m.name} as Council AI`}
+                  className="btn secondary small-btn"
+                  disabled={busy}
+                  onClick={() => importModel(m)}
+                >
+                  + {m.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <label>
           Model <span className="muted small">(optional: blank uses the first the service lists)</span>
           <input value={model} spellCheck={false} onChange={(e) => setModel(e.target.value)} placeholder="model-name" />
