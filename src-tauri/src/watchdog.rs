@@ -312,20 +312,23 @@ mod tests {
 
     #[test]
     fn test_challenge_signature_verification() {
-        let key = b"01234567890123456789012345678901";
-        let nonce = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let key_str = format!("{}", uuid::Uuid::new_v4().simple());
+        let key = key_str.as_bytes();
+        let nonce = format!("{}", uuid::Uuid::new_v4().simple());
+        let wrong_nonce = format!("{}", uuid::Uuid::new_v4().simple());
         let node_id = "lukes-mbp";
 
-        let payload = format_challenge_payload(nonce, node_id);
+        let payload = format_challenge_payload(&nonce, node_id);
         let sig = hex_encode(&compute_hmac(key, payload.as_bytes()));
 
-        assert!(verify_signature(key, nonce, node_id, &sig));
+        assert!(verify_signature(key, &nonce, node_id, &sig));
 
-        let wrong_key = b"wrong_key_32_bytes_long_padding!";
-        assert!(!verify_signature(wrong_key, nonce, node_id, &sig));
-        assert!(!verify_signature(key, "wrong_nonce", node_id, &sig));
-        assert!(!verify_signature(key, nonce, "other-node", &sig));
-        assert!(!verify_signature(key, nonce, node_id, "deadbeef"));
+        let wrong_key_str = format!("{}", uuid::Uuid::new_v4().simple());
+        let wrong_key = wrong_key_str.as_bytes();
+        assert!(!verify_signature(wrong_key, &nonce, node_id, &sig));
+        assert!(!verify_signature(key, &wrong_nonce, node_id, &sig));
+        assert!(!verify_signature(key, &nonce, "other-node", &sig));
+        assert!(!verify_signature(key, &nonce, node_id, "deadbeef"));
     }
 
     #[test]
