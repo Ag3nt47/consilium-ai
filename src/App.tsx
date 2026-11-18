@@ -1303,6 +1303,10 @@ export default function App() {
   const followRef = useRef(true);
   const lastScrollTopRef = useRef(0);
   const seenCountRef = useRef(0);
+  // Set when the human sends from this window, so only their own new message pulls the chat down.
+  // Command output, "Approved:" lines and messages from a linked computer are also sent as the
+  // human, and used to snap the view to the bottom while they were reading further up.
+  const ownSendRef = useRef(false);
   const [unseen, setUnseen] = useState(0);
 
   currentRef.current = current;
@@ -1512,23 +1516,28 @@ export default function App() {
   useEffect(() => {
     followRef.current = true;
     seenCountRef.current = 0;
+    ownSendRef.current = false;
     setUnseen(0);
+    setAwayFromLatest(false);
   }, [current]);
 
   useEffect(() => {
-    const grew = events.length - seenCountRef.current;
-    const mine = events.length > 0 && events[events.length - 1].sender === "human" && grew > 0;
+    const fresh = events.slice(Math.min(seenCountRef.current, events.length));
     seenCountRef.current = events.length;
+    // Read receipts aren't shown, so they neither count as new nor move the view.
+    const shown = fresh.filter((e) => e.kind !== "seen").length;
+    const mine = ownSendRef.current && fresh.some((e) => e.sender === "human" && e.kind === "message");
+    if (mine) ownSendRef.current = false;
     if (followRef.current || mine) {
       followRef.current = true;
       setUnseen(0);
       endRef.current?.scrollIntoView({ behavior: prefs.effects ? "smooth" : "auto" });
-    } else if (grew > 0) {
-      setUnseen((n) => n + grew);
+    } else if (shown > 0) {
+      setUnseen((n) => n + shown);
     }
   }, [events, turn, prefs.effects]);
 
-  // Shows the floating jump-to-latest button while the chat is scrolled well up.
+  // Shows the floating jump-to-latest button whenever the chat is scrolled off the bottom.
   const [awayFromLatest, setAwayFromLatest] = useState(false);
 
   function onMessagesScroll() {
@@ -1536,7 +1545,8 @@ export default function App() {
     if (!el) return;
     const top = el.scrollTop;
     const nearBottom = el.scrollHeight - top - el.clientHeight < 80;
-    setAwayFromLatest(el.scrollHeight - top - el.clientHeight > 300);
+    // The jump button shows whenever the view is off the bottom, not only when far up.
+    setAwayFromLatest(!nearBottom);
     // Only an upward scroll unpins: smooth auto-scrolls and growing content never move scrollTop up.
     if (nearBottom) {
       followRef.current = true;
@@ -1682,9 +1692,11 @@ export default function App() {
     const slow = window.setTimeout(() => setError("Your message is taking unusually long to send. It will appear here once Consilium accepts it."), 15000);
     try {
       const to = targets.filter((t) => members.some((m) => m.id === t));
+      ownSendRef.current = true;
       await api.send(id, withPersona(text, persona), to, discuss ? rounds : 1, false, files);
       setError((e) => (e?.startsWith("Your message is taking") ? null : e));
     } catch (e) {
+      ownSendRef.current = false;
       setDraft(text);
       setPending(files);
       setError(String(e));
@@ -1807,6 +1819,7 @@ export default function App() {
     if (!current) return;
     setHeard("");
     const to = targets.filter((t) => members.some((m) => m.id === t));
+    ownSendRef.current = true;
     api.send(current, text, to, discuss ? rounds : 1).catch((e) => setError(String(e)));
   };
 
@@ -2857,11 +2870,6 @@ export default function App() {
             </div>
           )}
           <div ref={endRef} />
-          {unseen > 0 && !awayFromLatest && (
-            <button type="button" className="btn small new-messages" onClick={scrollToLatest} title="Jump to the newest message">
-              ↓ {unseen} new message{unseen > 1 ? "s" : ""}
-            </button>
-          )}
           {awayFromLatest && (
             <div className="jump-latest-wrap">
               <button type="button" className="jump-latest" onClick={scrollToLatest} title="Jump to the newest message" aria-label="Jump to the newest message">
