@@ -2099,8 +2099,11 @@ fn interactive_prompt(output: &str) -> Option<String> {
 fn antigravity_allow_rules(access: Access) -> Option<Vec<&'static str>> {
     match access {
         Access::Chat | Access::Own => None,
-        Access::Read | Access::Edit => Some(vec!["read_file(*)"]),
-        Access::Unrestricted if cfg!(windows) => Some(vec!["read_file(*)", "write_file(*)"]),
+        Access::Read => Some(vec!["read_file(*)"]),
+        Access::Edit => Some(vec!["read_file(*)", "edit_file(*)", "write_file(*)"]),
+        Access::Unrestricted if cfg!(windows) => Some(vec!["read_file(*)", "write_file(*)", "edit_file(*)", "run_command(*)"]),
+        Access::Unrestricted => None,
+        Access::Unrestricted if cfg!(windows) => Some(vec!["read_file(*)", "write_file(*)", "edit_file(*)", "run_command(*)"]),
         Access::Unrestricted => None,
     }
 }

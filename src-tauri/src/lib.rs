@@ -214,7 +214,7 @@ fn save_approval(state: State<AppState>, request: String) -> Result<config::Coun
     state.engine.config.save_grants(&grants)
 }
 
-/// Settings → Tools: the catalog of not-bundled tools, with install state and pinned commands.
+/// Settings â†’ Tools: the catalog of not-bundled tools, with install state and pinned commands.
 #[tauri::command]
 fn tool_catalog() -> Vec<toolbox::CatalogEntry> {
     toolbox::catalog(data_dir().as_deref())
@@ -718,7 +718,7 @@ fn start_auto_install(app: AppHandle, engine: Arc<Engine>) {
                     id,
                     &format!(
                         "Installing Consilium {} automatically (now {}) and restarting; the AIs' work resumes after. \
-                         Turn this off in Settings → Updates.",
+                         Turn this off in Settings â†’ Updates.",
                         staged.build, staged.current_build
                     ),
                 );
@@ -746,7 +746,7 @@ async fn stress_test_and_post(engine: &Arc<Engine>, when: &str) -> Result<Vec<li
     Ok(reports)
 }
 
-/// The Communication stress test button (Settings → Multi-Computer Sync).
+/// The Communication stress test button (Settings â†’ Multi-Computer Sync).
 #[tauri::command]
 async fn stress_test_link(state: State<'_, AppState>) -> Result<Vec<link::StressReport>, String> {
     let engine = state.engine.clone();
@@ -784,7 +784,7 @@ fn release_check_requested() -> bool {
     follow::take_release_check()
 }
 
-/// Turns automatic install-and-restart on or off (Settings → Updates).
+/// Turns automatic install-and-restart on or off (Settings â†’ Updates).
 #[tauri::command]
 fn set_auto_install_updates(state: State<AppState>, on: bool) -> Result<(), String> {
     state.engine.config.set_auto_install_updates(on).map(|_| ())
@@ -1529,3 +1529,4 @@ pub fn run() {
             let _ = (app, event);
         });
 }
+
