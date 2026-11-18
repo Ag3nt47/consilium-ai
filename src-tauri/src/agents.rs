@@ -1043,6 +1043,13 @@ pub fn plan_with_files(
                     }
                 }
             }
+            // Print mode can't ask, so Antigravity denies any file outside the workspace that
+            // needs a permission ("denied_actions: ReadFile"). Grant reading (and, at Unrestricted,
+            // writing) for this run only; `--settings` is never saved to the user's settings.json.
+            if let Some(rules) = antigravity_allow_rules(access) {
+                push("--settings");
+                push(&serde_json::json!({ "permissions": { "allow": rules } }).to_string());
+            }
             if let Some(d) = dir {
                 push("--add-dir");
                 args.push(d.into());
@@ -2017,6 +2024,17 @@ fn interactive_prompt(output: &str) -> Option<String> {
 /// The reply from Antigravity's stream-json output: the final `result` event's response, or the
 /// streamed text if that is empty. A run that ended without text because a tool it reached for was
 /// blocked is reported as such, rather than as an empty answer.
+/// Antigravity allow-rules for an access level, or None when no file tools are wanted (Chat),
+/// the person's own settings decide (Own), or the bypass switch already covers them.
+fn antigravity_allow_rules(access: Access) -> Option<Vec<&'static str>> {
+    match access {
+        Access::Chat | Access::Own => None,
+        Access::Read | Access::Edit => Some(vec!["read_file(*)"]),
+        Access::Unrestricted if cfg!(windows) => Some(vec!["read_file(*)", "write_file(*)"]),
+        Access::Unrestricted => None,
+    }
+}
+
 fn antigravity_reply(stdout: &str) -> Result<String, String> {
     let mut streamed = String::new();
     let mut result = None;
@@ -2422,6 +2440,16 @@ mod plan_tests {
         assert_eq!(line["event"], "user");
         assert_eq!(line["message"]["content"], "SYS\n\nP");
         assert!(has(&args(Kind::Antigravity, Access::Edit), &["--mode", "accept-edits"]));
+        let read_rule = r#"{"permissions":{"allow":["read_file(*)"]}}"#;
+        assert!(has(&args(Kind::Antigravity, Access::Read), &["--settings", read_rule]));
+        assert!(has(&args(Kind::Antigravity, Access::Edit), &["--settings", read_rule]));
+        assert!(!args(Kind::Antigravity, Access::Chat).iter().any(|x| x == "--settings"));
+        assert!(!args(Kind::Antigravity, Access::Own).iter().any(|x| x == "--settings"));
+        assert_eq!(
+            args(Kind::Antigravity, Access::Unrestricted).iter().any(|x| x == "--settings"),
+            cfg!(windows),
+            "Unrestricted needs the rules only where the bypass switch isn't used"
+        );
         assert!(!args(Kind::Antigravity, Access::Own).iter().any(|x| x == "--mode"));
     }
 
