@@ -24,8 +24,9 @@ fn known_tools(os: &str) -> &'static [&'static str] {
 /// downloaded until the human approves the exact install command.
 struct CatalogTool {
     name: &'static str,
-    /// What to look for to tell whether it is installed: a program on the search path, or a file
-    /// under Consilium's data folder (prefixed `data:`). Empty when it can't be detected cheaply.
+    /// What to look for to tell whether it is installed: programs on the search path (any of
+    /// several, separated by `|`), or a file under Consilium's data folder (prefixed `data:`).
+    /// Empty when it can't be detected cheaply.
     detect: &'static str,
     source: &'static str,
     about: &'static str,
@@ -34,13 +35,12 @@ struct CatalogTool {
 const CATALOG: &[CatalogTool] = &[
     CatalogTool {
         name: "AnonRouter",
-        detect: "",
+        detect: "anonrouter-verify",
         source: "https://anonrouter.ai",
         about: "privacy router (\"VPN for AI\") that relays requests to AI model APIs without exposing the caller; \
 use it when the human wants AI traffic kept private. Python SDK: PyPI `anonrouter-confidential` (published \
-by AnonRouter, source github.com/anonrouter/anonrouter-sdk); needs Python 3.10 or newer; check for it with \
-`pip3 show anonrouter-confidential` (it has no CLI, so the status here reads unknown). Never send keys or the \
-human's details to it without approval",
+by AnonRouter, source github.com/anonrouter/anonrouter-sdk); needs Python 3.10 or newer; its `anonrouter-verify` command shows where it is installed (it may live in a \
+standalone Python rather than the system one). Never send keys or the human's details to it without approval",
     },
     CatalogTool {
         name: "Zero Breach Toolkit",
@@ -58,7 +58,7 @@ packaged files; not for ordinary source code in a repo",
     },
     CatalogTool {
         name: "Ghidra",
-        detect: "ghidraRun",
+        detect: "ghidraRun|ghidra|analyzeHeadless",
         source: "https://github.com/NationalSecurityAgency/ghidra",
         about: "decompiler REA uses for compiled native programs; needs a Java runtime; request it only when a \
 task needs native analysis",
@@ -114,7 +114,7 @@ fn detect(tool: &CatalogTool, dirs_: &[PathBuf], data: Option<&Path>) -> Option<
     match tool.detect.strip_prefix("data:") {
         Some(rel) => data.map(|d| d.join(rel)).filter(|p| p.is_file()),
         None if tool.detect.is_empty() => None,
-        None => present(tool.detect, dirs_),
+        None => tool.detect.split('|').find_map(|name| present(name, dirs_)),
     }
 }
 
@@ -183,13 +183,27 @@ fn search_dirs() -> Vec<PathBuf> {
             .map(|d| home.join(d)),
     );
     dirs_.extend(["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/snap/bin"].iter().map(PathBuf::from));
+    // Tools unpacked by hand (~/.local/opt/<tool>, with or without a bin folder), and Python
+    // console scripts installed with `pip install --user`, which are often not on PATH.
+    dirs_.extend(subdirs(&home.join(".local/opt")).into_iter().flat_map(|d| [d.join("bin"), d]));
+    dirs_.extend(subdirs(&home.join("Library/Python")).into_iter().map(|d| d.join("bin")));
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        dirs_.push(PathBuf::from(appdata).join("npm"));
+        dirs_.push(PathBuf::from(&appdata).join("npm"));
+        dirs_.extend(subdirs(&PathBuf::from(appdata).join("Python")).into_iter().map(|d| d.join("Scripts")));
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         dirs_.push(PathBuf::from(local).join("Microsoft").join("WindowsApps"));
     }
     dirs_
+}
+
+/// The folders directly inside `dir`, sorted; empty when it doesn't exist.
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|r| r.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
+        .unwrap_or_default();
+    out.sort();
+    out
 }
 
 fn present(name: &str, dirs_: &[PathBuf]) -> Option<PathBuf> {
@@ -405,5 +419,27 @@ mod tests {
         let cmd = zb.install_command.unwrap();
         assert!(cmd.contains("v3.0.2/zero-breach-toolkit.py") && cmd.contains("zero-breach-toolkit.py\""));
         assert!(!zb.detectable || zb.installed.is_none());
+    }
+
+    #[test]
+    fn catalog_finds_tools_by_any_listed_name_and_in_hand_unpacked_folders() {
+        let root = std::env::temp_dir().join(format!("consilium-catalog-{}", uuid::Uuid::new_v4()));
+        let opt = root.join("opt");
+        let bin = opt.join("python-3.11").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(opt.join("ghidra_12.2_PUBLIC")).unwrap();
+        let exe = |n: &str| if cfg!(windows) { format!("{n}.exe") } else { n.to_string() };
+        std::fs::write(bin.join(exe("anonrouter-verify")), "").unwrap();
+        std::fs::write(opt.join("ghidra_12.2_PUBLIC").join(exe("ghidraRun")), "").unwrap();
+        let dirs_: Vec<PathBuf> = subdirs(&opt).into_iter().flat_map(|d| [d.join("bin"), d]).collect();
+        let find = |name: &str| detect(CATALOG.iter().find(|t| t.name == name).unwrap(), &dirs_, None);
+        assert_eq!(find("AnonRouter"), Some(bin.join(exe("anonrouter-verify"))));
+        assert_eq!(find("Ghidra"), Some(opt.join("ghidra_12.2_PUBLIC").join(exe("ghidraRun"))));
+        assert_eq!(find("JADX"), None);
+        let launcher = root.join("bin");
+        std::fs::create_dir_all(&launcher).unwrap();
+        std::fs::write(launcher.join(exe("analyzeHeadless")), "").unwrap();
+        assert_eq!(detect(CATALOG.iter().find(|t| t.name == "Ghidra").unwrap(), &[launcher.clone()], None), Some(launcher.join(exe("analyzeHeadless"))));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
