@@ -2516,11 +2516,11 @@ mod plan_tests {
         assert_eq!(line["event"], "user");
         assert_eq!(line["message"]["content"], "SYS\n\nP");
         assert!(has(&args(Kind::Antigravity, Access::Edit), &["--mode", "accept-edits"]));
-        let read_rule = r#"{"permissions":{"allow":["read_file(*)"]}}"#;
-        assert!(has(&args(Kind::Antigravity, Access::Read), &["--settings", read_rule]));
-        let edit_rule = r#"{\"permissions\":{\"allow\":[\"read_file(*)\",\"edit_file(*)\",\"write_file(*)\"]}}\"#;
+          let read_rule = &serde_json::json!({ "permissions": { "allow": ["read_file(*)"] } }).to_string();
+          let edit_rule = &serde_json::json!({ "permissions": { "allow": ["read_file(*)", "edit_file(*)", "write_file(*)"] } }).to_string();
+          assert!(has(&args(Kind::Antigravity, Access::Read), &["--settings", read_rule]));
           assert!(has(&args(Kind::Antigravity, Access::Edit), &["--settings", edit_rule]));
-        assert!(!args(Kind::Antigravity, Access::Chat).iter().any(|x| x == "--settings"));
+          assert!(!args(Kind::Antigravity, Access::Chat).iter().any(|x| x == "--settings"));
         assert!(!args(Kind::Antigravity, Access::Own).iter().any(|x| x == "--settings"));
         assert_eq!(
             args(Kind::Antigravity, Access::Unrestricted).iter().any(|x| x == "--settings"),
