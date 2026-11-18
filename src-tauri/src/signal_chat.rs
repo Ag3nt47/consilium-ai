@@ -593,7 +593,7 @@ pub fn receipt(nobody_can_answer: bool, decision: bool) -> &'static str {
 /// Formats a specific verification notice for a phone message, indicating which AI is assigned or taking the task.
 pub fn formatted_receipt(nobody_can_answer: bool, decision: bool, targets: &[String]) -> String {
     if nobody_can_answer {
-        return notice::NO_AI.to_string();
+        return receipt(true, decision).to_string();
     }
     let names: Vec<String> = targets
         .iter()
@@ -601,12 +601,12 @@ pub fn formatted_receipt(nobody_can_answer: bool, decision: bool, targets: &[Str
         .collect();
     if decision {
         if names.is_empty() {
-            notice::DECISION.to_string()
+            receipt(false, true).to_string()
         } else {
             format!("Consilium: Decision received and passed to {}.", names.join(", "))
         }
     } else if names.is_empty() {
-        notice::RECEIVED.to_string()
+        receipt(false, false).to_string()
     } else if names.len() == 1 {
         format!("Consilium: Message received. Assigned to {}. Please wait for the response.", names[0])
     } else {
