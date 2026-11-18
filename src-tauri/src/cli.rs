@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const COMMANDS: &[&str] =
-    &["chat", "ask", "say", "log", "list", "new", "stop", "status", "check", "install-cli", "help", "--help", "-h", "--version", "-V"];
+    &["chat", "ask", "say", "log", "list", "new", "stop", "status", "check", "install-cli", "help", "--help", "-h", "--version", "-V", "--watchdog", "watchdog"];
 
 /// Whether the program was started as the terminal command rather than to open the window.
 pub fn wants_cli(args: &[String]) -> bool {
@@ -377,6 +377,9 @@ impl Ui for Term {
 
 /// Runs the terminal command; returns the process's exit code.
 pub fn main(args: Vec<String>) -> i32 {
+    if args.first().is_some_and(|a| a == "--watchdog" || a == "watchdog") {
+        return crate::watchdog::main_watchdog(&args);
+    }
     #[cfg(windows)]
     attach_console();
     let command = args.first().cloned().unwrap_or_default();
