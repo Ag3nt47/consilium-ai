@@ -17,15 +17,43 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Puts the finished temporary file `tmp` in place of `path`. Some Windows setups (an app container
-/// or a virtualised AppData folder) refuse to rename over an existing file; then the contents are
-/// copied over instead, so the save still lands.
+/// Puts the finished temporary file `tmp` in place of `path`. A rename can fail for a moment on
+/// Windows (another process reading the file, an antivirus scan), so it is retried. Some setups
+/// refuse it outright (an app container, a virtualised or EFS-encrypted AppData folder, which
+/// reports "not the same device"); then the contents are written over `path` in place. `path` is
+/// never removed first, so a failed save leaves the old file, not none.
 pub fn replace_file(tmp: &Path, path: &Path) -> std::io::Result<()> {
-    if fs::rename(tmp, path).is_ok() {
-        return Ok(());
+    for attempt in 0..5u64 {
+        if fs::rename(tmp, path).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15 * (attempt + 1)));
     }
-    fs::copy(tmp, path)?;
+    let data = fs::read(tmp)?;
+    let mut f = OpenOptions::new().write(true).create(true).truncate(true).open(path)?;
+    f.write_all(&data)?;
+    f.sync_all()?;
     let _ = fs::remove_file(tmp);
+    Ok(())
+}
+
+/// Writes `data` to a temporary file next to `path`, flushed to disk, and puts it in place. The
+/// temporary name is unique to this write, so the app and the terminal saving the same file at
+/// once can't take each other's temporary file away.
+pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = path.with_file_name(format!("{name}.{}-{}.tmp", std::process::id(), &uuid::Uuid::new_v4().simple().to_string()[..8]));
+    let written = (|| {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        // Flushed before it replaces anything: Consilium can be closed for an update straight
+        // after a save, and an unflushed file could come back as zeros.
+        f.sync_all()
+    })();
+    if let Err(e) = written.and_then(|_| replace_file(&tmp, path)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -284,18 +312,68 @@ impl Store {
         }
     }
 
+    /// Every conversation, newest first. One whose title file is missing or damaged is still
+    /// listed, rebuilt from its own message log (see `meta`), so it can never silently disappear.
     pub fn list(&self) -> Vec<ConversationMeta> {
-        let mut out: Vec<ConversationMeta> = fs::read_dir(&self.dir)
+        let mut ids: Vec<String> = fs::read_dir(&self.dir)
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .filter_map(|e| fs::read_to_string(e.path()).ok())
-            .filter_map(|s| serde_json::from_str::<ConversationMeta>(&s).ok())
-            .filter(|m| valid_id(&m.id))
+            .filter_map(|e| {
+                let path = e.path();
+                let ext = path.extension()?.to_str()?;
+                (ext == "json" || ext == "jsonl").then(|| path.file_stem()?.to_str().map(str::to_string)).flatten()
+            })
+            .filter(|id| valid_id(id))
             .collect();
+        ids.sort();
+        ids.dedup();
+        let mut out: Vec<ConversationMeta> = ids.iter().filter_map(|id| self.meta(id).ok()).filter(|m| valid_id(&m.id)).collect();
         out.sort_by_key(|m| std::cmp::Reverse(m.updated));
         out
+    }
+
+    /// Rebuilds the title file of a conversation whose `<id>.json` is missing or unreadable: from a
+    /// temporary copy a save left behind, else from its message log (title from the first thing the
+    /// human wrote, times from the first and last events). Saved again, so it is done once. None if
+    /// there is no log, so a conversation is only ever recovered, never invented.
+    fn recover_meta(&self, id: &str) -> Option<ConversationMeta> {
+        let log = self.log_path(id);
+        if !log.is_file() {
+            return None;
+        }
+        let events = read_events(&log);
+        let left_behind = fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(&format!("{id}.json")) && n.ends_with(".tmp")))
+            .filter_map(|e| serde_json::from_slice::<ConversationMeta>(&fs::read(e.path()).ok()?).ok())
+            .filter(|m| m.id == id)
+            .max_by_key(|m| m.updated);
+        let file_time = || {
+            fs::metadata(&log).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64)
+        };
+        let last = events.last().map(|e| e.ts).unwrap_or_else(file_time);
+        let meta = match left_behind {
+            Some(mut m) => {
+                m.updated = m.updated.max(last);
+                m
+            }
+            None => ConversationMeta {
+                id: id.to_string(),
+                title: events
+                    .iter()
+                    .find(|e| e.sender == "human" && e.kind == "message")
+                    .map(|e| clean_title(&e.text))
+                    .unwrap_or_else(|| "Recovered conversation".into()),
+                created: events.first().map(|e| e.ts).unwrap_or_else(file_time),
+                updated: last,
+                workspace: None,
+            },
+        };
+        let _ = self.write_meta(&meta);
+        Some(meta)
     }
 
     pub fn create(&self, title: &str) -> Result<ConversationMeta, String> {
@@ -313,16 +391,18 @@ impl Store {
     }
 
     fn write_meta(&self, meta: &ConversationMeta) -> Result<(), String> {
-        let tmp = self.dir.join(format!("{}.json.tmp", meta.id));
-        fs::write(&tmp, serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        replace_file(&tmp, &self.meta_path(&meta.id)).map_err(|e| e.to_string())
+        let data = serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?;
+        write_atomic(&self.meta_path(&meta.id), &data).map_err(|e| e.to_string())
     }
 
     pub fn meta(&self, id: &str) -> Result<ConversationMeta, String> {
         Self::check(id)?;
-        let s = fs::read_to_string(self.meta_path(id)).map_err(|_| "no such conversation".to_string())?;
-        serde_json::from_str(&s).map_err(|e| e.to_string())
+        let read = fs::read_to_string(self.meta_path(id)).ok().and_then(|s| serde_json::from_str::<ConversationMeta>(&s).ok());
+        match read {
+            Some(m) => Ok(m),
+            // Missing or damaged (a save cut off by a restart): rebuilt from the conversation's log.
+            None => self.recover_meta(id).ok_or_else(|| "no such conversation".to_string()),
+        }
     }
 
     pub fn rename(&self, id: &str, title: &str) -> Result<ConversationMeta, String> {
@@ -559,6 +639,54 @@ mod tests {
         replace_file(&tmp, &path).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
         assert!(!tmp.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_conversation_with_a_missing_or_zeroed_title_file_is_recovered_not_lost() {
+        let (s, dir) = temp_store();
+        let m = s.create("Plans").unwrap();
+        s.append(&m.id, "human", "message", vec![], "Please install the tools").unwrap();
+        s.append(&m.id, "claude", "message", vec![], "on it").unwrap();
+        // A save cut off by a restart: the title file is all zeros.
+        fs::write(s.meta_path(&m.id), vec![0u8; 202]).unwrap();
+        let listed = s.list();
+        assert_eq!(listed.len(), 1, "still listed");
+        assert_eq!(listed[0].id, m.id);
+        assert_eq!(listed[0].title, "Please install the tools");
+        assert!(serde_json::from_str::<ConversationMeta>(&fs::read_to_string(s.meta_path(&m.id)).unwrap()).is_ok(), "rewritten once");
+        // Missing, with the copy a failed save left behind: that copy wins.
+        let mut renamed = s.meta(&m.id).unwrap();
+        renamed.title = "Named by the human".into();
+        fs::write(dir.join(format!("{}.json.tmp", m.id)), serde_json::to_vec(&renamed).unwrap()).unwrap();
+        fs::remove_file(s.meta_path(&m.id)).unwrap();
+        assert_eq!(s.meta(&m.id).unwrap().title, "Named by the human");
+        // A title file with no log is not invented into a conversation.
+        assert!(s.meta("0b1c2d3e-0000-4000-8000-000000000000").is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn saves_from_two_processes_at_once_never_lose_the_file() {
+        let (s, dir) = temp_store();
+        let m = s.create("Plans").unwrap();
+        let s = std::sync::Arc::new(s);
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let (s, id) = (s.clone(), m.id.clone());
+                std::thread::spawn(move || {
+                    for j in 0..20 {
+                        let _ = s.rename(&id, &format!("title {i}-{j}"));
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert!(s.meta(&m.id).unwrap().title.starts_with("title "));
+        let leftovers = fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
+        assert_eq!(leftovers, 0, "no temporary files left behind");
         let _ = fs::remove_dir_all(dir);
     }
 

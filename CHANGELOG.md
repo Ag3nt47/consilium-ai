@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fixed: conversations disappearing, or splitting into a new one with the same title. Saving a
+  conversation's title file used one shared temporary name and wasn't flushed to disk, so the app
+  and the terminal saving at once, a rename refused by an encrypted AppData folder, or a restart
+  for an update could leave the file missing or zeroed, and the conversation vanished from the
+  list. Saves now use a unique, flushed temporary file and never remove the old file first, and a
+  missing or damaged title file is rebuilt from the conversation's own messages. Settings, Auto-run
+  chats, council memory and custom AIs are saved the same way.
 - **Zero Breach auto-remove skips running browsers**: extension cleanup is deferred while target
   browsers (Chrome, Edge, Brave, Vivaldi, Arc, Chromium) are open across macOS, Windows, and Linux
   to avoid profile corruption and orphaned extension records.

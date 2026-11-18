@@ -31,9 +31,7 @@ impl Memory {
 
     pub fn write(&self, text: &str) -> Result<(), String> {
         let _g = self.lock.lock().unwrap();
-        let tmp = self.path.with_extension("md.tmp");
-        std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-        crate::store::replace_file(&tmp, &self.path).map_err(|e| e.to_string())
+        crate::store::write_atomic(&self.path, text.as_bytes()).map_err(|e| e.to_string())
     }
 
     /// Adds facts an AI asked to remember, one bullet each.
