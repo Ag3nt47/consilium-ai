@@ -1,3 +1,4 @@
+#![cfg_attr(windows, allow(dead_code))]
 //! Keeps linked computers on the same build of Consilium.
 //!
 //! Every linked computer reports the build it runs in its heartbeat (see `build_id`, `link`). Once
@@ -21,6 +22,174 @@ use std::time::Duration;
 
 /// Where builds are fetched from.
 const REPO_URL: &str = "https://github.com/Ag3nt47/consilium-ai.git";
+const API_REPO: &str = "https://api.github.com/repos/Ag3nt47/consilium-ai";
+
+#[cfg(windows)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(windows)]
+use std::time::SystemTime;
+
+#[cfg(windows)]
+static LAST_RELEASE_POLL_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(windows)]
+const RELEASE_POLL_COOLDOWN_MS: u64 = 10 * 60_000;
+
+#[cfg(windows)]
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Pure helper: extracts (browser_download_url, digest) for the Windows setup executable.
+pub fn pick_windows_asset(release: &serde_json::Value) -> Option<(&str, &str)> {
+    let assets = release.get("assets")?.as_array()?;
+    let asset = assets.iter().find(|a| {
+        let name = a.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        name.to_ascii_lowercase().ends_with("-setup.exe")
+    })?;
+    let url = asset.get("browser_download_url")?.as_str()?;
+    let digest = asset.get("digest")?.as_str()?;
+    if url.is_empty() || digest.is_empty() {
+        return None;
+    }
+    Some((url, digest))
+}
+
+/// Pure helper: matches commit SHA against peer build commit.
+/// Rejects empty, dirty, short (< 7 chars), or non-40-char API SHAs.
+pub fn tag_commit_matches(commit_sha: &str, peer_build: &Build) -> bool {
+    let sha = commit_sha.trim();
+    if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    if peer_build.commit.is_empty() || peer_build.commit.contains("+dirty") {
+        return false;
+    }
+    let want = peer_build.commit.trim();
+    if want.len() < 7 {
+        return false;
+    }
+    sha.starts_with(want)
+}
+
+/// Pure helper: checks if a staged build satisfies the peer build, matching on commit
+/// when versions match even if shallow checkout build numbers differ.
+pub fn staged_matches_peer(staged: &Build, peer: &Build) -> bool {
+    if staged.version != peer.version {
+        return false;
+    }
+    if staged.commit.contains("+dirty") || peer.commit.contains("+dirty") {
+        return false;
+    }
+    if staged.commit.is_empty() || peer.commit.is_empty() {
+        if staged.commit.is_empty() && peer.commit.is_empty() {
+            return staged.number == peer.number;
+        }
+        return false;
+    }
+    let s = staged.commit.trim();
+    let p = peer.commit.trim();
+    s.starts_with(p) || p.starts_with(s)
+}
+
+#[cfg(windows)]
+async fn prepare_release_windows(data: &Path, build: &Build, from: &str, log: &Path) -> Result<bool, String> {
+    let now = current_time_ms();
+    let last = LAST_RELEASE_POLL_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < RELEASE_POLL_COOLDOWN_MS {
+        set("waiting", build, from, "Waiting for release to be published on GitHub (cooldown active)");
+        append(log, "Release poll cooldown active; skipping query\n");
+        return Ok(false);
+    }
+    LAST_RELEASE_POLL_MS.store(now, Ordering::Relaxed);
+
+    if build.commit.is_empty() || build.commit.contains("+dirty") {
+        append(log, &format!("Skip auto-follow: peer build {} has uncommitted or empty commit\n", build.label()));
+        return Ok(false);
+    }
+
+    let tag = format!("v{}", build.version.trim_start_matches(['v', 'V']));
+    let client = reqwest::Client::builder()
+        .user_agent("Consilium-AutoFollow")
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    let ref_url = format!("{API_REPO}/git/ref/tags/{tag}");
+    let ref_resp = client.get(&ref_url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("tag query failed: {e}"))?;
+
+    if ref_resp.status() == reqwest::StatusCode::NOT_FOUND {
+        set("waiting", build, from, "Waiting for tag to be pushed to GitHub");
+        append(log, &format!("Tag {tag} not on GitHub yet; waiting for release\n"));
+        return Ok(false);
+    }
+    if !ref_resp.status().is_success() {
+        return Err(format!("GitHub tag query returned HTTP {}", ref_resp.status()));
+    }
+
+    let ref_json: serde_json::Value = ref_resp.json().await.map_err(|e| format!("parse ref: {e}"))?;
+    let obj = ref_json.get("object").ok_or("missing object in ref response")?;
+    let obj_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let obj_sha = obj.get("sha").and_then(|s| s.as_str()).unwrap_or("");
+
+    let commit_sha = if obj_type == "tag" {
+        let tag_url = format!("{API_REPO}/git/tags/{obj_sha}");
+        let tag_resp = client.get(&tag_url)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            .map_err(|e| format!("tag deref query failed: {e}"))?;
+        if !tag_resp.status().is_success() {
+            return Err(format!("dereference returned HTTP {}", tag_resp.status()));
+        }
+        let tag_json: serde_json::Value = tag_resp.json().await.map_err(|e| format!("parse annotated tag: {e}"))?;
+        tag_json.get("object").and_then(|o| o.get("sha")).and_then(|s| s.as_str()).unwrap_or("").to_string()
+    } else {
+        obj_sha.to_string()
+    };
+
+    if !tag_commit_matches(&commit_sha, build) {
+        append(log, &format!("Tag {tag} commit {commit_sha} does not match peer commit {}; waiting\n", build.commit));
+        return Ok(false);
+    }
+
+    let rel_url = format!("{API_REPO}/releases/tags/{tag}");
+    let rel_resp = client.get(&rel_url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("release query failed: {e}"))?;
+
+    if rel_resp.status() == reqwest::StatusCode::NOT_FOUND {
+        set("waiting", build, from, "Waiting for release assets to be uploaded to GitHub");
+        append(log, &format!("Release {tag} not published yet; waiting\n"));
+        return Ok(false);
+    }
+    if !rel_resp.status().is_success() {
+        return Err(format!("release fetch returned HTTP {}", rel_resp.status()));
+    }
+
+    let rel_json: serde_json::Value = rel_resp.json().await.map_err(|e| format!("parse release: {e}"))?;
+    let (url, digest) = pick_windows_asset(&rel_json)
+        .ok_or_else(|| format!("release {tag} missing Windows -setup.exe asset or digest"))?;
+
+    set("preparing", build, from, "Downloading published release installer");
+    crate::update::stage_from_url(data, &build.version, url, digest).await?;
+
+    let stamp_path = crate::update::build_stamp(data);
+    let stamp_tmp = stamp_path.with_extension("json.tmp");
+    let mut stamp_bytes = serde_json::to_vec(build).map_err(|e| format!("serialize stamp: {e}"))?;
+    stamp_bytes.push(b'\n');
+    std::fs::write(&stamp_tmp, &stamp_bytes).map_err(|e| format!("write temp stamp: {e}"))?;
+    std::fs::rename(&stamp_tmp, &stamp_path).map_err(|e| format!("atomic commit stamp: {e}"))?;
+
+    Ok(true)
+}
 const CHECK_EVERY: Duration = Duration::from_secs(60);
 /// After a failed attempt, the same build isn't tried again for this long.
 const RETRY_AFTER_MS: u64 = 30 * 60_000;
@@ -177,29 +346,36 @@ fn tell(engine: &Arc<crate::engine::Engine>, text: &str) {
 
 /// Fetches `build`'s commit and stages it. Ok(false) if GitHub doesn't have that commit yet.
 async fn prepare(data: &Path, build: &Build, from: &str) -> Result<bool, String> {
-    let src = data.join("update").join("source");
     let log = data.join("update").join("follow.log");
     let _ = std::fs::create_dir_all(data.join("update"));
     append(&log, &format!("\n== {} preparing {} to match {from}\n", crate::store::now_ms(), build.label()));
-    if !src.join(".git").exists() {
-        let _ = std::fs::remove_dir_all(&src);
-        let dest = src.to_string_lossy().to_string();
-        run(&log, None, "git", &["clone", "--no-checkout", "--quiet", REPO_URL, &dest], STEP_LIMIT).await?;
-    }
-    run(&log, Some(&src), "git", &["fetch", "--quiet", "--force", "origin", "+refs/heads/*:refs/remotes/origin/*"], STEP_LIMIT).await?;
-    let wanted = format!("{}^{{commit}}", build.commit);
-    if run(&log, Some(&src), "git", &["cat-file", "-e", &wanted], STEP_LIMIT).await.is_err() {
-        return Ok(false);
-    }
-    run(&log, Some(&src), "git", &["checkout", "--quiet", "--force", "--detach", &build.commit], STEP_LIMIT).await?;
-    set("preparing", build, from, "Installing build tools' packages");
-    run(&log, Some(&src), "npm", &["ci", "--no-audit", "--no-fund"], STEP_LIMIT).await?;
-    set("preparing", build, from, "Building (this takes several minutes)");
-    run(&log, Some(&src), "node", &["scripts/stage-update.mjs"], BUILD_LIMIT).await?;
-    match crate::update::staged_build(data) {
-        Some(s) if s == *build => Ok(true),
-        Some(s) => Err(format!("the staged build is {}, not {}", s.label(), build.label())),
-        None => Err("the build finished but nothing was staged".into()),
+
+    #[cfg(windows)]
+    return prepare_release_windows(data, build, from, &log).await;
+
+    #[cfg(not(windows))]
+    {
+        let src = data.join("update").join("source");
+        if !src.join(".git").exists() {
+            let _ = std::fs::remove_dir_all(&src);
+            let dest = src.to_string_lossy().to_string();
+            run(&log, None, "git", &["clone", "--no-checkout", "--quiet", REPO_URL, &dest], STEP_LIMIT).await?;
+        }
+        run(&log, Some(&src), "git", &["fetch", "--quiet", "--force", "origin", "+refs/heads/*:refs/remotes/origin/*"], STEP_LIMIT).await?;
+        let wanted = format!("{}^{{commit}}", build.commit);
+        if run(&log, Some(&src), "git", &["cat-file", "-e", &wanted], STEP_LIMIT).await.is_err() {
+            return Ok(false);
+        }
+        run(&log, Some(&src), "git", &["checkout", "--quiet", "--force", "--detach", &build.commit], STEP_LIMIT).await?;
+        set("preparing", build, from, "Installing build tools' packages");
+        run(&log, Some(&src), "npm", &["ci", "--no-audit", "--no-fund"], STEP_LIMIT).await?;
+        set("preparing", build, from, "Building (this takes several minutes)");
+        run(&log, Some(&src), "node", &["scripts/stage-update.mjs"], BUILD_LIMIT).await?;
+        match crate::update::staged_build(data) {
+            Some(s) if staged_matches_peer(&s, build) => Ok(true),
+            Some(s) => Err(format!("the staged build is {}, not {}", s.label(), build.label())),
+            None => Err("the build finished but nothing was staged".into()),
+        }
     }
 }
 
@@ -252,6 +428,52 @@ async fn run(log: &Path, dir: Option<&Path>, program: &str, args: &[&str], limit
 
 #[cfg(test)]
 mod tests {
+    use crate::build_id::Build;
+
+    #[test]
+    fn test_tag_commit_matches_validation() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let valid = Build { version: "0.3.46".into(), number: 1, commit: "0123456".into() };
+        assert!(tag_commit_matches(sha, &valid));
+
+        // Rejects < 7 chars
+        let short = Build { version: "0.3.46".into(), number: 1, commit: "0".into() };
+        assert!(!tag_commit_matches(sha, &short));
+
+        // Rejects non-40-char API SHA
+        assert!(!tag_commit_matches("0123456", &valid));
+
+        // Rejects dirty commit
+        let dirty = Build { version: "0.3.46".into(), number: 1, commit: "0123456+dirty".into() };
+        assert!(!tag_commit_matches(sha, &dirty));
+    }
+
+    #[test]
+    fn test_staged_matches_peer_resolution() {
+        let peer = Build { version: "0.3.46".into(), number: 225, commit: "5986cae12345".into() };
+        let shallow = Build { version: "0.3.46".into(), number: 1, commit: "5986cae".into() };
+        assert!(staged_matches_peer(&shallow, &peer));
+
+        let dirty = Build { version: "0.3.46".into(), number: 1, commit: "5986cae+dirty".into() };
+        assert!(!staged_matches_peer(&dirty, &peer));
+
+        let diff_ver = Build { version: "0.3.47".into(), number: 225, commit: "5986cae".into() };
+        assert!(!staged_matches_peer(&diff_ver, &peer));
+
+        let num_diff = Build { version: "0.3.46".into(), number: 1, commit: "5986cae12345".into() };
+        assert!(staged_matches_peer(&num_diff, &peer));
+    }
+
+    #[test]
+    fn test_pick_windows_asset_extraction() {
+        let rel = serde_json::json!({
+            "assets": [
+                { "name": "Consilium-Linux.AppImage", "browser_download_url": "https://example.com/app", "digest": "sha256:1" },
+                { "name": "Consilium-Windows-Setup.exe", "browser_download_url": "https://example.com/setup.exe", "digest": "sha256:2" }
+            ]
+        });
+        assert_eq!(pick_windows_asset(&rel), Some(("https://example.com/setup.exe", "sha256:2")));
+    }
     use super::*;
 
     fn b(number: u64, commit: &str) -> Build {
