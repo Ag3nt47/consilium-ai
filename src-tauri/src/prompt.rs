@@ -506,6 +506,13 @@ Leave the primary checkout clean for reading, and remove completed worktrees.\n\
 - Resource-aware builds: direct heavy builds to the computer or drive with sufficient disk space (e.g. on Windows \
 use D: for Cargo targets when C: is tight; offload releases to the Mac).",
         );
+        let peer_res = crate::peer_sync::peer_resources();
+        if !peer_res.is_empty() {
+            s.push_str("\n\nLINKED COMPUTERS (resource status over peer link):\n");
+            for (_, res) in peer_res {
+                s.push_str(&format!("- {}\n", res.format_summary()));
+            }
+        }
     }
     if let Some(notes) = ctx.project_notes {
         s.push_str(&format!(

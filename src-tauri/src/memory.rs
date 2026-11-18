@@ -36,21 +36,41 @@ impl Memory {
         crate::store::replace_file(&tmp, &self.path).map_err(|e| e.to_string())
     }
 
-    /// Adds facts an AI asked to remember, one bullet each, skipping exact duplicates.
+    /// Adds facts an AI asked to remember, one bullet each.
+    /// Supports `[replaces: <topic>]` tags to replace outdated notes matching `<topic>`.
+    /// Preserves verification status tags like `[verified]`. Skips exact duplicates.
     pub fn remember(&self, who: &str, date: &str, facts: &[String]) -> Result<Vec<String>, String> {
         let _g = self.lock.lock().unwrap();
         let mut text = std::fs::read_to_string(&self.path).unwrap_or_default();
         let mut added = Vec::new();
         for f in facts {
             let f = &crate::redact::scrub(f);
-            if text.contains(f.as_str()) {
-                continue;
+            let (needle_opt, clean_fact) = extract_replaces(f);
+            if let Some(needle) = needle_opt {
+                let needle_lower = needle.to_lowercase();
+                let remaining_lines: Vec<&str> = text
+                    .lines()
+                    .filter(|line| {
+                        let line_lower = line.to_lowercase();
+                        !(line.trim_start().starts_with('-') && line_lower.contains(&needle_lower))
+                    })
+                    .collect();
+                text = remaining_lines.join("\n");
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&format!("- {clean_fact} ({who}, {date})\n"));
+                added.push(clean_fact);
+            } else {
+                if text.contains(clean_fact.as_str()) {
+                    continue;
+                }
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&format!("- {clean_fact} ({who}, {date})\n"));
+                added.push(clean_fact);
             }
-            if !text.is_empty() && !text.ends_with('\n') {
-                text.push('\n');
-            }
-            text.push_str(&format!("- {f} ({who}, {date})\n"));
-            added.push(f.clone());
         }
         if !added.is_empty() {
             // Written to a temporary file and swapped in, so a crash can't leave half a memory file.
@@ -85,6 +105,32 @@ fn clip(text: &str) -> Option<String> {
     let tail: String = t.chars().skip(skip).collect();
     let tail = tail.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap_or(tail);
     Some(format!("(earlier notes omitted)\n{tail}"))
+}
+
+/// Extracts an optional replacement target tag like `[replaces: needle]` or `[replace: needle]`
+/// from a memory fact line. Returns `(Some(needle), cleaned_fact)`.
+pub fn extract_replaces(fact: &str) -> (Option<String>, String) {
+    let trimmed = fact.trim();
+    let lower = trimmed.to_lowercase();
+    for prefix in &["[replaces:", "[replace:"] {
+        if lower.starts_with(prefix) {
+            if let Some(end) = trimmed.find(']') {
+                let needle = trimmed[prefix.len()..end].trim().trim_matches('"').trim_matches('\'').trim();
+                let rest = trimmed[end + 1..].trim();
+                if !needle.is_empty() && !rest.is_empty() {
+                    return (Some(needle.to_string()), rest.to_string());
+                }
+            }
+        }
+    }
+    (None, trimmed.to_string())
+}
+
+/// Checks if a fact note has been tagged as verified.
+#[allow(dead_code)]
+pub fn is_verified(fact: &str) -> bool {
+    let lower = fact.to_lowercase();
+    lower.contains("[verified]") || lower.contains("verified:") || lower.contains("(verified)")
 }
 
 /// Facts on `REMEMBER:` lines. Lines that look like they hold a secret are dropped.
@@ -140,5 +186,35 @@ mod tests {
         std::fs::write(dir.join(PROJECT_NOTES), "# Rules\nRun cargo test before pushing.").unwrap();
         assert!(project_notes(&dir).unwrap().contains("cargo test"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_verified_and_replaceable_memory_notes() {
+        let p = std::env::temp_dir().join(format!("consilium-rep-memory-{}.md", uuid::Uuid::new_v4()));
+        let m = Memory::new(p.clone());
+
+        let fact1 = "AnonRouter might be at /tmp/anonrouter".to_string();
+        let fact2 = "Zero Breach is v3.0.2".to_string();
+        let added = m.remember("Gemini", "2026-11-16", &[fact1, fact2]).unwrap();
+        assert_eq!(added.len(), 2);
+        assert!(m.read().contains("AnonRouter might be at /tmp/anonrouter"));
+        assert!(m.read().contains("Zero Breach is v3.0.2"));
+
+        // Replace AnonRouter note with verified location
+        let rep_fact = "[replaces: AnonRouter] [verified] AnonRouter is at ~/.local/opt/python-3.11".to_string();
+        assert!(is_verified(&rep_fact));
+        let (needle, clean) = extract_replaces(&rep_fact);
+        assert_eq!(needle.as_deref(), Some("AnonRouter"));
+        assert_eq!(clean, "[verified] AnonRouter is at ~/.local/opt/python-3.11");
+
+        let added2 = m.remember("Claude", "2026-11-17", &[rep_fact]).unwrap();
+        assert_eq!(added2.len(), 1);
+
+        let read_back = m.read();
+        assert!(!read_back.contains("/tmp/anonrouter"));
+        assert!(read_back.contains("- [verified] AnonRouter is at ~/.local/opt/python-3.11 (Claude, 2026-11-17)\n"));
+        assert!(read_back.contains("Zero Breach is v3.0.2"));
+
+        let _ = std::fs::remove_file(p);
     }
 }

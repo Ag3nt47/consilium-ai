@@ -103,6 +103,8 @@ pub struct Sync {
     reacted: Mutex<HashMap<String, u64>>,
     /// Per conversation: the human message, and how many turns handles have started since it.
     addressed: Mutex<HashMap<String, (u64, u32)>>,
+    /// Host resources reported by linked peer computers (keyed by computer name).
+    resources: Mutex<HashMap<String, crate::resources::HostResources>>,
 }
 
 /// Why an incoming message was turned away.
@@ -174,6 +176,7 @@ impl Sync {
             wake: OnceLock::new(),
             reacted: Mutex::new(HashMap::new()),
             addressed: Mutex::new(HashMap::new()),
+            resources: Mutex::new(HashMap::new()),
         }
     }
 
@@ -436,6 +439,46 @@ impl Sync {
         self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None).map(Some)
     }
 
+    /// Receives host resources reported by a linked peer computer.
+    fn take_resources(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
+        let mut m = self.mirrors.lock().unwrap();
+        if m.filed.contains(&packet.id) {
+            return Ok(None);
+        }
+        m.filed.insert(packet.id.clone());
+        let _ = self.save(&m);
+        drop(m);
+
+        if let Ok(res) = serde_json::from_str::<crate::resources::HostResources>(&shared.text) {
+            let mut r = self.resources.lock().unwrap();
+            r.insert(computer.to_string(), res);
+        }
+        Ok(None)
+    }
+
+    /// Shares this computer's host resources with linked peers.
+    pub fn share_resources(&self, target_path: Option<&Path>) -> Result<(), String> {
+        let Some(link) = crate::link_handle().filter(|l| l.enabled() && l.has_peers()) else { return Ok(()) };
+        let host_res = crate::resources::HostResources::sample(&crate::prompt::here_slug(), target_path);
+        let serialized = serde_json::to_string(&host_res).map_err(|e| e.to_string())?;
+        let payload = serde_json::json!({
+            "conversation": "",
+            "title": "",
+            "id": uuid::Uuid::new_v4().to_string(),
+            "sender": "system",
+            "kind": "resources",
+            "to": [],
+            "text": serialized,
+        });
+        link.send(PacketKind::Chat, payload)?;
+        Ok(())
+    }
+
+    /// Returns the newest host resources reported by each linked peer computer.
+    pub fn peer_resources(&self) -> HashMap<String, crate::resources::HostResources> {
+        self.resources.lock().unwrap().clone()
+    }
+
     /// Records that event `id` is being sent; false if it already was.
     fn first_time(&self, id: &str) -> bool {
         let mut recent = self.recent.lock().unwrap();
@@ -606,6 +649,9 @@ impl Sync {
         }
         if shared.kind == "tasks" {
             return self.take_board(packet, shared, computer);
+        }
+        if shared.kind == "resources" {
+            return self.take_resources(packet, shared, computer);
         }
         if shared.owner.is_some() {
             if shared.sender == "human" {
@@ -886,6 +932,19 @@ pub fn request_update() -> Result<usize, String> {
 pub fn receive(packet: &PeerPacket) -> Option<Event> {
     let (s, link) = SYNC.get().zip(crate::link_handle())?;
     s.file(packet, &link.peer_name(&packet.node_id)).ok().flatten()
+}
+
+/// Shares this computer's host resources with linked peers.
+pub fn share_resources(target_path: Option<&Path>) -> Result<(), String> {
+    if let Some(s) = SYNC.get() {
+        s.share_resources(target_path)?;
+    }
+    Ok(())
+}
+
+/// Returns the newest host resources reported by each linked peer computer.
+pub fn peer_resources() -> HashMap<String, crate::resources::HostResources> {
+    SYNC.get().map(|s| s.peer_resources()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1279,6 +1338,40 @@ mod tests {
         // Typed in the window instead: `reply` sends it, and showing it doesn't send it again.
         let (shown, _) = b.reply(&mirror.conversation, "and restart", &[]).unwrap();
         assert!(b.outgoing(&shown).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn linked_computers_share_and_record_host_resources() {
+        let root = std::env::temp_dir().join(format!("peer-sync-res-{}", uuid::Uuid::new_v4()));
+        let b = Sync::new(Arc::new(Store::new(root.join("c")).unwrap()), &root);
+        let sample = crate::resources::HostResources {
+            computer: "MSI-AGENT47".into(),
+            os: "windows".into(),
+            free_disk_bytes: 15 * 1024 * 1024 * 1024,
+            total_disk_bytes: 1024 * 1024 * 1024 * 1024,
+            cpu_percent: 18,
+            memory_percent: 32,
+            cores: 16,
+            tools: vec!["cargo".into(), "git".into(), "npm".into()],
+            updated_at: 100000,
+        };
+        let packet = packet(
+            "node-windows",
+            "res1",
+            serde_json::json!({
+                "conversation": "",
+                "title": "",
+                "id": "res1",
+                "sender": "system",
+                "kind": "resources",
+                "text": serde_json::to_string(&sample).unwrap(),
+            }),
+        );
+        let res = b.file(&packet, "MSI-AGENT47").unwrap();
+        assert!(res.is_none());
+        let recorded = b.peer_resources();
+        assert_eq!(recorded.get("MSI-AGENT47"), Some(&sample));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

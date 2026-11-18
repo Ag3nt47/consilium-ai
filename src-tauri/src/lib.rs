@@ -23,6 +23,7 @@ mod liveui;
 mod memory;
 pub mod ollama;
 pub mod peer_protocol;
+pub mod resources;
 mod peer_sync;
 mod pressure;
 mod projects;
@@ -914,6 +915,19 @@ fn import_ollama_model(model: ollama::OllamaTagModel, base_url: Option<String>) 
     customai::add(&custom.name, &custom.base_url, &custom.model, custom.local)
 }
 
+/// Returns the newest host resources reported by each linked peer computer.
+#[tauri::command]
+fn get_peer_resources() -> Result<std::collections::HashMap<String, resources::HostResources>, String> {
+    Ok(peer_sync::peer_resources())
+}
+
+/// Broadcasts this computer's host resources to linked peers.
+#[tauri::command]
+fn broadcast_host_resources() -> Result<(), String> {
+    let data_dir = crate::data_dir();
+    peer_sync::share_resources(data_dir.as_deref())
+}
+
 /// Runs block `index` of AI message `event_id` (the human clicked Run on its command box), then
 /// sends the output to that AI as the human's message. The command text is read from the stored
 /// message, never taken from the screen, and each block runs at most once.
@@ -1417,7 +1431,9 @@ pub fn run() {
             link_inbox,
             link_send,
             session_safety_status,
-            session_safety_restore
+            session_safety_restore,
+            get_peer_resources,
+            broadcast_host_resources
         ])
         .build(context)
         .expect("error while starting Consilium")
