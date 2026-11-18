@@ -64,12 +64,15 @@ export function TaskBoardPanel({
         if (e.key === "Escape") {
           setPinned(false);
           setClosed(true);
+          (document.activeElement as HTMLElement | null)?.blur();
         }
       }}
     >
       <button
         className="task-chip"
         onClick={() => {
+          // Keyboard focus would reopen it through :focus-within once the pointer leaves.
+          if (pinned) (document.activeElement as HTMLElement | null)?.blur();
           setClosed(pinned);
           setPinned(!pinned);
         }}
