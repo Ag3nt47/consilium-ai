@@ -22,6 +22,7 @@ use std::time::Duration;
 
 /// Where builds are fetched from.
 const REPO_URL: &str = "https://github.com/Ag3nt47/consilium-ai.git";
+#[cfg(windows)]
 const API_REPO: &str = "https://api.github.com/repos/Ag3nt47/consilium-ai";
 
 #[cfg(windows)]
@@ -43,6 +44,7 @@ fn current_time_ms() -> u64 {
 }
 
 /// Pure helper: extracts (browser_download_url, digest) for the Windows setup executable.
+#[cfg(any(windows, test))]
 pub fn pick_windows_asset(release: &serde_json::Value) -> Option<(&str, &str)> {
     let assets = release.get("assets")?.as_array()?;
     let asset = assets.iter().find(|a| {
@@ -59,6 +61,7 @@ pub fn pick_windows_asset(release: &serde_json::Value) -> Option<(&str, &str)> {
 
 /// Pure helper: matches commit SHA against peer build commit.
 /// Rejects empty, dirty, short (< 7 chars), or non-40-char API SHAs.
+#[cfg(any(windows, test))]
 pub fn tag_commit_matches(commit_sha: &str, peer_build: &Build) -> bool {
     let sha = commit_sha.trim();
     if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
