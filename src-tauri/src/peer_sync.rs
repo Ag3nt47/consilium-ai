@@ -1195,8 +1195,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Both tests below take `follow`'s one-shot release-check flag, which is shared by the
+    /// whole process; run in parallel, one could take the flag the other set.
+    static FOLLOW_FLAGS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn an_update_on_one_computer_tells_the_others_to_follow() {
+        let _flags = FOLLOW_FLAGS.lock().unwrap_or_else(|e| e.into_inner());
         let root = std::env::temp_dir().join(format!("peer-sync-update-{}", uuid::Uuid::new_v4()));
         let b = Sync::new(Arc::new(Store::new(root.join("c")).unwrap()), &root);
         let conv = b.store.create("Plans").unwrap();
@@ -1221,6 +1226,7 @@ mod tests {
 
     #[test]
     fn a_request_update_from_one_computer_makes_the_others_install() {
+        let _flags = FOLLOW_FLAGS.lock().unwrap_or_else(|e| e.into_inner());
         let root = std::env::temp_dir().join(format!("peer-sync-request-{}", uuid::Uuid::new_v4()));
         let b = Sync::new(Arc::new(Store::new(root.join("c")).unwrap()), &root);
         let conv = b.store.create("Plans").unwrap();
