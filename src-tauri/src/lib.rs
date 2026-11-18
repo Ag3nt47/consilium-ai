@@ -667,10 +667,15 @@ fn start_auto_install(app: AppHandle, engine: Arc<Engine>) {
         loop {
             tokio::time::sleep(CHECK_EVERY).await;
             let Some(data) = data_dir() else { continue };
-            if !engine.config.get().auto_install_updates || runcmd::running() > 0 {
+            // A linked computer's Request Update counts even with automatic install off.
+            let requested = follow::install_wanted(store::now_ms());
+            if !(engine.config.get().auto_install_updates || requested) || runcmd::running() > 0 {
                 continue;
             }
             let Some(staged) = update::staged(&data) else { continue };
+            if requested {
+                follow::clear_install_request();
+            }
             if failed.as_ref().is_some_and(|(b, at)| *b == staged.build && store::now_ms() < at + AUTO_INSTALL_RETRY_MS) {
                 continue;
             }
@@ -732,6 +737,12 @@ fn stress_test_after_start(engine: Arc<Engine>) {
             }
         }
     });
+}
+
+/// Request Update: asks every linked computer to update too. Returns how many it went to.
+#[tauri::command]
+fn request_peer_update() -> Result<usize, String> {
+    peer_sync::request_update()
 }
 
 /// Whether a linked computer announced an update since the last call, so the window checks GitHub now.
@@ -1361,6 +1372,7 @@ pub fn run() {
             set_auto_install_updates,
             stress_test_link,
             release_check_requested,
+            request_peer_update,
             agent_branches,
             merge_agent_branch,
             discard_agent_branch,

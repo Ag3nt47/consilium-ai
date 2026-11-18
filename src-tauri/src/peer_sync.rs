@@ -312,6 +312,27 @@ impl Sync {
         self.store.append(&conv.id, crate::council::CONSILIUM, "system", vec![], &note).map(Some)
     }
 
+    /// The human on `computer` pressed Request Update: this computer checks GitHub now and installs
+    /// the newest staged build as soon as it has one, as if its own button had been pressed.
+    fn take_update_request(&self, packet: &PeerPacket, computer: &str) -> Result<Option<Event>, String> {
+        {
+            let mut m = self.mirrors.lock().unwrap();
+            if !m.filed.insert(packet.id.clone()) {
+                return Ok(None);
+            }
+            self.save(&m)?;
+        }
+        crate::follow::install_requested(crate::store::now_ms());
+        let Some(conv) = self.store.list().into_iter().find(|c| !self.is_mirror(&c.id)) else { return Ok(None) };
+        let note = format!(
+            "{computer} asked every linked computer to update Consilium. This computer (now {}) checks GitHub \
+             now and installs any newer build it has staged or downloads in the next 30 minutes, then restarts; \
+             it waits for a running command to finish first.",
+            crate::build_id::Build::this().label()
+        );
+        self.store.append(&conv.id, crate::council::CONSILIUM, "system", vec![], &note).map(Some)
+    }
+
     /// An AI on `computer` answered in a copy of one of this computer's conversations: files the
     /// answer there as "<AI> (<computer>)" for the AIs here to see.
     fn take_contribution(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
@@ -500,6 +521,9 @@ impl Sync {
         let shared: Shared = serde_json::from_value(packet.payload.clone()).map_err(|e| e.to_string())?;
         if shared.kind == "update" {
             return self.take_update(packet, shared, computer);
+        }
+        if shared.kind == "update_request" {
+            return self.take_update_request(packet, computer);
         }
         if shared.owner.is_some() {
             if shared.sender == "human" {
@@ -726,6 +750,28 @@ pub fn announce_update(build: &crate::build_id::Build) {
     if let Ok(p) = payload {
         let _ = link.send(PacketKind::Chat, p);
     }
+}
+
+/// The Request Update button: asks every linked computer to update too. Queued durably, so it
+/// still goes out if this computer restarts into its own update first. Returns how many linked
+/// computers it was sent to.
+pub fn request_update() -> Result<usize, String> {
+    let Some(link) = crate::link_handle().filter(|l| l.enabled() && l.has_peers()) else { return Ok(0) };
+    let payload = serde_json::to_value(Shared {
+        conversation: String::new(),
+        title: String::new(),
+        id: uuid::Uuid::new_v4().to_string(),
+        sender: "human".into(),
+        kind: "update_request".into(),
+        to: vec![],
+        text: serde_json::to_string(&crate::build_id::Build::this()).unwrap_or_default(),
+        via: None,
+        owner: None,
+        history: vec![],
+    })
+    .map_err(|e| e.to_string())?;
+    link.send(PacketKind::Chat, payload)?;
+    Ok(link.status().peers.len())
 }
 
 /// Files a packet that just arrived from a paired computer.
@@ -1023,6 +1069,30 @@ mod tests {
         assert!(crate::follow::take_release_check(), "the window checks GitHub at once");
         let older = b.file(&announce("u2", &this), "MacBook").unwrap().unwrap();
         assert!(older.text.contains("already runs"), "{}", older.text);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_request_update_from_one_computer_makes_the_others_install() {
+        let root = std::env::temp_dir().join(format!("peer-sync-request-{}", uuid::Uuid::new_v4()));
+        let b = Sync::new(Arc::new(Store::new(root.join("c")).unwrap()), &root);
+        let conv = b.store.create("Plans").unwrap();
+        crate::follow::clear_install_request();
+        let request = packet(
+            "node-a",
+            "r1",
+            serde_json::json!({"conversation": "", "title": "", "id": "r1", "sender": "human", "kind": "update_request", "text": ""}),
+        );
+        let note = b.file(&request, "MacBook").unwrap().expect("a note");
+        assert_eq!(note.conversation, conv.id);
+        assert!(note.text.starts_with("MacBook asked every linked computer to update"), "{}", note.text);
+        let now = crate::store::now_ms();
+        assert!(crate::follow::install_wanted(now), "installs without waiting for the automatic-install setting");
+        assert!(!crate::follow::install_wanted(now + 31 * 60_000), "the request runs out");
+        assert!(crate::follow::take_release_check(), "the window checks GitHub at once");
+        assert!(b.file(&request, "MacBook").unwrap().is_none(), "once");
+        crate::follow::clear_install_request();
+        assert!(!crate::follow::install_wanted(now));
         let _ = std::fs::remove_dir_all(&root);
     }
 

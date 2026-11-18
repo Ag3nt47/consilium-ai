@@ -1714,8 +1714,13 @@ export default function App() {
   }
 
   // Request Update: install what's already built, or else ask the council to find, build and stage the next one.
+  // Every linked computer is asked to update too, first, since installing here quits the app.
   async function requestUpdate() {
     if (updating || requestingUpdate) return;
+    const peers = await api.requestPeerUpdate().catch((e) => {
+      setError(`Couldn't ask the linked computers to update: ${e}`);
+      return 0;
+    });
     if (staged) return updateNow();
     if (stagedUi) return applyUi();
     if (!current || !members.length) return;
@@ -1724,7 +1729,10 @@ export default function App() {
     try {
       await api.send(
         current,
-        "Update request: nothing is staged to install. If a build is already running, say so and when it should be ready; don't start a second one. Otherwise agree in one message who takes what, then work from docs/UPGRADE_STATUS.md, the canonical backlog for every requirement in the uploaded Word documents 'Consilium Upgrade Overhaul.docx', '2nd consilium update.docx' and '3rd update.docx'. Prioritize unfinished document items marked in progress or next before later items, docs/ROADMAP.md, open bugs, or newly noticed improvements. Build and test the selected work, update the backlog in the same commit, commit it, integrate it onto main, and push origin/main before staging it. Confirm GitHub checks pass on macOS, Windows and Linux. Stage with npm run update:ui for screen-only changes, or a version bump and npm run update:stage for engine changes. Do not mark a document item complete until it is implemented and verified. Only one build at a time on this machine.",
+        (peers
+          ? `Update request (also sent to ${peers} linked computer${peers === 1 ? "" : "s"}, which install any newer build they have or download): `
+          : "Update request: ") +
+          "nothing is staged to install. If a build is already running, say so and when it should be ready; don't start a second one. Otherwise agree in one message who takes what, then work from docs/UPGRADE_STATUS.md, the canonical backlog for every requirement in the uploaded Word documents 'Consilium Upgrade Overhaul.docx', '2nd consilium update.docx' and '3rd update.docx'. Prioritize unfinished document items marked in progress or next before later items, docs/ROADMAP.md, open bugs, or newly noticed improvements. Build and test the selected work, update the backlog in the same commit, commit it, integrate it onto main, and push origin/main before staging it. Confirm GitHub checks pass on macOS, Windows and Linux. Stage with npm run update:ui for screen-only changes, or a version bump and npm run update:stage for engine changes. Do not mark a document item complete until it is implemented and verified. Only one build at a time on this machine.",
         members.map((member) => member.id),
         1,
       );

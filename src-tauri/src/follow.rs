@@ -60,6 +60,31 @@ pub fn announced(computer: &str, build: Build) {
     WAKE.notify_one();
 }
 
+/// When a linked computer's human last pressed Request Update (see `peer_sync::request_update`),
+/// in ms; 0 when nobody has. While it lasts, this computer installs a newer staged build even with
+/// automatic install turned off, the same as if its own Request Update had been pressed.
+static INSTALL_REQUESTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// How long a request from another computer stays good, so a release still downloading counts.
+const REQUEST_LASTS_MS: u64 = 30 * 60_000;
+
+/// A linked computer asked every computer to update: check GitHub at once and install what comes.
+pub fn install_requested(now_ms: u64) {
+    INSTALL_REQUESTED.store(now_ms, std::sync::atomic::Ordering::SeqCst);
+    CHECK_RELEASE.store(true, std::sync::atomic::Ordering::SeqCst);
+    WAKE.notify_one();
+}
+
+/// Whether a request from another computer (see `install_requested`) is still good at `now_ms`.
+pub fn install_wanted(now_ms: u64) -> bool {
+    let at = INSTALL_REQUESTED.load(std::sync::atomic::Ordering::SeqCst);
+    at != 0 && now_ms < at.saturating_add(REQUEST_LASTS_MS)
+}
+
+/// The requested install has been started (or tried), so the request is used up.
+pub fn clear_install_request() {
+    INSTALL_REQUESTED.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Whether the window should check GitHub for a release now (once per announcement).
 pub fn take_release_check() -> bool {
     CHECK_RELEASE.swap(false, std::sync::atomic::Ordering::SeqCst)

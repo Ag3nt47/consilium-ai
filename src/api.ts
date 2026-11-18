@@ -482,6 +482,7 @@ const appApi = {
   setAutoInstallUpdates: (on: boolean) => invoke<void>("set_auto_install_updates", { on }),
   /** True once after a linked computer announced it is updating: check GitHub now. */
   releaseCheckRequested: () => invoke<boolean>("release_check_requested"),
+  requestPeerUpdate: () => invoke<number>("request_peer_update"),
   /** Moves the link onto each route in turn, verifies it, and posts the results in the chat. */
   stressTestLink: () => invoke<StressReport[]>("stress_test_link"),
   agentBranches: (conversation?: string) => invoke<AgentBranch[]>("agent_branches", { conversation }),
