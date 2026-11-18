@@ -1,4 +1,5 @@
 import { TypedText, TYPED_THEMES } from "./typed";
+import { clock, clockShort, day, num } from "./fmt";
 import { commandElementId, fencedBlocks, handledCommands, needsAdmin, pendingCommands, runsOn, shellName, shellSystem, deniedText, type Fence } from "./commands";
 import { OS, dictationHint, paletteKey, paletteKeyWords, terminalName } from "./platform";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -142,7 +143,7 @@ async function copyText(text: string) {
 }
 
 function time(ts: number) {
-  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return clock(ts);
 }
 
 type SeenReceipt = { agent: string; ts: number };
@@ -286,7 +287,7 @@ function TaskOwnership({ ids, objective, agents }: { ids: string[]; objective: s
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "k";
-  return n.toLocaleString();
+  return num(n);
 }
 
 /** A line of text with `inline code` spans rendered as code. */
@@ -874,8 +875,8 @@ function UsageMeter({ agent, forecast, claudeResets }: { agent: AgentInfo; forec
 /** "3:40 PM", or "Mon 3:40 PM" when it isn't today. */
 function resetTime(ts: number): string {
   const d = new Date(ts);
-  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  const time = clockShort(d);
+  return d.toDateString() === new Date().toDateString() ? time : `${day(d)} ${time}`;
 }
 
 function AgentDot({
@@ -3034,7 +3035,7 @@ export default function App() {
                   {e.usage && e.usage.total_tokens > 0 && (
                     <span
                       className="tokens-tag"
-                      title={`Turn usage:\n• Total: ${e.usage.total_tokens.toLocaleString()}\n• Input: ${e.usage.input_tokens.toLocaleString()}\n• Output: ${e.usage.output_tokens.toLocaleString()}${e.usage.thinking_tokens ? `\n• Thinking: ${e.usage.thinking_tokens.toLocaleString()}` : ""}${e.usage.cache_read_tokens ? `\n• Cache read: ${e.usage.cache_read_tokens.toLocaleString()}` : ""}`}
+                      title={`Turn usage:\n• Total: ${num(e.usage.total_tokens)}\n• Input: ${num(e.usage.input_tokens)}\n• Output: ${num(e.usage.output_tokens)}${e.usage.thinking_tokens ? `\n• Thinking: ${num(e.usage.thinking_tokens)}` : ""}${e.usage.cache_read_tokens ? `\n• Cache read: ${num(e.usage.cache_read_tokens)}` : ""}`}
                     >
                       {formatTokens(e.usage.total_tokens)} tokens
                     </span>
@@ -3819,11 +3820,11 @@ export default function App() {
                         return (
                           <tr key={m.id} className={`agent-${m.id}`}>
                             <td><span className="agent-name">{m.name}</span></td>
-                            <td>{u.input_tokens.toLocaleString()}</td>
-                            <td>{u.output_tokens.toLocaleString()}</td>
-                            <td>{u.thinking_tokens ? u.thinking_tokens.toLocaleString() : "—"}</td>
-                            <td>{u.cache_read_tokens ? u.cache_read_tokens.toLocaleString() : "—"}</td>
-                            <td><b>{u.total_tokens.toLocaleString()}</b></td>
+                            <td>{num(u.input_tokens)}</td>
+                            <td>{num(u.output_tokens)}</td>
+                            <td>{u.thinking_tokens ? num(u.thinking_tokens) : "—"}</td>
+                            <td>{u.cache_read_tokens ? num(u.cache_read_tokens) : "—"}</td>
+                            <td><b>{num(u.total_tokens)}</b></td>
                           </tr>
                         );
                       })}
@@ -3853,11 +3854,11 @@ export default function App() {
                         return (
                           <tr key={m.id} className={`agent-${m.id}`}>
                             <td><span className="agent-name">{m.name}</span></td>
-                            <td>{u.input_tokens.toLocaleString()}</td>
-                            <td>{u.output_tokens.toLocaleString()}</td>
-                            <td>{u.thinking_tokens ? u.thinking_tokens.toLocaleString() : "—"}</td>
-                            <td>{u.cache_read_tokens ? u.cache_read_tokens.toLocaleString() : "—"}</td>
-                            <td><b>{u.total_tokens.toLocaleString()}</b></td>
+                            <td>{num(u.input_tokens)}</td>
+                            <td>{num(u.output_tokens)}</td>
+                            <td>{u.thinking_tokens ? num(u.thinking_tokens) : "—"}</td>
+                            <td>{u.cache_read_tokens ? num(u.cache_read_tokens) : "—"}</td>
+                            <td><b>{num(u.total_tokens)}</b></td>
                           </tr>
                         );
                       })}

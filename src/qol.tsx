@@ -1,5 +1,6 @@
 // Persona chips above the prompt box, and the audit log drawer.
 // Both are screen-only, so they can arrive through Apply Now without a restart.
+import { clock, dateAndTime } from "./fmt";
 import { useMemo, useState } from "react";
 import type { ChatEvent } from "./api";
 
@@ -171,7 +172,7 @@ export function AuditDrawer({ events, names, onClose }: { events: ChatEvent[]; n
         {shown.map((e) => (
           <li key={e.id} className={`audit-${e.kind}`}>
             <span className="audit-kind">{LABELS[e.kind]}</span>
-            <time title={new Date(e.ts).toLocaleString()}>{new Date(e.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+            <time title={dateAndTime(e.ts)}>{clock(e.ts)}</time>
             <span className="audit-who">{e.who}</span>
             <span className="audit-text">{e.text}</span>
           </li>
