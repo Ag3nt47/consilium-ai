@@ -847,6 +847,8 @@ impl council::Host for RealHost {
             if workspace.is_some() { self.config.access(agent.id) } else { Access::Chat },
             workspace.is_some(),
         );
+        // The model chosen in this AI's council box (#29), read fresh like the folder.
+        let chosen_model = self.config.model(agent.id);
         let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w)));
         let shared = self.memory.for_prompt();
         let members = self.config.get().members;
@@ -988,6 +990,7 @@ checking what it would remove (list the folder first), so everything else still 
                 &cancel,
                 Some(activity),
                 elevated_commands,
+                chosen_model.as_deref(),
             )
             .await;
             drop(permit);

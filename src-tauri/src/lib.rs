@@ -117,6 +117,7 @@ async fn agents_status(state: State<'_, AppState>) -> Result<Vec<agents::AgentIn
         let mut info = result.map_err(|e| format!("AI status check failed: {e}"))?;
         info.benched_until = state.engine.bench.until(&info.id, now);
         info.reset_known = info.benched_until.is_some() && state.engine.bench.reset_known(&info.id);
+        info.model = config.model(&info.id);
         out.push(info);
     }
     sort_agents(&mut out, &config.get().members, |a| a.id.as_str());
@@ -336,6 +337,27 @@ fn unbench(state: State<AppState>, agent: String) {
 #[tauri::command]
 fn set_access(state: State<AppState>, agent: String, access: Access) -> Result<(), String> {
     state.engine.config.set_access(&agent, access).map(|_| ())
+}
+
+/// The model one AI uses from its next turn (#29); None goes back to its CLI's default.
+#[tauri::command]
+async fn set_model(state: State<'_, AppState>, agent: String, model: Option<String>) -> Result<(), String> {
+    let chosen = model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+    if let Some(m) = chosen {
+        let a = agents::by_id(&agent).ok_or_else(|| format!("unknown AI {agent}"))?;
+        let offered = agents::list_models(a).await;
+        if m.starts_with('-') || (!offered.is_empty() && !offered.iter().any(|c| c.id == m)) {
+            return Err(format!("{m} isn't a model {} offers", a.name));
+        }
+    }
+    state.engine.config.set_model(&agent, chosen).map(|_| ())
+}
+
+/// The models one AI's CLI offers, for its council-box picker (#29).
+#[tauri::command]
+async fn list_models(agent: String) -> Result<Vec<agents::ModelChoice>, String> {
+    let a = agents::by_id(&agent).ok_or_else(|| format!("unknown AI {agent}"))?;
+    Ok(agents::list_models(a).await)
 }
 
 #[tauri::command]
@@ -1345,6 +1367,8 @@ pub fn run() {
             agents_usage,
             set_member,
             set_access,
+            set_model,
+            list_models,
             set_workspace,
             set_default_workspace,
             get_default_workspace,

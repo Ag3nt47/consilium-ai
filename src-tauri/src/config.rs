@@ -32,6 +32,9 @@ pub struct Council {
     pub members: Vec<String>,
     #[serde(default)]
     pub access: HashMap<String, Access>,
+    /// Model per AI, chosen in its council box (#29). An AI without one uses its CLI's default.
+    #[serde(default)]
+    pub models: HashMap<String, String>,
     /// Project folder for conversations that don't set their own.
     #[serde(default)]
     pub default_workspace: Option<String>,
@@ -72,6 +75,7 @@ impl Default for Council {
         Council {
             members: vec!["gpt".into(), "claude".into()],
             access: HashMap::new(),
+            models: HashMap::new(),
             default_workspace: None,
             default_access: Access::Chat,
             reset_forecast: false,
@@ -120,6 +124,28 @@ impl Config {
     pub fn access(&self, agent: &str) -> Access {
         let c = self.current();
         c.access.get(agent).copied().unwrap_or(c.default_access)
+    }
+
+    /// The model chosen for this AI in its council box, or None to use its CLI's own default.
+    pub fn model(&self, agent: &str) -> Option<String> {
+        self.current().models.get(agent).cloned()
+    }
+
+    /// Sets the model one AI uses from its next turn; None or a blank name goes back to the default.
+    pub fn set_model(&self, agent: &str, model: Option<&str>) -> Result<Council, String> {
+        let mut c = self.current();
+        let mut next = c.clone();
+        match model.map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => {
+                next.models.insert(agent.to_string(), m.to_string());
+            }
+            None => {
+                next.models.remove(agent);
+            }
+        }
+        self.save(&next)?;
+        *c = next.clone();
+        Ok(next)
     }
 
     /// Sets the council-wide default and clears per-AI settings, so every AI uses it.

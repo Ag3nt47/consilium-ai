@@ -92,6 +92,8 @@ pub struct AgentInfo {
     /// Whether `benched_until` came from the AI itself (not Consilium's retry guess).
     #[serde(default)]
     pub reset_known: bool,
+    /// The model chosen in its council box (#29), or None for the CLI's own default.
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -799,6 +801,7 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
         hint: install_hint.into(),
         benched_until: None,
         reset_known: false,
+        model: None,
     };
     let Some(path) = find(kind) else { return info };
     info.path = Some(path.display().to_string());
@@ -847,6 +850,7 @@ async fn api_status(agent: &Agent, provider: &crate::apiagent::Provider, member:
         },
         benched_until: None,
         reset_known: false,
+        model: None,
     };
     if !crate::apiagent::has_key(agent.id, provider) {
         return info;
@@ -1068,6 +1072,58 @@ pub fn plan_with_files(
     Plan { args, input }
 }
 
+/// One entry in the council-box model picker (#29).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ModelChoice {
+    pub id: String,
+    pub name: String,
+}
+
+/// The models an AI's CLI offers, for the picker. Empty means only the CLI's default is known
+/// (API agents, the Gemini CLI, and Codex until its `model/list` is wired in).
+pub async fn list_models(agent: &Agent) -> Vec<ModelChoice> {
+    if provider_of(agent).is_some() {
+        return Vec::new();
+    }
+    match effective_kind(agent) {
+        Kind::ClaudeCode => [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
+            .map(|(id, name)| ModelChoice { id: id.into(), name: name.into() })
+            .to_vec(),
+        Kind::Antigravity => match find(Kind::Antigravity) {
+            Some(path) => parse_agy_models(&probe(&path, &["models"]).await.unwrap_or_default()),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// `agy models` prints a status line, then `id<TAB>name` for every model it serves, including
+/// other companies' ones; Gemini's picker keeps only the Gemini models.
+pub fn parse_agy_models(out: &str) -> Vec<ModelChoice> {
+    out.lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(id, name)| (id.trim(), name.trim()))
+        .filter(|(id, _)| id.starts_with("gemini-"))
+        .map(|(id, name)| ModelChoice { id: id.into(), name: if name.is_empty() { id.into() } else { name.into() } })
+        .collect()
+}
+/// Adds the model chosen in the council box (#29) to a turn's arguments: after `exec` for Codex,
+/// first for Claude Code, Antigravity and the Gemini CLI. A blank name, or one starting with `-`
+/// (which a CLI would read as an option), leaves the plan as it is, as do the API agents.
+pub fn with_model(mut plan: Plan, kind: Kind, model: Option<&str>) -> Plan {
+    let Some(m) = model.map(str::trim).filter(|m| !m.is_empty() && !m.starts_with('-')) else {
+        return plan;
+    };
+    let at = match kind {
+        Kind::Codex => 1,
+        Kind::ClaudeCode | Kind::Antigravity | Kind::GeminiCli => 0,
+        Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => return plan,
+    };
+    plan.args.insert(at, "--model".into());
+    plan.args.insert(at + 1, m.into());
+    plan
+}
+
 /// Asks one agent for its next message. `workspace` is the conversation's project folder, used
 /// only when the agent's access is above "chat".
 pub async fn run(
@@ -1104,7 +1160,7 @@ pub async fn run_with_files(
     files: &crate::attach::Files,
     cancel: &CancellationToken,
 ) -> Result<AgentReply, String> {
-    run_with_files_observed(agent, access, workspace, system, prompt, files, cancel, None, Vec::new()).await
+    run_with_files_observed(agent, access, workspace, system, prompt, files, cancel, None, Vec::new(), None).await
 }
 
 /// `run_with_files`, reporting provider-native activity as structured output arrives.
@@ -1119,6 +1175,7 @@ pub async fn run_with_files_observed(
     cancel: &CancellationToken,
     activity: Option<ActivitySink>,
     elevated_commands: Vec<String>,
+    model: Option<&str>,
 ) -> Result<AgentReply, String> {
     if let Some(provider) = provider_of(agent) {
         // Attached files aren't sent: the API agents see only the conversation text.
@@ -1147,6 +1204,7 @@ pub async fn run_with_files_observed(
         RUN_TIMEOUT,
         activity,
         elevated_commands,
+        model,
     )
     .await
 }
@@ -1177,6 +1235,7 @@ pub async fn run_at(
         timeout,
         None,
         Vec::new(),
+        None,
     )
         .await
         .map(|reply| reply.text)
@@ -1195,6 +1254,7 @@ async fn run_at_with_usage(
     timeout: Duration,
     activity: Option<ActivitySink>,
     elevated_commands: Vec<String>,
+    model: Option<&str>,
 ) -> Result<AgentReply, String> {
     let work = std::env::temp_dir().join(format!("consilium-{}", uuid::Uuid::new_v4()));
     let empty = work.join("empty");
@@ -1204,7 +1264,7 @@ async fn run_at_with_usage(
         _ => (empty.clone(), Access::Chat),
     };
     let reply_file = work.join("reply.txt");
-    let plan = plan_with_files(kind, access, &dir, &reply_file, system, prompt, files);
+    let plan = with_model(plan_with_files(kind, access, &dir, &reply_file, system, prompt, files), kind, model);
     let result = execute(
         path,
         kind,
@@ -2499,6 +2559,29 @@ mod plan_tests {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn agy_model_list_keeps_only_gemini_models() {
+        let out = "Fetching available models...\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\nclaude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n";
+        let ids: Vec<String> = parse_agy_models(out).into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, ["gemini-3.8-flash-high", "gemini-3.8-flash-low"]);
+    }
+    #[test]
+    fn chosen_model_goes_where_each_cli_reads_it() {
+        use std::ffi::OsString;
+        let d = std::path::Path::new(".");
+        let base = |k| plan(k, Access::Chat, d, d, "s", "p");
+        let codex = with_model(base(Kind::Codex), Kind::Codex, Some("gpt-x"));
+        assert_eq!(&codex.args[..3], &["exec", "--model", "gpt-x"].map(OsString::from)[..]);
+        let claude = with_model(base(Kind::ClaudeCode), Kind::ClaudeCode, Some("opus"));
+        assert_eq!(&claude.args[..2], &["--model", "opus"].map(OsString::from)[..]);
+        let agy = with_model(base(Kind::Antigravity), Kind::Antigravity, Some(" gemini-3.8-flash-high "));
+        assert_eq!(&agy.args[..2], &["--model", "gemini-3.8-flash-high"].map(OsString::from)[..]);
+        // No model, a blank one, or one that looks like an option leaves the arguments alone.
+        for m in [None, Some(""), Some("  "), Some("--dangerously-skip-permissions")] {
+            assert_eq!(with_model(base(Kind::ClaudeCode), Kind::ClaudeCode, m).args, base(Kind::ClaudeCode).args);
+        }
+    }
+
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
@@ -2551,6 +2634,7 @@ printf 'done' > "$out""#,
             RUN_TIMEOUT,
             Some(sink),
             Vec::new(),
+            None,
         )
         .await
         .unwrap();
@@ -2608,6 +2692,7 @@ printf 'done' > "$out""#
             RUN_TIMEOUT,
             None,
             vec![command.into()],
+            None,
         )
         .await
         .unwrap();
@@ -2632,7 +2717,7 @@ printf 'done' > "$out""#
             let (p, ws) = (p.clone(), ws.clone());
             async move {
                 run_at_with_usage(&p, Kind::Codex, Access::Unrestricted, Some(&ws), "system", "prompt",
-                    &crate::attach::Files::default(), &CancellationToken::new(), RUN_TIMEOUT, None, grants).await
+                    &crate::attach::Files::default(), &CancellationToken::new(), RUN_TIMEOUT, None, grants, None).await
             }
         };
         // A bare (elevation-style) grant must not authorise an install.

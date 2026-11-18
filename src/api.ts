@@ -148,6 +148,14 @@ export interface AgentInfo {
   benched_until?: number | null;
   /** Whether that time came from the AI's own tool, not Consilium's retry guess. */
   reset_known?: boolean;
+  /** The model chosen in its council box (#29); null means the CLI's own default. */
+  model?: string | null;
+}
+
+/** One model in an AI's council-box picker (#29). */
+export interface ModelChoice {
+  id: string;
+  name: string;
 }
 
 export interface UsageWindow {
@@ -528,6 +536,8 @@ const appApi = {
   chatAutoRun: (conversation: string) => invoke<boolean>("chat_auto_run", { conversation }),
   switchedOff: (conversation: string) => invoke<string[]>("switched_off", { conversation }),
   setAccess: (agent: string, access: Access) => invoke<void>("set_access", { agent, access }),
+  setModel: (agent: string, model: string | null) => invoke<void>("set_model", { agent, model }),
+  listModels: (agent: string) => invoke<ModelChoice[]>("list_models", { agent }),
   setWorkspace: (id: string, folder: string | null) => invoke<Conversation>("set_workspace", { id, folder }),
   /** Shows the system folder picker; returns the chosen folder or null. */
   pickFolder: async (): Promise<string | null> => {
