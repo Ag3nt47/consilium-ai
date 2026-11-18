@@ -287,6 +287,19 @@ pub fn windows_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &
     )
 }
 
+/// Waits up to 15 s for the Windows helper's first log line. If it never appears, the helper
+/// died on startup, so the caller keeps the app open and shows the error instead of quitting.
+#[cfg(windows)]
+fn confirm_helper_started(log: &Path) -> Result<(), String> {
+    for _ in 0..150 {
+        if std::fs::read_to_string(log).map(|t| t.contains("update helper started")).unwrap_or(false) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(format!("the update helper didn't start, so Consilium stayed open; see {}", log.display()))
+}
+
 /// Where the Windows helper writes what it did.
 pub fn install_log(data: &Path) -> PathBuf {
     data.join("update").join("install.log")
@@ -367,6 +380,40 @@ pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str)
     Ok(())
 }
 
+/// A PowerShell script that asks WMI to start the Windows update helper with no window, and
+/// prints `WMI <ReturnValue> <ProcessId>`. WMI creates the process under WmiPrvSE, so it is
+/// outside every job Consilium is in and needs no breakaway (which that job refuses).
+fn wmi_launch_script(helper: &Path) -> String {
+    let line = format!(
+        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+        helper.display()
+    );
+    let quoted = line.replace('\'', "''");
+    // Start in the update folder, not System32, so the relaunched app never inherits that.
+    let cwd = helper.parent().map(|d| d.display().to_string()).unwrap_or_default().replace('\'', "''");
+    format!(
+        "$ErrorActionPreference = 'Stop'\r\n\
+         $si = New-CimInstance -CimClass (Get-CimClass -ClassName Win32_ProcessStartup) -ClientOnly -Property @{{ShowWindow = [uint16]0}}\r\n\
+         $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine = '{quoted}'; CurrentDirectory = '{cwd}'; ProcessStartupInformation = $si}}\r\n\
+         'WMI {{0}} {{1}}' -f $r.ReturnValue, $r.ProcessId\r\n"
+    )
+}
+
+/// Reads `wmi_launch_script`'s output: the helper's process id, or why it didn't start.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wmi_launch_result(out: &str) -> Result<u32, String> {
+    let line = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("WMI "))
+        .ok_or("couldn't start the installer through Windows (WMI gave no answer)")?;
+    let mut parts = line.split_whitespace();
+    match (parts.next().and_then(|c| c.parse::<u32>().ok()), parts.next().and_then(|p| p.parse::<u32>().ok())) {
+        (Some(0), Some(pid)) if pid > 0 => Ok(pid),
+        (Some(code), _) => Err(format!("Windows refused to start the installer (WMI code {code})")),
+        _ => Err("couldn't start the installer through Windows (unreadable WMI answer)".into()),
+    }
+}
+
 /// Starts the detached helper. The caller then exits the app.
 pub fn start_install(data: &Path) -> Result<Staged, String> {
     use std::process::{Command, Stdio};
@@ -382,9 +429,27 @@ pub fn start_install(data: &Path) -> Result<Staged, String> {
         let appimage = std::env::var_os("APPIMAGE").filter(|_| cfg!(target_os = "linux")).map(PathBuf::from);
         let (staged, target) = swap_paths(data, &exe, appimage.as_deref())?;
         if cfg!(windows) {
+            // Run the helper from a file with -File. An inline -Command script combined with
+            // -WindowStyle Hidden and DETACHED_PROCESS made PowerShell 5.1 die before its first
+            // line, so the app quit and nothing installed or reopened. The BOM makes 5.1 read
+            // the file as UTF-8, so non-ASCII user paths survive.
+            let log = install_log(data);
+            let helper = data.join("update").join("install-helper.ps1");
+            if let Some(dir) = helper.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let script = windows_helper_script(pid, &staged, &target, &staged_dir(data), &log);
+            std::fs::write(&helper, format!("\u{feff}{script}"))
+                .map_err(|e| format!("couldn't write the update helper: {e}"))?;
+            std::fs::write(&log, format!("launching update helper {}\n", helper.display()))
+                .map_err(|e| format!("couldn't write the update log: {e}"))?;
+            // Start the helper through WMI (see `wmi_launch_script`): Consilium runs inside a job
+            // that refuses breakaway, so a helper spawned directly could die when the app quits.
+            let launcher = data.join("update").join("launch-helper.ps1");
+            std::fs::write(&launcher, format!("\u{feff}{}", wmi_launch_script(&helper)))
+                .map_err(|e| format!("couldn't write the update launcher: {e}"))?;
             cmd = Command::new("powershell.exe");
-            cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command"])
-                .arg(windows_helper_script(pid, &staged, &target, &staged_dir(data), &install_log(data)));
+            cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(&launcher);
         } else {
             cmd = Command::new("/bin/sh");
             let pkg = matches!(staged.extension().and_then(|e| e.to_str()), Some("deb" | "rpm"));
@@ -406,18 +471,41 @@ pub fn start_install(data: &Path) -> Result<Staged, String> {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-        // If Consilium was started inside a job that ends its children when it exits (some
-        // launchers and terminals do this), the helper must leave that job or it dies with the
-        // app and nothing reopens. A job that forbids leaving refuses the flag, so retry without.
-        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
-        if let Ok(child) = cmd.spawn() {
-            drop(child);
-            return Ok(s);
+        // `cmd` is the short launcher: it asks WMI to create the helper and prints the result.
+        cmd.creation_flags(CREATE_NO_WINDOW).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("couldn't start the installer: {e}"))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(100))
+                }
+                _ => {
+                    let _ = child.kill();
+                    return Err("the installer didn't start within 20 seconds".into());
+                }
+            }
         }
-        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+        let mut out = String::new();
+        if let Some(mut so) = child.stdout.take() {
+            use std::io::Read;
+            let _ = so.read_to_string(&mut out);
+        }
+        let mut err = String::new();
+        if let Some(mut se) = child.stderr.take() {
+            use std::io::Read;
+            let _ = se.read_to_string(&mut err);
+        }
+        wmi_launch_result(&out).map_err(|e| match err.lines().map(str::trim).rfind(|l| !l.is_empty()) {
+            Some(l) => format!("{e}: {l}"),
+            None => e,
+        })?;
+        // spawn() succeeding only means the process exists. Wait for the helper's own first
+        // log line, so a helper that dies on startup leaves the app open with an error.
+        confirm_helper_started(&install_log(data))?;
     }
+    #[cfg(not(windows))]
     cmd.spawn().map_err(|e| format!("couldn't start the installer: {e}"))?;
     Ok(s)
 }
@@ -425,6 +513,75 @@ pub fn start_install(data: &Path) -> Result<Staged, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wmi_launcher_quotes_the_helper_path_for_powershell() {
+        let s = wmi_launch_script(Path::new("C:\\Users\\O'Neil\\update\\install-helper.ps1"));
+        assert!(s.contains("CommandLine = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"C:\\Users\\O''Neil\\update\\install-helper.ps1\"'"), "{s}");
+        assert!(s.contains("ShowWindow = [uint16]0"));
+    }
+
+    #[test]
+    fn the_wmi_answer_gives_the_helper_pid_or_the_reason() {
+        assert_eq!(wmi_launch_result("WMI 0 4242\r\n"), Ok(4242));
+        assert!(wmi_launch_result("WMI 2 \r\n").unwrap_err().contains("code 2"));
+        assert!(wmi_launch_result("Invoke-CimMethod : Access denied").is_err());
+        assert!(wmi_launch_result("").is_err());
+    }
+
+    /// Probe f: the real WMI launch, run from inside a job (a Consilium Run box). The helper
+    /// must start, and must not be inside any job.
+    #[test]
+    #[cfg(windows)]
+    #[ignore]
+    fn probe_f_wmi_launch_escapes_the_job() {
+        use std::os::windows::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("consilium-wmi-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("install.log");
+        let helper = dir.join("install-helper.ps1");
+        let body = format!(
+            "Add-Type -Namespace P -Name J -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern bool IsProcessInJob(IntPtr p, IntPtr j, out bool r);'\r\n\
+             $r = $false; [void][P.J]::IsProcessInJob((Get-Process -Id $PID).Handle, [IntPtr]::Zero, [ref]$r)\r\n\
+             Add-Content -LiteralPath '{l}' -Value \"update helper started; in job = $r\"\r\n\
+             Start-Sleep -Seconds 3\r\n\
+             Add-Content -LiteralPath '{l}' -Value 'update helper still running'\r\n",
+            l = log.display().to_string().replace('\'', "''")
+        );
+        std::fs::write(&helper, format!("\u{feff}{body}")).unwrap();
+        let launcher = dir.join("launch-helper.ps1");
+        std::fs::write(&launcher, format!("\u{feff}{}", wmi_launch_script(&helper))).unwrap();
+        let out = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&launcher)
+            .creation_flags(0x0800_0000)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        println!("PROBE f launcher: {}", text.trim());
+        let pid = wmi_launch_result(&text).expect("WMI started the helper");
+        let mut seen = String::new();
+        for _ in 0..150 {
+            seen = std::fs::read_to_string(&log).unwrap_or_default();
+            if !seen.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        println!("PROBE f helper {pid}: {}", seen.trim());
+        assert!(seen.contains("update helper started"), "the helper never wrote its log");
+        // A job WMI owns doesn't matter; what matters is that the helper outlives its launcher,
+        // which `output()` above has already waited for.
+        for _ in 0..100 {
+            if seen.contains("still running") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            seen = std::fs::read_to_string(&log).unwrap_or_default();
+        }
+        println!("PROBE f later: {}", seen.trim());
+        assert!(seen.contains("update helper still running"), "the helper died after its launcher exited: {seen}");
+    }
 
     #[test]
     #[cfg(not(target_os = "macos"))]
