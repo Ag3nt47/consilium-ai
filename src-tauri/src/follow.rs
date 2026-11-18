@@ -94,6 +94,9 @@ pub fn staged_matches_peer(staged: &Build, peer: &Build) -> bool {
     }
     let s = staged.commit.trim();
     let p = peer.commit.trim();
+    if s.len() < 7 || p.len() < 7 {
+        return false;
+    }
     s.starts_with(p) || p.starts_with(s)
 }
 
@@ -474,6 +477,15 @@ mod tests {
 
     #[test]
     fn test_staged_matches_peer_resolution() {
+        {
+            let long = Build { version: "0.3.47".into(), number: 240, commit: "15c8ec2039f0".into() };
+            let short7 = Build { version: "0.3.47".into(), number: 240, commit: "15c8ec2".into() };
+            let tiny = Build { version: "0.3.47".into(), number: 240, commit: "1".into() };
+            assert!(staged_matches_peer(&short7, &long), "short and full hash of the same commit match");
+            assert!(staged_matches_peer(&long, &short7));
+            assert!(!staged_matches_peer(&tiny, &long), "hashes under 7 characters never match");
+            assert!(!staged_matches_peer(&long, &tiny));
+        }
         let peer = Build { version: "0.3.46".into(), number: 225, commit: "5986cae12345".into() };
         let shallow = Build { version: "0.3.46".into(), number: 1, commit: "5986cae".into() };
         assert!(staged_matches_peer(&shallow, &peer));
