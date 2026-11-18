@@ -44,7 +44,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 
 pub fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err("invalid hex length".into());
     }
     (0..s.len())
@@ -181,10 +181,21 @@ pub async fn send_remote_relaunch(
     }
 }
 
+pub type LauncherFn = Arc<dyn Fn(&Path) -> Result<u32, String> + Send + Sync>;
+
 pub async fn run_watchdog_server(
     port: u16,
     data_dir: PathBuf,
     peers: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+) -> Result<(), String> {
+    run_watchdog_server_with_launcher(port, data_dir, peers, Arc::new(relaunch_app)).await
+}
+
+pub async fn run_watchdog_server_with_launcher(
+    port: u16,
+    data_dir: PathBuf,
+    peers: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    launcher: LauncherFn,
 ) -> Result<(), String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
@@ -206,6 +217,7 @@ pub async fn run_watchdog_server(
 
         let peers = peers.clone();
         let data_dir = data_dir.clone();
+        let launcher = launcher.clone();
 
         tokio::spawn(async move {
             let (reader, mut writer) = socket.split();
@@ -248,7 +260,7 @@ pub async fn run_watchdog_server(
             }
 
             let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("consilium.exe"));
-            match relaunch_app(&exe_path) {
+            match launcher(&exe_path) {
                 Ok(pid) => {
                     let _ = writer.write_all(format!("OK {}\n", pid).as_bytes()).await;
                 }
@@ -268,10 +280,9 @@ pub fn main_watchdog(_args: &[String]) -> i32 {
             return 1;
         }
     };
-    let data_dir = std::env::var("APPDATA")
-        .map(|a| PathBuf::from(a).join("io.github.ag3nt47.consilium"))
-        .unwrap_or_else(|_| PathBuf::from("."));
-    let peers = Arc::new(Mutex::new(HashMap::new()));
+    let data_dir = crate::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    let peers_map = crate::link::load_peer_keys(&data_dir);
+    let peers = Arc::new(Mutex::new(peers_map));
     println!("Consilium watchdog listening on port {WATCHDOG_PORT}...");
     if let Err(e) = rt.block_on(run_watchdog_server(WATCHDOG_PORT, data_dir, peers)) {
         eprintln!("watchdog server error: {e}");
@@ -373,15 +384,16 @@ mod tests {
 
         let data_dir = temp_dir.clone();
         let peers_clone = peers.clone();
+        let mock_launcher: LauncherFn = Arc::new(|_p: &Path| Ok(9999));
         tokio::spawn(async move {
-            let _ = run_watchdog_server(port, data_dir, peers_clone).await;
+            let _ = run_watchdog_server_with_launcher(port, data_dir, peers_clone, mock_launcher).await;
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let res = send_remote_relaunch(addr, key, "test-peer-node").await;
-        assert!(res.is_ok() || res.unwrap_err().contains("OK") || res.unwrap_err().contains("WMI"));
+        assert_eq!(res.as_deref(), Ok("OK 9999"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

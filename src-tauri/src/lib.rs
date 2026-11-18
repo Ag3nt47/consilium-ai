@@ -1,4 +1,3 @@
-pub mod watchdog;
 //! Consilium's back end: conversations, agents, and turn-taking, exposed to the UI as Tauri commands.
 //! The same binary is also the `consilium` terminal command (see `cli`); both run turns through
 //! `engine`, on one shared data folder.
@@ -28,6 +27,7 @@ pub mod resources;
 mod peer_sync;
 mod pressure;
 mod projects;
+pub mod watchdog;
 mod prompt;
 mod reaper;
 mod repo;

@@ -1582,6 +1582,21 @@ fn peer_key(peer: &Peer) -> Result<Vec<u8>, String> {
     decode_hex(&peer.key).filter(|k| k.len() == 32).ok_or_else(|| format!("{} has a damaged key; pair it again", peer.name))
 }
 
+pub fn load_peer_keys(data_dir: &std::path::Path) -> std::collections::HashMap<String, Vec<u8>> {
+    let cfg_path = data_dir.join("link.json");
+    let mut map = std::collections::HashMap::new();
+    if let Ok(bytes) = std::fs::read(&cfg_path) {
+        if let Ok(cfg) = serde_json::from_slice::<LinkConfig>(&bytes) {
+            for peer in cfg.peers {
+                if let Ok(k) = peer_key(&peer) {
+                    map.insert(peer.node_id, k);
+                }
+            }
+        }
+    }
+    map
+}
+
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
