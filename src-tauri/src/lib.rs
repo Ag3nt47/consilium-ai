@@ -1353,6 +1353,19 @@ pub fn run() {
             // Checks every connection once connections have had time to come up, then reports
             // the result in the newest conversation and to the phone.
             tauri::async_runtime::spawn(startup_check::run(engine.clone(), data.clone()));
+            // Boxes posted while Consilium was closed: once connections have had time to come up,
+            // catch up each Auto-run chat the same way turning Auto-run on does (note, delay, Deny).
+            {
+                let engine = engine.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                    for c in engine.store.list() {
+                        if auto_run::is_on(engine.store.dir(), &c.id) {
+                            catch_up_auto_run(engine.clone(), c.id);
+                        }
+                    }
+                });
+            }
             app.manage(AppState { engine, security });
             // Direct link to the user's other paired computers. Off until they pair or turn it on.
             let emitter = app.handle().clone();
