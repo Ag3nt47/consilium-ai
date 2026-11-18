@@ -498,18 +498,25 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
         if !crate::link_answers_signal() {
             continue;
         }
+        let group_id = msg.group.clone();
         let reply = deliver(engine, &cfg, &mut out, msg);
-        if let Err(e) = send_self(&cfg, reply) {
-            eprintln!("signal chat: couldn't acknowledge the phone message: {e}");
+        if let Err(e) = send_self(&cfg, &reply) {
+            eprintln!("signal chat: couldn't acknowledge the phone message to Note to Self: {e}");
+        }
+        if let Some(ref g) = group_id {
+            if let Err(e) = send_group(&cfg, g, &reply) {
+                eprintln!("signal chat: couldn't acknowledge the phone message to group: {e}");
+            }
         }
     }
 }
 
 /// Posts a phone message as the human's message in the newest conversation, and returns the
 /// ready-made notice that tells the phone what happened to it.
-fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Incoming) -> &'static str {
-    let Some(conv) = engine.store.list().into_iter().find(|c| !crate::peer_sync::is_mirror(&c.id)) else {
-        return notice::NO_CONVERSATION;
+fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Incoming) -> String {
+    let convs = engine.store.list();
+    let Some(conv) = convs.iter().find(|c| !crate::peer_sync::is_mirror(&c.id)).or_else(|| convs.first()) else {
+        return notice::NO_CONVERSATION.to_string();
     };
     let members = engine.config.get().members;
     let events = engine.store.load(&conv.id).unwrap_or_default();
@@ -557,19 +564,19 @@ fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Inco
     }
     let text = text.trim().to_string();
     if text.is_empty() && attachments.is_empty() {
-        return notice::NOT_POSTED;
+        return notice::NOT_POSTED.to_string();
     }
-    match engine.send_via(&conv.id, &text, attachments, targets, 1, Some("Signal")) {
+    match engine.send_via(&conv.id, &text, attachments, targets.clone(), 1, Some("Signal")) {
         Ok(e) => {
             out.origins.insert(e.id.clone(), msg.origin);
             if out.origins.len() > 500 {
                 out.origins.clear();
             }
-            receipt(nobody, decision)
+            formatted_receipt(nobody, decision, if e.to.is_empty() { &targets } else { &e.to })
         }
         Err(e) => {
             eprintln!("signal chat: couldn't post the phone message: {e}");
-            notice::NOT_POSTED
+            notice::NOT_POSTED.to_string()
         }
     }
 }
@@ -583,13 +590,38 @@ pub fn receipt(nobody_can_answer: bool, decision: bool) -> &'static str {
     }
 }
 
+/// Formats a specific verification notice for a phone message, indicating which AI is assigned or taking the task.
+pub fn formatted_receipt(nobody_can_answer: bool, decision: bool, targets: &[String]) -> String {
+    if nobody_can_answer {
+        return notice::NO_AI.to_string();
+    }
+    let names: Vec<String> = targets
+        .iter()
+        .map(|id| crate::agents::by_id(id).map_or(id.clone(), |a| a.name.to_string()))
+        .collect();
+    if decision {
+        if names.is_empty() {
+            notice::DECISION.to_string()
+        } else {
+            format!("Consilium: Decision received and passed to {}.", names.join(", "))
+        }
+    } else if names.is_empty() {
+        notice::RECEIVED.to_string()
+    } else if names.len() == 1 {
+        format!("Consilium: Message received. Assigned to {}. Please wait for the response.", names[0])
+    } else {
+        format!("Consilium: Message received. Assigned to the council ({}). Please wait for the response.", names.join(", "))
+    }
+}
+
 /// Sends new messages (AI replies, in-app human messages, Consilium notes) across active conversations to Signal.
 fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
     let convs = engine.store.list();
     if convs.is_empty() {
         return;
     }
-    for conv in convs.into_iter().filter(|c| !crate::peer_sync::is_mirror(&c.id)).take(10) {
+    let answers = crate::link_answers_signal();
+    for conv in convs.into_iter().filter(|c| answers || !crate::peer_sync::is_mirror(&c.id)).take(10) {
         let events = engine.store.load(&conv.id).unwrap_or_default();
         let newest = events.last().map_or(0, |e| e.seq);
         let cursor = match out.cursors.get(&conv.id) {
@@ -637,9 +669,22 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
             if let Err(err) = send_self_files(cfg, &formatted, &files) {
                 eprintln!("signal chat: couldn't send to Signal: {err}");
             }
-            let group = if asked_privately { cfg.groups.agents.get(&e.sender) } else { None };
-            let group = group.unwrap_or(&cfg.groups.main);
-            if !group.is_empty() {
+            let mut target_groups: Vec<&str> = Vec::new();
+            if asked_privately {
+                if let Some(g) = cfg.groups.agents.get(&e.sender) {
+                    target_groups.push(g.as_str());
+                }
+            } else if let Some(Origin::Agent(ref a)) = last_human.and_then(|h| out.origins.get(&h.id)) {
+                if let Some(g) = cfg.groups.agents.get(a) {
+                    target_groups.push(g.as_str());
+                }
+                if !cfg.groups.main.is_empty() {
+                    target_groups.push(cfg.groups.main.as_str());
+                }
+            } else if !cfg.groups.main.is_empty() {
+                target_groups.push(cfg.groups.main.as_str());
+            }
+            for group in target_groups {
                 let _ = send_group(cfg, group, &text);
             }
         }
@@ -779,6 +824,26 @@ mod tests {
         for n in [notice::RECEIVED, notice::DECISION, notice::NO_AI, notice::NOT_POSTED, notice::NO_CONVERSATION, notice::BACK_ONLINE] {
             assert!(n.starts_with("Consilium: "), "{n}");
         }
+    }
+
+    #[test]
+    fn formatted_receipt_specifies_assigned_ai_and_council() {
+        assert_eq!(
+            formatted_receipt(false, false, &["gemini".into()]),
+            "Consilium: Message received. Assigned to Gemini. Please wait for the response."
+        );
+        assert_eq!(
+            formatted_receipt(false, false, &["claude".into(), "gemini".into()]),
+            "Consilium: Message received. Assigned to the council (Claude, Gemini). Please wait for the response."
+        );
+        assert_eq!(
+            formatted_receipt(false, true, &["claude".into()]),
+            "Consilium: Decision received and passed to Claude."
+        );
+        assert_eq!(
+            formatted_receipt(true, false, &[]),
+            notice::NO_AI
+        );
     }
 
     #[test]
