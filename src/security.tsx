@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
+import { dateAndTime } from "./fmt";
 import { api, type SecurityScanStatus } from "./api";
 
 function when(ms: number): string {
-  return ms ? new Date(ms).toLocaleString() : "Never";
+  return ms ? dateAndTime(ms) : "Never";
 }
 
 /** Settings for the optional, approval-installed Zero Breach adapter. */
