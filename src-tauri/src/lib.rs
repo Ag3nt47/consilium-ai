@@ -246,6 +246,9 @@ fn set_chat_auto_run(state: State<AppState>, conversation: String, on: bool) -> 
         "Auto-run is off in this chat: command boxes wait for the human's Run click again."
     };
     let _ = state.engine.note(&conversation, text);
+    if now {
+        catch_up_auto_run(state.engine.clone(), conversation.clone());
+    }
     Ok(now)
 }
 
@@ -1013,6 +1016,46 @@ fn run_in_turn(engine: Arc<Engine>, e: &Event, runnable: Vec<usize>) {
         for index in runnable {
             if let Err(err) = run_block(engine.clone(), &conversation, &event_id, index).await {
                 eprintln!("consilium: always-run skipped {event_id}#{index}: {err}");
+            }
+        }
+    });
+}
+
+/// When Auto-run is turned on in a chat, runs the AI boxes posted since the human last wrote that
+/// are still waiting (under `autocontinue::CATCH_UP_MS` old): auto-run only sees a box as it
+/// arrives, so ones posted while it was off would otherwise wait for a click forever. A note names
+/// them first and they start after `autocontinue::DELAY_SECS`, so the human can Deny any of them.
+fn catch_up_auto_run(engine: Arc<Engine>, conversation: String) {
+    if crate::peer_sync::is_mirror(&conversation) {
+        return;
+    }
+    let Ok(events) = engine.store.load(&conversation) else { return };
+    let from = crate::autocontinue::since_human_start(&events);
+    let picks: Vec<(String, usize)> =
+        crate::autocontinue::waiting_boxes(&events, from, crate::store::now_ms(), crate::autocontinue::CATCH_UP_MS)
+            .into_iter()
+            .filter(|(id, _)| events.iter().any(|e| &e.id == id && engine.config.is_member(&e.sender)))
+            .collect();
+    if picks.is_empty() {
+        return;
+    }
+    let list = picks.iter().map(|(id, i)| format!("ref {}#{i}", &id[..id.len().min(8)])).collect::<Vec<_>>().join(", ");
+    let _ = engine.note(
+        &conversation,
+        &format!(
+            "Auto-run will run {} command box(es) that were waiting, in {} s: {list}. Click Deny on any you don't want run.",
+            picks.len(),
+            crate::autocontinue::DELAY_SECS
+        ),
+    );
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(crate::autocontinue::DELAY_SECS)).await;
+        for (event_id, index) in picks {
+            if !crate::auto_run::is_on(engine.store.dir(), &conversation) {
+                return;
+            }
+            if let Err(err) = run_block(engine.clone(), &conversation, &event_id, index).await {
+                eprintln!("consilium: auto-run catch-up skipped {event_id}#{index}: {err}");
             }
         }
     });
