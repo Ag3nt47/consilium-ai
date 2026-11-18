@@ -1,41 +1,237 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#17142D"/>
-      <stop offset="1" stop-color="#32245E"/>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0818"/>
+      <stop offset="45%" stop-color="#140f2d"/>
+      <stop offset="100%" stop-color="#22134a"/>
     </linearGradient>
-    <linearGradient id="ivory" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FBF4E4"/>
-      <stop offset="1" stop-color="#E9DCC0"/>
+
+    <!-- Core Ambient Radial Glow -->
+    <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.35"/>
+      <stop offset="35%" stop-color="#8b5cf6" stop-opacity="0.2"/>
+      <stop offset="70%" stop-color="#06b6d4" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#0a0818" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Node Glow Gradients -->
+    <radialGradient id="goldGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#fffbeb"/>
+      <stop offset="30%" stop-color="#fde047"/>
+      <stop offset="70%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#b45309" stop-opacity="0.2"/>
+    </radialGradient>
+
+    <radialGradient id="cyanGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ecfeff"/>
+      <stop offset="30%" stop-color="#67e8f9"/>
+      <stop offset="70%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#0e7490" stop-opacity="0.2"/>
+    </radialGradient>
+
+    <radialGradient id="violetGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#faf5ff"/>
+      <stop offset="30%" stop-color="#d8b4fe"/>
+      <stop offset="70%" stop-color="#a855f7"/>
+      <stop offset="100%" stop-color="#6b21a8" stop-opacity="0.2"/>
+    </radialGradient>
+
+    <radialGradient id="emeraldGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ecfdf5"/>
+      <stop offset="30%" stop-color="#6ee7b7"/>
+      <stop offset="70%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#047857" stop-opacity="0.2"/>
+    </radialGradient>
+
+    <radialGradient id="amberGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#fffbeb"/>
+      <stop offset="30%" stop-color="#fcd34d"/>
+      <stop offset="70%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#b45309" stop-opacity="0.2"/>
+    </radialGradient>
+
+    <radialGradient id="blueGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#eff6ff"/>
+      <stop offset="30%" stop-color="#93c5fd"/>
+      <stop offset="70%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8" stop-opacity="0.2"/>
+    </radialGradient>
+
+    <!-- Synaptic Conduit Gradients -->
+    <linearGradient id="synapse1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.8"/>
+      <stop offset="50%" stop-color="#f59e0b" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#a855f7" stop-opacity="0.8"/>
     </linearGradient>
-    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#F0CF83"/>
-      <stop offset="1" stop-color="#C99B4A"/>
+
+    <linearGradient id="synapse2" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.8"/>
+      <stop offset="50%" stop-color="#3b82f6" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#f59e0b" stop-opacity="0.8"/>
     </linearGradient>
-    <!-- A classical profile facing right; the right-hand one is its mirror image. -->
-    <path id="profile" d="M330 852 L330 500 C330 420 372 372 424 368 C458 366 478 392 478 428
-      C478 440 476 448 479 457 L491 494 C493 501 487 505 478 505 C481 512 485 517 481 523 L474 527
-      C481 531 483 537 477 543 C472 551 477 560 479 568 C479 582 467 590 452 592 L442 600 L442 852 Z"/>
+
+    <!-- Glow Filter -->
+    <filter id="neuralGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="intenseGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="16" result="blur1"/>
+      <feGaussianBlur stdDeviation="6" result="blur2"/>
+      <feMerge>
+        <feMergeNode in="blur1"/>
+        <feMergeNode in="blur2"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
   </defs>
 
-  <!-- Background squircle -->
-  <rect x="64" y="64" width="896" height="896" rx="210" fill="url(#bg)"/>
+  <!-- Background Squircle / Rounded Canvas -->
+  <rect x="48" y="48" width="928" height="928" rx="220" fill="url(#bgGradient)"/>
+  <rect x="48" y="48" width="928" height="928" rx="220" fill="none" stroke="#6366f1" stroke-opacity="0.25" stroke-width="4"/>
 
-  <!-- Soft shadow under the arch -->
-  <path d="M232 866 L232 446 A280 280 0 0 1 816 446 L816 866 Z" fill="#000" opacity="0.18"/>
+  <!-- Ambient Neural Field Glow -->
+  <circle cx="512" cy="512" r="420" fill="url(#coreGlow)"/>
 
-  <!-- Plinth -->
-  <rect x="188" y="850" width="648" height="34" rx="6" fill="url(#ivory)"/>
+  <!-- Synaptic Mesh Network (Connecting Axons / Data Lines) -->
+  <g filter="url(#neuralGlow)" stroke-linecap="round">
+    <!-- Cross-mesh Interconnects between Council Nodes -->
+    <line x1="512" y1="230" x2="756" y2="371" stroke="#38bdf8" stroke-opacity="0.45" stroke-width="3"/>
+    <line x1="756" y1="371" x2="756" y2="653" stroke="#818cf8" stroke-opacity="0.45" stroke-width="3"/>
+    <line x1="756" y1="653" x2="512" y2="794" stroke="#c084fc" stroke-opacity="0.45" stroke-width="3"/>
+    <line x1="512" y1="794" x2="268" y2="653" stroke="#34d399" stroke-opacity="0.45" stroke-width="3"/>
+    <line x1="268" y1="653" x2="268" y2="371" stroke="#fbbf24" stroke-opacity="0.45" stroke-width="3"/>
+    <line x1="268" y1="371" x2="512" y2="230" stroke="#f472b6" stroke-opacity="0.45" stroke-width="3"/>
 
-  <!-- The Roman arch -->
-  <path d="M220 850 L220 430 A292 292 0 0 1 804 430 L804 850 L694 850 L694 430 A182 182 0 0 0 330 430 L330 850 Z"
-        fill="url(#ivory)" stroke="#C99B4A" stroke-width="10" stroke-linejoin="round"/>
+    <!-- Diagonal Hive-Mind Lattice Lines -->
+    <line x1="512" y1="230" x2="756" y2="653" stroke="#06b6d4" stroke-opacity="0.3" stroke-width="2.5" stroke-dasharray="6,6"/>
+    <line x1="512" y1="230" x2="268" y2="653" stroke="#f59e0b" stroke-opacity="0.3" stroke-width="2.5" stroke-dasharray="6,6"/>
+    <line x1="756" y1="371" x2="268" y2="653" stroke="#a855f7" stroke-opacity="0.3" stroke-width="2.5" stroke-dasharray="6,6"/>
+    <line x1="268" y1="371" x2="756" y2="653" stroke="#10b981" stroke-opacity="0.3" stroke-width="2.5" stroke-dasharray="6,6"/>
+    <line x1="268" y1="371" x2="512" y2="794" stroke="#3b82f6" stroke-opacity="0.3" stroke-width="2.5" stroke-dasharray="6,6"/>
+    <line x1="756" y1="371" x2="512" y2="794" stroke="#ec4899" stroke-opacity="0.3" stroke-width="2.5" stroke-dasharray="6,6"/>
 
-  <!-- Two faces in council -->
-  <use href="#profile" fill="url(#ivory)"/>
-  <use href="#profile" fill="url(#ivory)" transform="translate(1024 0) scale(-1 1)"/>
+    <!-- Central Neural Axons (Direct to Hive-Mind Core) -->
+    <line x1="512" y1="512" x2="512" y2="230" stroke="url(#synapse1)" stroke-width="5"/>
+    <line x1="512" y1="512" x2="756" y2="371" stroke="url(#synapse2)" stroke-width="5"/>
+    <line x1="512" y1="512" x2="756" y2="653" stroke="url(#synapse1)" stroke-width="5"/>
+    <line x1="512" y1="512" x2="512" y2="794" stroke="url(#synapse2)" stroke-width="5"/>
+    <line x1="512" y1="512" x2="268" y2="653" stroke="url(#synapse1)" stroke-width="5"/>
+    <line x1="512" y1="512" x2="268" y2="371" stroke="url(#synapse2)" stroke-width="5"/>
 
-  <!-- Council spark between them -->
-  <path d="M512 486 C516 512 522 518 548 522 C522 526 516 532 512 558 C508 532 502 526 476 522 C502 518 508 512 512 486 Z"
-        fill="url(#gold)"/>
+    <!-- Dendritic Extensions (Branching Synapses Outward) -->
+    <path d="M512 230 C512 170 470 140 440 120" stroke="#38bdf8" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+    <path d="M512 230 C530 170 580 150 610 130" stroke="#f472b6" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+    
+    <path d="M756 371 C810 340 850 310 880 280" stroke="#818cf8" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+    <path d="M756 371 C820 380 870 410 900 440" stroke="#38bdf8" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+
+    <path d="M756 653 C810 680 860 700 890 740" stroke="#c084fc" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+    <path d="M756 653 C790 710 820 760 840 810" stroke="#818cf8" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+
+    <path d="M512 794 C512 850 480 890 450 920" stroke="#34d399" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+    <path d="M512 794 C530 850 570 890 600 920" stroke="#c084fc" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+
+    <path d="M268 653 C220 690 170 720 140 760" stroke="#fbbf24" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+    <path d="M268 653 C210 640 160 620 120 600" stroke="#34d399" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+
+    <path d="M268 371 C210 330 170 290 130 250" stroke="#f59e0b" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+    <path d="M268 371 C230 420 190 450 140 480" stroke="#fbbf24" stroke-opacity="0.4" stroke-width="2.5" fill="none"/>
+  </g>
+
+  <!-- Dendrite Terminal Synaptic Buds (Glowing Micro Data Points) -->
+  <g fill="#f8fafc">
+    <circle cx="440" cy="120" r="5" fill="#38bdf8" opacity="0.8"/>
+    <circle cx="610" cy="130" r="4.5" fill="#f472b6" opacity="0.8"/>
+    <circle cx="880" cy="280" r="5" fill="#818cf8" opacity="0.8"/>
+    <circle cx="900" cy="440" r="4.5" fill="#38bdf8" opacity="0.8"/>
+    <circle cx="890" cy="740" r="5" fill="#c084fc" opacity="0.8"/>
+    <circle cx="840" cy="810" r="4" fill="#818cf8" opacity="0.8"/>
+    <circle cx="450" cy="920" r="5" fill="#34d399" opacity="0.8"/>
+    <circle cx="600" cy="920" r="4.5" fill="#c084fc" opacity="0.8"/>
+    <circle cx="140" cy="760" r="5" fill="#fbbf24" opacity="0.8"/>
+    <circle cx="120" cy="600" r="4.5" fill="#34d399" opacity="0.8"/>
+    <circle cx="130" cy="250" r="5" fill="#f59e0b" opacity="0.8"/>
+    <circle cx="140" cy="480" r="4" fill="#fbbf24" opacity="0.8"/>
+  </g>
+
+  <!-- In-flight Synaptic Data Packets / Pulses -->
+  <g filter="url(#intenseGlow)">
+    <circle cx="512" cy="371" r="7" fill="#38bdf8"/>
+    <circle cx="634" cy="441" r="7" fill="#818cf8"/>
+    <circle cx="634" cy="582" r="7" fill="#c084fc"/>
+    <circle cx="512" cy="653" r="7" fill="#34d399"/>
+    <circle cx="390" cy="582" r="7" fill="#fbbf24"/>
+    <circle cx="390" cy="441" r="7" fill="#f472b6"/>
+
+    <circle cx="634" cy="300" r="5.5" fill="#67e8f9"/>
+    <circle cx="756" cy="512" r="5.5" fill="#a855f7"/>
+    <circle cx="634" cy="723" r="5.5" fill="#c084fc"/>
+    <circle cx="390" cy="723" r="5.5" fill="#10b981"/>
+    <circle cx="268" cy="512" r="5.5" fill="#f59e0b"/>
+    <circle cx="390" cy="300" r="5.5" fill="#f43f5e"/>
+  </g>
+
+  <!-- Peripheral Council AI Neural Nodes (Representing Specialized Minds) -->
+  <!-- Node 1: Top (ChatGPT / Codex - Emerald/Cyan) -->
+  <g filter="url(#intenseGlow)">
+    <circle cx="512" cy="230" r="32" fill="url(#emeraldGlow)"/>
+    <circle cx="512" cy="230" r="16" fill="#ffffff"/>
+    <circle cx="512" cy="230" r="40" fill="none" stroke="#10b981" stroke-width="2.5" stroke-opacity="0.6"/>
+  </g>
+
+  <!-- Node 2: Top-Right (Claude - Amber/Copper) -->
+  <g filter="url(#intenseGlow)">
+    <circle cx="756" cy="371" r="32" fill="url(#amberGlow)"/>
+    <circle cx="756" cy="371" r="16" fill="#ffffff"/>
+    <circle cx="756" cy="371" r="40" fill="none" stroke="#f59e0b" stroke-width="2.5" stroke-opacity="0.6"/>
+  </g>
+
+  <!-- Node 3: Bottom-Right (Gemini - Azure/Cobalt) -->
+  <g filter="url(#intenseGlow)">
+    <circle cx="756" cy="653" r="32" fill="url(#blueGlow)"/>
+    <circle cx="756" cy="653" r="16" fill="#ffffff"/>
+    <circle cx="756" cy="653" r="40" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-opacity="0.6"/>
+  </g>
+
+  <!-- Node 4: Bottom (DeepSeek - Cyan/Teal) -->
+  <g filter="url(#intenseGlow)">
+    <circle cx="512" cy="794" r="32" fill="url(#cyanGlow)"/>
+    <circle cx="512" cy="794" r="16" fill="#ffffff"/>
+    <circle cx="512" cy="794" r="40" fill="none" stroke="#06b6d4" stroke-width="2.5" stroke-opacity="0.6"/>
+  </g>
+
+  <!-- Node 5: Bottom-Left (Llama - Violet/Indigo) -->
+  <g filter="url(#intenseGlow)">
+    <circle cx="268" cy="653" r="32" fill="url(#violetGlow)"/>
+    <circle cx="268" cy="653" r="16" fill="#ffffff"/>
+    <circle cx="268" cy="653" r="40" fill="none" stroke="#8b5cf6" stroke-width="2.5" stroke-opacity="0.6"/>
+  </g>
+
+  <!-- Node 6: Top-Left (Qwen / Local Offline Coding - Rose/Magenta) -->
+  <g filter="url(#intenseGlow)">
+    <circle cx="268" cy="371" r="32" fill="url(#goldGlow)"/>
+    <circle cx="268" cy="371" r="16" fill="#ffffff"/>
+    <circle cx="268" cy="371" r="40" fill="none" stroke="#eab308" stroke-width="2.5" stroke-opacity="0.6"/>
+  </g>
+
+  <!-- Central Hive-Mind Core / Cognitive Nexus (Consilium Core) -->
+  <g filter="url(#intenseGlow)">
+    <!-- Outer Pulsing Orbit Rings -->
+    <circle cx="512" cy="512" r="92" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="8,6" stroke-opacity="0.5"/>
+    <circle cx="512" cy="512" r="76" fill="none" stroke="#8b5cf6" stroke-width="2.5" stroke-opacity="0.7"/>
+
+    <!-- Radiant Inner Nexus -->
+    <circle cx="512" cy="512" r="54" fill="url(#goldGlow)"/>
+    <circle cx="512" cy="512" r="28" fill="#ffffff"/>
+
+    <!-- Central Spark / Star of Consensus -->
+    <path d="M512 472 C515 498 522 509 552 512 C522 515 515 526 512 552 C509 526 502 515 472 512 C502 509 509 498 512 472 Z"
+          fill="#fef08a" filter="url(#neuralGlow)"/>
+  </g>
 </svg>
