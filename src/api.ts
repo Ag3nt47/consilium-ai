@@ -14,6 +14,19 @@ export interface CatalogTool {
   install_command: string | null;
 }
 
+export interface OllamaModel {
+  name: string;
+  model: string;
+  size: number;
+  digest: string;
+  details?: {
+    format: string;
+    family: string;
+    parameter_size: string;
+    quantization_level: string;
+  };
+}
+
 export const IN_APP = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 /** One item on the conversation's shared task checklist. */
@@ -528,6 +541,9 @@ const appApi = {
   addCustomAi: (name: string, baseUrl: string, model: string, local: boolean, key: string) =>
     invoke<string>("add_custom_ai", { name, baseUrl, model, local, key }),
   removeCustomAi: (id: string) => invoke<void>("remove_custom_ai", { id }),
+  probeOllama: (baseUrl?: string) => invoke<OllamaModel[]>("probe_ollama", { baseUrl }),
+  importOllamaModel: (model: OllamaModel, baseUrl?: string) =>
+    invoke<string>("import_ollama_model", { model, baseUrl }),
   /** Samples host PC CPU and memory pressure (0-100%). */
   systemPressure: () => invoke<SystemPressure>("system_pressure"),
   securityScanStatus: () => invoke<SecurityScanStatus>("security_scan_status"),
