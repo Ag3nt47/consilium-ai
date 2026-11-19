@@ -261,6 +261,18 @@ mod tests {
         assert!(waiting_boxes(&events, from, 20 + CATCH_UP_MS, CATCH_UP_MS).is_empty(), "too old to run unasked");
     }
 
+    #[test]
+    fn waiting_boxes_from_zero_picks_unhandled_boxes_across_human_messages() {
+        let events = vec![
+            boxed(1, 5),
+            ev(2, 10, "human", "message", "Approved: run it", vec![]),
+            boxed(3, 20),
+            ran(4, 30, "e3"),
+        ];
+        // With from = 0, box 1 (e1#0) is picked because it was never handled, even though human wrote afterwards
+        assert_eq!(waiting_boxes(&events, 0, 50, CATCH_UP_MS), vec![("e1".to_string(), 0)]);
+    }
+
     const SHELL: &str = if cfg!(windows) { "powershell" } else { "bash" };
 
     fn boxed(seq: u64, ts: u64) -> Event {
