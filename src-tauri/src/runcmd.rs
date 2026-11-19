@@ -192,7 +192,7 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Keeps the start and end of long output.
+/// Keeps the start and end of long output, and saves the whole of it (see `offload`).
 fn clip(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= MAX_OUTPUT {
@@ -200,7 +200,11 @@ fn clip(text: &str) -> String {
     }
     let head: String = chars[..MAX_OUTPUT / 3].iter().collect();
     let tail: String = chars[chars.len() - MAX_OUTPUT * 2 / 3..].iter().collect();
-    format!("{head}\n… ({} characters left out) …\n{tail}", chars.len() - MAX_OUTPUT)
+    // The whole output (already scrubbed of secrets) is kept in the offload folder, so an AI can
+    // read the part that was left out instead of running the command again.
+    let saved = crate::data_dir().and_then(|d| crate::offload::store(&d, text));
+    let whole = saved.map(|p| format!("; the full output is in {}", p.display())).unwrap_or_default();
+    format!("{head}\n… ({} characters left out{whole}) …\n{tail}", chars.len() - MAX_OUTPUT)
 }
 
 /// The outcome of one run.
