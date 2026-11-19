@@ -662,6 +662,29 @@ code {
   margin-left: auto;
 }
 
+.msg-reply {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 1px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.12s, color 0.12s, transform 0.12s;
+}
+
+.msg:hover .msg-reply,
+.msg-reply:focus-visible {
+  opacity: 1;
+}
+
+.msg-reply:hover {
+  color: var(--sender, var(--text));
+  transform: rotate(-20deg);
+}
+
 .tokens-tag {
   color: var(--muted);
   font-size: 11px;
