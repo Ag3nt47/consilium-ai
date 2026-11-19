@@ -80,6 +80,54 @@ pub async fn list_models(base_url: Option<&str>) -> Result<Vec<OllamaTagModel>, 
     Ok(parsed.models)
 }
 
+/// How long Ollama keeps a warmed model loaded after the last ping. Renewed every `WARM_EVERY`,
+/// so a council member's model stays loaded while Consilium is open and unloads soon after it
+/// closes.
+const KEEP_ALIVE: &str = "10m";
+const WARM_EVERY: Duration = Duration::from_secs(4 * 60);
+
+/// The native Ollama endpoint and model of a local council AI, from its OpenAI-style base URL
+/// (`http://host:11434/v1`). None for an AI that isn't a local model with a set model.
+pub fn warm_target(agent: &crate::agents::Agent) -> Option<(String, String)> {
+    let p = agent.provider.filter(|p| p.local)?;
+    let model = p.prefer.first()?.to_string();
+    let base = p.base_url.trim_end_matches('/').trim_end_matches("/v1").trim_end_matches('/').to_string();
+    Some((base, model))
+}
+
+/// Keeps the council's local models loaded while the app is open, so a prompt never waits for
+/// a model to load from disk (Ollama unloads one after 5 idle minutes by default). Loading
+/// without a prompt costs no generation.
+pub fn keep_warm(config: std::sync::Arc<crate::config::Config>) {
+    tauri::async_runtime::spawn(async move {
+        let Ok(client) = reqwest::Client::builder().user_agent("Consilium").timeout(Duration::from_secs(300)).build() else { return };
+        loop {
+            let members = config.get().members;
+            let mut targets: Vec<(String, String)> = members.iter().filter_map(|m| crate::agents::by_id(m)).filter_map(warm_target).collect();
+            targets.dedup();
+            for (base, model) in targets {
+                let body = serde_json::json!({ "model": model, "keep_alive": KEEP_ALIVE });
+                // One at a time: loading two models at once on a small GPU only slows both.
+                let _ = client.post(format!("{base}/api/generate")).json(&body).send().await;
+            }
+            tokio::time::sleep(WARM_EVERY).await;
+        }
+    });
+}
+
+#[cfg(test)]
+mod warm_tests {
+    #[test]
+    fn warms_local_models_at_their_native_endpoint_only() {
+        let local = crate::apiagent::Provider { base_url: "http://127.0.0.1:11434/v1/", env_var: "", key_page: "", prefer: &["qwen2.5-coder:7b"], family: "", local: true };
+        let cloud = crate::apiagent::Provider { local: false, ..local };
+        let a = |p: &'static crate::apiagent::Provider| crate::agents::Agent { id: "q", name: "Q", company: "", kind: crate::agents::Kind::CustomApi, provider: Some(p) };
+        let (l, c): (&'static _, &'static _) = (Box::leak(Box::new(local)), Box::leak(Box::new(cloud)));
+        assert_eq!(super::warm_target(&a(l)), Some(("http://127.0.0.1:11434".into(), "qwen2.5-coder:7b".into())));
+        assert_eq!(super::warm_target(&a(c)), None);
+    }
+}
+
 /// Formats a clean human-readable name from a model tag (e.g. "llama3.2:latest" -> "Llama3.2").
 pub fn clean_name(tag: &str) -> String {
     let base = tag.split(':').next().unwrap_or(tag).trim();

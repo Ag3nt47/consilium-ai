@@ -258,10 +258,28 @@ fn usage_of(v: &serde_json::Value) -> Option<TokenUsage> {
     })
 }
 
+/// `text` without `<think>…</think>` blocks; an unclosed one runs to the end.
+pub fn strip_think(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("<think>") {
+        out.push_str(&rest[..i]);
+        match rest[i..].find("</think>") {
+            Some(j) => rest = &rest[i + j + "</think>".len()..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Pulls the reply text and token counts out of a chat-completions response body.
 pub fn parse_reply(body: &str) -> Result<(String, Option<TokenUsage>), String> {
     let v: serde_json::Value = serde_json::from_str(body).map_err(|_| "unreadable reply".to_string())?;
-    let text = v["choices"][0]["message"]["content"].as_str().unwrap_or_default().trim().to_string();
+    let raw = v["choices"][0]["message"]["content"].as_str().unwrap_or_default();
+    // Reasoning models (DeepSeek-R1, Qwen3) put their hidden reasoning in the reply as
+    // <think>…</think>; the council should see only the answer.
+    let text = strip_think(raw).trim().to_string();
     if text.is_empty() {
         return Err("empty reply".into());
     }
@@ -280,6 +298,68 @@ pub async fn run(
 ) -> Result<(String, Option<TokenUsage>, String), String> {
     let key = key(agent, provider).ok_or_else(|| format!("No {name} API key. Add one in Add AI."))?;
     let model = model_for(agent, name, provider, &key).await?;
+    match ask_once(name, provider, &key, &model, system, prompt, cancel, timeout).await {
+        Ok(r) => Ok((r.0, r.1, model)),
+        Err(e) if e != "stopped" && provider.local && !cancel.is_cancelled() => {
+            // A local model's turn shouldn't be lost to a hiccup: start Ollama if it is down on
+            // this computer, and ask once more, saying why when the answer came back empty.
+            if is_unreachable(&e) && !start_local_ollama(provider.base_url).await {
+                return Err(e);
+            }
+            let system = if e.ends_with("empty reply") {
+                format!("{system}\n\nNOTE FROM CONSILIUM: your last answer to this came back empty (or only hidden reasoning). Reply in plain text now.")
+            } else {
+                system.to_string()
+            };
+            let r = ask_once(name, provider, &key, &model, &system, prompt, cancel, timeout).await?;
+            Ok((r.0, r.1, model))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn is_unreachable(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("connect") || e.contains("refused") || e.contains("unreachable")
+}
+
+/// Starts `ollama serve` when a local AI's endpoint is this computer and nothing answers there,
+/// then waits up to 20 s for it. Whether it answers now.
+async fn start_local_ollama(base_url: &str) -> bool {
+    let lower = base_url.to_lowercase();
+    if !(lower.contains("127.0.0.1") || lower.contains("localhost")) {
+        return false;
+    }
+    let mut cmd = tokio::process::Command::new("ollama");
+    cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    if cmd.spawn().is_err() {
+        return false;
+    }
+    let tags = format!("{}/api/tags", base_url.trim_end_matches('/').trim_end_matches("/v1"));
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if let Ok(c) = client() {
+            if c.get(&tags).timeout(Duration::from_secs(2)).send().await.is_ok_and(|r| r.status().is_success()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ask_once(
+    name: &str,
+    provider: &Provider,
+    key: &str,
+    model: &str,
+    system: &str,
+    prompt: &str,
+    cancel: &CancellationToken,
+    timeout: Duration,
+) -> Result<(String, Option<TokenUsage>), String> {
     let body = serde_json::json!({
         "model": model,
         "messages": [
@@ -288,7 +368,7 @@ pub async fn run(
         ],
         "stream": false,
     });
-    let request = auth(client()?.post(format!("{}/chat/completions", provider.base_url)), &key)
+    let request = auth(client()?.post(format!("{}/chat/completions", provider.base_url)), key)
         .json(&body)
         .timeout(timeout)
         .send();
@@ -304,13 +384,23 @@ pub async fn run(
     if !status.is_success() {
         return Err(http_error(name, status, &text));
     }
-    let (reply, usage) = parse_reply(&text).map_err(|e| format!("{name}: {e}"))?;
-    Ok((reply, usage, model))
+    parse_reply(&text).map_err(|e| format!("{name}: {e}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_reasoning_is_dropped_and_a_reply_of_only_reasoning_counts_as_empty() {
+        assert_eq!(strip_think("<think>plan it</think>\nThe answer."), "\nThe answer.");
+        assert_eq!(strip_think("a<think>x</think>b<think>y</think>c"), "abc");
+        assert_eq!(strip_think("ok <think>never closed"), "ok ");
+        let only = r#"{"choices":[{"message":{"content":"<think>hmm</think>  "}}]}"#;
+        assert_eq!(parse_reply(only).unwrap_err(), "empty reply");
+        assert!(is_unreachable("Qwen: error sending request: tcp connect error: connection refused"));
+        assert!(!is_unreachable("Qwen: HTTP 500"));
+    }
 
     #[test]
     fn chooses_preferred_model_from_account_list() {
