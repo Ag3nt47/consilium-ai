@@ -3381,6 +3381,11 @@ button.attachment {
 .sidebar .agents > .section-label { flex-shrink: 0; }
 .agent-list { flex: 0 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 .agent-list.scrolls { padding-right: 3px; scrollbar-gutter: stable; }
+/* Five or more AIs: the council takes all the height left between the conversation list and
+   the footer (no fixed cap, so no gap above PC pressure) and scrolls inside it. A zero basis
+   means a long council never squeezes the conversation list below its own share. */
+.sidebar .agents.many { flex: 1 1 0; }
+.agent-list.scrolls { max-height: none; }
 .sidebar-foot { flex-shrink: 0; margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
 .sidebar-actions .btn { white-space: nowrap; }
 
