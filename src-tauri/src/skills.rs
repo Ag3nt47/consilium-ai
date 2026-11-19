@@ -56,7 +56,7 @@ pub fn index(dir: &Path) -> Vec<Skill> {
             Some(Skill { summary: summary(&text), name, path })
         })
         .collect();
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|s| s.name.to_lowercase());
     out
 }
 
