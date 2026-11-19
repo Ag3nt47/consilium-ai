@@ -350,6 +350,40 @@ impl Sync {
         self.store.append(&conv.id, crate::council::CONSILIUM, "system", vec![], &note).map(Some)
     }
 
+    /// A linked computer requested a restart of Consilium.
+    fn take_restart_request(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
+        let my_name = {
+            crate::link_handle()
+                .map(|l| l.status().name)
+                .unwrap_or_default()
+        };
+        let target = shared.text.trim();
+        let applies = target.is_empty()
+            || target.eq_ignore_ascii_case("all")
+            || (!my_name.is_empty() && target.eq_ignore_ascii_case(&my_name))
+            || target.eq_ignore_ascii_case(&self.me.lock().unwrap());
+        if !applies {
+            return Ok(None);
+        }
+        {
+            let mut m = self.mirrors.lock().unwrap();
+            if !m.filed.insert(packet.id.clone()) {
+                return Ok(None);
+            }
+            self.save(&m)?;
+        }
+        let Some(conv) = self.store.list().into_iter().find(|c| !self.is_mirror(&c.id)) else {
+            crate::restart_this_computer();
+            return Ok(None);
+        };
+        let note = format!(
+            "{computer} requested a restart of Consilium on this computer. Restarting now; in-progress work will resume after."
+        );
+        let event = self.store.append(&conv.id, crate::council::CONSILIUM, "system", vec![], &note).map(Some)?;
+        crate::restart_this_computer();
+        Ok(event)
+    }
+
     /// An AI on `computer` answered in a copy of one of this computer's conversations: files the
     /// answer there as "<AI> (<computer>)" for the AIs here to see.
     fn take_contribution(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
@@ -647,6 +681,9 @@ impl Sync {
         if shared.kind == "update_request" {
             return self.take_update_request(packet, computer);
         }
+        if shared.kind == "restart_request" {
+            return self.take_restart_request(packet, shared, computer);
+        }
         if shared.kind == "tasks" {
             return self.take_board(packet, shared, computer);
         }
@@ -919,6 +956,27 @@ pub fn request_update() -> Result<usize, String> {
         kind: "update_request".into(),
         to: vec![],
         text: serde_json::to_string(&crate::build_id::Build::this()).unwrap_or_default(),
+        via: None,
+        owner: None,
+        history: vec![],
+    })
+    .map_err(|e| e.to_string())?;
+    link.send(PacketKind::Chat, payload)?;
+    Ok(link.status().peers.len())
+}
+
+/// Requests a restart of Consilium on linked computers (or a specific target). Returns how many linked
+/// computers it was sent to.
+pub fn request_restart(target: Option<&str>) -> Result<usize, String> {
+    let Some(link) = crate::link_handle().filter(|l| l.enabled() && l.has_peers()) else { return Ok(0) };
+    let payload = serde_json::to_value(Shared {
+        conversation: String::new(),
+        title: String::new(),
+        id: uuid::Uuid::new_v4().to_string(),
+        sender: "human".into(),
+        kind: "restart_request".into(),
+        to: vec![],
+        text: target.unwrap_or("all").to_string(),
         via: None,
         owner: None,
         history: vec![],
@@ -1305,6 +1363,23 @@ mod tests {
         assert!(b.file(&request, "MacBook").unwrap().is_none(), "once");
         crate::follow::clear_install_request();
         assert!(!crate::follow::install_wanted(now));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_restart_request_from_one_computer_records_note() {
+        let root = std::env::temp_dir().join(format!("peer-sync-restart-{}", uuid::Uuid::new_v4()));
+        let b = Sync::new(Arc::new(Store::new(root.join("c")).unwrap()), &root);
+        let conv = b.store.create("Plans").unwrap();
+        let request = packet(
+            "node-a",
+            "rst1",
+            serde_json::json!({"conversation": "", "title": "", "id": "rst1", "sender": "human", "kind": "restart_request", "text": "all"}),
+        );
+        let note = b.file(&request, "MacBook").unwrap().expect("a note");
+        assert_eq!(note.conversation, conv.id);
+        assert!(note.text.contains("MacBook requested a restart of Consilium"), "{}", note.text);
+        assert!(b.file(&request, "MacBook").unwrap().is_none(), "once");
         let _ = std::fs::remove_dir_all(&root);
     }
 

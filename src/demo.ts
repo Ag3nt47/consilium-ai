@@ -495,6 +495,7 @@ export const demoApi = {
   linuxPackageKind: async () => null,
   releaseCheckRequested: async () => false,
   requestPeerUpdate: async () => 0,
+  restartApp: async () => undefined,
   setAutoInstallUpdates: async () => undefined,
   stageReleaseUpdate: async () => undefined,
   stressTestLink: async () => [],
