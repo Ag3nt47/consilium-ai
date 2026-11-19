@@ -3,6 +3,7 @@ import { clock, clockShort, day, num } from "./fmt";
 import { commandElementId, fencedBlocks, handledCommands, needsAdmin, pendingCommands, runsOn, shellName, shellSystem, deniedText, type Fence } from "./commands";
 import { OS, dictationHint, paletteKey, paletteKeyWords, terminalName } from "./platform";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -1651,15 +1652,18 @@ export default function App() {
 
   const [openModelPicker, setOpenModelPicker] = useState<string | null>(null);
   const [openAccessPicker, setOpenAccessPicker] = useState<string | null>(null);
+  const [pickerAnchorRect, setPickerAnchorRect] = useState<DOMRect | null>(null);
   const [modelChoices, setModelChoices] = useState<Record<string, ModelChoice[]>>({});
   const [loadingModels, setLoadingModels] = useState<Record<string, boolean>>({});
 
-  function toggleModelPicker(id: string) {
+  function toggleModelPicker(id: string, el: HTMLElement) {
     if (openModelPicker === id) {
       setOpenModelPicker(null);
+      setPickerAnchorRect(null);
     } else {
       setOpenModelPicker(id);
       setOpenAccessPicker(null);
+      setPickerAnchorRect(el.getBoundingClientRect());
       if (!modelChoices[id]) {
         setLoadingModels((prev) => ({ ...prev, [id]: true }));
         api.listModels(id)
@@ -1670,12 +1674,14 @@ export default function App() {
     }
   }
 
-  function toggleAccessPicker(id: string) {
+  function toggleAccessPicker(id: string, el: HTMLElement) {
     if (openAccessPicker === id) {
       setOpenAccessPicker(null);
+      setPickerAnchorRect(null);
     } else {
       setOpenAccessPicker(id);
       setOpenModelPicker(null);
+      setPickerAnchorRect(el.getBoundingClientRect());
     }
   }
 
@@ -1683,6 +1689,7 @@ export default function App() {
     try {
       await api.setModel(agentId, model);
       setOpenModelPicker(null);
+      setPickerAnchorRect(null);
       refreshAgents();
     } catch (e) {
       setError(`Couldn't set model: ${e}`);
@@ -1698,9 +1705,30 @@ export default function App() {
       }
       setOpenModelPicker(null);
       setOpenAccessPicker(null);
+      setPickerAnchorRect(null);
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setOpenModelPicker(null);
+        setOpenAccessPicker(null);
+        setPickerAnchorRect(null);
+      }
+    }
+    function handleScrollOrResize() {
+      setOpenModelPicker(null);
+      setOpenAccessPicker(null);
+      setPickerAnchorRect(null);
     }
     window.addEventListener("mousedown", handleClickOutside);
-    return () => window.removeEventListener("mousedown", handleClickOutside);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", handleScrollOrResize);
+    window.addEventListener("scroll", handleScrollOrResize, true);
+    return () => {
+      window.removeEventListener("mousedown", handleClickOutside);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", handleScrollOrResize);
+      window.removeEventListener("scroll", handleScrollOrResize, true);
+    };
   }, [openModelPicker, openAccessPicker]);
 
   // Everyone in the council is asked by default: after a restart, and when an AI joins.
@@ -2635,7 +2663,7 @@ export default function App() {
                   <button
                     type="button"
                     className="link model-picker-btn"
-                    onClick={() => toggleModelPicker(a.id)}
+                    onClick={(e) => toggleModelPicker(a.id, e.currentTarget)}
                     title={`Model: ${a.model || "Default"} (click to choose model)`}
                     aria-label={`Model picker for ${a.name}`}
                     style={{ color: "#3b82f6", fontSize: 10, lineHeight: 1, padding: "1px 4px", flex: "none" }}
@@ -2646,7 +2674,7 @@ export default function App() {
                   <button
                     type="button"
                     className="link access-picker-btn"
-                    onClick={() => toggleAccessPicker(a.id)}
+                    onClick={(e) => toggleAccessPicker(a.id, e.currentTarget)}
                     title={`Access: ${ACCESS_LEVELS.find((l) => l.id === a.access)?.name ?? a.access} (click to choose access level)`}
                     aria-label={`Access picker for ${a.name}`}
                     style={{ color: "#22c55e", fontSize: 10, lineHeight: 1, padding: "1px 4px", flex: "none" }}
@@ -2654,141 +2682,150 @@ export default function App() {
                     {"\u25CF"}
                   </button>
 
-                  {openModelPicker === a.id && (
-                    <div
-                      className="picker-popover model-popover"
-                      style={{
-                        position: "absolute",
-                        right: "calc(100% + 6px)",
-                        top: -10,
-                        zIndex: 100,
-                        background: "var(--panel, #1e1e24)",
-                        border: "1px solid var(--border, #333)",
-                        borderRadius: "6px",
-                        boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
-                        padding: "8px",
-                        minWidth: "180px",
-                        maxWidth: "240px",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "4px",
-                        textAlign: "left",
-                      }}
-                    >
-                      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted)", paddingBottom: 4, borderBottom: "1px solid var(--border)" }}>
-                        Model for {a.name}
-                      </div>
-                      <button
-                        type="button"
-                        className="picker-option"
-                        onClick={() => void handleSetModel(a.id, null)}
+                  {openModelPicker === a.id && pickerAnchorRect &&
+                    createPortal(
+                      <div
+                        className="picker-popover model-popover"
                         style={{
+                          position: "fixed",
+                          left: pickerAnchorRect.right + 8 + 240 <= window.innerWidth
+                            ? pickerAnchorRect.right + 8
+                            : Math.max(10, pickerAnchorRect.left - 240),
+                          top: Math.max(10, Math.min(pickerAnchorRect.top - 10, window.innerHeight - 280)),
+                          zIndex: 1000,
+                          background: "var(--panel, #1e1e24)",
+                          border: "1px solid var(--border, #333)",
+                          borderRadius: "6px",
+                          boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
+                          padding: "8px",
+                          minWidth: "180px",
+                          maxWidth: "240px",
                           display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          padding: "4px 6px",
-                          borderRadius: "4px",
-                          fontSize: 12,
-                          background: !a.model ? "rgba(59, 130, 246, 0.2)" : "transparent",
-                          color: !a.model ? "#60a5fa" : "inherit",
-                          border: "none",
-                          cursor: "pointer",
+                          flexDirection: "column",
+                          gap: "4px",
                           textAlign: "left",
                         }}
                       >
-                        <span>Default model</span>
-                        {!a.model && <span>✓</span>}
-                      </button>
-                      {loadingModels[a.id] ? (
-                        <div style={{ fontSize: 11, color: "var(--muted)", padding: "4px 6px" }}>Loading models…</div>
-                      ) : (
-                        (modelChoices[a.id] ?? []).map((m) => (
-                          <button
-                            key={m.id}
-                            type="button"
-                            className="picker-option"
-                            onClick={() => void handleSetModel(a.id, m.id)}
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "space-between",
-                              padding: "4px 6px",
-                              borderRadius: "4px",
-                              fontSize: 12,
-                              background: a.model === m.id ? "rgba(59, 130, 246, 0.2)" : "transparent",
-                              color: a.model === m.id ? "#60a5fa" : "inherit",
-                              border: "none",
-                              cursor: "pointer",
-                              textAlign: "left",
-                            }}
-                          >
-                            <span>{m.name || m.id}</span>
-                            {a.model === m.id && <span>✓</span>}
-                          </button>
-                        ))
-                      )}
-                    </div>
-                  )}
+                        <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted)", paddingBottom: 4, borderBottom: "1px solid var(--border)" }}>
+                          Model for {a.name}
+                        </div>
+                        <button
+                          type="button"
+                          className="picker-option"
+                          onClick={() => void handleSetModel(a.id, null)}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            padding: "4px 6px",
+                            borderRadius: "4px",
+                            fontSize: 12,
+                            background: !a.model ? "rgba(59, 130, 246, 0.2)" : "transparent",
+                            color: !a.model ? "#60a5fa" : "inherit",
+                            border: "none",
+                            cursor: "pointer",
+                            textAlign: "left",
+                          }}
+                        >
+                          <span>Default model</span>
+                          {!a.model && <span>✓</span>}
+                        </button>
+                        {loadingModels[a.id] ? (
+                          <div style={{ fontSize: 11, color: "var(--muted)", padding: "4px 6px" }}>Loading models…</div>
+                        ) : (
+                          (modelChoices[a.id] ?? []).map((m) => (
+                            <button
+                              key={m.id}
+                              type="button"
+                              className="picker-option"
+                              onClick={() => void handleSetModel(a.id, m.id)}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                padding: "4px 6px",
+                                borderRadius: "4px",
+                                fontSize: 12,
+                                background: a.model === m.id ? "rgba(59, 130, 246, 0.2)" : "transparent",
+                                color: a.model === m.id ? "#60a5fa" : "inherit",
+                                border: "none",
+                                cursor: "pointer",
+                                textAlign: "left",
+                              }}
+                            >
+                              <span>{m.name || m.id}</span>
+                              {a.model === m.id && <span>✓</span>}
+                            </button>
+                          ))
+                        )}
+                      </div>,
+                      document.body
+                    )}
 
-                  {openAccessPicker === a.id && (
-                    <div
-                      className="picker-popover access-popover"
-                      style={{
-                        position: "absolute",
-                        right: "calc(100% + 6px)",
-                        top: -20,
-                        zIndex: 100,
-                        background: "var(--panel, #1e1e24)",
-                        border: "1px solid var(--border, #333)",
-                        borderRadius: "6px",
-                        boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
-                        padding: "8px",
-                        minWidth: "200px",
-                        maxWidth: "260px",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "4px",
-                        textAlign: "left",
-                      }}
-                    >
-                      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted)", paddingBottom: 4, borderBottom: "1px solid var(--border)" }}>
-                        Access level for {a.name}
-                      </div>
-                      {ACCESS_LEVELS.map((lvl) => {
-                        const active = a.access === lvl.id;
-                        return (
-                          <button
-                            key={lvl.id}
-                            type="button"
-                            className="picker-option"
-                            onClick={() => {
-                              setOpenAccessPicker(null);
-                              void changeAccess(a, lvl.id);
-                            }}
-                            title={lvl.note}
-                            style={{
-                              display: "flex",
-                              flexDirection: "column",
-                              alignItems: "flex-start",
-                              padding: "4px 6px",
-                              borderRadius: "4px",
-                              background: active ? "rgba(34, 197, 94, 0.2)" : "transparent",
-                              color: active ? "#4ade80" : "inherit",
-                              border: "none",
-                              cursor: "pointer",
-                              textAlign: "left",
-                            }}
-                          >
-                            <div style={{ display: "flex", width: "100%", justifyContent: "space-between", alignItems: "center" }}>
-                              <span style={{ fontWeight: active ? 600 : 400, fontSize: 12 }}>{lvl.name}</span>
-                              {active && <span style={{ fontSize: 12 }}>✓</span>}
-                            </div>
-                            <span style={{ fontSize: 10, color: "var(--muted)", lineHeight: 1.2 }}>{lvl.note}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
+                  {openAccessPicker === a.id && pickerAnchorRect &&
+                    createPortal(
+                      <div
+                        className="picker-popover access-popover"
+                        style={{
+                          position: "fixed",
+                          left: pickerAnchorRect.right + 8 + 260 <= window.innerWidth
+                            ? pickerAnchorRect.right + 8
+                            : Math.max(10, pickerAnchorRect.left - 260),
+                          top: Math.max(10, Math.min(pickerAnchorRect.top - 20, window.innerHeight - 300)),
+                          zIndex: 1000,
+                          background: "var(--panel, #1e1e24)",
+                          border: "1px solid var(--border, #333)",
+                          borderRadius: "6px",
+                          boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
+                          padding: "8px",
+                          minWidth: "200px",
+                          maxWidth: "260px",
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "4px",
+                          textAlign: "left",
+                        }}
+                      >
+                        <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted)", paddingBottom: 4, borderBottom: "1px solid var(--border)" }}>
+                          Access level for {a.name}
+                        </div>
+                        {ACCESS_LEVELS.map((lvl) => {
+                          const active = a.access === lvl.id;
+                          return (
+                            <button
+                              key={lvl.id}
+                              type="button"
+                              className="picker-option"
+                              onClick={() => {
+                                setOpenAccessPicker(null);
+                                setPickerAnchorRect(null);
+                                void changeAccess(a, lvl.id);
+                              }}
+                              title={lvl.note}
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                alignItems: "flex-start",
+                                padding: "4px 6px",
+                                borderRadius: "4px",
+                                background: active ? "rgba(34, 197, 94, 0.2)" : "transparent",
+                                color: active ? "#4ade80" : "inherit",
+                                border: "none",
+                                cursor: "pointer",
+                                textAlign: "left",
+                              }}
+                            >
+                              <div style={{ display: "flex", width: "100%", justifyContent: "space-between", alignItems: "center" }}>
+                                <span style={{ fontWeight: active ? 600 : 400, fontSize: 12 }}>{lvl.name}</span>
+                                {active && <span style={{ fontSize: 12 }}>✓</span>}
+                              </div>
+                              <span style={{ fontSize: 10, color: "var(--muted)", lineHeight: 1.2 }}>{lvl.note}</span>
+                            </button>
+                          );
+                        })}
+                      </div>,
+                      document.body
+                    )}
                 </div>
               </div>
             );
