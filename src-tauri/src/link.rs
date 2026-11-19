@@ -685,8 +685,11 @@ impl Link {
         let label = addrs.first().cloned().unwrap_or_default();
         let generation = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| s.generation);
         let started = std::time::Instant::now();
-        let (me, p, a, t) = (self.clone(), peer.clone(), addrs.to_vec(), token.clone());
-        let dial = tokio::spawn(async move { me.dial_on(p, &a, t).await });
+        let spawn_dial = || {
+            let (me, p, a, t) = (self.clone(), peer.clone(), addrs.to_vec(), token.clone());
+            tokio::spawn(async move { me.dial_on(p, &a, t).await })
+        };
+        let mut dial = spawn_dial();
         let mut switched_at: Option<(String, u64, u64)> = None;
         let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, detail };
         while started.elapsed() < STRESS_SWITCH_TIMEOUT {
@@ -719,11 +722,13 @@ impl Link {
                 }
             }
             if dial.is_finished() && switched_at.is_none() {
-                let why = match dial.await {
-                    Ok(Err(e)) => e,
-                    _ => "the connection closed".into(),
-                };
-                return fail(label, why);
+                match (&mut dial).await {
+                    // The session came up and ended before it was seen: the other computer dialed
+                    // in at the same moment and replaced it. The route answered, so dial it again.
+                    Ok(Ok(())) => dial = spawn_dial(),
+                    Ok(Err(e)) => return fail(label, e),
+                    Err(_) => return fail(label, "the connection closed".into()),
+                }
             }
         }
         match switched_at {
