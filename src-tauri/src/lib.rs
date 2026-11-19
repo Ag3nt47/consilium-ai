@@ -576,7 +576,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: Gemini (Antigravity) can read files and run commands again on Windows and the Mac, through explicit permission rules instead of the bypass switch that print mode refuses; the council box's access and model menus float above the page instead of hiding behind the PC pressure box; local AIs (Qwen, Llama, Phi) are told how to code through command boxes and get a skill library of runbooks (on Windows in F:\\Consilium\\skills) that the bigger AIs write for them.";
+const WHATS_NEW: &str = "What's new: Gemini (Antigravity) can read files and run commands again on Windows and the Mac, through explicit permission rules instead of the bypass switch that print mode refuses; the council box's access and model menus float above the page instead of hiding behind the PC pressure box; local AIs (Qwen, Llama, Phi) are told how to code through command boxes and get a skill library of runbooks (on Windows in F:\\Consilium\\skills) that the bigger AIs write for them, and their models stay loaded while Consilium is open; in Auto-run chats rounds follow 5 s apart instead of 20, up to 25 in a row, and a command box that never reports back no longer stops the chat for good; if Consilium freezes it restarts itself within about a minute.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -1396,6 +1396,8 @@ pub fn run() {
             start_auto_install(app.handle().clone(), app.state::<AppState>().engine.clone());
             // Restarts the app if it freezes (a lock that stays taken, a stalled runtime).
             stall::start(app.handle().clone(), app.state::<AppState>().engine.clone(), data.clone());
+            // Keeps the council's local models (Ollama) loaded, so they answer without a cold start.
+            ollama::keep_warm(app.state::<AppState>().engine.config.clone());
             // Tests every route to the linked computers after each start and posts the result.
             stress_test_after_start(app.state::<AppState>().engine.clone());
             // Falls back to the built-in page if an instantly applied one never starts.

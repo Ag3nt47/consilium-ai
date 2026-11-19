@@ -523,8 +523,19 @@ impl Engine {
         }
         let engine = self.clone();
         let conv = conv.to_string();
+        let wait = crate::autocontinue::delay_secs(crate::auto_run::is_on(self.store.dir(), &conv));
         (self.spawn)(Box::pin(async move {
-            tokio::time::sleep(Duration::from_secs(crate::autocontinue::DELAY_SECS)).await;
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            engine.auto_continue(&conv);
+        }));
+    }
+
+    /// Looks again later while a command box holds the next round back.
+    fn recheck_auto_continue(self: &Arc<Self>, conv: &str) {
+        let engine = self.clone();
+        let conv = conv.to_string();
+        (self.spawn)(Box::pin(async move {
+            tokio::time::sleep(Duration::from_secs(crate::autocontinue::RECHECK_SECS)).await;
             engine.auto_continue(&conv);
         }));
     }
@@ -544,6 +555,7 @@ impl Engine {
             crate::autocontinue::Decision::Pause(note) => {
                 let _ = self.note(conv, &note);
             }
+            crate::autocontinue::Decision::Recheck => self.recheck_auto_continue(conv),
             crate::autocontinue::Decision::Stop => {}
         }
     }

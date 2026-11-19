@@ -27,6 +27,17 @@ pub const MAX_ROUNDS: usize = 8;
 pub const IDLE_ROUNDS: usize = 2;
 /// How long after a turn ends before the next round starts, so the human can step in first.
 pub const DELAY_SECS: u64 = 20;
+/// The same in a chat where the human turned on Auto-run: they chose not to step in each time.
+pub const AUTO_RUN_DELAY_SECS: u64 = 5;
+/// Automatic rounds allowed after each message from the human in an Auto-run chat.
+pub const AUTO_RUN_MAX_ROUNDS: usize = 25;
+/// While a command box holds rounds back, how often auto-continue looks again.
+pub const RECHECK_SECS: u64 = 30;
+
+/// The wait before the next automatic round.
+pub fn delay_secs(auto_run: bool) -> u64 {
+    if auto_run { AUTO_RUN_DELAY_SECS } else { DELAY_SECS }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Decision {
@@ -36,6 +47,8 @@ pub enum Decision {
     Pause(String),
     /// Stop quietly.
     Stop,
+    /// Nothing to do yet (a command box is due to report back); look again in `RECHECK_SECS`.
+    Recheck,
 }
 
 fn is_auto_note(e: &Event) -> bool {
@@ -141,8 +154,10 @@ pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pendin
     }
     // In an auto-run chat a box that is running, or about to, reports back by itself and starts
     // its AI's next turn; a round now would only have every AI say it's waiting.
+    // If the box never reports (skipped, lost in a restart), the recheck carries on once it ages
+    // out after PENDING_MS instead of leaving the chat stopped for good.
     if auto_run && boxes_pending {
-        return Decision::Stop;
+        return Decision::Recheck;
     }
     let notes: Vec<&Event> = since_human.iter().filter(|e| is_auto_note(e) && !e.text.contains(AUTO_APPROVED)).collect();
     // A pause note is the last word until the human writes again.
@@ -150,9 +165,10 @@ pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pendin
         return Decision::Stop;
     }
     let rounds: Vec<&&Event> = notes.iter().filter(|n| !n.text.starts_with(&format!("{PREFIX} paused"))).collect();
-    if rounds.len() >= MAX_ROUNDS {
+    let max_rounds = if auto_run { AUTO_RUN_MAX_ROUNDS } else { MAX_ROUNDS };
+    if rounds.len() >= max_rounds {
         return Decision::Pause(format!(
-            "{PREFIX} paused after {MAX_ROUNDS} rounds on its own. {} task(s) are still open; send any message to carry on.",
+            "{PREFIX} paused after {max_rounds} rounds on its own. {} task(s) are still open; send any message to carry on.",
             open.len()
         ));
     }
@@ -168,7 +184,7 @@ pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pendin
     }
     let list = open.iter().map(|t| format!("#{} {}", t.id, t.title)).collect::<Vec<_>>().join("; ");
     Decision::Continue(format!(
-        "{PREFIX} (round {} of {MAX_ROUNDS}): {} task(s) still open: {list}. Carry on with the task you own, or take an \
+        "{PREFIX} (round {} of {max_rounds}): {} task(s) still open: {list}. Carry on with the task you own, or take an \
          open one nobody owns. Don't repeat work another AI reports done. If you are only waiting on something \
          (a build, GitHub's checks, a reset), say so in one line and change nothing.",
         rounds.len() + 1,
@@ -216,7 +232,7 @@ mod tests {
         let b = board(Status::Doing, 15);
         let now = 20 + 1000;
         assert!(pending_boxes(&events, now));
-        assert_eq!(decide_with(&events, &b, true, true), Decision::Stop, "an auto-run chat waits for the box");
+        assert_eq!(decide_with(&events, &b, true, true), Decision::Recheck, "an auto-run chat waits for the box, and looks again");
         assert!(matches!(decide_with(&events, &b, false, true), Decision::Continue(_)), "a normal chat isn't held back");
         let mut done = events.clone();
         done.push(ran(3, 30, "e2"));
@@ -305,6 +321,11 @@ mod tests {
         assert!(matches!(decide(&events, &b, true), Decision::Continue(_)), "an auto-run chat keeps going");
         let mut capped = vec![ev(1, 10, "human", "message", "go", vec![])];
         for i in 0..MAX_ROUNDS as u64 {
+            capped.push(auto(2 + i, 20 + i));
+        }
+        assert!(matches!(decide(&capped, &board(Status::Doing, 1000), true), Decision::Continue(_)), "auto-run allows more rounds");
+        let mut capped = vec![ev(1, 10, "human", "message", "go", vec![])];
+        for i in 0..AUTO_RUN_MAX_ROUNDS as u64 {
             capped.push(auto(2 + i, 20 + i));
         }
         assert!(matches!(decide(&capped, &board(Status::Doing, 1000), true), Decision::Pause(t) if t.contains("rounds on its own")));
