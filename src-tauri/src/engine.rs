@@ -523,8 +523,19 @@ impl Engine {
         }
         let engine = self.clone();
         let conv = conv.to_string();
+        let wait = crate::autocontinue::delay_secs(crate::auto_run::is_on(self.store.dir(), &conv));
         (self.spawn)(Box::pin(async move {
-            tokio::time::sleep(Duration::from_secs(crate::autocontinue::DELAY_SECS)).await;
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            engine.auto_continue(&conv);
+        }));
+    }
+
+    /// Looks again later while a command box holds the next round back.
+    fn recheck_auto_continue(self: &Arc<Self>, conv: &str) {
+        let engine = self.clone();
+        let conv = conv.to_string();
+        (self.spawn)(Box::pin(async move {
+            tokio::time::sleep(Duration::from_secs(crate::autocontinue::RECHECK_SECS)).await;
             engine.auto_continue(&conv);
         }));
     }
@@ -544,6 +555,7 @@ impl Engine {
             crate::autocontinue::Decision::Pause(note) => {
                 let _ = self.note(conv, &note);
             }
+            crate::autocontinue::Decision::Recheck => self.recheck_auto_continue(conv),
             crate::autocontinue::Decision::Stop => {}
         }
     }
@@ -635,6 +647,12 @@ impl Engine {
         for id in ids {
             self.stop_and_wait(&id).await;
         }
+    }
+
+    /// Whether the turn table's lock is free right now (it's only ever held for moments; see
+    /// `stall`, which restarts the app when it stays taken).
+    pub fn turns_lock_free(&self) -> bool {
+        self.running.try_lock().is_ok()
     }
 
     /// Whether this process runs a turn in `id`.
@@ -909,6 +927,21 @@ impl council::Host for RealHost {
         if agents::is_api(agents::effective_kind(agent)) {
             if let Some(w) = workspace.as_deref() {
                 system.push_str(&prompt::command_box_coding(w, std::env::consts::OS, crate::auto_run::is_on(self.store.dir(), conv)));
+            }
+        }
+        // The skill library: local AIs see its index and pull runbooks; flagship AIs write them.
+        let library = crate::skills::ensure_library(&self.data);
+        if agents::is_local(agent) {
+            system.push_str(&crate::skills::for_local(&library, &crate::skills::index(&library), std::env::consts::OS));
+        } else {
+            let locals: Vec<String> = members
+                .iter()
+                .filter_map(|m| agents::by_id(m))
+                .filter(|a| agents::is_local(a))
+                .map(|a| a.name.to_string())
+                .collect();
+            if !locals.is_empty() {
+                system.push_str(&crate::skills::for_flagship(&library, &locals, crate::skills::index(&library).len()));
             }
         }
         // Everyone's plan usage and reset times, as last read.

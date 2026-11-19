@@ -890,6 +890,7 @@ function AgentDot({
   isWorking,
   isFrozen,
   load,
+  controls,
 }: {
   agent: AgentInfo;
   onSetup: (a: AgentInfo) => void;
@@ -901,6 +902,8 @@ function AgentDot({
   isFrozen?: boolean;
   /** Share of the whole PC (0-100) this AI's processes are using right now; undefined when none run. */
   load?: number;
+  /** Stop/start, model and access buttons, drawn inside the card's right edge. */
+  controls?: React.ReactNode;
 }) {
   const state = agentState(agent);
   const dotClass = isFrozen
@@ -915,7 +918,7 @@ function AgentDot({
     : { ready: "Ready", signin: "Not signed in", missing: "Not installed", benched: "Out of usage" }[state];
   return (
     <div
-      className={`agent agent-${agent.id}${isExhausted(agent) ? " agent-exhausted" : ""}`}
+      className={`agent agent-${agent.id}${isExhausted(agent) ? " agent-exhausted" : ""}${controls ? " has-controls" : ""}`}
       title={
         isFrozen
           ? "Stalled: no provider activity for 25 seconds"
@@ -995,6 +998,7 @@ function AgentDot({
         {agent.model && <span className="model-tag" style={{ color: "#3b82f6" }}> · {agent.model}</span>}
         {agent.access !== "chat" && <span className="access-tag"> · {ACCESS_LEVELS.find((l) => l.id === agent.access)?.name}</span>}
       </span>
+      {controls && <div className="council-box-controls">{controls}</div>}
     </div>
   );
 }
@@ -2702,21 +2706,18 @@ export default function App() {
             );
             const off = offHere.includes(a.id);
             return (
-              <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 4, opacity: off ? 0.55 : 1, position: "relative" }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <AgentDot
-                    agent={a}
-                    onSetup={setupAgent}
-                    onRetry={retryAgent}
-                    check={checks[a.id]}
-                    forecast={forecast}
-                    claudeResets={claudeResets}
-                    isWorking={isWorking}
-                    isFrozen={isFrozen}
-                    load={agentLoad}
-                  />
-                </div>
-                <div className="council-box-controls" style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "center", flex: "none", position: "relative" }}>
+              <div key={a.id} style={{ opacity: off ? 0.55 : 1, minWidth: 0 }}>
+                <AgentDot
+                  agent={a}
+                  onSetup={setupAgent}
+                  onRetry={retryAgent}
+                  check={checks[a.id]}
+                  forecast={forecast}
+                  claudeResets={claudeResets}
+                  isWorking={isWorking}
+                  isFrozen={isFrozen}
+                  load={agentLoad}
+                  controls={<>
                   <button
                     type="button"
                     className="link"
@@ -2895,7 +2896,8 @@ export default function App() {
                       </div>,
                       document.body
                     )}
-                </div>
+                  </>}
+                />
               </div>
             );
           })}

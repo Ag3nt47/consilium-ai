@@ -3395,6 +3395,11 @@ button.attachment {
 .sidebar .agents > .section-label { flex-shrink: 0; }
 .agent-list { flex: 0 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 .agent-list.scrolls { padding-right: 3px; scrollbar-gutter: stable; }
+/* Five or more AIs: the council takes all the height left between the conversation list and
+   the footer (no fixed cap, so no gap above PC pressure) and scrolls inside it. A zero basis
+   means a long council never squeezes the conversation list below its own share. */
+.sidebar .agents.many { flex: 1 1 0; }
+.agent-list.scrolls { max-height: none; }
 .sidebar-foot { flex-shrink: 0; margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
 .sidebar-actions .btn { white-space: nowrap; }
 
@@ -3779,3 +3784,19 @@ button.attachment {
 .autorun-dialog { max-width: 540px; margin: 16px; padding: 20px 22px; border-radius: 10px; background: #1f1f1f; color: #f5f5f5; border: 2px solid #d92d20; }
 .autorun-dialog h3 { margin: 0 0 10px; color: #f04438; }
 .autorun-buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+/* Council card controls (stop/start, model, access) sit inside the card's right edge, so
+   every card uses the sidebar's full width instead of leaving a column of buttons beside it. */
+.agent.has-controls { position: relative; padding-right: 24px; min-height: 34px; }
+.sidebar:not([data-fit="0"]) .agent.has-controls { padding-right: 22px; }
+.council-box-controls {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  bottom: 2px;
+  width: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-evenly;
+}
+.council-box-controls > .link { padding: 0 3px !important; line-height: 1 !important; }
