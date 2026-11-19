@@ -81,6 +81,70 @@ struct State {
     generation: u64,
     /// The turn has ended; a new message needs a new turn.
     closed: bool,
+    /// An AI's failure has already alerted the council in this turn, so a failure while the
+    /// others work on it doesn't raise another alarm.
+    alarmed: bool,
+}
+
+/// Each conversation's AIs whose failure has alerted the council, with the error: the same AI
+/// failing the same way again (a dead endpoint, turn after turn) raises no new alarm until it has
+/// answered once.
+static ALARMED: std::sync::LazyLock<Mutex<HashMap<(String, String), String>>> = std::sync::LazyLock::new(Default::default);
+
+fn answered_again(conversation: &str, id: &str) {
+    ALARMED.lock().unwrap().remove(&(conversation.to_string(), id.to_string()));
+}
+
+/// An AI couldn't answer because of a real error (not usage): tells every other AI that can
+/// answer, and brings them into the turn to work out why. At most one alarm a turn, and one per AI
+/// and error until that AI answers again, so a failing alarm round can't start another.
+fn alarm(s: &Arc<Shared>, failed: &'static Agent, why: &str) {
+    let key = (s.turn.conversation.clone(), failed.id.to_string());
+    let now = now_ms();
+    let mut st = s.state.lock().unwrap();
+    if st.alarmed || st.paused || s.cancel.is_cancelled() || ALARMED.lock().unwrap().get(&key).is_some_and(|w| w == why) {
+        return;
+    }
+    let helpers: Vec<&'static Agent> = s
+        .turn
+        .members
+        .iter()
+        .filter(|m| **m != failed.id)
+        .filter_map(|m| agents::by_id(m))
+        .filter(|a| s.bench.until(a.id, now).is_none() && s.host.installed(a))
+        .filter(|a| !crate::switched::is_off(s.store.dir(), &s.turn.conversation, a.id))
+        .collect();
+    if helpers.is_empty() {
+        return;
+    }
+    st.alarmed = true;
+    ALARMED.lock().unwrap().insert(key, why.to_string());
+    let to: Vec<String> = helpers.iter().map(|a| a.id.to_string()).collect();
+    let names = to.iter().map(|id| format!("@{id}")).collect::<Vec<_>>().join(" ");
+    let text = format!(
+        "{names}: {} couldn't answer: {why}\nPlease work out why together and fix it: one of you takes it with a TASK: line, the others review.",
+        failed.name
+    );
+    let Ok(e) = s.store.append(&s.turn.conversation, CONSILIUM, "system", to.clone(), &text) else {
+        return;
+    };
+    s.host.event(&e);
+    // Waiting AIs wake for it; the rest get one more answer and join in.
+    st.latest.insert(CONSILIUM.to_string(), e.seq);
+    let mut start = Vec::new();
+    for id in to {
+        *st.extra.entry(id.clone()).or_default() += 1;
+        st.passed.remove(&id);
+        if st.live.insert(id.clone()) {
+            st.joined.insert(id.clone());
+            start.push(id);
+        }
+    }
+    drop(st);
+    for id in start {
+        tokio::spawn(worker(s.clone(), id, Some(e.seq - 1)));
+    }
+    s.wake.notify_waiters();
 }
 
 struct Shared {
@@ -440,6 +504,7 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
         match result {
             Ok(reply) if rounds > 1 && prompt::is_pass(&reply.text) => {
                 s.bench.clear(&id);
+                answered_again(&s.turn.conversation, &id);
                 // A pass still used tokens, so they are recorded on the note.
                 let text = format!("{} had nothing to add.", agent.name);
                 if let Ok(e) = s.store.append_with_usage(&s.turn.conversation, &id, "system", vec![], &text, reply.usage) {
@@ -456,6 +521,7 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
             }
             Ok(reply) => {
                 s.bench.clear(&id);
+                answered_again(&s.turn.conversation, &id);
                 let to = prompt::mentioned_agents(&reply.text);
                 let Ok(ev) = s.store.append_with_usage(&s.turn.conversation, &id, "message", to.clone(), &reply.text, reply.usage)
                 else {
@@ -530,8 +596,11 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                         CONSILIUM,
                         &format!("{} ran out of usage ({when}); the council carries on without it.", agent.name),
                     );
-                } else if let Ok(e) = s.store.append(&s.turn.conversation, &id, "error", vec![], &format!("{} couldn't answer: {why}", agent.name)) {
-                    s.host.event(&e);
+                } else {
+                    if let Ok(e) = s.store.append(&s.turn.conversation, &id, "error", vec![], &format!("{} couldn't answer: {why}", agent.name)) {
+                        s.host.event(&e);
+                    }
+                    alarm(&s, agent, &why);
                 }
                 failed = true;
                 break;
@@ -731,6 +800,49 @@ mod tests {
         assert_eq!(s.iter().filter(|(a, _)| a == "gpt").count(), 2);
         assert_eq!(s.iter().filter(|(a, _)| a == "claude").count(), 2);
         assert!(ev.iter().any(|e| e.text == "Discussion ended: nobody had more to add."));
+    }
+
+    #[tokio::test]
+    async fn a_real_error_alerts_the_others_once_and_not_again_until_it_answers() {
+        let (store, c) = setup();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "claude" => Err("error sending request".into()),
+            _ => Ok(format!("{id} looking into it")),
+        }));
+        let ev = go(&store, &c, f.clone(), &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
+        let alarms: Vec<&Event> = ev.iter().filter(|e| e.sender == CONSILIUM && e.text.contains("couldn't answer: error sending request")).collect();
+        assert_eq!(alarms.len(), 1, "one alarm: {alarms:?}");
+        assert_eq!(alarms[0].to, ids(&["gpt", "gemini"]));
+        assert!(said(&ev).iter().any(|(a, _)| a == "gemini"), "gemini was brought in");
+        assert_eq!(f.asked.lock().unwrap().iter().filter(|(a, _)| a == "claude").count(), 1, "the failing AI isn't asked again");
+
+        // The same failure next turn raises no new alarm.
+        store.append(&c, "human", "message", vec![], "again").unwrap();
+        let ev = go(&store, &c, f.clone(), &["claude"], 1, Arc::new(Bench::new())).await;
+        assert_eq!(ev.iter().filter(|e| e.sender == CONSILIUM && e.text.contains("couldn't answer")).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_alerted_ai_failing_too_raises_no_second_alarm() {
+        let (store, c) = setup();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "gpt" => Ok("gpt here".into()),
+            _ => Err(format!("{id} crashed")),
+        }));
+        let ev = go(&store, &c, f, &["claude"], 1, Arc::new(Bench::new())).await;
+        assert_eq!(ev.iter().filter(|e| e.sender == CONSILIUM && e.text.contains("couldn't answer")).count(), 1);
+        assert_eq!(ev.iter().filter(|e| e.kind == "error").count(), 2, "both failures are still shown");
+    }
+
+    #[tokio::test]
+    async fn running_out_of_usage_raises_no_alarm() {
+        let (store, c) = setup();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "claude" => Err("Claude AI usage limit reached|9999999999".into()),
+            _ => Ok(format!("{id} here")),
+        }));
+        let ev = go(&store, &c, f, &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
+        assert!(!ev.iter().any(|e| e.sender == CONSILIUM && e.text.contains("couldn't answer")));
     }
 
     #[tokio::test]
