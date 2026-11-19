@@ -1255,20 +1255,12 @@ async fn get_daily_wallpaper() -> Result<Option<wallpaper::DailyWallpaper>, Stri
     }
 }
 
-static RESTART_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+static RESTART_HOOK: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
 
 /// Restarts Consilium on this computer, saving window state and relaunching.
 pub fn restart_this_computer() {
-    if let Some(app) = RESTART_HANDLE.get() {
-        {
-            use tauri_plugin_window_state::{AppHandleExt, StateFlags};
-            let _ = app.save_window_state(StateFlags::all());
-        }
-        let app = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            app.restart();
-        });
+    if let Some(f) = RESTART_HOOK.get() {
+        f();
     }
 }
 
@@ -1366,7 +1358,16 @@ pub fn run() {
         // Remembers the window's size, position, maximized and full-screen state across restarts.
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
-            let _ = RESTART_HANDLE.set(app.handle().clone());
+            let handle = app.handle().clone();
+            let _ = RESTART_HOOK.set(Box::new(move || {
+                use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+                let _ = handle.save_window_state(StateFlags::all());
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    h.restart();
+                });
+            }));
             signal_setup::autostart(bridge::config_path(None));
             let data = match data_override() {
                 Some(d) => d,
