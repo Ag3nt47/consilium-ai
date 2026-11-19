@@ -14,14 +14,35 @@ use std::time::{Duration, Instant};
 /// out the current task while preserving decisions and requests from earlier turns.
 pub const MAX_TRANSCRIPT_CHARS: usize = 120_000;
 const MAX_TRANSCRIPT_SUMMARY_CHARS: usize = 16_000;
-const RECENT_TRANSCRIPT_CHARS: usize = MAX_TRANSCRIPT_CHARS - MAX_TRANSCRIPT_SUMMARY_CHARS;
 const MAX_SUMMARY_ENTRY_CHARS: usize = 420;
+/// Local models (Ollama, llama.cpp) run with 4k–32k-token windows, so they get a far smaller
+/// transcript, and any one long message (a command's output, a log, an attached file) is offloaded
+/// to a file with only its start, end and error lines kept (see `offload`). The newest message
+/// from the human keeps more, since it usually holds the task itself.
+const LOCAL_TRANSCRIPT_CHARS: usize = 24_000;
+const LOCAL_SUMMARY_CHARS: usize = 3_000;
+const LOCAL_MESSAGE_CHARS: usize = 2_400;
+const LOCAL_LATEST_HUMAN_CHARS: usize = 8_000;
 /// Enough patch context to identify concurrent edits without spending the whole prompt on a diff.
 const MAX_WORKSPACE_DIFF_BYTES: usize = 12_000;
 const MAX_WORKSPACE_STATUS_BYTES: usize = 8_000;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 type TranscriptPart<'a> = (&'a Event, String);
+
+/// How much of the conversation one AI's prompt may carry.
+struct Limits<'a> {
+    total: usize,
+    summary: usize,
+    /// Per-message cap and where offloaded text goes; None leaves messages whole.
+    per_message: Option<(usize, Option<&'a Path>)>,
+}
+
+const CLOUD_LIMITS: Limits<'static> = Limits { total: MAX_TRANSCRIPT_CHARS, summary: MAX_TRANSCRIPT_SUMMARY_CHARS, per_message: None };
+
+fn local_limits(data: Option<&Path>) -> Limits<'_> {
+    Limits { total: LOCAL_TRANSCRIPT_CHARS, summary: LOCAL_SUMMARY_CHARS, per_message: Some((LOCAL_MESSAGE_CHARS, data)) }
+}
 
 struct GitOutput {
     shown: String,
@@ -602,21 +623,32 @@ in the council: {}. Never use ADD_AI for a current participant; @mention them in
 
 /// Transcript entries, newest last. Once the safety threshold is crossed, returns the older
 /// entries separately for condensation and keeps a generous recent window verbatim.
-fn transcript_parts<'a>(events: &'a [Event], me: &str) -> (Vec<TranscriptPart<'a>>, Vec<TranscriptPart<'a>>) {
+fn transcript_parts<'a>(events: &'a [Event], me: &str, limits: &Limits) -> (Vec<TranscriptPart<'a>>, Vec<TranscriptPart<'a>>) {
+    let latest_human = events.iter().rposition(|e| e.kind == "message" && e.sender == "human");
     let mut parts: Vec<TranscriptPart<'a>> = events
         .iter()
-        .filter(|e| e.kind == "message" || (e.kind == "system" && e.sender == crate::council::CONSILIUM))
-        .map(|e| {
+        .enumerate()
+        .filter(|(_, e)| e.kind == "message" || (e.kind == "system" && e.sender == crate::council::CONSILIUM))
+        .map(|(i, e)| {
             let who = if e.sender == me && e.via.is_none() { format!("{} (you)", label(me)) } else { named(e) };
-            (e, format!("[{who}] {}{}", e.text, crate::attach::for_transcript(&e.attachments, me)))
+            let body = format!("{}{}", e.text, crate::attach::for_transcript(&e.attachments, me));
+            let body = match limits.per_message {
+                Some((max, data)) => {
+                    let max = if Some(i) == latest_human { max.max(LOCAL_LATEST_HUMAN_CHARS) } else { max };
+                    crate::offload::offload(data, &body, max)
+                }
+                None => body,
+            };
+            (e, format!("[{who}] {body}"))
         })
         .collect();
     let mut total: usize = parts.iter().map(|(_, p)| p.len() + 2).sum();
-    if total <= MAX_TRANSCRIPT_CHARS {
+    if total <= limits.total {
         return (Vec::new(), parts);
     }
+    let recent = limits.total - limits.summary;
     let mut older = Vec::new();
-    while parts.len() > 1 && total > RECENT_TRANSCRIPT_CHARS {
+    while parts.len() > 1 && total > recent {
         total -= parts[0].1.len() + 2;
         older.push(parts.remove(0));
     }
@@ -636,7 +668,7 @@ fn clipped(text: &str, max: usize) -> String {
 /// A local, deterministic digest of older turns. It intentionally avoids another provider call:
 /// context compression must still work offline, under rate limits, and on weaker hardware. The
 /// scoring keeps human intent and explicit decisions ahead of routine progress narration.
-fn transcript_digest(older: &[(&Event, String)]) -> String {
+fn transcript_digest(older: &[(&Event, String)], budget: usize) -> String {
     if older.is_empty() {
         return String::new();
     }
@@ -677,7 +709,7 @@ fn transcript_digest(older: &[(&Event, String)]) -> String {
     let mut selected = Vec::new();
     for (index, _, line) in candidates {
         let cost = line.len() + 1;
-        if used + cost <= MAX_TRANSCRIPT_SUMMARY_CHARS {
+        if used + cost <= budget {
             used += cost;
             selected.push((index, line));
         }
@@ -693,7 +725,7 @@ fn transcript_digest(older: &[(&Event, String)]) -> String {
 
 /// Message ids actually included in this AI's bounded transcript.
 pub fn visible_message_ids(events: &[Event], me: &str) -> Vec<String> {
-    transcript_parts(events, me)
+    transcript_parts(events, me, &CLOUD_LIMITS)
         .1
         .into_iter()
         .filter(|(event, _)| event.kind == "message" && event.sender != me)
@@ -705,14 +737,24 @@ pub fn visible_message_ids(events: &[Event], me: &str) -> Vec<String> {
 /// crossed. The latest window remains verbatim so current code, requests and corrections retain
 /// their exact wording.
 pub fn transcript(events: &[Event], me: &str) -> String {
-    let (older, parts) = transcript_parts(events, me);
+    transcript_within(events, me, &CLOUD_LIMITS)
+}
+
+/// The transcript for a local model: a small budget, with long messages offloaded to files in
+/// `data`'s offload folder (see `offload`) so one command's output can't fill its context window.
+pub fn local_transcript(events: &[Event], me: &str, data: Option<&Path>) -> String {
+    transcript_within(events, me, &local_limits(data))
+}
+
+fn transcript_within(events: &[Event], me: &str, limits: &Limits) -> String {
+    let (older, parts) = transcript_parts(events, me, limits);
     let mut out = String::from("CONVERSATION SO FAR\n\n");
     if events.iter().any(|e| e.kind == "message" && e.sender != "human" && e.via.is_some()) {
         out.push_str(OTHER_COMPUTER_NOTE);
         out.push_str(&handles_note(events, me));
     }
     if !older.is_empty() {
-        out.push_str(&transcript_digest(&older));
+        out.push_str(&transcript_digest(&older, limits.summary));
         out.push_str("\n\nRECENT MESSAGES (verbatim)\n\n");
     }
     out.push_str(&parts.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n\n"));
@@ -1090,6 +1132,36 @@ mod tests {
         assert!(t.contains("Approved: preserve this decision"));
         assert!(t.contains("the current task stays exact"));
         assert!(t.len() <= MAX_TRANSCRIPT_CHARS + 500);
+    }
+
+    #[test]
+    fn local_models_get_a_small_transcript_with_long_outputs_offloaded() {
+        let data = std::env::temp_dir().join(format!("consilium-local-transcript-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let output = format!("Ran command from Qwen's message (exit 1, failed):\n{}error: linker failed\n{}", "ok\n".repeat(3_000), "tail\n".repeat(3_000));
+        let mut events: Vec<Event> = (0..30).map(|i| ev("gpt", &format!("progress note {i} {}", "x".repeat(1_500)))).collect();
+        events.push(ev("human", &output));
+        events.push(ev("human", "now fix the linker error"));
+        let t = local_transcript(&events, "qwen", Some(&data));
+        assert!(t.len() <= LOCAL_TRANSCRIPT_CHARS + 2_000, "{}", t.len());
+        assert!(t.contains("now fix the linker error"));
+        assert!(t.contains("error: linker failed"));
+        let saved = crate::offload::dir(&data);
+        assert!(t.contains(&saved.display().to_string()));
+        assert_eq!(std::fs::read_dir(&saved).unwrap().count(), 1);
+        // Cloud AIs still see every message whole.
+        let cloud = transcript(&events, "claude");
+        assert!(cloud.contains(&output));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn the_newest_human_message_keeps_more_room_for_local_models() {
+        let task = format!("TASK START {} TASK END", "spec ".repeat(1_000));
+        let events = vec![ev("human", &task)];
+        let t = local_transcript(&events, "qwen", None);
+        assert!(t.contains("TASK START") && t.contains("TASK END"));
+        assert!(!t.contains("left out"));
     }
 
     #[test]

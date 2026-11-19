@@ -21,6 +21,7 @@ mod follow;
 mod link;
 mod liveui;
 mod memory;
+mod offload;
 pub mod ollama;
 pub mod peer_protocol;
 pub mod resources;

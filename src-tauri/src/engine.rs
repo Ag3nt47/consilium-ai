@@ -942,7 +942,13 @@ impl council::Host for RealHost {
         if let Some(w) = workspace.as_deref() {
             system.push_str(&crate::ci::for_prompt(std::path::Path::new(w)));
         }
-        let transcript = prompt::transcript(&events, agent.id);
+        // Local models have small context windows: they get a smaller transcript, with long
+        // command outputs and files offloaded to the data folder (offline blueprint, phase 4).
+        let transcript = if agents::is_local(agent) {
+            prompt::local_transcript(&events, agent.id, Some(&self.data))
+        } else {
+            prompt::transcript(&events, agent.id)
+        };
         let mut elevated_commands = prompt::elevated_command_grants(&events, agent.id);
         // The Tools page's Install button: one pinned catalog install for the AI it was sent to.
         if let Some(command) = prompt::catalog_install_grant(&events, agent.id, &self.data) {
