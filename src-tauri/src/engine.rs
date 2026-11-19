@@ -753,7 +753,16 @@ don't repeat changes that are already made.",
         if crate::agents::by_id(agent).is_none() {
             return Err("unknown AI".into());
         }
-        crate::switched::set(self.store.dir(), conversation, agent, on)
+        let now_off = crate::switched::set(self.store.dir(), conversation, agent, on)?;
+        if !on {
+            // Switching it off also ends what it is doing now in this chat (its CLI or its local
+            // model's request), not only its next turns.
+            let council = self.running.lock().unwrap().get(conversation).map(|r| r.council.clone());
+            if let Some(c) = council {
+                c.stop_agent(agent);
+            }
+        }
+        Ok(now_off)
     }
 
     /// A note from Consilium itself, which the human and the AIs see.

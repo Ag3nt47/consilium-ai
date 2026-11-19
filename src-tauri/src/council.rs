@@ -84,6 +84,11 @@ struct State {
     /// An AI's failure has already alerted the council in this turn, so a failure while the
     /// others work on it doesn't raise another alarm.
     alarmed: bool,
+    /// Each AI's own stop switch for this turn, under the turn's: its council-box Stop ends its
+    /// answer in progress (and the program or request behind it) without stopping the others.
+    own_cancel: HashMap<String, CancellationToken>,
+    /// AIs stopped in their council box during this turn: they don't answer again in it.
+    stopped: HashSet<String>,
 }
 
 /// Each conversation's AIs whose failure has alerted the council, with the error: the same AI
@@ -327,6 +332,22 @@ impl Council {
         true
     }
 
+    /// The human stopped `id` in its council box: ends its answer in progress, and the program or
+    /// request behind it, and it takes no further part in this turn. The others carry on. Returns
+    /// whether it was taking part.
+    pub fn stop_agent(&self, id: &str) -> bool {
+        let s = &self.shared;
+        let mut st = s.state.lock().unwrap();
+        if !st.live.contains(id) || st.closed {
+            return false;
+        }
+        st.stopped.insert(id.to_string());
+        st.own_cancel.entry(id.to_string()).or_insert_with(|| s.cancel.child_token()).cancel();
+        drop(st);
+        s.wake.notify_waiters();
+        true
+    }
+
     /// Runs the turn to its end.
     pub async fn run(&self) {
         let shared = self.shared.clone();
@@ -400,8 +421,11 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
     let rounds = s.turn.rounds;
     let mut failed = false;
     loop {
-        if s.cancel.is_cancelled() || s.state.lock().unwrap().paused {
-            break;
+        {
+            let st = s.state.lock().unwrap();
+            if s.cancel.is_cancelled() || st.paused || st.stopped.contains(&id) {
+                break;
+            }
         }
         let now = now_ms();
         if let Some(until) = s.bench.until(&id, now) {
@@ -426,7 +450,7 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                 {
                     let mut st = s.state.lock().unwrap();
                     let budget = rounds + st.extra.get(&id).copied().unwrap_or(0);
-                    if st.paused || st.answered.get(&id).copied().unwrap_or(0) >= budget {
+                    if st.paused || st.stopped.contains(&id) || st.answered.get(&id).copied().unwrap_or(0) >= budget {
                         break false;
                     }
                     if st.latest.iter().any(|(who, seq)| who != &id && *seq > seen) {
@@ -449,7 +473,7 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                 break;
             }
         }
-        let (n, asked_in) = {
+        let (n, asked_in, mine) = {
             let mut st = s.state.lock().unwrap();
             let n = st.answered.get(&id).copied().unwrap_or(0) + 1;
             if n > rounds + st.extra.get(&id).copied().unwrap_or(0) {
@@ -457,7 +481,8 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
             }
             st.thinking.push((id.clone(), n));
             emit_thinking(&s, &st);
-            (n, st.generation)
+            let mine = st.own_cancel.entry(id.clone()).or_insert_with(|| s.cancel.child_token()).clone();
+            (n, st.generation, mine)
         };
         let events = s.store.load(&s.turn.conversation).unwrap_or_default();
         last_seen = Some(events.last().map_or(0, |e| e.seq));
@@ -488,7 +513,7 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                 s.host.event(&receipt);
             }
         }
-        let result = s.host.ask(agent, n, rounds, events, s.cancel.clone()).await;
+        let result = s.host.ask(agent, n, rounds, events, mine).await;
         if result.is_ok() {
             if let Some(link) = crate::link_handle() {
                 for (computer, their_ai) in &heard_from {
@@ -753,6 +778,28 @@ mod tests {
         let ev = go(&store, &c, Arc::new(f), &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
         assert!(started.elapsed() < Duration::from_millis(4500), "answers ran in parallel: {:?}", started.elapsed());
         assert_eq!(said(&ev), vec![("gpt".into(), "hi from gpt".into()), ("claude".into(), "hi from claude".into())]);
+    }
+
+    #[tokio::test]
+    async fn stopping_one_ai_in_its_council_box_ends_its_answer_and_the_others_carry_on() {
+        let (store, c) = setup();
+        let mut f = fake(|id, _, _| Ok(format!("hi from {id}")));
+        // Claude would take a minute (a slow local model, say); ChatGPT is quick.
+        f.delay.insert("claude", 60_000);
+        f.delay.insert("gpt", 300);
+        let turn = Turn { conversation: c.clone(), targets: ids(&["claude", "gpt"]), rounds: 1, members: ids(&["gpt", "claude", "gemini"]) };
+        let council = Arc::new(Council::new(turn, store.clone(), Arc::new(Bench::new()), Arc::new(f), CancellationToken::new()));
+        let running = tokio::spawn({
+            let council = council.clone();
+            async move { council.run().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(council.stop_agent("claude"));
+        tokio::time::timeout(Duration::from_secs(5), running).await.expect("the turn ends without waiting for Claude").unwrap();
+        let ev = store.load(&c).unwrap();
+        assert_eq!(said(&ev), vec![("gpt".into(), "hi from gpt".into())]);
+        assert!(ev.iter().any(|e| e.sender == "claude" && e.text == "Stopped Claude."), "its stop is noted");
+        assert!(!council.stop_agent("claude"), "the turn is over");
     }
 
     #[tokio::test]

@@ -579,7 +579,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: Gemini (Antigravity) can read files and run commands again on Windows and the Mac, through explicit permission rules instead of the bypass switch that print mode refuses; the council box's access and model menus float above the page instead of hiding behind the PC pressure box; local AIs (Qwen, Llama, Phi) are told how to code through command boxes and get a skill library of runbooks (on Windows in F:\\Consilium\\skills) that the bigger AIs write for them, and their models stay loaded while Consilium is open; in Auto-run chats rounds follow 5 s apart instead of 20, up to 25 in a row, and a command box that never reports back no longer stops the chat for good; if Consilium freezes it restarts itself within about a minute; Gemini's next Antigravity process starts ahead so it answers about 2-3 s sooner, and a turn lost to a refused tool is asked again; local AIs retry an empty reply, hide <think> reasoning and start Ollama when it is down; a known-issues log (consilium-known-issues.md in the skill library) lists past problems and fixes.";
+const WHATS_NEW: &str = "What's new: the Stop button in an AI's council box now also ends what that AI is doing right now in the chat (its CLI, or a local model's request), not only its next turns; the other AIs carry on.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
