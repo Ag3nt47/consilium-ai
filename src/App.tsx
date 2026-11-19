@@ -2233,6 +2233,48 @@ export default function App() {
     }
   }
 
+  // Restart dialog: confirmation prompt with computer picker and Restart All
+  type RestartTarget = { id: string; name: string; connected: boolean; isSelf: boolean };
+  const [showRestartModal, setShowRestartModal] = useState(false);
+  const [restartComputers, setRestartComputers] = useState<RestartTarget[]>([]);
+  const [selectedRestartComputers, setSelectedRestartComputers] = useState<string[]>(["this"]);
+  const [restarting, setRestarting] = useState(false);
+
+  async function openRestartModal() {
+    try {
+      const s = await api.linkStatus();
+      const list: RestartTarget[] = [
+        { id: "this", name: s?.name ? `This computer (${s.name})` : "This computer", connected: true, isSelf: true },
+        ...(s?.peers || []).map((p) => ({
+          id: p.name,
+          name: p.name,
+          connected: p.connected,
+          isSelf: false,
+        })),
+      ];
+      setRestartComputers(list);
+      setSelectedRestartComputers(["this"]);
+    } catch {
+      setRestartComputers([{ id: "this", name: "This computer", connected: true, isSelf: true }]);
+      setSelectedRestartComputers(["this"]);
+    }
+    setShowRestartModal(true);
+  }
+
+  async function handleRestart(targets: string[]) {
+    setRestarting(true);
+    try {
+      await api.restartApp(targets);
+      setTimeout(() => {
+        setShowRestartModal(false);
+        setRestarting(false);
+      }, 1500);
+    } catch (e) {
+      setError(String(e));
+      setRestarting(false);
+    }
+  }
+
   // Renaming happens in place: the title turns into a text box (prompt() shows nothing in the app window).
   const [titleDraft, setTitleDraft] = useState<string | null>(null);
   function renameCurrent() {
@@ -2952,6 +2994,15 @@ export default function App() {
             >
               <span className="topbar-action-icon" aria-hidden="true">{requestingStatus ? "…" : "↻"}</span>
               <span className="topbar-action-label">{requestingStatus ? "Requesting…" : "Status"}</span>
+            </button>
+            <button
+              title="Restart Consilium on this computer or linked computers"
+              className="btn ghost compact-action restart-action"
+              onClick={openRestartModal}
+              aria-label="Restart Consilium"
+            >
+              <span className="topbar-action-icon" aria-hidden="true">⟳</span>
+              <span className="topbar-action-label">Restart</span>
             </button>
             <button
               title="Open the audit log: every approval, request, update, council change, phone message and error, newest first"
@@ -3835,6 +3886,84 @@ export default function App() {
               </button>
               <button className="btn danger" onClick={deleteConfirmed} title="Delete the conversation permanently">
                 Delete permanently
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showRestartModal && (
+        <div className="modal-backdrop" onClick={() => !restarting && setShowRestartModal(false)}>
+          <div
+            className="modal confirm-modal"
+            role="alertdialog"
+            aria-labelledby="confirm-restart-title"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && !restarting) setShowRestartModal(false);
+            }}
+          >
+            <h2 id="confirm-restart-title">Restart Consilium</h2>
+            <p className="restart-prompt-question"><strong>Are you sure?</strong></p>
+            <p className="muted small">
+              Work in progress will pause and resume automatically after restart.
+            </p>
+
+            <div className="restart-computer-selection">
+              <div className="section-label">Choose which Computers to restart:</div>
+              <div className="restart-computer-list">
+                {restartComputers.map((c) => (
+                  <label key={c.id} className="restart-computer-item">
+                    <input
+                      type="checkbox"
+                      checked={selectedRestartComputers.includes(c.id)}
+                      disabled={restarting || (!c.isSelf && !c.connected)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedRestartComputers((prev) => [...prev, c.id]);
+                        } else {
+                          setSelectedRestartComputers((prev) => prev.filter((id) => id !== c.id));
+                        }
+                      }}
+                    />
+                    <span className="restart-computer-name">
+                      <strong>{c.name}</strong>
+                      {!c.isSelf && (
+                        <span className={`peer-badge ${c.connected ? "connected" : "offline"}`}>
+                          {c.connected ? "connected" : "offline"}
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="confirm-actions">
+              <button
+                className="btn"
+                autoFocus
+                onClick={() => setShowRestartModal(false)}
+                disabled={restarting}
+                title="Cancel restart"
+              >
+                Cancel
+              </button>
+              <button
+                className="btn ghost"
+                onClick={() => handleRestart(selectedRestartComputers)}
+                disabled={restarting || selectedRestartComputers.length === 0}
+                title="Restart only the selected computers"
+              >
+                {restarting ? "Restarting…" : "Restart selected"}
+              </button>
+              <button
+                className="btn danger"
+                onClick={() => handleRestart(["all"])}
+                disabled={restarting}
+                title="Restart this computer and all linked computers"
+              >
+                {restarting ? "Restarting…" : "Restart all"}
               </button>
             </div>
           </div>
