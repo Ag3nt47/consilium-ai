@@ -31,15 +31,29 @@ pub fn library_dir(data: &Path) -> PathBuf {
     data.join("skills")
 }
 
-/// The library folder, created if missing. Falls back to the data folder when it can't be made.
+/// Runbooks that ship with Consilium, written into the library on every start (replaced when an
+/// update changes them): `(file name, contents)`.
+const BUILT_IN: &[(&str, &str)] = &[("consilium-known-issues.md", include_str!("../../docs/known-issues.md"))];
+
+/// The library folder, created if missing and holding the built-in runbooks. Falls back to the
+/// data folder when it can't be made.
 pub fn ensure_library(data: &Path) -> PathBuf {
-    let dir = library_dir(data);
-    if std::fs::create_dir_all(&dir).is_ok() {
-        return dir;
+    let mut dir = library_dir(data);
+    if std::fs::create_dir_all(&dir).is_err() {
+        dir = data.join("skills");
+        let _ = std::fs::create_dir_all(&dir);
     }
-    let fallback = data.join("skills");
-    let _ = std::fs::create_dir_all(&fallback);
-    fallback
+    seed_built_ins(&dir);
+    dir
+}
+
+fn seed_built_ins(dir: &Path) {
+    for (name, text) in BUILT_IN {
+        let path = dir.join(name);
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(*text) {
+            let _ = crate::store::write_atomic(&path, text.as_bytes());
+        }
+    }
 }
 
 /// The runbooks in `dir` (`*.md`, by name), each with its summary: the first line of text that
@@ -109,7 +123,8 @@ pub fn for_flagship(dir: &Path, locals: &[String], count: usize) -> String {
          When you solve something they would struggle with (a tricky build step, a parser, a repo's conventions, a fix that keeps \
          coming back), save a runbook for them in {} as `short-name.md`: first line a one-sentence summary, then concrete steps, \
          exact commands and code to copy. Keep each under about 150 lines, one topic per file, and update a runbook rather than \
-         adding a near-copy. The library holds {count} runbook(s) now.",
+         adding a near-copy. The library holds {count} runbook(s) now. Before debugging Consilium itself, read \
+         `consilium-known-issues.md` there: the problems already seen and their fixes.",
         locals.join(", "),
         dir.display()
     )
@@ -143,6 +158,21 @@ mod tests {
 
         let flag = for_flagship(&d, &["Qwen Coder".into(), "Llama".into()], 2);
         assert!(flag.contains("Qwen Coder, Llama") && flag.contains("2 runbook"));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn the_known_issues_log_ships_in_the_library_and_is_refreshed_on_update() {
+        let d = tmp();
+        seed_built_ins(&d);
+        let path = d.join("consilium-known-issues.md");
+        let shipped = std::fs::read_to_string(&path).unwrap();
+        assert!(shipped.contains("Antigravity") && shipped.contains("stall.log"));
+        std::fs::write(&path, "old version").unwrap();
+        seed_built_ins(&d);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), shipped);
+        let k = index(&d);
+        assert_eq!(k[0].summary, "Symptoms seen before, their causes, and the fix: check here before debugging Consilium itself.");
         let _ = std::fs::remove_dir_all(d);
     }
 

@@ -342,12 +342,15 @@ fn unbench(state: State<AppState>, agent: String) {
 
 #[tauri::command]
 fn set_access(state: State<AppState>, agent: String, access: Access) -> Result<(), String> {
+    // A waiting Antigravity process was started with the old access; it would never be used.
+    agents::drop_spares();
     state.engine.config.set_access(&agent, access).map(|_| ())
 }
 
 /// The model one AI uses from its next turn (#29); None goes back to its CLI's default.
 #[tauri::command]
 async fn set_model(state: State<'_, AppState>, agent: String, model: Option<String>) -> Result<(), String> {
+    agents::drop_spares();
     let chosen = model.as_deref().map(str::trim).filter(|m| !m.is_empty());
     if let Some(m) = chosen {
         let a = agents::by_id(&agent).ok_or_else(|| format!("unknown AI {agent}"))?;
@@ -576,7 +579,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: Gemini (Antigravity) can read files and run commands again on Windows and the Mac, through explicit permission rules instead of the bypass switch that print mode refuses; the council box's access and model menus float above the page instead of hiding behind the PC pressure box; local AIs (Qwen, Llama, Phi) are told how to code through command boxes and get a skill library of runbooks (on Windows in F:\\Consilium\\skills) that the bigger AIs write for them, and their models stay loaded while Consilium is open; in Auto-run chats rounds follow 5 s apart instead of 20, up to 25 in a row, and a command box that never reports back no longer stops the chat for good; if Consilium freezes it restarts itself within about a minute.";
+const WHATS_NEW: &str = "What's new: Gemini (Antigravity) can read files and run commands again on Windows and the Mac, through explicit permission rules instead of the bypass switch that print mode refuses; the council box's access and model menus float above the page instead of hiding behind the PC pressure box; local AIs (Qwen, Llama, Phi) are told how to code through command boxes and get a skill library of runbooks (on Windows in F:\\Consilium\\skills) that the bigger AIs write for them, and their models stay loaded while Consilium is open; in Auto-run chats rounds follow 5 s apart instead of 20, up to 25 in a row, and a command box that never reports back no longer stops the chat for good; if Consilium freezes it restarts itself within about a minute; Gemini's next Antigravity process starts ahead so it answers about 2-3 s sooner, and a turn lost to a refused tool is asked again; local AIs retry an empty reply, hide <think> reasoning and start Ollama when it is down; a known-issues log (consilium-known-issues.md in the skill library) lists past problems and fixes.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -1398,6 +1401,25 @@ pub fn run() {
             stall::start(app.handle().clone(), app.state::<AppState>().engine.clone(), data.clone());
             // Keeps the council's local models (Ollama) loaded, so they answer without a cold start.
             ollama::keep_warm(app.state::<AppState>().engine.config.clone());
+            // Starts Gemini's Antigravity for the most recent chat's folder, ready for its first answer.
+            {
+                let engine = app.state::<AppState>().engine.clone();
+                tauri::async_runtime::spawn(async move {
+                    let Some(gemini) = agents::by_id("gemini").filter(|_| engine.config.is_member("gemini")) else { return };
+                    let folder = engine
+                        .store
+                        .list()
+                        .into_iter()
+                        .max_by_key(|m| m.updated)
+                        .and_then(|m| m.workspace)
+                        .or_else(|| engine.config.get().default_workspace)
+                        .map(std::path::PathBuf::from)
+                        .filter(|p| p.is_dir());
+                    let Some(folder) = folder else { return };
+                    let access = agents::effective_access("gemini", engine.config.access("gemini"), true);
+                    agents::prewarm_antigravity(gemini, access, &folder, engine.config.model("gemini").as_deref()).await;
+                });
+            }
             // Tests every route to the linked computers after each start and posts the result.
             stress_test_after_start(app.state::<AppState>().engine.clone());
             // Falls back to the built-in page if an instantly applied one never starts.

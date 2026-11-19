@@ -1197,7 +1197,7 @@ pub async fn run_with_files_observed(
     }
     let kind = effective_kind(agent);
     let path = find(kind).ok_or_else(|| format!("{} isn't installed", agent.name))?;
-    run_at_with_usage(
+    let first = run_at_with_usage(
         &path,
         kind,
         access,
@@ -1207,11 +1207,46 @@ pub async fn run_with_files_observed(
         files,
         cancel,
         RUN_TIMEOUT,
-        activity,
-        elevated_commands,
+        activity.clone(),
+        elevated_commands.clone(),
         model,
     )
-    .await
+    .await;
+    // Antigravity ends a turn with no reply at all when the one tool it reached for was refused,
+    // which leaves the council without its answer. Ask once more, saying so, for a text answer
+    // (anything that needs running goes in a command box), instead of failing the turn.
+    match first {
+        Err(e) if kind == Kind::Antigravity && is_refused_tool(&e) && !cancel.is_cancelled() => {
+            let retry = format!("{system}\n\n{}", refused_tool_note(&e));
+            run_at_with_usage(&path, kind, access, workspace, &retry, prompt, files, cancel, RUN_TIMEOUT, activity, elevated_commands, model).await
+        }
+        other => other,
+    }
+}
+
+fn is_refused_tool(error: &str) -> bool {
+    error.contains("its access doesn't allow")
+}
+
+fn refused_tool_note(error: &str) -> String {
+    let tools = error.split_once('(').and_then(|(_, r)| r.split_once(')')).map_or("a tool", |(t, _)| t);
+    format!(
+        "NOTE FROM CONSILIUM: your last try at this turn used {tools}, which this access level doesn't allow, so it \
+         stopped with no reply. Answer in text this time. Read what you need from the transcript; anything that needs \
+         running (reading a file, a build, a test) goes in a command box, which Consilium runs and reports back."
+    )
+}
+
+/// Starts an Antigravity process for `workspace` at `access` so the first Gemini answer after the
+/// app opens skips the startup too (see `take_spare`).
+pub async fn prewarm_antigravity(agent: &Agent, access: Access, workspace: &Path, model: Option<&str>) {
+    if effective_kind(agent) != Kind::Antigravity || access == Access::Chat || !workspace.is_dir() {
+        return;
+    }
+    let Some(path) = find(Kind::Antigravity) else { return };
+    let files = crate::attach::Files { dir: None, images: Vec::new() };
+    let plan = with_model(plan_with_files(Kind::Antigravity, access, workspace, &workspace.join("reply.txt"), "", "", &files), Kind::Antigravity, model);
+    prepare_spare(&path, workspace, &plan.args);
 }
 
 /// Text-only `run_at_with_usage` at a given CLI path and time limit; the tests drive fake CLIs
@@ -1270,6 +1305,9 @@ async fn run_at_with_usage(
     };
     let reply_file = work.join("reply.txt");
     let plan = with_model(plan_with_files(kind, access, &dir, &reply_file, system, prompt, files), kind, model);
+    // Antigravity in a real project folder: the next process starts as soon as this one is done
+    // (see `take_spare`). Not for Chat, whose folder is this run's own temporary one.
+    let warm_args = (kind == Kind::Antigravity && access != Access::Chat).then(|| plan.args.clone());
     let result = execute(
         path,
         kind,
@@ -1284,7 +1322,70 @@ async fn run_at_with_usage(
     )
     .await;
     let _ = std::fs::remove_dir_all(&work);
+    // Only after a run that worked: a sign-in or install problem shouldn't keep spawning spares.
+    if let (Some(args), Ok(_)) = (&warm_args, &result) {
+        prepare_spare(path, &dir, args);
+    }
     result
+}
+
+/// Antigravity spends about 3-4 s starting up (signing in, loading tools) before it reads the
+/// prompt from stdin, and print mode runs one prompt per process. So after each answer the next
+/// process is started straight away with the same arguments and folder, and waits, ready: the
+/// next prompt skips the startup. A spare older than `SPARE_MAX_AGE`, or one that has exited, is
+/// dropped (killed) and a fresh process started as before. At most `MAX_SPARES` (one per folder
+/// and settings combination in use), so idle processes never pile up.
+const SPARE_MAX_AGE: Duration = Duration::from_secs(20 * 60);
+const MAX_SPARES: usize = 3;
+
+struct Spare {
+    key: String,
+    child: tokio::process::Child,
+    born: std::time::Instant,
+}
+
+static SPARES: std::sync::Mutex<Vec<Spare>> = std::sync::Mutex::new(Vec::new());
+
+fn spare_key(path: &Path, dir: &Path, args: &[std::ffi::OsString]) -> String {
+    let mut k = format!("{}\u{0}{}", path.display(), dir.display());
+    for a in args {
+        k.push('\u{0}');
+        k.push_str(&a.to_string_lossy());
+    }
+    k
+}
+
+/// A ready Antigravity process started with exactly these arguments in `dir`, if there is one.
+fn take_spare(path: &Path, dir: &Path, args: &[std::ffi::OsString]) -> Option<tokio::process::Child> {
+    let key = spare_key(path, dir, args);
+    let mut spares = SPARES.lock().unwrap();
+    let i = spares.iter().position(|s| s.key == key)?;
+    let mut s = spares.remove(i);
+    drop(spares);
+    let alive = matches!(s.child.try_wait(), Ok(None));
+    (alive && s.born.elapsed() < SPARE_MAX_AGE).then_some(s.child)
+}
+
+/// Starts the next Antigravity process for these arguments, to wait for the next prompt.
+fn prepare_spare(path: &Path, dir: &Path, args: &[std::ffi::OsString]) {
+    if cfg!(test) || std::env::var_os("CONSILIUM_NO_WARM_AGY").is_some() {
+        return;
+    }
+    let key = spare_key(path, dir, args);
+    let mut cmd = command(path);
+    cmd.current_dir(dir).stdin(Stdio::piped()).args(args);
+    let Ok(child) = cmd.spawn() else { return };
+    let mut spares = SPARES.lock().unwrap();
+    spares.retain(|s| s.key != key);
+    if spares.len() >= MAX_SPARES {
+        spares.remove(0); // oldest; dropping it kills it
+    }
+    spares.push(Spare { key, child, born: std::time::Instant::now() });
+}
+
+/// Ends every waiting Antigravity process (quitting, or the person changed Gemini's settings).
+pub fn drop_spares() {
+    SPARES.lock().unwrap().clear();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1300,9 +1401,15 @@ async fn execute(
     activity: Option<ActivitySink>,
     mut elevated_commands: Vec<String>,
 ) -> Result<AgentReply, String> {
-    let mut cmd = command(path);
-    cmd.current_dir(dir).stdin(Stdio::piped()).args(&plan.args);
-    let mut child = cmd.spawn().map_err(|e| format!("couldn't start {}: {e}", path.display()))?;
+    let spare = if kind == Kind::Antigravity { take_spare(path, dir, &plan.args) } else { None };
+    let mut child = match spare {
+        Some(c) => c,
+        None => {
+            let mut cmd = command(path);
+            cmd.current_dir(dir).stdin(Stdio::piped()).args(&plan.args);
+            cmd.spawn().map_err(|e| format!("couldn't start {}: {e}", path.display()))?
+        }
+    };
     let pid = child.id();
     let _registered = crate::reaper::Registered::new(pid);
     let mut stdin = child.stdin.take().expect("stdin is piped");
@@ -2460,6 +2567,17 @@ mod plan_tests {
         assert!(has(&c, &["--permission-mode", "acceptEdits"]));
         assert!(!c.iter().any(|a| a.contains("Bash")));
         assert!(has(&args(Kind::GeminiCli, Access::Edit), &["--approval-mode", "auto_edit"]));
+    }
+
+    #[test]
+    fn a_turn_lost_to_a_refused_tool_is_asked_again_with_the_reason() {
+        let e = "Gemini tried to use a tool its access doesn't allow (Bash, ReadFile) and wrote no reply. Ask again, or raise its access in Settings.";
+        assert!(is_refused_tool(e) && !is_refused_tool("stopped"));
+        let note = refused_tool_note(e);
+        assert!(note.contains("used Bash, ReadFile") && note.contains("command box"), "{note}");
+        let k = |d: &str| spare_key(Path::new("agy"), Path::new(d), &["--mode".into(), "plan".into()]);
+        assert_eq!(k("/a"), k("/a"));
+        assert_ne!(k("/a"), k("/b"), "a spare is only for the same folder and arguments");
     }
 
     #[test]
