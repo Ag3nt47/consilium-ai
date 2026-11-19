@@ -1119,20 +1119,32 @@ function ResourcePressureGauge({ pressure }: { pressure: SystemPressure | null }
 // The prompt box keeps its own text so typing re-renders only this textarea, not the whole
 // conversation (which made the caret lag in long chats). The app reads and sets it through a handle
 // and only hears about empty <-> non-empty changes, for the Send button.
-type DraftHandle = { get(): string; set(text: string): void };
+type DraftHandle = { get(): string; set(text: string): void; focus(): void };
 const DraftBox = memo(
   forwardRef<DraftHandle, { initial: string; onEmptyChange: (empty: boolean) => void; onSend: () => void; onPasteFiles: (files: File[]) => void }>(
     function DraftBox({ initial, onEmptyChange, onSend, onPasteFiles }, ref) {
       const [text, setText] = useState(initial);
       const textRef = useRef(text);
+      const area = useRef<HTMLTextAreaElement>(null);
       const update = (v: string) => {
         if (!v.trim() !== !textRef.current.trim()) onEmptyChange(!v.trim());
         textRef.current = v;
         setText(v);
       };
-      useImperativeHandle(ref, () => ({ get: () => textRef.current, set: update }));
+      useImperativeHandle(ref, () => ({
+        get: () => textRef.current,
+        set: update,
+        focus: () => {
+          const el = area.current;
+          if (!el) return;
+          el.focus();
+          // Caret at the end, ready to type under the quote.
+          requestAnimationFrame(() => el.setSelectionRange(el.value.length, el.value.length));
+        },
+      }));
       return (
         <textarea
+          ref={area}
           value={text}
           onPaste={(e) => {
             const files = Array.from(e.clipboardData.files);
@@ -1193,6 +1205,21 @@ export default function App() {
   const draftBox = useRef<DraftHandle>(null);
   const [draftEmpty, setDraftEmpty] = useState(!(IN_APP ? "" : demoDraft).trim());
   const setDraft = useCallback((text: string) => draftBox.current?.set(text), []);
+  // The reply arrow on a message: addresses its sender (an AI on this computer) and quotes it in
+  // the prompt box, keeping whatever was already typed below the quote.
+  const replyTo = useCallback((e: ChatEvent) => {
+    const box = draftBox.current;
+    if (!box) return;
+    const lines = e.text.trim().split(/\r?\n/).filter((l) => l.trim());
+    let excerpt = lines.slice(0, 3).join("\n");
+    if (excerpt.length > 240) excerpt = `${excerpt.slice(0, 240).trimEnd()}…`;
+    else if (lines.length > 3) excerpt += " …";
+    const quote = excerpt ? excerpt.split("\n").map((l) => `> ${l}`).join("\n") : "";
+    const mention = e.sender !== "human" && !e.via ? `@${e.sender} ` : "";
+    const existing = box.get().trim();
+    box.set([quote, `${mention}${existing}`].filter(Boolean).join("\n"));
+    box.focus();
+  }, []);
   /** Files waiting to go with the next message. */
   const [pending, setPending] = useState<Attachment[]>([]);
   const [dropping, setDropping] = useState(false);
@@ -3137,6 +3164,15 @@ export default function App() {
                     <span className="to">→ {e.to.map((t) => senderName(t, agents)).join(", ")}</span>
                   )}
                   <span className="when">{time(e.ts)}</span>
+                  <button
+                    type="button"
+                    className="msg-reply"
+                    title={`Reply to ${senderName(e.sender, agents, e.via)}: quotes this message in the prompt box`}
+                    aria-label={`Reply to ${senderName(e.sender, agents, e.via)}`}
+                    onClick={() => replyTo(e)}
+                  >
+                    ↩
+                  </button>
                   {e.usage && e.usage.total_tokens > 0 && (
                     <span
                       className="tokens-tag"
