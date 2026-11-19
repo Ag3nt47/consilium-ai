@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fixed: the council list in the sidebar now fills the space down to PC pressure. With five or
+  more AIs it was capped at 46% of the window (at most 480 px), leaving a gap above PC pressure
+  and cutting cards off; it now takes the remaining height and scrolls inside it. Council card
+  controls (start/stop, model, access) also sit inside each card, so cards use the full width.
+
 - Fixed: conversations disappearing, or splitting into a new one with the same title. Saving a
   conversation's title file used one shared temporary name and wasn't flushed to disk, so the app
   and the terminal saving at once, a rename refused by an encrypted AppData folder, or a restart
