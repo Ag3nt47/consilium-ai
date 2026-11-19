@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/icon-1024.png" width="128" alt="Consilium icon: glowing neural network of interconnected AI nodes converging into a central cognitive nexus"></p>
 
 <h1 align="center">Consilium - Local-First Multi-Agent AI Mesh</h1>
-<p align="center"><i>A council of minds: the offline-first, peer-linked AI hive mind.</i></p>
+<p align="center"><i>A council of minds: the offline capable, peer-linked AI hive mind.</i></p>
 
 Consilium is an elite, cross-platform desktop application and command-line environment that transforms your local hardware network into an autonomous Hive Mind home server. Effortlessly link any mix of computers running Windows, macOS, or Linux into a seamless, offline LAN cluster where each node hosts its own dedicated AI instances—uniting heavyweights like ChatGPT, Claude, Gemini, Grok, and DeepSeek alongside local powerhouses like Llama 3, Qwen 2.5 Coder, and DeepSeek-R1—to tackle massive, complex projects faster than ever, entirely on your own terms and with the capablity for complete air-gap from the cloud.
 
