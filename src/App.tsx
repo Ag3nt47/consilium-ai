@@ -3,6 +3,7 @@ import { clock, clockShort, day, num } from "./fmt";
 import { commandElementId, fencedBlocks, handledCommands, needsAdmin, pendingCommands, runsOn, shellName, shellSystem, deniedText, type Fence } from "./commands";
 import { OS, dictationHint, paletteKey, paletteKeyWords, terminalName } from "./platform";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -75,6 +76,17 @@ const PROVIDER_PORTALS: Record<string, { account: string; accountLabel: string; 
 };
 
 const knownTheme = (id: string | null | undefined) => THEMES.some((t) => t.id === id);
+
+/** Fixed position for a council-box picker drawn in a portal next to its button: to the button's
+ * left when there is room, else to its right, and never past the bottom of the window. */
+function floatingPickerPosition(anchor: DOMRect | null, width: number): React.CSSProperties {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const a = anchor ?? new DOMRect(vw / 2, vh / 3, 0, 0);
+  const top = Math.max(8, Math.min(a.top - 10, vh - 220));
+  const side: React.CSSProperties = a.left - 6 >= width + 8 ? { right: vw - a.left + 6 } : { left: Math.min(a.right + 6, vw - width - 8) };
+  return { position: "fixed", top, ...side, zIndex: 1000, maxHeight: vh - top - 8, overflowY: "auto" };
+}
 
 type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean };
 const PREFS_KEY = "consilium.prefs";
@@ -1654,10 +1666,15 @@ export default function App() {
   const [modelChoices, setModelChoices] = useState<Record<string, ModelChoice[]>>({});
   const [loadingModels, setLoadingModels] = useState<Record<string, boolean>>({});
 
-  function toggleModelPicker(id: string) {
+  // Where the open picker's button is, so the picker floats over the page (in a portal) instead of
+  // being clipped by the scrolling council list or hidden behind the PC pressure box.
+  const [pickerAnchor, setPickerAnchor] = useState<DOMRect | null>(null);
+
+  function toggleModelPicker(id: string, button?: HTMLElement) {
     if (openModelPicker === id) {
       setOpenModelPicker(null);
     } else {
+      if (button) setPickerAnchor(button.getBoundingClientRect());
       setOpenModelPicker(id);
       setOpenAccessPicker(null);
       if (!modelChoices[id]) {
@@ -1670,10 +1687,11 @@ export default function App() {
     }
   }
 
-  function toggleAccessPicker(id: string) {
+  function toggleAccessPicker(id: string, button?: HTMLElement) {
     if (openAccessPicker === id) {
       setOpenAccessPicker(null);
     } else {
+      if (button) setPickerAnchor(button.getBoundingClientRect());
       setOpenAccessPicker(id);
       setOpenModelPicker(null);
     }
@@ -2635,7 +2653,7 @@ export default function App() {
                   <button
                     type="button"
                     className="link model-picker-btn"
-                    onClick={() => toggleModelPicker(a.id)}
+                    onClick={(e) => toggleModelPicker(a.id, e.currentTarget)}
                     title={`Model: ${a.model || "Default"} (click to choose model)`}
                     aria-label={`Model picker for ${a.name}`}
                     style={{ color: "#3b82f6", fontSize: 10, lineHeight: 1, padding: "1px 4px", flex: "none" }}
@@ -2646,7 +2664,7 @@ export default function App() {
                   <button
                     type="button"
                     className="link access-picker-btn"
-                    onClick={() => toggleAccessPicker(a.id)}
+                    onClick={(e) => toggleAccessPicker(a.id, e.currentTarget)}
                     title={`Access: ${ACCESS_LEVELS.find((l) => l.id === a.access)?.name ?? a.access} (click to choose access level)`}
                     aria-label={`Access picker for ${a.name}`}
                     style={{ color: "#22c55e", fontSize: 10, lineHeight: 1, padding: "1px 4px", flex: "none" }}
@@ -2654,14 +2672,11 @@ export default function App() {
                     {"\u25CF"}
                   </button>
 
-                  {openModelPicker === a.id && (
+                  {openModelPicker === a.id && createPortal(
                     <div
                       className="picker-popover model-popover"
                       style={{
-                        position: "absolute",
-                        right: "calc(100% + 6px)",
-                        top: -10,
-                        zIndex: 100,
+                        ...floatingPickerPosition(pickerAnchor, 240),
                         background: "var(--panel, #1e1e24)",
                         border: "1px solid var(--border, #333)",
                         borderRadius: "6px",
@@ -2727,17 +2742,15 @@ export default function App() {
                           </button>
                         ))
                       )}
-                    </div>
+                    </div>,
+                    document.body,
                   )}
 
-                  {openAccessPicker === a.id && (
+                  {openAccessPicker === a.id && createPortal(
                     <div
                       className="picker-popover access-popover"
                       style={{
-                        position: "absolute",
-                        right: "calc(100% + 6px)",
-                        top: -20,
-                        zIndex: 100,
+                        ...floatingPickerPosition(pickerAnchor, 260),
                         background: "var(--panel, #1e1e24)",
                         border: "1px solid var(--border, #333)",
                         borderRadius: "6px",
@@ -2787,7 +2800,8 @@ export default function App() {
                           </button>
                         );
                       })}
-                    </div>
+                    </div>,
+                    document.body,
                   )}
                 </div>
               </div>

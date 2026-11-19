@@ -1047,15 +1047,10 @@ pub fn plan_with_files(
                     push("accept-edits");
                 }
                 Access::Own => {} // Antigravity's own permission settings decide
-                Access::Unrestricted => {
-                    // On Windows, Antigravity's print mode (-p) with --dangerously-skip-permissions
-                    // triggers an internal policy denial for shell execution ("bash"), returning
-                    // denied_actions instead of running the command. On Windows we omit the flag so
-                    // it uses Antigravity's own permission configuration (which works in Full).
-                    if !cfg!(windows) {
-                        push("--dangerously-skip-permissions");
-                    }
-                }
+                // Antigravity's print mode (-p) with --dangerously-skip-permissions denies shell
+                // commands and outside-workspace reads ("denied_actions: Bash / ReadFile") on both
+                // Windows and macOS. Explicit allow rules (below) run them, so the flag isn't used.
+                Access::Unrestricted => {}
             }
             // Print mode can't ask, so Antigravity denies any file outside the workspace that
             // needs a permission ("denied_actions: ReadFile"). Grant reading (and, at Unrestricted,
@@ -2101,13 +2096,7 @@ fn antigravity_allow_rules(access: Access) -> Option<Vec<&'static str>> {
         Access::Chat | Access::Own => None,
         Access::Read => Some(vec!["read_file(*)"]),
         Access::Edit => Some(vec!["read_file(*)", "edit_file(*)", "write_file(*)"]),
-        Access::Unrestricted if cfg!(windows) => Some(vec![
-            "read_file(*)",
-            "write_file(*)",
-            "edit_file(*)",
-            "run_command(*)",
-        ]),
-        Access::Unrestricted => None,
+        Access::Unrestricted => Some(vec!["read_file(*)", "write_file(*)", "edit_file(*)", "run_command(*)"]),
     }
 }
 
@@ -2477,10 +2466,11 @@ mod plan_tests {
     fn unrestricted_access_uses_each_tools_own_bypass_switch() {
         assert!(args(Kind::Codex, Access::Unrestricted).contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(args(Kind::ClaudeCode, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
-        #[cfg(not(windows))]
-        assert!(args(Kind::Antigravity, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
-        #[cfg(windows)]
-        assert!(!args(Kind::Antigravity, Access::Unrestricted).contains(&"--dangerously-skip-permissions".to_string()));
+        // Antigravity's bypass switch denies shell and outside reads in print mode; explicit
+        // allow rules run them instead, on every system.
+        let agy = args(Kind::Antigravity, Access::Unrestricted);
+        assert!(!agy.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(agy.iter().any(|a| a.contains("run_command(*)") && a.contains("read_file(*)")));
         assert!(has(&args(Kind::GeminiCli, Access::Unrestricted), &["--approval-mode", "yolo"]));
         for k in [Kind::Codex, Kind::ClaudeCode, Kind::Antigravity, Kind::GeminiCli] {
             assert!(!args(k, Access::Edit).iter().any(|a| a.contains("dangerously") || a == "yolo"));
@@ -2522,11 +2512,7 @@ mod plan_tests {
           assert!(has(&args(Kind::Antigravity, Access::Edit), &["--settings", edit_rule]));
           assert!(!args(Kind::Antigravity, Access::Chat).iter().any(|x| x == "--settings"));
         assert!(!args(Kind::Antigravity, Access::Own).iter().any(|x| x == "--settings"));
-        assert_eq!(
-            args(Kind::Antigravity, Access::Unrestricted).iter().any(|x| x == "--settings"),
-            cfg!(windows),
-            "Unrestricted needs the rules only where the bypass switch isn't used"
-        );
+        assert!(args(Kind::Antigravity, Access::Unrestricted).iter().any(|x| x == "--settings"), "Unrestricted grants by rules on every system");
         assert!(!args(Kind::Antigravity, Access::Own).iter().any(|x| x == "--mode"));
     }
 

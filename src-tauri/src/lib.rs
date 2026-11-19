@@ -35,6 +35,8 @@ mod runcmd;
 mod redact;
 mod resume;
 mod setup;
+mod skills;
+mod stall;
 mod signal_chat;
 mod signal_setup;
 mod startup_check;
@@ -214,7 +216,7 @@ fn save_approval(state: State<AppState>, request: String) -> Result<config::Coun
     state.engine.config.save_grants(&grants)
 }
 
-/// Settings â†’ Tools: the catalog of not-bundled tools, with install state and pinned commands.
+/// Settings → Tools: the catalog of not-bundled tools, with install state and pinned commands.
 #[tauri::command]
 fn tool_catalog() -> Vec<toolbox::CatalogEntry> {
     toolbox::catalog(data_dir().as_deref())
@@ -573,7 +575,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: conversations no longer vanish or split in two after a failed save (a damaged title file is rebuilt from the messages); in Auto-run chats, command boxes that were waiting for a click run when Auto-run is turned on, auto-continue waits quietly while every open task's owner has a box running, and command results no longer restart the round count; the sidebar stops re-laying itself out on every scrollbar change, and the Mac window reuses its date and number formatters, cutting CPU; the link stress test only credits the route under test.";
+const WHATS_NEW: &str = "What's new: Gemini (Antigravity) can read files and run commands again on Windows and the Mac, through explicit permission rules instead of the bypass switch that print mode refuses; the council box's access and model menus float above the page instead of hiding behind the PC pressure box; local AIs (Qwen, Llama, Phi) are told how to code through command boxes and get a skill library of runbooks (on Windows in F:\\Consilium\\skills) that the bigger AIs write for them.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -718,7 +720,7 @@ fn start_auto_install(app: AppHandle, engine: Arc<Engine>) {
                     id,
                     &format!(
                         "Installing Consilium {} automatically (now {}) and restarting; the AIs' work resumes after. \
-                         Turn this off in Settings â†’ Updates.",
+                         Turn this off in Settings → Updates.",
                         staged.build, staged.current_build
                     ),
                 );
@@ -746,7 +748,7 @@ async fn stress_test_and_post(engine: &Arc<Engine>, when: &str) -> Result<Vec<li
     Ok(reports)
 }
 
-/// The Communication stress test button (Settings â†’ Multi-Computer Sync).
+/// The Communication stress test button (Settings → Multi-Computer Sync).
 #[tauri::command]
 async fn stress_test_link(state: State<'_, AppState>) -> Result<Vec<link::StressReport>, String> {
     let engine = state.engine.clone();
@@ -784,7 +786,7 @@ fn release_check_requested() -> bool {
     follow::take_release_check()
 }
 
-/// Turns automatic install-and-restart on or off (Settings â†’ Updates).
+/// Turns automatic install-and-restart on or off (Settings → Updates).
 #[tauri::command]
 fn set_auto_install_updates(state: State<AppState>, on: bool) -> Result<(), String> {
     state.engine.config.set_auto_install_updates(on).map(|_| ())
@@ -1391,6 +1393,8 @@ pub fn run() {
             follow::start(app.state::<AppState>().engine.clone(), data.clone());
             // Installs newer builds by itself and restarts, unless turned off in Settings.
             start_auto_install(app.handle().clone(), app.state::<AppState>().engine.clone());
+            // Restarts the app if it freezes (a lock that stays taken, a stalled runtime).
+            stall::start(app.handle().clone(), app.state::<AppState>().engine.clone(), data.clone());
             // Tests every route to the linked computers after each start and posts the result.
             stress_test_after_start(app.state::<AppState>().engine.clone());
             // Falls back to the built-in page if an instantly applied one never starts.
