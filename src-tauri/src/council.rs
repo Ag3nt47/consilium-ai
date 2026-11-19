@@ -110,6 +110,9 @@ fn alarm(s: &Arc<Shared>, failed: &'static Agent, why: &str) {
     if st.alarmed || st.paused || s.cancel.is_cancelled() || ALARMED.lock().unwrap().get(&key).is_some_and(|w| w == why) {
         return;
     }
+    if crate::switched::is_off(s.store.dir(), &s.turn.conversation, failed.id) {
+        return;
+    }
     let helpers: Vec<&'static Agent> = s
         .turn
         .members
@@ -226,7 +229,7 @@ impl Council {
                 who.push((a.clone(), Some(*seq)));
             }
         }
-        who.retain(|(a, _)| !done.passed.contains(a) && agents::by_id(a).is_some());
+        who.retain(|(a, _)| !done.passed.contains(a) && agents::by_id(a).is_some() && !crate::switched::is_off(store.dir(), &turn.conversation, a));
         for (a, _) in &who {
             state.live.insert(a.clone());
             state.joined.insert(a.clone());
@@ -255,7 +258,11 @@ impl Council {
             st.generation += 1;
             st.latest.insert(message.sender.clone(), message.seq);
             for t in targets {
-                if agents::by_id(t).is_some() && s.bench.until(t, now_ms()).is_none() && !st.live.contains(t) {
+                if agents::by_id(t).is_some()
+                    && s.bench.until(t, now_ms()).is_none()
+                    && !st.live.contains(t)
+                    && !crate::switched::is_off(s.store.dir(), &s.turn.conversation, t)
+                {
                     st.live.insert(t.clone());
                     st.joined.insert(t.clone());
                     start.push(t.clone());
@@ -309,7 +316,10 @@ impl Council {
                 if st.pulled_in >= limit {
                     break;
                 }
-                if agents::by_id(m).is_none() || s.bench.until(m, now).is_some() {
+                if agents::by_id(m).is_none()
+                    || s.bench.until(m, now).is_some()
+                    || crate::switched::is_off(s.store.dir(), &s.turn.conversation, m)
+                {
                     continue;
                 }
                 let used = st.answered.get(m).copied().unwrap_or(0);
@@ -418,6 +428,9 @@ fn worker(s: Arc<Shared>, id: String, last_seen: Option<u64>) -> Pin<Box<dyn Fut
 /// out of usage), and the newest message it has read.
 async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool, Option<u64>) {
     let agent = agents::by_id(&id).expect("known agent");
+    if crate::switched::is_off(s.store.dir(), &s.turn.conversation, &id) {
+        return (false, last_seen);
+    }
     let rounds = s.turn.rounds;
     let mut failed = false;
     loop {
@@ -622,10 +635,13 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                         &format!("{} ran out of usage ({when}); the council carries on without it.", agent.name),
                     );
                 } else {
-                    if let Ok(e) = s.store.append(&s.turn.conversation, &id, "error", vec![], &format!("{} couldn't answer: {why}", agent.name)) {
-                        s.host.event(&e);
+                    let off_here = crate::switched::is_off(s.store.dir(), &s.turn.conversation, &id);
+                    if !off_here {
+                        if let Ok(e) = s.store.append(&s.turn.conversation, &id, "error", vec![], &format!("{} couldn't answer: {why}", agent.name)) {
+                            s.host.event(&e);
+                        }
+                        alarm(&s, agent, &why);
                     }
-                    alarm(&s, agent, &why);
                 }
                 failed = true;
                 break;
@@ -890,6 +906,33 @@ mod tests {
         }));
         let ev = go(&store, &c, f, &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
         assert!(!ev.iter().any(|e| e.sender == CONSILIUM && e.text.contains("couldn't answer")));
+    }
+
+    #[tokio::test]
+    async fn switched_off_ai_is_not_asked_and_raises_no_alarm_or_error() {
+        let (store, c) = setup();
+        crate::switched::set(store.dir(), &c, "claude", false).unwrap();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "claude" => Err("Claude crashed".into()),
+            _ => Ok(format!("{id} here")),
+        }));
+        let ev = go(&store, &c, f.clone(), &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
+        assert!(!ev.iter().any(|e| e.sender == CONSILIUM && e.text.contains("couldn't answer")));
+        assert!(!ev.iter().any(|e| e.sender == "claude" && e.kind == "error"));
+        assert_eq!(f.asked.lock().unwrap().iter().filter(|(a, _)| a == "claude").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn switched_off_ai_is_not_started_by_mention() {
+        let (store, c) = setup();
+        crate::switched::set(store.dir(), &c, "claude", false).unwrap();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "gpt" => Ok("Hey @claude check this out".into()),
+            _ => Ok(format!("{id} here")),
+        }));
+        let ev = go(&store, &c, f.clone(), &["gpt"], 2, Arc::new(Bench::new())).await;
+        assert_eq!(f.asked.lock().unwrap().iter().filter(|(a, _)| a == "claude").count(), 0);
+        assert!(!ev.iter().any(|e| e.sender == "claude"));
     }
 
     #[tokio::test]
