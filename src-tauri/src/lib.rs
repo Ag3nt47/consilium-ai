@@ -273,7 +273,9 @@ fn set_auto_run_commands(state: State<AppState>, on: bool) -> Result<(), String>
     if on {
         let engine = state.engine.clone();
         for c in engine.store.list() {
-            catch_up_auto_run(engine.clone(), c.id);
+            if auto_run::is_on(engine.store.dir(), &c.id) {
+                catch_up_auto_run(engine.clone(), c.id);
+            }
         }
     }
     Ok(())

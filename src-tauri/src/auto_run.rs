@@ -50,4 +50,15 @@ mod tests {
         assert!(!is_on(&d, "a"), "turning it off sticks");
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    #[test]
+    fn sweeps_only_conversations_where_auto_run_is_on() {
+        let d = std::env::temp_dir().join(format!("auto-run-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        set(&d, "chat-auto", true).unwrap();
+        let convs = vec!["chat-manual".to_string(), "chat-auto".to_string()];
+        let auto_convs: Vec<_> = convs.into_iter().filter(|c| is_on(&d, c)).collect();
+        assert_eq!(auto_convs, vec!["chat-auto".to_string()]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

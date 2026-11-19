@@ -103,13 +103,17 @@ pub fn since_human_start(events: &[Event]) -> usize {
 
 /// Command boxes from AIs on this computer in `events[from..]`, under `max_age` ms old, that can
 /// run here and have neither run nor been denied (a running one counts too): `(event id, index)`.
+/// Boxes whose author has posted a later message are skipped (the author moved on or superseded them).
 pub fn waiting_boxes(events: &[Event], from: usize, now: u64, max_age: u64) -> Vec<(String, usize)> {
     let mut out = Vec::new();
-    for e in events.iter().skip(from) {
+    for (idx, e) in events.iter().enumerate().skip(from) {
         if e.kind != "message" || e.sender == "human" || e.sender == CONSILIUM || e.via.is_some() {
             continue;
         }
         if now.saturating_sub(e.ts) >= max_age {
+            continue;
+        }
+        if events[idx + 1..].iter().any(|later| later.sender == e.sender && later.kind == "message") {
             continue;
         }
         for (i, b) in crate::runcmd::fenced_blocks(&e.text).iter().enumerate() {
@@ -135,10 +139,7 @@ pub fn decide(events: &[Event], board: &Board, auto_run: bool) -> Decision {
 /// `decide`, knowing whether a command box is still due to report back (`pending_boxes`).
 pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pending: bool) -> Decision {
     let open: Vec<_> = board.tasks.iter().filter(|t| matches!(t.status, Status::Todo | Status::Doing)).collect();
-    let since_human = events
-        .iter()
-        .rposition(is_human_message)
-        .map_or(events, |i| &events[i + 1..]);
+    let since_human = &events[since_human_start(events)..];
     let waiting = unanswered(since_human);
     if open.is_empty() && (waiting.is_empty() || !auto_run) {
         return Decision::Stop;
@@ -255,10 +256,22 @@ mod tests {
 
     #[test]
     fn catch_up_picks_only_waiting_boxes_since_the_human_wrote() {
-        let events = vec![boxed(1, 5), ev(2, 10, "human", "message", "go", vec![]), boxed(3, 20), boxed(4, 30), ran(5, 40, "e4")];
+        let events = vec![boxed(1, 5), ev(2, 10, "human", "message", "go", vec![]), boxed(3, 20)];
         let from = since_human_start(&events);
         assert_eq!(waiting_boxes(&events, from, 50, CATCH_UP_MS), vec![("e3".to_string(), 0)]);
         assert!(waiting_boxes(&events, from, 20 + CATCH_UP_MS, CATCH_UP_MS).is_empty(), "too old to run unasked");
+    }
+
+    #[test]
+    fn waiting_boxes_skips_boxes_older_than_a_later_message_from_the_same_author() {
+        let events = vec![
+            boxed(1, 5),
+            ev(2, 10, "claude", "message", "actually never mind", vec![]),
+            boxed(3, 20),
+        ];
+        // Event 1 is skipped because claude posted a later message (event 2).
+        // Event 3 is picked because claude posted no later message.
+        assert_eq!(waiting_boxes(&events, 0, 50, CATCH_UP_MS), vec![("e3".to_string(), 0)]);
     }
 
     #[test]
@@ -266,10 +279,9 @@ mod tests {
         let events = vec![
             boxed(1, 5),
             ev(2, 10, "human", "message", "Approved: run it", vec![]),
-            boxed(3, 20),
-            ran(4, 30, "e3"),
         ];
-        // With from = 0, box 1 (e1#0) is picked because it was never handled, even though human wrote afterwards
+        // With from = 0, box 1 (e1#0) is picked because it was never handled and author didn't move on,
+        // even though human wrote afterwards (e.g. approving a request).
         assert_eq!(waiting_boxes(&events, 0, 50, CATCH_UP_MS), vec![("e1".to_string(), 0)]);
     }
 
