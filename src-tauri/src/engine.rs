@@ -905,6 +905,12 @@ impl council::Host for RealHost {
             project_notes: notes.as_deref(),
         };
         let mut system = prompt::system(agent.id, answer, rounds, &ctx);
+        // Local models and other chat-API AIs have no tools: they code through command boxes.
+        if agents::is_api(agents::effective_kind(agent)) {
+            if let Some(w) = workspace.as_deref() {
+                system.push_str(&prompt::command_box_coding(w, std::env::consts::OS, crate::auto_run::is_on(self.store.dir(), conv)));
+            }
+        }
         // Everyone's plan usage and reset times, as last read.
         if let Some(usage) = crate::usage::for_prompt(&crate::usage::load(&self.data), &members, agent.id, store::now_ms()) {
             system.push_str(&usage);
