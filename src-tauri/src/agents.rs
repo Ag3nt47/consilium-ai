@@ -1674,6 +1674,18 @@ fn last_chars(s: &str, n: usize) -> String {
     s.chars().skip(skip).collect()
 }
 
+/// `s` cut to at most about `n` characters by dropping its middle, so both the error kind at the
+/// start ("rate_limit: ") and a reset time at the end ("|<secs>") still reach `bench::usage_limit`.
+fn clip_middle(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    if count <= n {
+        return s.to_string();
+    }
+    let head = n / 4;
+    let head_text: String = s.chars().take(head).collect();
+    format!("{head_text} … {}", last_chars(s, n - head))
+}
+
 /// The newest error Claude Code's stream reported (an `error` line, or an assistant message
 /// flagged with `error`, as a usage limit is), as its text.
 fn claude_stream_error(stdout: &str) -> Option<String> {
@@ -1694,7 +1706,7 @@ fn claude_stream_error(stdout: &str) -> Option<String> {
             .to_string();
         // Keep the error kind beside the text (e.g. "rate_limit") so the usage check sees it too.
         let kind = err.as_str().or(err["type"].as_str()).filter(|k| !msg.contains(k));
-        Some(last_chars(&kind.map_or(msg.clone(), |k| format!("{k}: {msg}")), ERROR_TAIL_CHARS))
+        Some(clip_middle(&kind.map_or(msg.clone(), |k| format!("{k}: {msg}")), ERROR_TAIL_CHARS))
     })
 }
 
@@ -2762,6 +2774,15 @@ mod tests {
     }
 
     async fn go(p: &Path, kind: Kind, access: Access, ws: Option<&Path>, system: &str) -> Result<String, String> {
+        // Linux: a test on another thread can fork while `fake` still has the script open for
+        // writing, and the child keeps that handle until it execs, so starting the script fails
+        // with "Text file busy" (ETXTBSY) for a moment. Retry that start error only.
+        for _ in 0..20 {
+            match run_at(p, kind, access, ws, system, "convo", &CancellationToken::new(), RUN_TIMEOUT).await {
+                Err(e) if e.contains("Text file busy") => tokio::time::sleep(Duration::from_millis(50)).await,
+                r => return r,
+            }
+        }
         run_at(p, kind, access, ws, system, "convo", &CancellationToken::new(), RUN_TIMEOUT).await
     }
 
@@ -2918,6 +2939,20 @@ printf 'done' > "$out""#
         let e = go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err();
         assert!(e.starts_with("Claude CLI ended before reporting a final result (exit 1): "), "{e}");
         assert!(e.chars().count() < 500, "{} chars", e.chars().count());
+    }
+
+    #[test]
+    fn a_long_stream_error_keeps_its_kind_and_reset_time() {
+        let filler = "z".repeat(1000);
+        let line = format!(
+            r#"{{"type":"assistant","error":"rate_limit","message":{{"content":[{{"type":"text","text":"{filler} |1800003600"}}]}}}}"#
+        );
+        let e = claude_stream_error(&line).unwrap();
+        assert!(e.chars().count() <= ERROR_TAIL_CHARS + 3, "{} chars", e.chars().count());
+        assert!(e.starts_with("rate_limit: ") && e.ends_with("|1800003600"), "{e}");
+        assert_eq!(crate::bench::usage_limit(&e, 1_800_003_540_000), Some(1_800_003_600_000));
+        let top = claude_stream_error(r#"{"type":"error","message":"quota exceeded"}"#).unwrap();
+        assert!(crate::bench::usage_limit(&top, 0).is_some(), "{top}");
     }
 
     #[tokio::test]
