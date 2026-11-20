@@ -83,6 +83,11 @@ impl Memory {
     pub fn for_prompt(&self) -> Option<String> {
         clip(&self.read())
     }
+
+    /// Like `for_prompt`, but only the newest `max` characters: for local models' small windows.
+    pub fn for_prompt_within(&self, max: usize) -> Option<String> {
+        clip_to(&self.read(), max)
+    }
 }
 
 /// The project's CONSILIUM.md, if the folder has one.
@@ -92,14 +97,18 @@ pub fn project_notes(folder: &Path) -> Option<String> {
 
 /// Keeps the last MAX_CHARS characters (newest notes are at the end), trimmed to whole lines.
 fn clip(text: &str) -> Option<String> {
+    clip_to(text, MAX_CHARS)
+}
+
+fn clip_to(text: &str, max: usize) -> Option<String> {
     let t = text.trim();
     if t.is_empty() {
         return None;
     }
-    if t.chars().count() <= MAX_CHARS {
+    if t.chars().count() <= max {
         return Some(t.to_string());
     }
-    let skip = t.chars().count() - MAX_CHARS;
+    let skip = t.chars().count() - max;
     let tail: String = t.chars().skip(skip).collect();
     let tail = tail.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap_or(tail);
     Some(format!("(earlier notes omitted)\n{tail}"))

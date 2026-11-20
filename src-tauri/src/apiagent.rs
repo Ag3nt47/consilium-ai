@@ -298,8 +298,28 @@ pub async fn run(
 ) -> Result<(String, Option<TokenUsage>, String), String> {
     let key = key(agent, provider).ok_or_else(|| format!("No {name} API key. Add one in Add AI."))?;
     let model = model_for(agent, name, provider, &key).await?;
+    // A local model's window is small: fit the prompt to the size its server reports.
+    let window = if provider.local { local_window(provider.base_url).await } else { None };
+    let (system, prompt) = match window {
+        Some(ctx) => fit_to_window(system, prompt, ctx),
+        None => (system.to_string(), prompt.to_string()),
+    };
+    let (system, prompt) = (system.as_str(), prompt.as_str());
     match ask_once(name, provider, &key, &model, system, prompt, cancel, timeout).await {
         Ok(r) => Ok((r.0, r.1, model)),
+        // The server named its window in the refusal: fit to that and ask once more.
+        Err(e) if provider.local && !cancel.is_cancelled() && context_from_error(&e).is_some() => {
+            let ctx = context_from_error(&e).unwrap_or(4096);
+            // The refusal also says how many tokens this prompt really was: measure the ratio,
+            // so a prompt the estimate let through is cut by enough the second time.
+            let chars = system.chars().count() + prompt.chars().count();
+            let cpt = request_tokens(&e)
+                .map(|n| (chars as f64 / n as f64 * 0.9).min(CHARS_PER_TOKEN as f64))
+                .unwrap_or(CHARS_PER_TOKEN as f64 / 2.0);
+            let (system, prompt) = fit_to_window_at(system, prompt, ctx, cpt);
+            let r = ask_once(name, provider, &key, &model, &system, &prompt, cancel, timeout).await?;
+            Ok((r.0, r.1, model))
+        }
         Err(e) if e != "stopped" && provider.local && !cancel.is_cancelled() => {
             // A local model's turn shouldn't be lost to a hiccup: start Ollama if it is down on
             // this computer, and ask once more, saying why when the answer came back empty.
@@ -316,6 +336,69 @@ pub async fn run(
         }
         Err(e) => Err(e),
     }
+}
+
+/// Characters per token when budgeting a local window: low on purpose (code, paths and
+/// non-English text run denser than prose), so the estimate errs toward fitting.
+const CHARS_PER_TOKEN: usize = 3;
+
+/// The context window (tokens) a local server has loaded its model with: llama.cpp's `/props`.
+/// None when the server doesn't say (Ollama), so the prompt goes as it is.
+async fn local_window(base_url: &str) -> Option<usize> {
+    let root = base_url.trim_end_matches('/').trim_end_matches("/v1");
+    let resp = client().ok()?.get(format!("{root}/props")).timeout(Duration::from_secs(3)).send().await.ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let n = v.pointer("/default_generation_settings/n_ctx").or_else(|| v.get("n_ctx"))?.as_u64()?;
+    usize::try_from(n).ok().filter(|n| *n >= 512)
+}
+
+/// The window named in a refusal like llama.cpp's "exceeds the available context size (8192 tokens)".
+fn context_from_error(error: &str) -> Option<usize> {
+    const MARK: &str = "context size (";
+    let rest = &error[error.find(MARK)? + MARK.len()..];
+    rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok().filter(|n| *n >= 512)
+}
+
+/// The token count a refusal says the prompt was: "request (21362 tokens) exceeds …".
+fn request_tokens(error: &str) -> Option<usize> {
+    const MARK: &str = "request (";
+    let rest = &error[error.find(MARK)? + MARK.len()..];
+    rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok().filter(|n| *n > 0)
+}
+
+/// The first `n` characters of `text`.
+fn first_chars(text: &str, n: usize) -> String {
+    text.chars().take(n).collect()
+}
+
+/// `system` and `prompt` cut to fit a `ctx`-token window, leaving room for the reply. The system
+/// prompt keeps its start (who the AI is, the rules) and takes at most half; the conversation
+/// keeps its opening lines and its newest part, where the question is.
+pub fn fit_to_window(system: &str, prompt: &str, ctx: usize) -> (String, String) {
+    fit_to_window_at(system, prompt, ctx, CHARS_PER_TOKEN as f64)
+}
+
+/// `fit_to_window` with a given characters-per-token ratio.
+fn fit_to_window_at(system: &str, prompt: &str, ctx: usize, chars_per_token: f64) -> (String, String) {
+    let budget = (ctx.saturating_sub((ctx / 4).min(1024)) as f64 * chars_per_token.max(1.0)) as usize;
+    let (s_len, p_len) = (system.chars().count(), prompt.chars().count());
+    if s_len + p_len <= budget {
+        return (system.to_string(), prompt.to_string());
+    }
+    let system = if s_len > budget / 2 {
+        format!("{}\n\n[… the rest of these instructions was left out to fit your context window]", first_chars(system, budget / 2))
+    } else {
+        system.to_string()
+    };
+    let room = budget.saturating_sub(system.chars().count());
+    if p_len <= room {
+        return (system, prompt.to_string());
+    }
+    let note = format!("\n\n[… {} characters of older conversation left out to fit your context window …]\n\n", p_len.saturating_sub(room));
+    let head = (room / 10).min(400);
+    let tail_len = room.saturating_sub(head + note.chars().count());
+    let tail: String = prompt.chars().skip(p_len - tail_len).collect();
+    (system, format!("{}{note}{tail}", first_chars(prompt, head)))
 }
 
 fn is_unreachable(error: &str) -> bool {
@@ -400,6 +483,28 @@ mod tests {
         assert_eq!(parse_reply(only).unwrap_err(), "empty reply");
         assert!(is_unreachable("Qwen: error sending request: tcp connect error: connection refused"));
         assert!(!is_unreachable("Qwen: HTTP 500"));
+    }
+
+    #[test]
+    fn local_prompt_is_fitted_to_the_window_keeping_rules_and_newest_messages() {
+        let system = format!("RULES{}", "s".repeat(30_000));
+        let prompt = format!("CONVERSATION SO FAR{}END OF CONVERSATION. Write now.", "m".repeat(60_000));
+        let (s, p) = fit_to_window(&system, &prompt, 8192);
+        let budget = (8192 - 1024) * CHARS_PER_TOKEN;
+        assert!(s.chars().count() + p.chars().count() <= budget + 200, "{} + {}", s.len(), p.len());
+        assert!(s.starts_with("RULES") && p.starts_with("CONVERSATION SO FAR"));
+        assert!(p.ends_with("END OF CONVERSATION. Write now."));
+        assert!(p.contains("left out to fit your context window"));
+        // A prompt that fits is left alone.
+        assert_eq!(fit_to_window("a", "b", 8192), ("a".to_string(), "b".to_string()));
+        let e = "Qwen: request failed (HTTP 400 Bad Request): request (21051 tokens) exceeds the available context size (8192 tokens), try increasing it";
+        assert_eq!(context_from_error(e), Some(8192));
+        assert_eq!(context_from_error("Qwen: HTTP 500"), None);
+        assert_eq!(request_tokens(e), Some(21051));
+        // The retry at a measured, denser ratio cuts harder than the estimate.
+        let (s2, p2) = fit_to_window_at(&system, &prompt, 8192, 1.5);
+        assert!(s2.chars().count() + p2.chars().count() < s.chars().count() + p.chars().count());
+        assert!(p2.ends_with("END OF CONVERSATION. Write now."));
     }
 
     #[test]
