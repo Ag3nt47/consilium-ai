@@ -1614,6 +1614,18 @@ async fn execute(
         Kind::Antigravity => antigravity_reply(&stdout)?,
         Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => String::new(),
     };
+    if matches!(kind, Kind::ClaudeCode) && claude_result(&stdout).is_none() {
+        // The stream ended without a result line. Pass on the provider's own error if it sent one,
+        // word for word, so a usage limit is still recognised; otherwise say so in a line, never
+        // the raw stream (its first line alone lists every tool and runs to kilobytes).
+        if let Some(e) = claude_stream_error(&stdout) {
+            return Err(e);
+        }
+        let code = status.code().map_or_else(|| "killed".to_string(), |c| format!("exit {c}"));
+        let err = stderr.trim();
+        let why = if err.is_empty() { String::new() } else { format!(": {}", last_chars(err, ERROR_TAIL_CHARS)) };
+        return Err(format!("Claude CLI ended before reporting a final result ({code}){why}"));
+    }
     if !status.success() || reply.trim().is_empty() {
         let detail = if stderr.trim().is_empty() { stdout } else { stderr };
         return Err(format!("exit {}: {}", status.code().unwrap_or(-1), tail(&detail)));
@@ -1651,6 +1663,51 @@ fn claude_result(stdout: &str) -> Option<serde_json::Value> {
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .rfind(|v| v["type"] == "result")
+}
+
+/// Most of a stderr tail quoted in an error, in characters.
+const ERROR_TAIL_CHARS: usize = 400;
+
+/// The last `n` characters of `s` (never splitting a character).
+fn last_chars(s: &str, n: usize) -> String {
+    let skip = s.chars().count().saturating_sub(n);
+    s.chars().skip(skip).collect()
+}
+
+/// `s` cut to at most about `n` characters by dropping its middle, so both the error kind at the
+/// start ("rate_limit: ") and a reset time at the end ("|<secs>") still reach `bench::usage_limit`.
+fn clip_middle(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    if count <= n {
+        return s.to_string();
+    }
+    let head = n / 4;
+    let head_text: String = s.chars().take(head).collect();
+    format!("{head_text} … {}", last_chars(s, n - head))
+}
+
+/// The newest error Claude Code's stream reported (an `error` line, or an assistant message
+/// flagged with `error`, as a usage limit is), as its text.
+fn claude_stream_error(stdout: &str) -> Option<String> {
+    stdout.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).rev().find_map(|v| {
+        let err = &v["error"];
+        if v["type"] != "error" && (err.is_null() || err == false) {
+            return None;
+        }
+        let text: String = v["message"]["content"]
+            .as_array()
+            .map(|parts| parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+        let msg = [err["message"].as_str(), v["message"].as_str(), Some(text.as_str()), err.as_str()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|m| !m.is_empty())?
+            .to_string();
+        // Keep the error kind beside the text (e.g. "rate_limit") so the usage check sees it too.
+        let kind = err.as_str().or(err["type"].as_str()).filter(|k| !msg.contains(k));
+        Some(clip_middle(&kind.map_or(msg.clone(), |k| format!("{k}: {msg}")), ERROR_TAIL_CHARS))
+    })
 }
 
 fn json_u64(value: &serde_json::Value, key: &str) -> u64 {
@@ -2717,6 +2774,15 @@ mod tests {
     }
 
     async fn go(p: &Path, kind: Kind, access: Access, ws: Option<&Path>, system: &str) -> Result<String, String> {
+        // Linux: a test on another thread can fork while `fake` still has the script open for
+        // writing, and the child keeps that handle until it execs, so starting the script fails
+        // with "Text file busy" (ETXTBSY) for a moment. Retry that start error only.
+        for _ in 0..20 {
+            match run_at(p, kind, access, ws, system, "convo", &CancellationToken::new(), RUN_TIMEOUT).await {
+                Err(e) if e.contains("Text file busy") => tokio::time::sleep(Duration::from_millis(50)).await,
+                r => return r,
+            }
+        }
         run_at(p, kind, access, ws, system, "convo", &CancellationToken::new(), RUN_TIMEOUT).await
     }
 
@@ -2857,6 +2923,48 @@ printf 'done' > "$out""#
         assert_eq!(go(&p, Kind::Codex, Access::Edit, Some(&ws), "s").await.unwrap(), "README.md");
         assert!(go(&p, Kind::Codex, Access::Chat, Some(&ws), "s").await.is_err(), "chat access must not see the project");
         std::fs::remove_dir_all(ws).unwrap();
+    }
+
+    #[tokio::test]
+    async fn claude_ending_without_a_result_gives_a_short_plain_error() {
+        // A huge stream line and no result: one short line, not the raw stream.
+        let big = "x".repeat(5000);
+        let p = fake(&format!(r#"cat >/dev/null; printf '{{"type":"system","tools":"{big}"}}\n'; exit 1"#));
+        let e = go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err();
+        assert_eq!(e, "Claude CLI ended before reporting a final result (exit 1)");
+        let p = fake(r#"cat >/dev/null; printf '{"type":"system"}\n'; exit 0"#);
+        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err(), "Claude CLI ended before reporting a final result (exit 0)");
+        // A long non-ASCII stderr is cut to its last characters, whole.
+        let p = fake(r#"cat >/dev/null; i=0; while [ $i -lt 1000 ]; do printf 'é漢字'; i=$((i+1)); done >&2; exit 1"#);
+        let e = go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err();
+        assert!(e.starts_with("Claude CLI ended before reporting a final result (exit 1): "), "{e}");
+        assert!(e.chars().count() < 500, "{} chars", e.chars().count());
+    }
+
+    #[test]
+    fn a_long_stream_error_keeps_its_kind_and_reset_time() {
+        let filler = "z".repeat(1000);
+        let line = format!(
+            r#"{{"type":"assistant","error":"rate_limit","message":{{"content":[{{"type":"text","text":"{filler} |1800003600"}}]}}}}"#
+        );
+        let e = claude_stream_error(&line).unwrap();
+        assert!(e.chars().count() <= ERROR_TAIL_CHARS + 3, "{} chars", e.chars().count());
+        assert!(e.starts_with("rate_limit: ") && e.ends_with("|1800003600"), "{e}");
+        assert_eq!(crate::bench::usage_limit(&e, 1_800_003_540_000), Some(1_800_003_600_000));
+        let top = claude_stream_error(r#"{"type":"error","message":"quota exceeded"}"#).unwrap();
+        assert!(crate::bench::usage_limit(&top, 0).is_some(), "{top}");
+    }
+
+    #[tokio::test]
+    async fn a_usage_limit_in_the_stream_without_a_result_still_benches() {
+        let p = fake(
+            r#"cat >/dev/null; printf '{"type":"assistant","error":"rate_limit","message":{"content":[{"type":"text","text":"Claude AI usage limit reached|1800003600"}]}}\n'; exit 1"#,
+        );
+        let e = go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err();
+        assert_eq!(e, "rate_limit: Claude AI usage limit reached|1800003600");
+        assert_eq!(crate::bench::usage_limit(&e, 1_800_000_000_000), Some(1_800_003_600_000));
+        let p = fake(r#"cat >/dev/null; printf '{"type":"error","error":{"type":"api_error","message":"Overloaded"}}\n'; exit 1"#);
+        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err(), "api_error: Overloaded");
     }
 
     #[tokio::test]
