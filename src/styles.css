@@ -162,6 +162,37 @@ code {
   height: 40px;
 }
 
+.brand-icon.update-downloading {
+  animation: update-emblem-pulse 1.15s ease-in-out infinite;
+}
+
+@keyframes update-emblem-pulse {
+  50% {
+    opacity: 0.72;
+    transform: scale(0.91);
+    filter: drop-shadow(0 0 9px var(--accent));
+  }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-icon.update-downloading {
+    animation: none;
+    filter: drop-shadow(0 0 7px var(--accent));
+  }
+}
+
 .brand-name {
   font: 600 21px/1.1 var(--brand-font);
   letter-spacing: 0.3px;

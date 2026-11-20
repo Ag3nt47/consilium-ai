@@ -13,6 +13,7 @@
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Staged {
@@ -21,6 +22,49 @@ pub struct Staged {
     /// The staged and running builds, e.g. "0.3.37 #812 (76debf3a1b2c)" (see `build_id`).
     pub build: String,
     pub current_build: String,
+}
+
+/// Whether a GitHub release installer is currently being downloaded. The sidebar emblem reads
+/// this independently of `staged`, so the download is visible before Update Now appears.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct DownloadStatus {
+    pub active: bool,
+    pub version: String,
+}
+
+#[derive(Default)]
+struct DownloadState {
+    active: usize,
+    version: String,
+}
+
+static DOWNLOAD_STATE: OnceLock<Mutex<DownloadState>> = OnceLock::new();
+
+fn download_state() -> &'static Mutex<DownloadState> {
+    DOWNLOAD_STATE.get_or_init(|| Mutex::new(DownloadState::default()))
+}
+
+fn download_started(version: &str) {
+    if let Ok(mut state) = download_state().lock() {
+        state.active = state.active.saturating_add(1);
+        state.version = version.trim_start_matches(['v', 'V']).trim().to_string();
+    }
+}
+
+fn download_finished() {
+    if let Ok(mut state) = download_state().lock() {
+        state.active = state.active.saturating_sub(1);
+        if state.active == 0 {
+            state.version.clear();
+        }
+    }
+}
+
+pub fn download_status() -> DownloadStatus {
+    download_state()
+        .lock()
+        .map(|state| DownloadStatus { active: state.active > 0, version: state.version.clone() })
+        .unwrap_or_default()
 }
 
 /// Which build is staged, written by `scripts/stage-update.mjs` after the build is in place.
@@ -329,8 +373,15 @@ fn check_release_download(version: &str, url: &str, digest: &str) -> Result<Stri
 }
 
 pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
     let want = check_release_download(version, url, digest)?;
+    download_started(version);
+    let result = stage_from_url_inner(data, version, url, &want).await;
+    download_finished();
+    result
+}
+
+async fn stage_from_url_inner(data: &Path, version: &str, url: &str, want: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
     let client = reqwest::Client::builder()
         .user_agent("Consilium-Updater")
         .build()
@@ -714,5 +765,16 @@ mod tests {
         assert!(check_release_download("v0.3.28", "https://evil.example/x.exe", &d).is_err());
         assert!(check_release_download("v0.3.28", "https://github.com/Ag3nt47/consilium-ai/releases/download/v1/../../x/y.exe", &d).is_err());
         assert!(check_release_download("0.3.28; rm", url, &d).is_err());
+    }
+
+    #[test]
+    fn download_status_tracks_overlapping_downloads() {
+        download_started("v1.2.3");
+        assert_eq!(download_status(), DownloadStatus { active: true, version: "1.2.3".into() });
+        download_started("V1.2.4");
+        download_finished();
+        assert_eq!(download_status(), DownloadStatus { active: true, version: "1.2.4".into() });
+        download_finished();
+        assert_eq!(download_status(), DownloadStatus::default());
     }
 }

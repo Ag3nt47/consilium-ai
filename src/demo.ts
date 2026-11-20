@@ -278,6 +278,7 @@ export const demoApi = {
   addCustomAi: async (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, ""),
   removeCustomAi: async () => undefined,
   updateAvailable: async () => null,
+  updateDownloadStatus: async () => ({ active: false, version: "" }),
   updateNow: async () => undefined,
   uiUpdateAvailable: async () => null,
   uiUpdateApply: async () => "",
