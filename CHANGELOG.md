@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed: a freeze of up to a minute (and a freeze-guard restart) when messages arrived while
+  AIs were answering. The turn table stayed locked while the window, linked computers, notes
+  and the council were told of a message; it is now held only to file the message (#14).
+
 - Fixed: the council list in the sidebar now fills the space down to PC pressure. With five or
   more AIs it was capped at 46% of the window (at most 480 px), leaving a gap above PC pressure
   and cutting cards off; it now takes the remaining height and scrolls inside it. Council card
