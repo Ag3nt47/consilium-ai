@@ -1297,8 +1297,11 @@ async fn run_at_with_usage(
     model: Option<&str>,
 ) -> Result<AgentReply, String> {
     let work = std::env::temp_dir().join(format!("consilium-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&work).map_err(|e| format!("couldn't create a work folder: {e}"))?;
+    std::fs::write(work.join(".consilium-temp-owner"), b"io.github.ag3nt47.consilium\n")
+        .map_err(|e| format!("couldn't mark a work folder: {e}"))?;
     let empty = work.join("empty");
-    std::fs::create_dir_all(&empty).map_err(|e| format!("couldn't create a work folder: {e}"))?;
+    std::fs::create_dir(&empty).map_err(|e| format!("couldn't create a work folder: {e}"))?;
     let (dir, access) = match workspace {
         Some(ws) if access != Access::Chat && ws.is_dir() => (ws.to_path_buf(), access),
         _ => (empty.clone(), Access::Chat),
