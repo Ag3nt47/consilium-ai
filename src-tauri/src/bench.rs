@@ -165,7 +165,9 @@ pub fn usage_limit(error: &str, now: u64) -> Option<u64> {
         "insufficient_quota",
         "weekly limit",
     ];
-    if !SIGNS.iter().any(|s| lower.contains(s)) && !has_status_429(&lower) {
+    // Claude Code: "You've hit your 5-hour limit · resets 10:40pm", "You've reached your weekly limit".
+    let named_limit = (lower.contains("hit your") || lower.contains("reached your")) && lower.contains("limit");
+    if !named_limit && !SIGNS.iter().any(|s| lower.contains(s)) && !has_status_429(&lower) {
         return None;
     }
     let wait = reset_in_ms(&lower, now).unwrap_or(DEFAULT_COOLDOWN_MS).clamp(60_000, MAX_COOLDOWN_MS);
@@ -241,6 +243,8 @@ mod tests {
             "HTTP 429 Too Many Requests",
             "status: 429",
             "5-hour limit reached ∙ resets 3pm",
+            "You've hit your 5-hour limit · resets 10:40pm",
+            "You've reached your weekly limit · resets Tue 7pm",
         ] {
             assert!(usage_limit(e, NOW).is_some(), "{e}");
         }
