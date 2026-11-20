@@ -28,6 +28,7 @@ mod peer_sync;
 mod pressure;
 mod projects;
 pub mod watchdog;
+mod agy_session;
 mod prompt;
 mod reaper;
 mod repo;
