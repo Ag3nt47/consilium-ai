@@ -22,10 +22,7 @@ pub struct Memory {
 
 impl Memory {
     pub fn new(path: PathBuf) -> Self {
-        Memory {
-            path,
-            lock: Mutex::new(()),
-        }
+        Memory { path, lock: Mutex::new(()) }
     }
 
     pub fn read(&self) -> String {
@@ -104,10 +101,7 @@ fn clip(text: &str) -> Option<String> {
     }
     let skip = t.chars().count() - MAX_CHARS;
     let tail: String = t.chars().skip(skip).collect();
-    let tail = tail
-        .split_once('\n')
-        .map(|(_, rest)| rest.to_string())
-        .unwrap_or(tail);
+    let tail = tail.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap_or(tail);
     Some(format!("(earlier notes omitted)\n{tail}"))
 }
 
@@ -182,11 +176,7 @@ pub fn extract_replaces(fact: &str) -> (Option<String>, String) {
     for prefix in &["[replaces:", "[replace:"] {
         if lower.starts_with(prefix) {
             if let Some(end) = trimmed.find(']') {
-                let needle = trimmed[prefix.len()..end]
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .trim();
+                let needle = trimmed[prefix.len()..end].trim().trim_matches('"').trim_matches('\'').trim();
                 let rest = trimmed[end + 1..].trim();
                 if !needle.is_empty() && !rest.is_empty() {
                     return (Some(needle.to_string()), rest.to_string());
@@ -220,18 +210,7 @@ pub fn remember_lines(text: &str) -> Vec<String> {
 
 fn looks_secret(s: &str) -> bool {
     let lower = s.to_lowercase();
-    [
-        "password",
-        "api key",
-        "apikey",
-        "secret",
-        "token",
-        "sk-",
-        "ghp_",
-        "-----begin",
-    ]
-    .iter()
-    .any(|w| lower.contains(w))
+    ["password", "api key", "apikey", "secret", "token", "sk-", "ghp_", "-----begin"].iter().any(|w| lower.contains(w))
 }
 
 #[cfg(test)]
@@ -254,13 +233,7 @@ mod tests {
     #[test]
     fn remember_lines_are_parsed_and_secrets_refused() {
         let r = remember_lines("ok\nREMEMBER: The human prefers short answers\nremember: Builds use npm run app:build\nREMEMBER: my API key is abc");
-        assert_eq!(
-            r,
-            vec![
-                "The human prefers short answers",
-                "Builds use npm run app:build"
-            ]
-        );
+        assert_eq!(r, vec!["The human prefers short answers", "Builds use npm run app:build"]);
     }
 
     #[test]
@@ -268,17 +241,11 @@ mod tests {
         let p = std::env::temp_dir().join(format!("consilium-memory-{}.md", uuid::Uuid::new_v4()));
         let m = Memory::new(p.clone());
         assert!(m.for_prompt().is_none());
-        let added = m
-            .remember("Gemini", "2026-11-14", &["Use Tauri 2".into()])
-            .unwrap();
+        let added = m.remember("Gemini", "2026-11-14", &["Use Tauri 2".into()]).unwrap();
         assert_eq!(added.len(), 1);
-        assert!(m
-            .remember("Claude", "2026-11-14", &["Use Tauri 2".into()])
-            .unwrap()
-            .is_empty());
+        assert!(m.remember("Claude", "2026-11-14", &["Use Tauri 2".into()]).unwrap().is_empty());
         assert_eq!(m.read(), "- Use Tauri 2 (Gemini, 2026-11-14)\n");
-        m.write(&format!("{}\nnewest line", "old line\n".repeat(2000)))
-            .unwrap();
+        m.write(&format!("{}\nnewest line", "old line\n".repeat(2000))).unwrap();
         let clipped = m.for_prompt().unwrap();
         assert!(clipped.starts_with("(earlier notes omitted)") && clipped.ends_with("newest line"));
         assert!(clipped.chars().count() <= MAX_CHARS + 30);
@@ -290,19 +257,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("consilium-proj-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(project_notes(&dir).is_none());
-        std::fs::write(
-            dir.join(PROJECT_NOTES),
-            "# Rules\nRun cargo test before pushing.",
-        )
-        .unwrap();
+        std::fs::write(dir.join(PROJECT_NOTES), "# Rules\nRun cargo test before pushing.").unwrap();
         assert!(project_notes(&dir).unwrap().contains("cargo test"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn test_verified_and_replaceable_memory_notes() {
-        let p =
-            std::env::temp_dir().join(format!("consilium-rep-memory-{}.md", uuid::Uuid::new_v4()));
+        let p = std::env::temp_dir().join(format!("consilium-rep-memory-{}.md", uuid::Uuid::new_v4()));
         let m = Memory::new(p.clone());
 
         let fact1 = "AnonRouter might be at /tmp/anonrouter".to_string();
@@ -313,25 +275,18 @@ mod tests {
         assert!(m.read().contains("Zero Breach is v3.0.2"));
 
         // Replace AnonRouter note with verified location
-        let rep_fact =
-            "[replaces: AnonRouter] [verified] AnonRouter is at ~/.local/opt/python-3.11"
-                .to_string();
+        let rep_fact = "[replaces: AnonRouter] [verified] AnonRouter is at ~/.local/opt/python-3.11".to_string();
         assert!(is_verified(&rep_fact));
         let (needle, clean) = extract_replaces(&rep_fact);
         assert_eq!(needle.as_deref(), Some("AnonRouter"));
-        assert_eq!(
-            clean,
-            "[verified] AnonRouter is at ~/.local/opt/python-3.11"
-        );
+        assert_eq!(clean, "[verified] AnonRouter is at ~/.local/opt/python-3.11");
 
         let added2 = m.remember("Claude", "2026-11-17", &[rep_fact]).unwrap();
         assert_eq!(added2.len(), 1);
 
         let read_back = m.read();
         assert!(!read_back.contains("/tmp/anonrouter"));
-        assert!(read_back.contains(
-            "- [verified] AnonRouter is at ~/.local/opt/python-3.11 (Claude, 2026-11-17)\n"
-        ));
+        assert!(read_back.contains("- [verified] AnonRouter is at ~/.local/opt/python-3.11 (Claude, 2026-11-17)\n"));
         assert!(read_back.contains("Zero Breach is v3.0.2"));
 
         let _ = std::fs::remove_file(p);
