@@ -1052,6 +1052,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The startup replay of `inbox.jsonl` after a quit or crash files each packet once, even
+    /// though a fresh `Sync` reads it again (the filed ids are saved with the mirrors).
+    #[test]
+    fn replaying_the_inbox_after_a_restart_files_nothing_twice() {
+        let root = std::env::temp_dir().join(format!("peer-sync-replay-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let conv = a.store.create("Plans").unwrap();
+        let typed = a.store.append(&conv.id, "human", "message", vec![], "hello").unwrap();
+        let p = packet("node-a", "p1", a.outgoing(&typed).unwrap());
+
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        let filed = b.file(&p, "MacBook").unwrap().expect("filed");
+        drop(b);
+        // Restart: a new Sync over the same folder replays the whole inbox.
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        assert!(b.file(&p, "MacBook").unwrap().is_none(), "filed once across a restart");
+        let copies = b.store.load(&filed.conversation).unwrap().iter().filter(|e| e.text == "hello").count();
+        assert_eq!(copies, 1);
+        // A packet that arrived but wasn't filed before the crash is filed on replay.
+        let more = a.store.append(&conv.id, "human", "message", vec![], "after").unwrap();
+        let q = packet("node-a", "p2", a.outgoing(&more).unwrap());
+        assert_eq!(b.file(&q, "MacBook").unwrap().expect("filed on replay").conversation, filed.conversation);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn earlier_messages_arrive_once_when_a_conversation_is_first_shared() {
         let root = std::env::temp_dir().join(format!("peer-sync-history-{}", uuid::Uuid::new_v4()));
