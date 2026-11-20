@@ -165,11 +165,17 @@ pub fn usage_limit(error: &str, now: u64) -> Option<u64> {
         "insufficient_quota",
         "weekly limit",
     ];
-    if !SIGNS.iter().any(|s| lower.contains(s)) && !has_status_429(&lower) {
+    if !SIGNS.iter().any(|s| lower.contains(s)) && !hit_your_named_limit(&lower) && !has_status_429(&lower) {
         return None;
     }
     let wait = reset_in_ms(&lower, now).unwrap_or(DEFAULT_COOLDOWN_MS).clamp(60_000, MAX_COOLDOWN_MS);
     Some(now + wait)
+}
+
+/// Claude Code says, for example, "You've hit your 5-hour limit". The window name between
+/// "your" and "limit" varies, so it cannot be represented by one fixed substring in `SIGNS`.
+fn hit_your_named_limit(s: &str) -> bool {
+    s.split_once("hit your ").is_some_and(|(_, rest)| rest.contains(" limit"))
 }
 
 /// Whether `error` itself says when the limit resets (rather than Consilium guessing).
@@ -241,6 +247,7 @@ mod tests {
             "HTTP 429 Too Many Requests",
             "status: 429",
             "5-hour limit reached ∙ resets 3pm",
+            "You've hit your 5-hour limit · resets 10:40pm",
         ] {
             assert!(usage_limit(e, NOW).is_some(), "{e}");
         }
