@@ -441,14 +441,38 @@ pub fn saved_grants_note(grants: &[String]) -> String {
 You may run them without a new REQUEST, as written, character for character. Any other command, or any \
 change to one of these, still needs its own REQUEST.\n",
     );
-    for grant in grants {
-        match grant.strip_prefix(INSTALL_GRANT_PREFIX) {
-            Some(command) => s.push_str(&format!("- install: {}\n", serde_json::to_string(command).unwrap_or_default())),
-            None => s.push_str(&format!("- elevated: {}\n", serde_json::to_string(grant).unwrap_or_default())),
+    // Every saved approval used to be listed in full on every turn of every AI; most are one-off
+    // checks that are never run again, and the list grew to thousands of tokens. Only the newest
+    // ones (they are appended in order) are listed, within a character budget.
+    let mut lines: Vec<String> = Vec::new();
+    let mut used = 0;
+    for grant in grants.iter().rev() {
+        let line = match grant.strip_prefix(INSTALL_GRANT_PREFIX) {
+            Some(command) => format!("- install: {}\n", serde_json::to_string(command).unwrap_or_default()),
+            None => format!("- elevated: {}\n", serde_json::to_string(grant).unwrap_or_default()),
+        };
+        let cost = line.chars().count();
+        if lines.len() >= SAVED_GRANTS_LISTED || (!lines.is_empty() && used + cost > SAVED_GRANTS_CHARS) {
+            break;
         }
+        used += cost;
+        lines.push(line);
+    }
+    let hidden = grants.len() - lines.len();
+    for line in lines.iter().rev() {
+        s.push_str(line);
+    }
+    if hidden > 0 {
+        s.push_str(&format!(
+            "({hidden} older saved approval(s) are not listed here to save space; for anything else, ask with a REQUEST.)\n"
+        ));
     }
     s
 }
+
+/// The most saved approvals listed in a prompt, and the characters they may take together.
+const SAVED_GRANTS_LISTED: usize = 8;
+const SAVED_GRANTS_CHARS: usize = 3_000;
 
 pub fn system(me: &str, round: u32, rounds: u32, ctx: &Context) -> String {
     let others: Vec<String> = ctx
@@ -1359,6 +1383,20 @@ mod tests {
         assert_eq!(saved_grants_note(&[]), "");
         let note = saved_grants_note(&[format!("{INSTALL_GRANT_PREFIX}brew install jq"), "sudo true".into()]);
         assert!(note.contains("- install: \"brew install jq\"") && note.contains("- elevated: \"sudo true\""));
+    }
+
+    #[test]
+    fn saved_grants_list_only_the_newest_within_budget() {
+        let grants: Vec<String> = (0..30).map(|i| format!("{INSTALL_GRANT_PREFIX}echo {i} {}", "x".repeat(200))).collect();
+        let note = saved_grants_note(&grants);
+        assert!(note.contains("echo 29 ") && !note.contains("echo 0 "));
+        assert!(note.matches("- install:").count() <= SAVED_GRANTS_LISTED);
+        assert!(note.contains("older saved approval(s) are not listed"));
+        // Newest stays last, as in the saved order.
+        assert!(note.find("echo 28 ").unwrap() < note.find("echo 29 ").unwrap());
+        // A single grant longer than the budget is still listed.
+        let long = vec![format!("{INSTALL_GRANT_PREFIX}{}", "y".repeat(SAVED_GRANTS_CHARS + 10))];
+        assert!(!saved_grants_note(&long).contains("not listed"));
     }
 
     #[test]
