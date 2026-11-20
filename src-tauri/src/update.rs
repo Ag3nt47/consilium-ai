@@ -604,7 +604,7 @@ fn stage_non_macos_download(data: &Path, version: &str, url: &str, bytes: &[u8])
     };
 
     let target_file = tmp_dir.join(filename);
-    std::fs::write(&target_file, &bytes).map_err(|e| format!("write asset: {e}"))?;
+    std::fs::write(&target_file, bytes).map_err(|e| format!("write asset: {e}"))?;
 
     #[cfg(unix)]
     {

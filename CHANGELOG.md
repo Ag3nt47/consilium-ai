@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fixed: when a linked PC announced an update, macOS no longer starts a full source rebuild while
+  the GitHub release is still publishing. It checks every 30 minutes (and immediately after the
+  announcement), verifies the published DMG's SHA-256, stages its app bundle atomically, and lets
+  the existing automatic installer restart into it (#10).
+
 - Fixed: a freeze of up to a minute (and a freeze-guard restart) when messages arrived while
   AIs were answering. The turn table stayed locked while the window, linked computers, notes
   and the council were told of a message; it is now held only to file the message (#14).
