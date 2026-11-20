@@ -1600,14 +1600,46 @@ export default function App() {
     // The jump button shows whenever the view is off the bottom, not only when far up.
     setAwayFromLatest(!nearBottom);
     // Only an upward scroll unpins: smooth auto-scrolls and growing content never move scrollTop up.
-    if (nearBottom) {
+    if (top < lastScrollTopRef.current - 2) {
+      followRef.current = false;
+    } else if (nearBottom) {
       followRef.current = true;
       setUnseen(0);
-    } else if (top < lastScrollTopRef.current - 2) {
-      followRef.current = false;
     }
     lastScrollTopRef.current = top;
   }
+
+  // Streamed text, images loading and expanded messages make the list taller without a new
+  // event; while following, keep the newest content in view.
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const stick = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (!followRef.current) return;
+        el.scrollTop = el.scrollHeight;
+        lastScrollTopRef.current = el.scrollTop;
+      });
+    };
+    const ro = new ResizeObserver(stick);
+    Array.from(el.children).forEach((c) => ro.observe(c));
+    const mo = new MutationObserver((records) => {
+      for (const r of records) {
+        r.addedNodes.forEach((n) => n instanceof Element && ro.observe(n));
+        r.removedNodes.forEach((n) => n instanceof Element && ro.unobserve(n));
+      }
+      stick();
+    });
+    mo.observe(el, { childList: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [current]);
 
   function scrollToLatest() {
     followRef.current = true;
