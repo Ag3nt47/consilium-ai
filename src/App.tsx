@@ -1592,6 +1592,29 @@ export default function App() {
   // Shows the floating jump-to-latest button whenever the chat is scrolled off the bottom.
   const [awayFromLatest, setAwayFromLatest] = useState(false);
 
+  // Only a scroll the reader started unpins; content shrinking, scroll anchoring and our own
+  // scrolls also lower scrollTop and must not stop following.
+  const userScrollIntentRef = useRef(0);
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const mark = () => { userScrollIntentRef.current = Date.now(); };
+    const onWheel = (e: WheelEvent) => { if (e.deltaY < 0) mark(); };
+    // Scrollbar drags hit the list itself; clicks on message controls (Collapse, Reply) hit children.
+    const onPointer = (e: PointerEvent) => { if (e.target === el) mark(); };
+    const onKey = (e: KeyboardEvent) => { if (["PageUp", "ArrowUp", "Home"].includes(e.key)) mark(); };
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchmove", mark, { passive: true });
+    el.addEventListener("pointerdown", onPointer);
+    el.addEventListener("keydown", onKey);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchmove", mark);
+      el.removeEventListener("pointerdown", onPointer);
+      el.removeEventListener("keydown", onKey);
+    };
+  }, [current]);
+
   function onMessagesScroll() {
     const el = messagesRef.current;
     if (!el) return;
@@ -1600,7 +1623,7 @@ export default function App() {
     // The jump button shows whenever the view is off the bottom, not only when far up.
     setAwayFromLatest(!nearBottom);
     // Only an upward scroll unpins: smooth auto-scrolls and growing content never move scrollTop up.
-    if (top < lastScrollTopRef.current - 2) {
+    if (top < lastScrollTopRef.current - 2 && Date.now() - userScrollIntentRef.current < 400) {
       followRef.current = false;
     } else if (nearBottom) {
       followRef.current = true;
@@ -1613,6 +1636,7 @@ export default function App() {
   // event; while following, keep the newest content in view.
   useEffect(() => {
     const el = messagesRef.current;
+    followRef.current = true; // a newly opened conversation starts at its newest message
     if (!el || typeof ResizeObserver === "undefined") return;
     let frame = 0;
     const stick = () => {
