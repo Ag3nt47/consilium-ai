@@ -111,15 +111,38 @@ pub fn since_human_start(events: &[Event]) -> usize {
     events.iter().rposition(is_human_message).map_or(0, |i| i + 1)
 }
 
+fn request_denied(events_after: &[Event], e: &Event) -> bool {
+    if e.requests.is_empty() {
+        return false;
+    }
+    events_after.iter().any(|later| {
+        if later.sender != "human" || later.kind != "message" {
+            return false;
+        }
+        let t = later.text.trim();
+        if !t.starts_with("Denied:") {
+            return false;
+        }
+        e.requests.iter().any(|r| {
+            let r = r.trim();
+            t.starts_with(&format!("Denied: {r}")) || (!r.is_empty() && t.contains(r))
+        })
+    })
+}
+
 /// Command boxes from AIs on this computer in `events[from..]`, under `max_age` ms old, that can
 /// run here and have neither run nor been denied (a running one counts too): `(event id, index)`.
+/// Skips boxes whose message asked a REQUEST that the human later Denied.
 pub fn waiting_boxes(events: &[Event], from: usize, now: u64, max_age: u64) -> Vec<(String, usize)> {
     let mut out = Vec::new();
-    for e in events.iter().skip(from) {
+    for (idx, e) in events.iter().enumerate().skip(from) {
         if e.kind != "message" || e.sender == "human" || e.sender == CONSILIUM || e.via.is_some() {
             continue;
         }
         if now.saturating_sub(e.ts) >= max_age {
+            continue;
+        }
+        if request_denied(&events[idx + 1..], e) {
             continue;
         }
         for (i, b) in crate::runcmd::fenced_blocks(&e.text).iter().enumerate() {
@@ -145,10 +168,7 @@ pub fn decide(events: &[Event], board: &Board, auto_run: bool) -> Decision {
 /// `decide`, knowing whether a command box is still due to report back (`pending_boxes`).
 pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pending: bool) -> Decision {
     let open: Vec<_> = board.tasks.iter().filter(|t| matches!(t.status, Status::Todo | Status::Doing)).collect();
-    let since_human = events
-        .iter()
-        .rposition(is_human_message)
-        .map_or(events, |i| &events[i + 1..]);
+    let since_human = &events[since_human_start(events)..];
     let waiting = unanswered(since_human);
     if open.is_empty() && (waiting.is_empty() || !auto_run) {
         return Decision::Stop;
@@ -272,10 +292,50 @@ mod tests {
 
     #[test]
     fn catch_up_picks_only_waiting_boxes_since_the_human_wrote() {
-        let events = vec![boxed(1, 5), ev(2, 10, "human", "message", "go", vec![]), boxed(3, 20), boxed(4, 30), ran(5, 40, "e4")];
+        let events = vec![boxed(1, 5), ev(2, 10, "human", "message", "go", vec![]), boxed(3, 20)];
         let from = since_human_start(&events);
         assert_eq!(waiting_boxes(&events, from, 50, CATCH_UP_MS), vec![("e3".to_string(), 0)]);
         assert!(waiting_boxes(&events, from, 20 + CATCH_UP_MS, CATCH_UP_MS).is_empty(), "too old to run unasked");
+    }
+
+    #[test]
+    fn waiting_boxes_runs_box_followed_by_authors_waiting_messages() {
+        let events = vec![
+            boxed(1, 5),
+            ev(2, 10, "claude", "message", "Waiting on box e1#0... no files changed", vec![]),
+            ev(3, 15, "claude", "message", "Still waiting on e1#0...", vec![]),
+        ];
+        // e1#0 must still run despite author's subsequent "waiting" status updates
+        assert_eq!(waiting_boxes(&events, 0, 50, CATCH_UP_MS), vec![("e1".to_string(), 0)]);
+    }
+
+    #[test]
+    fn waiting_boxes_skips_box_whose_request_was_denied() {
+        let mut b = boxed(1, 5);
+        b.requests = vec!["Delete old branch?".to_string()];
+        let events = vec![
+            b,
+            ev(2, 10, "human", "message", "Denied: Delete old branch?", vec![]),
+        ];
+        assert!(waiting_boxes(&events, 0, 50, CATCH_UP_MS).is_empty());
+    }
+
+    #[test]
+    fn waiting_boxes_skips_boxes_older_than_max_age() {
+        let events = vec![boxed(1, 5)];
+        // At ts 5 + CATCH_UP_MS + 1, box 1 is older than max_age and should be skipped
+        assert!(waiting_boxes(&events, 0, 5 + CATCH_UP_MS + 1, CATCH_UP_MS).is_empty());
+    }
+
+    #[test]
+    fn waiting_boxes_from_zero_picks_unhandled_boxes_across_human_messages() {
+        let events = vec![
+            boxed(1, 5),
+            ev(2, 10, "human", "message", "Approved: run it", vec![]),
+        ];
+        // With from = 0, box 1 (e1#0) is picked because it was never handled and author didn't move on,
+        // even though human wrote afterwards (e.g. approving a request).
+        assert_eq!(waiting_boxes(&events, 0, 50, CATCH_UP_MS), vec![("e1".to_string(), 0)]);
     }
 
     const SHELL: &str = if cfg!(windows) { "powershell" } else { "bash" };
