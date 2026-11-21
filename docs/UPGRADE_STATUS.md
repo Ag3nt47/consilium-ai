@@ -93,7 +93,7 @@ not complete the phase.
 | Phone "launch" actions | ✅ | 0.3.7. Allowlisted targets (terminal, vscode, dashboard) executed without shell |
 | Telegram / Discord | 🕓 | After Signal |
 | Clipboard image capture | 🔨 | Composer action attaches copied screenshots to the draft where clipboard permission is available. Live desktop checks pending. |
-| Global quick-summon hotkey | 🔨 | Restores the desktop window and focuses the current draft. Live shortcut and floating prompt verification remain open. |
+| Global quick-summon hotkey | 🔨 | Verified on installed Windows v0.3.54: Ctrl+Alt+Space restored the minimized window, brought it to the foreground, and focused the composer. macOS shortcut acceptance and the floating prompt remain open. |
 | Direct screenshot capture, Whisper, Ollama + HUD | 🕓 | |
 | Obsidian search, secrets vault, fix-drafting watchdog, widget dock | 🕓 | |
 | Consensus tribunal | ✅ | Discuss mode |
@@ -150,7 +150,7 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 
 | Item | Status | Acceptance and dependencies |
 |---|---|---|
-| Peer update status and transport checks | 🔨 | A simulated download verified the progress emblem and version text. Verify real download, installer integrity and automatic restart on both computers with the next release. Installer signing and transport measurements remain open. |
+| Peer update status and transport checks | 🔨 | A simulated download verified the progress emblem and version text. Both v0.3.54 installer files matched GitHub SHA-256 digests. Windows staged the release after Check now, recovered from a failed manual installer attempt on automatic retry, and reopened on v0.3.54. The live emblem, unprompted download, macOS install and restart, installer signing, and transport measurements remain open. |
 | Read-only environment and tool audit | 🔨 | Run `node scripts/audit-environment.mjs` for tracked Git changes, direct dependency versions, PATH availability and a bounded inventory of local Ollama manifests without starting models. App integration and macOS verification remain open. |
 | Distributed retrieval and state alignment | 🕓 | Reuse the conversation transport and offline retrieval work. Reconcile session and audit state across peers and verify duplicate handling. |
 | Local validation and mentor escalation | 🕓 | Reuse deterministic checks and the reviewed skills registry. After bounded failures, package a compact redacted report for an allowed mentor. Reuse reviewed repair lessons as retrieval material. |
