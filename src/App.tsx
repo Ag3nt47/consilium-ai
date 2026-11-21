@@ -1606,22 +1606,78 @@ export default function App() {
   // Shows the floating jump-to-latest button whenever the chat is scrolled off the bottom.
   const [awayFromLatest, setAwayFromLatest] = useState(false);
 
+  // Only a scroll the reader started unpins; content shrinking, scroll anchoring and our own
+  // scrolls also lower scrollTop and must not stop following.
+  const userScrollIntentRef = useRef(0);
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const mark = () => { userScrollIntentRef.current = Date.now(); };
+    const onWheel = (e: WheelEvent) => { if (e.deltaY < 0) mark(); };
+    // Scrollbar drags hit the list itself; clicks on message controls (Collapse, Reply) hit children.
+    const onPointer = (e: PointerEvent) => { if (e.target === el) mark(); };
+    const onKey = (e: KeyboardEvent) => { if (["PageUp", "ArrowUp", "Home"].includes(e.key)) mark(); };
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchmove", mark, { passive: true });
+    el.addEventListener("pointerdown", onPointer);
+    el.addEventListener("keydown", onKey);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchmove", mark);
+      el.removeEventListener("pointerdown", onPointer);
+      el.removeEventListener("keydown", onKey);
+    };
+  }, [current]);
+
   function onMessagesScroll() {
     const el = messagesRef.current;
     if (!el) return;
     const top = el.scrollTop;
-    const nearBottom = el.scrollHeight - top - el.clientHeight < 80;
+    const nearBottom = el.scrollHeight - top - el.clientHeight <= 4;
     // The jump button shows whenever the view is off the bottom, not only when far up.
     setAwayFromLatest(!nearBottom);
     // Only an upward scroll unpins: smooth auto-scrolls and growing content never move scrollTop up.
-    if (nearBottom) {
+    if (top < lastScrollTopRef.current - 2 && Date.now() - userScrollIntentRef.current < 400) {
+      followRef.current = false;
+    } else if (nearBottom) {
       followRef.current = true;
       setUnseen(0);
-    } else if (top < lastScrollTopRef.current - 2) {
-      followRef.current = false;
     }
     lastScrollTopRef.current = top;
   }
+
+  // Streamed text, images loading and expanded messages make the list taller without a new
+  // event; while following, keep the newest content in view.
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const stick = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (!followRef.current) return;
+        el.scrollTop = el.scrollHeight;
+        lastScrollTopRef.current = el.scrollTop;
+      });
+    };
+    const ro = new ResizeObserver(stick);
+    ro.observe(el);
+    Array.from(el.children).forEach((c) => ro.observe(c));
+    const mo = new MutationObserver((records) => {
+      for (const r of records) {
+        r.addedNodes.forEach((n) => n instanceof Element && ro.observe(n));
+        r.removedNodes.forEach((n) => n instanceof Element && ro.unobserve(n));
+      }
+      stick();
+    });
+    mo.observe(el, { childList: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [current]);
 
   function scrollToLatest() {
     followRef.current = true;
