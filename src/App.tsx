@@ -1243,7 +1243,15 @@ export default function App() {
   const agentNames = useMemo(() => Object.fromEntries(agents.map((a) => [a.id, a.name])), [agents]);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(!IN_APP && demoSettings);
-  const [showAddAi, setShowAddAi] = useState(!IN_APP && demoAddAi);
+  const [addPanel, setAddPanel] = useState<"choose" | "ai" | "device" | null>(!IN_APP && demoAddAi ? "ai" : null);
+  const addTrigger = useRef<HTMLButtonElement>(null);
+  const focusAddHeading = useCallback((heading: HTMLHeadingElement | null) => {
+    heading?.focus({ preventScroll: true });
+  }, []);
+  function closeAddPanel() {
+    setAddPanel(null);
+    addTrigger.current?.focus();
+  }
   const [showUsage, setShowUsage] = useState(false);
   const [showPalette, setShowPalette] = useState(false);
   // Voice chat: whether replies are being read aloud right now, and what the recogniser is hearing.
@@ -2425,7 +2433,7 @@ export default function App() {
   async function bringIn(a: AgentInfo) {
     const st = agentState(a);
     if (a.transport === "api" && st !== "ready") {
-      setShowAddAi(true);
+      setAddPanel("ai");
       const portal = PROVIDER_PORTALS[a.id];
       if (portal) await openUrl(portal.account).catch((e) => setError(`Couldn't open ${a.company}: ${e}`));
       setToast(`Finish account, billing, and API-key setup with ${a.company}; then paste only the key in Add AI`);
@@ -2435,7 +2443,7 @@ export default function App() {
     if (st !== "ready") {
       try {
         const title = await api.setup(a.id, st === "missing" ? "install" : "signin");
-        setShowAddAi(true);
+        setAddPanel("ai");
         setToast(`${title}: finish in the terminal window, then approve adding ${a.name}`);
         setTimeout(() => setToast(null), 7000);
       } catch (e) {
@@ -2629,7 +2637,7 @@ export default function App() {
     { id: "audit", name: "Open Audit Log", hint: "Approvals, requests, updates and errors, newest first", run: () => setAuditOpen(true) },
     { id: "usage", name: "Show Token Usage", hint: "Conversation & daily totals", run: () => openUsage() },
     { id: "self-check", name: "Run Self-Check", hint: "Probe all active council models", run: () => runSelfCheck() },
-    { id: "manage-ais", name: "Add / Remove AIs", hint: "Council membership", run: () => setShowAddAi(true) },
+    { id: "manage-ais", name: "Add / Remove AIs", hint: "Council membership", run: () => setAddPanel("ai") },
     { id: "link-sync", name: "Multi-Computer Sync", hint: "Pair and sync with Mac or Windows PC over Gigabit / Wi-Fi", run: () => setShowSettings(true) },
     { id: "settings", name: "Open Settings", hint: "Theme & access preferences", run: () => {
         setShowSettings(true);
@@ -2986,8 +2994,8 @@ export default function App() {
         <div className="sidebar-foot">
         <ResourcePressureGauge pressure={pressure} />
         <div className="sidebar-actions">
-          <button className="btn ghost" onClick={() => setShowAddAi(true)} title="Add or remove AIs">
-            + Add AI
+          <button className="btn ghost" ref={addTrigger} onClick={() => setAddPanel("choose")} aria-haspopup="dialog" aria-label="Add an AI or device">
+            Add <span aria-hidden="true">🤖 💻</span>
           </button>
           <button
             title="Theme, default folder, access level, shared memory, terminal command and updates"
@@ -3828,10 +3836,51 @@ export default function App() {
           </div>
         </div>
       )}
-      {showAddAi && (
-        <div className="modal-backdrop" onClick={() => setShowAddAi(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>Add AI</h2>
+      {addPanel === "choose" && (
+        <div className="modal-backdrop" onClick={closeAddPanel}>
+          <div className="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="add-title"
+            onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") closeAddPanel(); }}>
+            <h2 id="add-title">Add to Consilium</h2>
+            <button autoFocus className="btn ghost add-choice" onClick={() => setAddPanel("ai")}>
+              <span aria-hidden="true">🤖</span> Add an AI
+              <small>Set up a provider or a local model, check it, and add it to the council.</small>
+            </button>
+            <button className="btn ghost add-choice" onClick={() => setAddPanel("device")}>
+              <span aria-hidden="true">💻</span> Connect a device
+              <small>Pair a Windows or Mac computer and test the connection.</small>
+            </button>
+            <div className="row end"><button className="btn ghost" onClick={closeAddPanel}>Cancel</button></div>
+          </div>
+        </div>
+      )}
+      {addPanel === "device" && (
+        <div className="modal-backdrop" onClick={closeAddPanel}>
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="add-device-title"
+            onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") closeAddPanel(); }}>
+            <h2 id="add-device-title" tabIndex={-1} ref={focusAddHeading}>Connect a device</h2>
+            <ol className="addai-steps">
+              <li>Open Consilium on both computers, connect them to the same network, and enable sync below.</li>
+              <li>Generate a pairing code on one computer. Enter its address and code on the other.</li>
+              <li>Under Paired Computers, select Test Connection to verify the handshake and routes.</li>
+            </ol>
+            <LinkSettings />
+            <div className="row end">
+              <button className="btn ghost" onClick={() => setAddPanel("choose")}>Back</button>
+              <button className="btn primary" onClick={closeAddPanel}>Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {addPanel === "ai" && (
+        <div className="modal-backdrop" onClick={closeAddPanel}>
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="add-ai-title"
+            onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") closeAddPanel(); }}>
+            <h2 id="add-ai-title" tabIndex={-1} ref={focusAddHeading}>Add an AI</h2>
+            <ol className="addai-steps">
+              <li>Choose a provider below, or add a custom endpoint for a local or hosted model.</li>
+              <li>Complete the steps on its card, then use Check setup to refresh its status.</li>
+              <li>Add the model to the council. Test council replies sends one short prompt to each active member and may use provider allowance.</li>
+            </ol>
             <p className="muted small">
               Most AIs join through their company's official command-line tool and your own account. Grok and DeepSeek
               have no such tool, so they use an API key you paste here. You can also add any other AI below: a
@@ -3949,10 +3998,15 @@ export default function App() {
               </div>
             ))}
             <div className="row end">
-              <button title="Check every AI's install and sign-in status again" className="btn ghost" onClick={refreshAgents} disabled={agentsRefreshing}>
-                {agentsRefreshing ? "Checking…" : "Check again"}
+              <button className="btn ghost" onClick={() => setAddPanel("choose")}>Back</button>
+              <button title="Check install and sign-in status" className="btn ghost" onClick={refreshAgents} disabled={agentsRefreshing}>
+                {agentsRefreshing ? "Checking…" : "Check setup"}
               </button>
-              <button title="Close Add AI" className="btn primary" onClick={() => setShowAddAi(false)}>
+              <button title="Send one short test prompt to each active council member" className="btn ghost"
+                onClick={runSelfCheck} disabled={!members.length || Object.values(checks).includes("running")}>
+                Test council replies
+              </button>
+              <button title="Close Add AI" className="btn primary" onClick={closeAddPanel}>
                 Done
               </button>
             </div>
