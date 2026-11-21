@@ -1254,6 +1254,8 @@ export default function App() {
     addTrigger.current?.focus();
   }
   const [showUsage, setShowUsage] = useState(false);
+  const usageVisible = useRef(false);
+  const usageRequest = useRef(0);
   const [budgetWarning, setBudgetWarning] = useState<{ id: string; text: string; message: string } | null>(null);
   const budgetCheck = useRef(false);
   const [showPalette, setShowPalette] = useState(false);
@@ -1384,6 +1386,7 @@ export default function App() {
   const [unseen, setUnseen] = useState(0);
 
   currentRef.current = current;
+  usageVisible.current = showUsage;
 
   const adaptiveMode = pressure?.adaptive_mode ?? "balanced";
 
@@ -1507,26 +1510,27 @@ export default function App() {
 
   const loadTokenUsage = useCallback(async (convId?: string | null) => {
     const id = convId ?? currentRef.current;
+    const request = ++usageRequest.current;
     if (!id) {
       setTokenReport(null);
+      setUsageLoading(false);
       return;
     }
     setUsageLoading(true);
     try {
       const dayStart = new Date().setHours(0, 0, 0, 0);
       const report = await api.tokenUsage(id, dayStart);
-      setTokenReport(report);
+      if (request === usageRequest.current && id === currentRef.current) setTokenReport(report);
     } catch {
-      /* ignore */
+      if (request === usageRequest.current) setTokenReport(null);
     } finally {
-      setUsageLoading(false);
+      if (request === usageRequest.current) setUsageLoading(false);
     }
   }, []);
 
   const openUsage = useCallback(() => {
     setShowUsage(true);
-    loadTokenUsage();
-  }, [loadTokenUsage]);
+  }, []);
 
   // Startup: agents, conversations (creating a first one), live events, update check.
   useEffect(() => {
@@ -1565,7 +1569,7 @@ export default function App() {
       }
       if (t.state === "idle") {
         refreshAgents();
-        loadTokenUsage();
+        if (usageVisible.current) loadTokenUsage();
       }
     });
     const un3 = onActivity((activity) => {
