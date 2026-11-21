@@ -1623,7 +1623,7 @@ async fn execute(
         }
         let code = status.code().map_or_else(|| "killed".to_string(), |c| format!("exit {c}"));
         let err = stderr.trim();
-        let why = if err.is_empty() { String::new() } else { format!(": {}", last_chars(err, ERROR_TAIL_CHARS)) };
+        let why = if err.is_empty() { String::new() } else { format!(": {}", clip_middle(err, ERROR_TAIL_CHARS)) };
         return Err(format!("Claude CLI ended before reporting a final result ({code}){why}"));
     }
     if !status.success() || reply.trim().is_empty() {
@@ -2939,6 +2939,11 @@ printf 'done' > "$out""#
         let e = go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err();
         assert!(e.starts_with("Claude CLI ended before reporting a final result (exit 1): "), "{e}");
         assert!(e.chars().count() < 500, "{} chars", e.chars().count());
+        // A usage limit at the start of a long stderr survives the cut, so it still benches.
+        let p = fake(r#"cat >/dev/null; printf 'Claude AI usage limit reached|1800003600 ' >&2; i=0; while [ $i -lt 1000 ]; do printf 'x' >&2; i=$((i+1)); done; exit 1"#);
+        let e = go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err();
+        assert!(e.contains("usage limit reached"), "{e}");
+        assert!(crate::bench::usage_limit(&e, 1_800_000_000_000).is_some(), "{e}");
     }
 
     #[test]

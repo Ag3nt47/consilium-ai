@@ -44,15 +44,15 @@ fn download_state() -> &'static Mutex<DownloadState> {
     DOWNLOAD_STATE.get_or_init(|| Mutex::new(DownloadState::default()))
 }
 
-fn download_started(version: &str) {
-    if let Ok(mut state) = download_state().lock() {
+fn download_started(state: &Mutex<DownloadState>, version: &str) {
+    if let Ok(mut state) = state.lock() {
         state.active = state.active.saturating_add(1);
         state.version = version.trim_start_matches(['v', 'V']).trim().to_string();
     }
 }
 
-fn download_finished() {
-    if let Ok(mut state) = download_state().lock() {
+fn download_finished(state: &Mutex<DownloadState>) {
+    if let Ok(mut state) = state.lock() {
         state.active = state.active.saturating_sub(1);
         if state.active == 0 {
             state.version.clear();
@@ -60,11 +60,39 @@ fn download_finished() {
     }
 }
 
-pub fn download_status() -> DownloadStatus {
-    download_state()
+/// Keeps the download indicator balanced even when the async download is cancelled. Locals held
+/// across an `.await` are dropped with their future, so cleanup cannot be skipped by cancellation.
+struct DownloadActivity<'a> {
+    state: &'a Mutex<DownloadState>,
+}
+
+impl<'a> DownloadActivity<'a> {
+    fn start(state: &'a Mutex<DownloadState>, version: &str) -> Self {
+        download_started(state, version);
+        Self { state }
+    }
+}
+
+impl Drop for DownloadActivity<'_> {
+    fn drop(&mut self) {
+        download_finished(self.state);
+    }
+}
+
+fn download_status_for(state: &Mutex<DownloadState>) -> DownloadStatus {
+    state
         .lock()
         .map(|state| DownloadStatus { active: state.active > 0, version: state.version.clone() })
         .unwrap_or_default()
+}
+
+pub fn download_status() -> DownloadStatus {
+    download_status_for(download_state())
+}
+
+async fn track_download<T>(state: &Mutex<DownloadState>, version: &str, operation: impl std::future::Future<Output = T>) -> T {
+    let _activity = DownloadActivity::start(state, version);
+    operation.await
 }
 
 /// Which build is staged, written by `scripts/stage-update.mjs` after the build is in place.
@@ -375,10 +403,7 @@ fn check_release_download(version: &str, url: &str, digest: &str) -> Result<Stri
 
 pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str) -> Result<(), String> {
     let want = check_release_download(version, url, digest)?;
-    download_started(version);
-    let result = stage_from_url_inner(data, version, url, &want).await;
-    download_finished();
-    result
+    track_download(download_state(), version, stage_from_url_inner(data, version, url, &want)).await
 }
 
 async fn stage_from_url_inner(data: &Path, version: &str, url: &str, want: &str) -> Result<(), String> {
@@ -960,14 +985,28 @@ mod tests {
     }
 
     #[test]
-    fn download_status_tracks_overlapping_downloads() {
-        download_started("v1.2.3");
-        assert_eq!(download_status(), DownloadStatus { active: true, version: "1.2.3".into() });
-        download_started("V1.2.4");
-        download_finished();
-        assert_eq!(download_status(), DownloadStatus { active: true, version: "1.2.4".into() });
-        download_finished();
-        assert_eq!(download_status(), DownloadStatus::default());
+    fn download_status_tracks_overlapping_and_cancelled_downloads() {
+        // Keep this test isolated from the process-global production counter: Rust runs unit tests
+        // concurrently, and a cancellation assertion must not race another status test.
+        let state = Mutex::new(DownloadState::default());
+        let remaining_download = DownloadActivity::start(&state, "v1.2.3");
+        let pending_download = track_download(&state, "V1.2.4", std::future::pending::<()>());
+        let mut pending_download = Box::pin(pending_download);
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+
+        // Constructing an async future does nothing. Poll it once so its guard is alive across the
+        // pending await, then cancel it by dropping the future.
+        assert!(std::future::Future::poll(pending_download.as_mut(), &mut context).is_pending());
+        assert_eq!(state.lock().unwrap().active, 2);
+        assert_eq!(download_status_for(&state), DownloadStatus { active: true, version: "1.2.4".into() });
+
+        drop(pending_download);
+        assert_eq!(state.lock().unwrap().active, 1);
+        assert!(download_status_for(&state).active);
+
+        drop(remaining_download);
+        assert_eq!(download_status_for(&state), DownloadStatus::default());
     }
 
     #[test]
