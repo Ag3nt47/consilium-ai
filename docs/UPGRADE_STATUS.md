@@ -64,7 +64,7 @@ not complete the phase.
 | Phase 13: Frontier-model intelligence | 🕓 | Multimodal UI-to-code, digital-twin sandboxes and theorem-prover integration; provider-internal speculative decoding and latent/KV sharing remain unavailable through public CLIs/APIs |
 | Phase 14: Enterprise architectures | 🕓 | Air-gapped compliance evidence, local GPU cache pooling where supported, accessibility-driven cross-app automation, defensive threat simulation and fleet consensus |
 | Phase 15: Ultra-cutting-edge capabilities | 🕓 | Ephemeral micro-VM isolation, local model adaptation/pruning, post-quantum agent-mesh security and explicitly opt-in ambient context |
-| Phase 16: Cost and explainability | 🔨 | Token Usage offers an optional daily warning before Discuss based on recorded tokens. Projected usage and spend limits, complexity-aware routing, decision traces and live desktop verification remain open |
+| Phase 16: Cost and explainability | 🔨 | The optional daily Discuss warning is visible on Windows. A browser fixture verified the threshold, draft preservation on cancel, send-once confirmation and normal send below the threshold. Projected usage and spend limits, complexity-aware routing and decision traces remain open |
 | Phase 17: P2P local compute mesh | 🕓 | Private-LAN discovery, distributed offline inference, task sharding and disconnect-aware load balancing |
 | Phase 18: Evolutionary code optimization | 🕓 | Sandboxed candidate mutation/crossover, benchmark fitness selection and approval-gated promotion of winners |
 | Phase 19: Universal deconstruction | 🕓 | Deconstruct/reassemble commands, command-intent analysis and dependency/architecture mapping; attachment parsing and repo inspection are foundations |
@@ -125,7 +125,7 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 
 | Item | Status | Acceptance and dependencies |
 |---|---|---|
-| Concise engineering mode and compact handoffs | ⏭ | Share the same short status fields across agent adapters and task routing. Omit redundant prose and unchanged code. Compare prompt sizes using the same task fixtures. |
+| Concise engineering mode and compact handoffs | 🔨 | The shared editable-workspace prompt now assigns file scope once and asks for a compact handoff. The prompt tests passed on Windows, macOS and Linux. Comparing actual replies with fixed task fixtures and verifying routing behavior remain open. |
 | Scoped diffs, artifact references and indexing exclusions | ⏭ | Reuse existing bounded file snapshots and history compaction. Exclude generated artifacts from scans, retain readable artifact references and measure the change in input size. |
 | Local pre-flight and escalation ceilings | 🕓 | Run scoped syntax, lint and unit checks before eligible cloud requests. Surface the failure with a bounded retry count and a user-set budget. |
 | Persistent workers and stall recovery | 🕓 | Reuse supported provider sessions with a heartbeat, bounded restart attempts and resumable task state. Measure cold and warm latency and test an interrupted worker. |
@@ -150,7 +150,7 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 
 | Item | Status | Acceptance and dependencies |
 |---|---|---|
-| Peer update status and transport checks | 🔨 | Existing peer update requests and automatic installs are foundations. Verify progress emblem, signed release installation and restart on both computers. Add transport measurements after native paths work. |
+| Peer update status and transport checks | 🔨 | A simulated download verified the progress emblem and version text. Verify real download, installer integrity and automatic restart on both computers with the next release. Installer signing and transport measurements remain open. |
 | Read-only environment and tool audit | 🔨 | Run `node scripts/audit-environment.mjs` for tracked Git changes, direct dependency versions, PATH availability and a bounded inventory of local Ollama manifests without starting models. App integration and macOS verification remain open. |
 | Distributed retrieval and state alignment | 🕓 | Reuse the conversation transport and offline retrieval work. Reconcile session and audit state across peers and verify duplicate handling. |
 | Local validation and mentor escalation | 🕓 | Reuse deterministic checks and the reviewed skills registry. After bounded failures, package a compact redacted report for an allowed mentor. Reuse reviewed repair lessons as retrieval material. |
