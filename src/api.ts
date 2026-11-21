@@ -464,6 +464,7 @@ const appApi = {
   attachFiles: (id: string, paths: string[]) => invoke<Attachment[]>("attach_files", { id, paths }),
   /** Saves pasted file contents (a screenshot, say) for the next message. */
   attachData: (id: string, name: string, data: number[]) => invoke<Attachment>("attach_data", { id, name, data }),
+  attachClipboardImage: (id: string) => invoke<Attachment>("attach_clipboard_image", { id }),
   openAttachment: (id: string, attachment: Attachment) => invoke<void>("open_attachment", { id, attachment }),
   /** Opens an installed app by name, after the human confirms a spoken "open <app>". */
   openApp: (name: string) => invoke<void>("open_app", { name }),

@@ -2106,6 +2106,14 @@ export default function App() {
     if (!current) return;
     const conversation = current;
     try {
+      if (IN_APP) {
+        const attachment = await api.attachClipboardImage(conversation);
+        if (conversation === currentRef.current) {
+          setPending((previous) => [...previous, attachment]);
+          setError(null);
+        }
+        return;
+      }
       const items = await navigator.clipboard.read();
       const files: File[] = [];
       for (const item of items) {
@@ -2121,9 +2129,9 @@ export default function App() {
         return;
       }
       await attachPasted(files);
-    } catch {
+    } catch (error) {
       if (conversation === currentRef.current) {
-        setError("Couldn't read an image from the clipboard. Paste the copied image directly into the message box instead.");
+        setError(IN_APP ? String(error) : "Couldn't read an image from the clipboard. Paste the copied image directly into the message box instead.");
       }
     }
   }
