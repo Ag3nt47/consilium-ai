@@ -471,11 +471,11 @@ export const demoApi = {
     handshake_ok: true,
     rtt_ms: 4,
     routes: [
-      { addr: "192.168.1.157:8470", kind: "Gigabit / Wi-Fi LAN", reachable: true, rtt_ms: 4, status: "Reachable (4 ms)" },
+      { addr: "192.168.1.157:8470", kind: "IP route", reachable: true, rtt_ms: 4, status: "TCP connected in 4 ms" },
       { addr: "169.254.12.34:8470", kind: "Direct Cable / Bluetooth (Link-Local)", reachable: false, status: "Timed out" },
     ],
     queued_outgoing: 0,
-    summary: "✔ Handshake verified (4 ms via 192.168.1.157:8470) · Chats aligned (0 queued)",
+    summary: "Authenticated session via 192.168.1.157:8470 · 4 ms round trip · 0 outgoing queued",
   }),
   linkAddPeerRoute: async (_nodeId: string, address: string) => ["192.168.1.157:8470", address],
   linkRefreshRoutes: async () => ["192.168.1.157:8470", "192.168.1.170:8470"],

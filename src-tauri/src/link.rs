@@ -775,7 +775,7 @@ impl Link {
                         kind,
                         reachable: true,
                         rtt_ms: Some(elapsed),
-                        status: format!("Reachable ({elapsed} ms)"),
+                        status: format!("TCP connected in {elapsed} ms"),
                     });
                 }
                 Ok(Err(_)) => {
@@ -801,9 +801,9 @@ impl Link {
 
         let handshake_ok = connected;
         let summary = if connected {
+            let latency = rtt_ms.map(|ms| format!(" · {ms} ms round trip")).unwrap_or_default();
             format!(
-                "✔ Handshake verified ({} ms via {}) · Chats aligned ({} queued)",
-                rtt_ms.unwrap_or(0),
+                "Authenticated session via {}{latency} · {} outgoing queued",
                 active_route.as_deref().unwrap_or("active link"),
                 queued_outgoing
             )
