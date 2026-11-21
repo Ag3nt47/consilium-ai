@@ -1960,6 +1960,13 @@ mod tests {
         // One route that works and one that is down (nothing listens there).
         let dead = format!("127.0.0.1:{}", free_port());
         joiner.0.cfg.lock().unwrap().peers[0].addrs = vec![good.clone(), dead.clone()];
+        // A startup test holding the guard blocks a second diagnostic on the same device.
+        let running = joiner.0.stress_test_lock.lock().await;
+        assert_eq!(
+            joiner.stress_test().await.unwrap_err(),
+            "A communication stress test is already running"
+        );
+        drop(running);
         let reports = joiner.stress_test().await.unwrap();
         assert_eq!(reports.len(), 1);
         let r = &reports[0];
