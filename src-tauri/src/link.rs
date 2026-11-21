@@ -697,16 +697,16 @@ impl Link {
         let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, detail };
         while started.elapsed() < STRESS_SWITCH_TIMEOUT {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let (route, packets, session_generation) = {
+            let (route, packets, session_generation, interface) = {
                 let states = self.0.peers.lock().unwrap();
                 let Some(s) = states.get(&peer.node_id) else { continue };
                 // Only a session over one of the routes under test counts. The other computer may
                 // dial in meanwhile, and that session's route is its own outgoing port: crediting
                 // it passed a dead route, or reported the working one under the wrong address.
                 if s.generation <= generation || s.tx.is_none() {
-                    (None, 0, s.generation)
+                    (None, 0, s.generation, None)
                 } else {
-                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in, s.generation)
+                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in, s.generation, s.local_interface.clone())
                 }
             };
             if let Some(route) = route {
@@ -717,7 +717,7 @@ impl Link {
                             addr: r.clone(),
                             ok: true,
                             ms: Some(*ms),
-                            detail: format!("switched in {ms} ms, traffic confirmed after {} ms", started.elapsed().as_millis()),
+                            detail: format!("switched in {ms} ms, traffic confirmed after {} ms, local interface {}", started.elapsed().as_millis(), interface.as_deref().unwrap_or("unavailable")),
                         };
                     }
                     Some((_, _, _, observed_generation)) if *observed_generation == session_generation => {}
@@ -1964,6 +1964,7 @@ mod tests {
         let r = &reports[0];
         assert_eq!(r.routes.len(), 2);
         assert!(r.routes[0].ok && r.routes[0].addr == good, "{:?}", r.routes[0]);
+        assert!(r.routes[0].detail.contains("local interface "));
         assert!(!r.routes[1].ok && r.routes[1].addr == dead, "{:?}", r.routes[1]);
         assert_eq!(r.restored.as_deref(), Some(good.as_str()), "back on the working route");
         assert!(wait_for(|| joiner.status().peers[0].connected).await);
