@@ -4095,6 +4095,7 @@ export default function App() {
               );
             })}
             <CustomAiForm
+              availableGiB={pressure ? Math.max(0, pressure.total_memory_mb * (1 - pressure.memory_percent / 100) / 1024) : undefined}
               onAdded={(id) => {
                 refreshAgents();
                 setToast(`Added @${id}. Press "Add" on its card to bring it into the council.`);
