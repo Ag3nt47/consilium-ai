@@ -2030,6 +2030,8 @@ mod tests {
         let code = host.begin_pairing().unwrap();
         joiner.join(&direct, &code.code).await.unwrap();
         assert!(wait_for(|| joiner.status().peers[0].connected).await);
+        // Keep the listener available for the proxy without a competing reverse dial.
+        host.0.cfg.lock().unwrap().peers[0].addrs.clear();
         joiner.stop();
         assert!(wait_for(|| !host.status().peers[0].connected).await);
 
@@ -2044,14 +2046,9 @@ mod tests {
             let mut outbound = TcpStream::connect(direct).await.unwrap();
             tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await
         });
-        let peer = joiner.0.cfg.lock().unwrap().peers[0].clone();
-        let cancel = CancellationToken::new();
-        let dial = tokio::spawn({
-            let joiner = joiner.clone();
-            let alternate = alternate.clone();
-            let cancel = cancel.clone();
-            async move { joiner.dial_on(peer, &[alternate], cancel).await }
-        });
+        let unavailable = format!("127.0.0.1:{}", free_port());
+        joiner.0.cfg.lock().unwrap().peers[0].addrs = vec![unavailable, alternate.clone()];
+        joiner.start();
         assert!(wait_for(|| {
             let status = joiner.status();
             let peer = &status.peers[0];
@@ -2060,8 +2057,7 @@ mod tests {
         assert_eq!(received.lock().unwrap().iter().map(|packet| packet.id.as_str()).collect::<Vec<_>>(), [id.as_str()]);
         assert_eq!(host.inbox().len(), 1);
 
-        cancel.cancel();
-        dial.await.unwrap().unwrap();
+        joiner.stop();
         proxy.abort();
         host.stop();
         let _ = std::fs::remove_dir_all(&dir);
