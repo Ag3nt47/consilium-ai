@@ -140,13 +140,13 @@ export async function checkForUpdate(
       const asset = Array.isArray(r.assets) ? releaseAsset(r.assets, pkg) : undefined;
       writeCache({ lastCheck: Date.now(), etag: res.headers.get("ETag") || undefined, latest, asset });
     } else {
-      // 404 (no releases yet), rate limits, etc.: remember we checked, then try again on schedule.
-      writeCache({ ...cache, lastCheck: Date.now() });
+      // Keep rate-limit and missing-release checks on schedule. Retry server failures on reconnect.
+      if (res.status < 500) writeCache({ ...cache, lastCheck: Date.now() });
       if (force) throw new Error(`GitHub returned HTTP ${res.status}`);
     }
   } catch (error) {
     if (force) throw error;
-    return null;
+    // A cached installer can still be reachable when release metadata is unavailable.
   }
   const c = readCache();
   stageRelease(current, c.latest, c.asset, onDownloadStart, onDownloadFailure);
