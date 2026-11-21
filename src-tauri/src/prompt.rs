@@ -549,7 +549,7 @@ command box only for a command that needs administrator rights, or one your own 
         s.push_str(
             "\n\nFor council implementation, work at full capacity and assign deliverables and file scope once with @mentions. \
 Build your part and review related changes. Skip greetings, repeated plans and unchanged code. \
-Report handoffs with one field per line: Status:, Files:, Tests:, Blocker:, Next:. Omit empty fields. \
+Report handoffs with one field per line: Status:, Files:, Artifacts:, Tests:, Blocker:, Next:. Omit empty fields. Use artifact paths or PR and workflow run links instead of copying output. \
 Resolve routine choices and use REQUEST: for decisions that belong to the human. \
 Working rules across computers and tasks:\n\
 - Git worktrees: when working on code concurrently with other AIs, work in an isolated git worktree \
@@ -716,8 +716,8 @@ fn clipped(text: &str, max: usize) -> String {
 
 /// Preserve the fields of an agent handoff when its surrounding message ages out of context.
 fn compact_handoff(text: &str) -> Option<String> {
-    let mut fields = [None; 5];
-    let labels = ["Status", "Files", "Tests", "Blocker", "Next"];
+    let mut fields = [None; 6];
+    let labels = ["Status", "Files", "Artifacts", "Tests", "Blocker", "Next"];
     let mut fenced = false;
     for line in text.lines().map(str::trim) {
         if line.starts_with("```") {
@@ -739,8 +739,10 @@ fn compact_handoff(text: &str) -> Option<String> {
     if fields[0].is_none() || fields.iter().flatten().count() < 2 {
         return None;
     }
+    let has_artifacts = fields[2].is_some();
     Some(labels.into_iter().zip(fields).filter_map(|(label, value)| {
-        value.map(|value| format!("{label}: {}", clipped(value, 72)))
+        let limit = if label == "Artifacts" { 120 } else if has_artifacts { 46 } else { 72 };
+        value.map(|value| format!("{label}: {}", clipped(value, limit)))
     }).collect::<Vec<_>>().join(" | "))
 }
 
@@ -1156,7 +1158,7 @@ mod tests {
         };
         let s = system("gemini", 1, 1, &ctx);
         assert!(s.contains("Working rules across computers and tasks:"));
-        assert!(s.contains("one field per line: Status:, Files:, Tests:, Blocker:, Next:"));
+        assert!(s.contains("one field per line: Status:, Files:, Artifacts:, Tests:, Blocker:, Next:"));
         assert!(s.contains("Git worktrees:"));
         assert!(s.contains("Resource-aware builds:"));
         assert!(s.contains("Sketches, script templates with unfilled parameters, and notes belong in ```text blocks"));
@@ -1241,12 +1243,13 @@ mod tests {
     #[test]
     fn compact_handoff_preserves_fields_after_verbose_status() {
         let text = format!(
-            "**Status:** {}\nFiles: src/update.rs\nTests: cargo test passed\nNext: verify Mac restart",
+            "**Status:** {}\nFiles: src/update.rs\nArtifacts: https://github.com/example/project/actions/runs/123456\nTests: cargo test passed\nNext: verify Mac restart",
             "progress ".repeat(150)
         );
         let compact = compact_handoff(&text).unwrap();
         assert!(compact.len() <= MAX_SUMMARY_ENTRY_CHARS);
         assert!(compact.contains("Files: src/update.rs"));
+        assert!(compact.contains("Artifacts: https://github.com/example/project/actions/runs/123456"));
         assert!(compact.contains("Tests: cargo test passed"));
         assert!(compact.ends_with("Next: verify Mac restart"));
         assert!(compact_handoff("Status: ordinary line").is_none());
