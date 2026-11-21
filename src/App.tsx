@@ -2515,13 +2515,17 @@ export default function App() {
 
   async function checkNow() {
     setUpdateNote("Checking…");
-    const u = await checkForUpdate(true, markDownloadStarting, markDownloadFailed).catch(() => null);
-    setUpdate(u);
-    setUpdateNote(
-      !u ? "You're up to date (or offline)."
-        : u.unreleased ? `Version ${u.latest} is on GitHub but has no installer yet (you have ${u.current}). Build it from source, or ask the AIs to publish a release.`
-        : `Version ${u.latest} is available (you have ${u.current}).`,
-    );
+    try {
+      const u = await checkForUpdate(true, markDownloadStarting, markDownloadFailed);
+      setUpdate(u);
+      setUpdateNote(
+        !u ? "You're up to date."
+          : u.unreleased ? `Version ${u.latest} is on GitHub but has no installer yet (you have ${u.current}). Build it from source, or ask the AIs to publish a release.`
+          : `Version ${u.latest} is available (you have ${u.current}).`,
+      );
+    } catch (error) {
+      setUpdateNote(`Couldn't check GitHub for updates: ${String(error)}`);
+    }
   }
 
   const notReady = members.filter((a) => !a.available);

@@ -142,9 +142,11 @@ export async function checkForUpdate(
     } else {
       // 404 (no releases yet), rate limits, etc.: remember we checked, then try again on schedule.
       writeCache({ ...cache, lastCheck: Date.now() });
+      if (force) throw new Error(`GitHub returned HTTP ${res.status}`);
     }
-  } catch {
-    return null; // offline: stay quiet
+  } catch (error) {
+    if (force) throw error;
+    return null;
   }
   const c = readCache();
   stageRelease(current, c.latest, c.asset, onDownloadStart, onDownloadFailure);
