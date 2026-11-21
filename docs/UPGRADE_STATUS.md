@@ -142,7 +142,7 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 | Deterministic symbol maps and bounded edits | ⏭ | Expose compact symbols/imports and targeted edits through supported tools. Compare token usage and check patch applicability and formatting. |
 | Output offload and resumable checkpoints | ⏭ | Store large output locally and pass a bounded summary plus reference. Resume a task from a checkpoint with decisions, changes, tests and open work intact. |
 | Skill registry and batch export | 🕓 | Keep reviewed manifests, helpers and runbooks locally. Load content on demand and allow one compact export for approved cloud assistance. |
-| Offline model tiering and retrieval | 🔨 | Add AI estimates weight fit on one device or across manually entered devices, including per-device runtime allowance. Browser fixtures verify single, split and insufficient memory. Runner compatibility, throughput and local retrieval remain open. |
+| Offline model tiering and retrieval | 🔨 | Add AI estimates single or split weight fit using paired-device RAM reports or manual entries, including per-device runtime allowance. Browser fixtures verify single, split and insufficient memory. Live peer capability discovery, runner compatibility, throughput and local retrieval remain open. |
 | Worktree ownership and deterministic validation | 🕓 | Set file boundaries before dispatch. Run language-appropriate checks locally and record compact, bounded repair feedback. |
 | Credentials, persistent task queue and replay | 🕓 | Plan OS-backed storage, resumable queue state, dead-letter visibility and opt-in replay. Verify offline behavior and recovery after interruption. |
 

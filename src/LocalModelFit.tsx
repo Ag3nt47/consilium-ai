@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { api } from "./api";
 
 const MODELS = [
   { name: "Qwen3 0.6B", parameters: 0.6 },
@@ -10,7 +11,7 @@ const MODELS = [
   { name: "Custom model", parameters: 0 },
 ];
 
-type Device = { id: number; name: string; memory: string };
+type Device = { id: number | string; name: string; memory: string };
 const gib = (value: number) => `${value.toFixed(1)} GiB`;
 const positive = (value: string) => Math.max(0, Number(value) || 0);
 
@@ -21,6 +22,8 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   const [bits, setBits] = useState(4);
   const [overhead, setOverhead] = useState("2");
   const [customWeights, setCustomWeights] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [scanStatus, setScanStatus] = useState("");
   const host = hostMemory ?? (availableGiB && availableGiB > 0 ? availableGiB.toFixed(1) : "");
   const runtime = positive(overhead);
   const hasMemory = [host, ...devices.map(({ memory }) => memory)].some((memory) => positive(memory) > 0);
@@ -30,10 +33,41 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
     .sort((a, b) => b.capacity - a.capacity);
   const combined = budgets.reduce((sum, { capacity }) => sum + capacity, 0);
 
+  async function scanPeers() {
+    setScanning(true);
+    setScanStatus("");
+    try {
+      const before = await api.peerResources();
+      await api.requestPeerResources();
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const reports = await api.peerResources();
+      const found = Object.entries(reports).flatMap(([name, report]) => {
+        if (report.updated_at <= (before[name]?.updated_at ?? 0) || !report.total_memory_mb) return [];
+        const memory = Math.max(0, report.total_memory_mb * (1 - report.memory_percent / 100) / 1024);
+        return [{ id: name, name, memory: memory.toFixed(1) }];
+      });
+      setDevices((previous) => [
+        ...previous.filter((device) => !found.some((peer) => peer.id === device.id)),
+        ...found,
+      ]);
+      setScanStatus(found.length
+        ? `Imported ${found.length} paired computer(s). Review the estimates and remove any duplicate manual entry.`
+        : "No new memory reports arrived. Check that paired computers are online and updated, or enter memory manually.");
+    } catch {
+      setScanStatus("Peer capability scan unavailable. Enter device memory manually.");
+    } finally {
+      setScanning(false);
+    }
+  }
+
   return (
     <details className="small">
       <summary>Check local model memory</summary>
-      <p className="muted">Enter the usable memory on each device after leaving room for its OS and other apps. Edit this computer’s estimate, and enter the Mac or other devices manually. Count unified memory once.</p>
+      <p className="muted">Use the paired-computer scan or enter usable memory after leaving room for the OS and other apps. Count unified memory once.</p>
+      <button type="button" className="btn ghost small-btn" disabled={scanning} onClick={() => void scanPeers()}>
+        {scanning ? "Checking paired computers…" : "Check paired computers"}
+      </button>
+      {scanStatus && <p className="muted" role="status">{scanStatus}</p>}
       <div className="custom-ai-fields">
         <label>
           This computer usable memory (GiB)

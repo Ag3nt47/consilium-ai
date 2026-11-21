@@ -791,6 +791,13 @@ impl Sync {
         if shared.kind == "resources" {
             return self.take_resources(packet, shared, computer);
         }
+        if shared.kind == "resources_request" {
+            if crate::store::now_ms().abs_diff(packet.timestamp_ms) <= 120_000 {
+                let data = crate::data_dir();
+                self.share_resources(data.as_deref())?;
+            }
+            return Ok(None);
+        }
         if shared.kind == "switched" {
             return self.take_switched(packet, shared, computer);
         }
@@ -1707,6 +1714,7 @@ mod tests {
             total_disk_bytes: 1024 * 1024 * 1024 * 1024,
             cpu_percent: 18,
             memory_percent: 32,
+            total_memory_mb: 16384,
             cores: 16,
             tools: vec!["cargo".into(), "git".into(), "npm".into()],
             updated_at: 100000,
