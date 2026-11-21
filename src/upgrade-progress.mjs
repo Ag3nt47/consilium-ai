@@ -33,5 +33,6 @@ export function parseUpgradeProgress(ledger) {
     number,
     ...document,
     percentage: Math.round(100 * document.done / document.total),
+    activePercentage: Math.round(100 * document.active / document.total),
   }));
 }
