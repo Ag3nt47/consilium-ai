@@ -430,7 +430,7 @@ pub fn task_lines(text: &str) -> Vec<Op> {
             fenced = !fenced;
             continue;
         }
-        if fenced || t.len() < 5 || !t[..5].eq_ignore_ascii_case("TASK:") {
+        if fenced || !t.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("TASK:")) {
             continue;
         }
         let rest = t[5..].trim();
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn reads_task_lines_and_skips_code_blocks() {
         let ops = task_lines(
-            "Working on it.\nTASK: take Signal relay\ntask: done #2\nTASK: blocked #3 - needs disk space\nTASK: hand #4 to @gemini\n```text\nTASK: take example\n```\nTASK: nonsense here",
+            "正在处理。\nTASK: take Signal relay\ntask: done #2\nTASK: blocked #3 - needs disk space\nTASK: hand #4 to @gemini\n```text\nTASK: take example\n```\nTASK: nonsense here",
         );
         assert_eq!(
             ops,
