@@ -748,6 +748,7 @@ mod tests {
         script: Box<Script>,
         /// How long each AI takes to answer, in ms.
         delay: HashMap<&'static str, u64>,
+        wait_for_gpt: Option<Arc<tokio::sync::Notify>>,
         asked: Mutex<Vec<(String, u32)>>,
         installed: HashSet<&'static str>,
     }
@@ -757,14 +758,27 @@ mod tests {
             self.asked.lock().unwrap().push((agent.id.to_string(), answer));
             let r = (self.script)(agent.id, answer, &events).map(|text| AgentReply { text, usage: None, model: None });
             let d = self.delay.get(agent.id).copied().unwrap_or(10);
+            let gate = self.wait_for_gpt.clone().filter(|_| agent.id == "claude");
             Box::pin(async move {
+                let ready = async {
+                    if let Some(gate) = gate {
+                        gate.notified().await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(d)).await;
+                };
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_millis(d)) => r,
+                    _ = ready => r,
                     _ = cancel.cancelled() => Err("stopped".into()),
                 }
             })
         }
-        fn event(&self, _e: &Event) {}
+        fn event(&self, e: &Event) {
+            if e.kind == "message" && e.sender == "gpt" {
+                if let Some(gate) = &self.wait_for_gpt {
+                    gate.notify_one();
+                }
+            }
+        }
         fn thinking(&self, _agents: Vec<String>, _round: u32) {}
         fn installed(&self, agent: &'static Agent) -> bool {
             self.installed.contains(agent.id)
@@ -778,6 +792,7 @@ mod tests {
         Fake {
             script: Box::new(script),
             delay: HashMap::new(),
+            wait_for_gpt: None,
             asked: Mutex::new(vec![]),
             installed: ["gpt", "claude", "gemini"].into_iter().collect(),
         }
@@ -823,13 +838,10 @@ mod tests {
     async fn everyone_answers_at_once_without_waiting_for_each_other() {
         let (store, c) = setup();
         let mut f = fake(|id, _, _| Ok(format!("hi from {id}")));
-        // Claude is asked first but is slower; ChatGPT answers without waiting for it. One after
-        // the other would take 5 s; side by side, about 3 s.
-        f.delay.insert("claude", 3000);
-        f.delay.insert("gpt", 2000);
-        let started = std::time::Instant::now();
+        // Claude is asked first and can finish only after the GPT reply is published.
+        // A sequential council would time out in go() while waiting for Claude.
+        f.wait_for_gpt = Some(Arc::new(tokio::sync::Notify::new()));
         let ev = go(&store, &c, Arc::new(f), &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
-        assert!(started.elapsed() < Duration::from_millis(4500), "answers ran in parallel: {:?}", started.elapsed());
         assert_eq!(said(&ev), vec![("gpt".into(), "hi from gpt".into()), ("claude".into(), "hi from claude".into())]);
     }
 
