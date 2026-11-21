@@ -545,7 +545,7 @@ command box only for a command that needs administrator rights, or one your own 
         s.push_str(
             "\n\nFor council implementation, work at full capacity and assign deliverables and file scope once with @mentions. \
 Build your part and review related changes. Skip greetings, repeated plans and unchanged code. \
-Report handoffs as Status, Files, Tests, Blocker, Next. Omit empty fields. \
+Report handoffs with one field per line: Status:, Files:, Tests:, Blocker:, Next:. Omit empty fields. \
 Resolve routine choices and use REQUEST: for decisions that belong to the human. \
 Working rules across computers and tasks:\n\
 - Git worktrees: when working on code concurrently with other AIs, work in an isolated git worktree \
@@ -710,6 +710,28 @@ fn clipped(text: &str, max: usize) -> String {
     }
 }
 
+/// Preserve the fields of an agent handoff when its surrounding message ages out of context.
+fn compact_handoff(text: &str) -> Option<String> {
+    let mut fields = [None; 5];
+    let labels = ["Status", "Files", "Tests", "Blocker", "Next"];
+    for line in text.lines() {
+        let Some((label, value)) = line.trim().split_once(':') else { continue };
+        let label = label.trim_start_matches("- ").trim_matches('*');
+        let value = value.trim_start_matches('*').trim();
+        if !value.is_empty() {
+            if let Some(index) = labels.iter().position(|candidate| candidate.eq_ignore_ascii_case(label)) {
+                fields[index] = Some(value);
+            }
+        }
+    }
+    if fields[0].is_none() || fields.iter().flatten().count() < 2 {
+        return None;
+    }
+    Some(labels.into_iter().zip(fields).filter_map(|(label, value)| {
+        value.map(|value| format!("{label}: {}", clipped(value, 72)))
+    }).collect::<Vec<_>>().join(" | "))
+}
+
 /// A local, deterministic digest of older turns. It intentionally avoids another provider call:
 /// context compression must still work offline, under rate limits, and on weaker hardware. The
 /// scoring keeps human intent and explicit decisions ahead of routine progress narration.
@@ -730,7 +752,11 @@ fn transcript_digest(older: &[(&Event, String)], budget: usize) -> String {
             let outcome = [" decided ", " complete", " committed", " pushed", " blocked", " failed", " fixed", " next step"]
                 .iter()
                 .any(|needle| lower.contains(needle));
-            let score = u8::from(decisive) * 100 + u8::from(event.sender == "human") * 30 + u8::from(outcome) * 10;
+            let handoff = if decisive || event.sender == "human" { None } else { compact_handoff(&event.text) };
+            let score = u8::from(decisive) * 100
+                + u8::from(event.sender == "human") * 30
+                + u8::from(handoff.is_some()) * 20
+                + u8::from(outcome) * 10;
             let attachments = if event.attachments.is_empty() {
                 String::new()
             } else {
@@ -742,7 +768,7 @@ fn transcript_digest(older: &[(&Event, String)], budget: usize) -> String {
             (
                 index,
                 score,
-                format!("- [{}] {}{}", named(event), clipped(&compact, MAX_SUMMARY_ENTRY_CHARS), attachments),
+                format!("- [{}] {}{}", named(event), clipped(handoff.as_deref().unwrap_or(&compact), MAX_SUMMARY_ENTRY_CHARS), attachments),
             )
         })
         .collect();
@@ -1113,7 +1139,7 @@ mod tests {
         };
         let s = system("gemini", 1, 1, &ctx);
         assert!(s.contains("Working rules across computers and tasks:"));
-        assert!(s.contains("Status, Files, Tests, Blocker, Next"));
+        assert!(s.contains("one field per line: Status:, Files:, Tests:, Blocker:, Next:"));
         assert!(s.contains("Git worktrees:"));
         assert!(s.contains("Resource-aware builds:"));
         assert!(s.contains("Sketches, script templates with unfilled parameters, and notes belong in ```text blocks"));
@@ -1193,6 +1219,39 @@ mod tests {
         assert!(t.contains("RECENT MESSAGES"));
         assert!(t.len() <= MAX_TRANSCRIPT_CHARS + 500);
         assert_eq!(visible_message_ids(&events, "gpt"), vec!["latest"]);
+    }
+
+    #[test]
+    fn compact_handoff_preserves_fields_after_verbose_status() {
+        let text = format!(
+            "**Status:** {}\nFiles: src/update.rs\nTests: cargo test passed\nNext: verify Mac restart",
+            "progress ".repeat(150)
+        );
+        let compact = compact_handoff(&text).unwrap();
+        assert!(compact.len() <= MAX_SUMMARY_ENTRY_CHARS);
+        assert!(compact.contains("Files: src/update.rs"));
+        assert!(compact.contains("Tests: cargo test passed"));
+        assert!(compact.ends_with("Next: verify Mac restart"));
+        assert!(compact_handoff("Status: ordinary line").is_none());
+    }
+
+    #[test]
+    fn transcript_digest_fits_approval_and_handoff_in_a_tight_budget() {
+        let events = [
+            ev("human", "Approved: verify before rollout"),
+            ev("gpt", &format!(
+                "Status: {}\nTests: cargo test passed\nNext: verify Mac restart",
+                "progress ".repeat(150)
+            )),
+            ev("gpt", &"routine progress".repeat(150)),
+        ];
+        let older: Vec<_> = events.iter().map(|event| (event, String::new())).collect();
+        let digest = transcript_digest(&older, 400);
+        assert!(digest.contains("Approved: verify before rollout"));
+        assert!(digest.contains("Tests: cargo test passed"));
+        assert!(digest.contains("Next: verify Mac restart"));
+        assert!(!digest.contains("routine progress"));
+        assert!(digest.len() <= 400);
     }
 
     #[test]
