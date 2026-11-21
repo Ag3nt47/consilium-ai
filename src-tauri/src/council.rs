@@ -893,6 +893,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claude_codes_five_hour_limit_wording_raises_no_alarm() {
+        let (store, c) = setup();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "claude" => Err("You've hit your 5-hour limit · resets 10:40pm".into()),
+            _ => Ok(format!("{id} here")),
+        }));
+        let ev = go(&store, &c, f, &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
+        assert!(!ev.iter().any(|e| e.text.contains("couldn't answer")), "{ev:?}");
+        assert!(ev.iter().any(|e| e.sender == CONSILIUM && e.text.contains("Claude ran out of usage")));
+    }
+
+    #[tokio::test]
     async fn an_ai_out_of_usage_is_benched_and_the_others_carry_on() {
         let (store, c) = setup();
         let bench = Arc::new(Bench::new());
