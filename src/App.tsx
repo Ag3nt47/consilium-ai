@@ -1510,8 +1510,11 @@ export default function App() {
       refreshList();
       // An AI saying an update is ready should light the button straight away.
       if (e.kind === "message" && e.sender !== "human") pollStaged();
-      // A note from Consilium (an AI ran out of usage, or is back) changes the AIs' status.
-      if (e.sender === "consilium") refreshAgents();
+      // A note from Consilium (an AI ran out of usage, or is back, or council on/off changed) changes the AIs' status.
+      if (e.sender === "consilium") {
+        refreshAgents();
+        if (currentRef.current) api.switchedOff(currentRef.current).then(setOffHere).catch(() => setOffHere([]));
+      }
     });
     const un2 = onTurn((t) => {
       if (t.conversation === currentRef.current) {
