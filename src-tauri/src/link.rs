@@ -1469,14 +1469,12 @@ impl Link {
 /// Tries every known address at once and keeps whichever connects first.
 /// What kind of connection an address is, for test results.
 fn route_kind(addr: &str) -> &'static str {
-    if addr.starts_with("169.254.") {
-        "Direct cable / Bluetooth (link-local)"
-    } else if addr.starts_with("100.") {
-        "Tailscale"
-    } else if addr.starts_with("127.") {
-        "Loopback"
-    } else {
-        "LAN (Ethernet or Wi-Fi)"
+    match addr.parse::<SocketAddr>().map(|socket| socket.ip().to_canonical()) {
+        Ok(ip) if ip.is_loopback() => "Loopback",
+        Ok(std::net::IpAddr::V4(ip)) if ip.is_link_local() => "Link-local",
+        Ok(std::net::IpAddr::V4(ip)) if ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64 => "Shared address space",
+        Ok(_) => "IP route",
+        Err(_) => "Unclassified endpoint",
     }
 }
 

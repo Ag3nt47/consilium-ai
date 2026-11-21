@@ -779,19 +779,12 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         <div className="failover-routes-chips">
           {(peer.addrs || []).map((addr) => {
             const isActive = peer.route && peer.route === addr;
-            const kind = addr.startsWith("169.254.")
-              ? "Direct Cable / BT"
-              : addr.startsWith("100.")
-              ? "Tailscale"
-              : addr.startsWith("127.0.0.1")
-              ? "Loopback"
-              : "Gigabit / Wi-Fi";
             return (
               <div key={addr} className={`failover-chip ${isActive ? "active" : "standby"}`}>
                 <span className="chip-icon">{isActive ? "🟢" : "⚪"}</span>
                 <code>{addr}</code>
-                <span className="chip-kind">{kind}</span>
-                <span className="chip-role">{isActive ? "Active (Primary)" : "Standby (Failover)"}</span>
+                {isActive && peer.local_interface && <span className="chip-kind">{peer.local_interface}</span>}
+                <span className="chip-role">{isActive ? "Active route" : "Candidate route"}</span>
               </div>
             );
           })}
