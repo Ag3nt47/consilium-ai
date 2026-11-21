@@ -1236,6 +1236,25 @@ mod tests {
     }
 
     #[test]
+    fn transcript_digest_fits_approval_and_handoff_in_a_tight_budget() {
+        let events = [
+            ev("human", "Approved: verify before rollout"),
+            ev("gpt", &format!(
+                "Status: {}\nTests: cargo test passed\nNext: verify Mac restart",
+                "progress ".repeat(150)
+            )),
+            ev("gpt", &"routine progress".repeat(150)),
+        ];
+        let older: Vec<_> = events.iter().map(|event| (event, String::new())).collect();
+        let digest = transcript_digest(&older, 400);
+        assert!(digest.contains("Approved: verify before rollout"));
+        assert!(digest.contains("Tests: cargo test passed"));
+        assert!(digest.contains("Next: verify Mac restart"));
+        assert!(!digest.contains("routine progress"));
+        assert!(digest.len() <= 400);
+    }
+
+    #[test]
     fn transcript_digest_prioritizes_decisions_and_human_intent() {
         let noise = "routine progress ".repeat(900);
         let mut events: Vec<Event> = (0..20).map(|_| ev("gpt", &noise)).collect();
