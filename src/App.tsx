@@ -1623,10 +1623,33 @@ export default function App() {
   // with automatic install on (Settings → Updates) Consilium installs it and restarts by itself.
   useEffect(() => {
     if (!prefs.autoUpdate) return;
-    const check = () => checkForUpdate(false, markDownloadStarting, markDownloadFailed).then(setUpdate).catch(() => undefined);
+    let lastCheck = 0;
+    let checking = false;
+    let disposed = false;
+    const check = () => {
+      if (checking) return;
+      checking = true;
+      lastCheck = Date.now();
+      void checkForUpdate(false, markDownloadStarting, markDownloadFailed)
+        .then((result) => { if (!disposed) setUpdate(result); })
+        .catch(() => undefined)
+        .finally(() => { checking = false; });
+    };
+    const onResume = () => {
+      if (document.visibilityState === "visible" && Date.now() - lastCheck >= 30_000) check();
+    };
     check();
     const t = setInterval(check, 30 * 60 * 1000);
-    return () => clearInterval(t);
+    window.addEventListener("focus", onResume);
+    window.addEventListener("online", onResume);
+    document.addEventListener("visibilitychange", onResume);
+    return () => {
+      disposed = true;
+      clearInterval(t);
+      window.removeEventListener("focus", onResume);
+      window.removeEventListener("online", onResume);
+      document.removeEventListener("visibilitychange", onResume);
+    };
   }, [prefs.autoUpdate, markDownloadStarting, markDownloadFailed]);
 
   useEffect(() => {
