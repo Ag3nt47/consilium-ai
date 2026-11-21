@@ -92,7 +92,7 @@ not complete the phase.
 | Persona chips above the prompt | ✅ | Applied instantly on 0.3.6 without restarting |
 | Phone "launch" actions | ✅ | 0.3.7. Allowlisted targets (terminal, vscode, dashboard) executed without shell |
 | Telegram / Discord | 🕓 | After Signal |
-| Clipboard image capture | 🔨 | Composer action attaches copied screenshots to the draft where clipboard permission is available. Live desktop checks pending. |
+| Clipboard image capture | 🔨 | The installed Windows v0.3.54 webview rejected a generated clipboard image. The desktop button now reads images through the native clipboard and attaches a PNG to the current draft. Windows and macOS live retests remain open. |
 | Global quick-summon hotkey | 🔨 | Verified on installed Windows v0.3.54: Ctrl+Alt+Space restored the minimized window, brought it to the foreground, and focused the composer. macOS shortcut acceptance and the floating prompt remain open. |
 | Direct screenshot capture, Whisper, Ollama + HUD | 🕓 | |
 | Obsidian search, secrets vault, fix-drafting watchdog, widget dock | 🕓 | |

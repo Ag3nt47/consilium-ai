@@ -524,6 +524,25 @@ async fn attach_data(state: State<'_, AppState>, id: String, name: String, data:
     state.engine.attach_bytes(&id, &name, &data)
 }
 
+#[tauri::command]
+async fn attach_clipboard_image(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<attach::Attachment, String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+
+    let image = app.clipboard().read_image().map_err(|error| format!("Couldn't read a clipboard image: {error}"))?;
+    if image.rgba().len() as u64 > attach::MAX_BYTES {
+        return Err("The clipboard image is too large. Copy a smaller image and try again.".into());
+    }
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, image.width(), image.height());
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+        writer.write_image_data(image.rgba()).map_err(|error| error.to_string())?;
+    }
+    state.engine.attach_bytes(&id, "clipboard-1.png", &bytes)
+}
+
 /// Opens an attachment of conversation `id` in its usual app.
 #[tauri::command]
 fn open_attachment(app: AppHandle, state: State<AppState>, id: String, attachment: attach::Attachment) -> Result<(), String> {
@@ -1420,6 +1439,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         // Remembers the window's size, position, maximized and full-screen state across restarts.
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
@@ -1637,6 +1657,7 @@ pub fn run() {
             forget_approval,
             attach_files,
             attach_data,
+            attach_clipboard_image,
             open_attachment,
             open_app,
             get_daily_wallpaper,

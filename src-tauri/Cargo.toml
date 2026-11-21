@@ -34,6 +34,8 @@ tauri-plugin-dialog = "2"
 sysinfo = "0.37"
 tauri-plugin-window-state = "2"
 tauri-plugin-global-shortcut = "=2.3.2"
+tauri-plugin-clipboard-manager = "=2.3.2"
+png = "0.18"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
