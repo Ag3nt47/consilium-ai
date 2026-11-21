@@ -40,8 +40,12 @@ struct Limits<'a> {
 
 const CLOUD_LIMITS: Limits<'static> = Limits { total: MAX_TRANSCRIPT_CHARS, summary: MAX_TRANSCRIPT_SUMMARY_CHARS, per_message: None };
 
-fn local_limits(data: Option<&Path>) -> Limits<'_> {
-    Limits { total: LOCAL_TRANSCRIPT_CHARS, summary: LOCAL_SUMMARY_CHARS, per_message: Some((LOCAL_MESSAGE_CHARS, data)) }
+fn local_limits(data: Option<&Path>, window: Option<usize>, system_chars: usize) -> Limits<'_> {
+    let total = window.map_or(LOCAL_TRANSCRIPT_CHARS, |tokens| {
+        let input = (tokens - tokens / 4).saturating_mul(crate::apiagent::CHARS_PER_TOKEN);
+        input.saturating_sub(system_chars).clamp(512, LOCAL_TRANSCRIPT_CHARS)
+    });
+    Limits { total, summary: LOCAL_SUMMARY_CHARS.min(total / 3), per_message: Some((LOCAL_MESSAGE_CHARS, data)) }
 }
 
 struct GitOutput {
@@ -813,8 +817,8 @@ pub fn transcript(events: &[Event], me: &str) -> String {
 
 /// The transcript for a local model: a small budget, with long messages offloaded to files in
 /// `data`'s offload folder (see `offload`) so one command's output can't fill its context window.
-pub fn local_transcript(events: &[Event], me: &str, data: Option<&Path>, handoff: Option<&Path>) -> String {
-    transcript_within(events, me, &local_limits(data), handoff)
+pub fn local_transcript(events: &[Event], me: &str, data: Option<&Path>, handoff: Option<&Path>, window: Option<usize>, system: &str) -> String {
+    transcript_within(events, me, &local_limits(data, window, system.chars().count()), handoff)
 }
 
 fn transcript_within(events: &[Event], me: &str, limits: &Limits, handoff: Option<&Path>) -> String {
@@ -1272,6 +1276,13 @@ mod tests {
     }
 
     #[test]
+    fn known_local_window_reserves_a_quarter_and_system_prompt_space() {
+        assert_eq!(local_limits(None, Some(8192), 1024).total, 17_408);
+        assert_eq!(local_limits(None, None, 1024).total, LOCAL_TRANSCRIPT_CHARS);
+        assert_eq!(local_limits(None, Some(512), 9999).total, 512);
+    }
+
+    #[test]
     fn local_models_get_a_small_transcript_with_long_outputs_offloaded() {
         let data = std::env::temp_dir().join(format!("consilium-local-transcript-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
@@ -1280,7 +1291,7 @@ mod tests {
         events.push(ev("human", &output));
         events.push(ev("human", "now fix the linker error"));
         let path = data.join("test.HANDOFF.md");
-        let t = local_transcript(&events, "qwen", Some(&data), Some(&path));
+        let t = local_transcript(&events, "qwen", Some(&data), Some(&path), Some(8_192), "");
         let checkpoint = std::fs::read_to_string(path).unwrap();
         assert!(checkpoint.starts_with("# Consilium handoff"));
         assert!(t.contains(checkpoint.trim_start_matches("# Consilium handoff\n\n").trim_end()));
@@ -1302,7 +1313,7 @@ mod tests {
     fn the_newest_human_message_keeps_more_room_for_local_models() {
         let task = format!("TASK START {} TASK END", "spec ".repeat(1_000));
         let events = vec![ev("human", &task)];
-        let t = local_transcript(&events, "qwen", None, None);
+        let t = local_transcript(&events, "qwen", None, None, None, "");
         assert!(t.contains("TASK START") && t.contains("TASK END"));
         assert!(!t.contains("left out"));
     }
