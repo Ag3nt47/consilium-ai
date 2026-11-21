@@ -278,6 +278,7 @@ mod tests {
             name: name.into(),
             connected,
             route: connected.then(|| "192.168.1.157:8470".into()),
+            local_interface: None,
             rtt_ms: connected.then_some(3),
             last_seen_ms: Some(1_000),
             queued,

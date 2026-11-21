@@ -217,6 +217,7 @@ pub struct PeerView {
     pub name: String,
     pub connected: bool,
     pub route: Option<String>,
+    pub local_interface: Option<String>,
     pub rtt_ms: Option<u64>,
     pub last_seen_ms: Option<u64>,
     pub queued: usize,
@@ -324,6 +325,7 @@ struct PeerState {
     tx: Option<mpsc::UnboundedSender<String>>,
     generation: u64,
     route: Option<String>,
+    local_interface: Option<String>,
     rtt_ms: Option<u64>,
     last_seen_ms: u64,
     down_since_ms: u64,
@@ -512,6 +514,7 @@ impl Link {
                         name: p.name.clone(),
                         connected: s.is_some_and(|s| s.tx.is_some()),
                         route: s.and_then(|s| s.tx.as_ref().and(s.route.clone())),
+                        local_interface: s.filter(|s| s.tx.is_some()).and_then(|s| s.local_interface.clone()),
                         rtt_ms: s.and_then(|s| s.rtt_ms),
                         last_seen_ms: s.map(|s| s.last_seen_ms).filter(|&t| t > 0),
                         queued: s.map_or(0, |s| s.outbox.len()),
@@ -690,36 +693,38 @@ impl Link {
             tokio::spawn(async move { me.dial_on(p, &a, t).await })
         };
         let mut dial = spawn_dial();
-        let mut switched_at: Option<(String, u64, u64)> = None;
+        let mut switched_at: Option<(String, u64, u64, u64)> = None;
         let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, detail };
         while started.elapsed() < STRESS_SWITCH_TIMEOUT {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let (route, packets) = {
+            let (route, packets, session_generation, interface) = {
                 let states = self.0.peers.lock().unwrap();
                 let Some(s) = states.get(&peer.node_id) else { continue };
                 // Only a session over one of the routes under test counts. The other computer may
                 // dial in meanwhile, and that session's route is its own outgoing port: crediting
                 // it passed a dead route, or reported the working one under the wrong address.
                 if s.generation <= generation || s.tx.is_none() {
-                    (None, 0)
+                    (None, 0, s.generation, None)
                 } else {
-                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in)
+                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in, s.generation, s.local_interface.clone())
                 }
             };
             if let Some(route) = route {
                 match &switched_at {
-                    None => switched_at = Some((route, packets, started.elapsed().as_millis() as u64)),
-                    Some((r, before, ms)) if packets > *before => {
+                    Some((r, before, ms, observed_generation)) if *observed_generation == session_generation && packets > *before => {
                         return RouteSwitch {
                             kind: route_kind(r).into(),
                             addr: r.clone(),
                             ok: true,
                             ms: Some(*ms),
-                            detail: format!("switched in {ms} ms, traffic confirmed after {} ms", started.elapsed().as_millis()),
+                            detail: format!("switched in {ms} ms, traffic confirmed after {} ms, local interface {}", started.elapsed().as_millis(), interface.as_deref().unwrap_or("unavailable")),
                         };
                     }
-                    _ => {}
+                    Some((_, _, _, observed_generation)) if *observed_generation == session_generation => {}
+                    _ => switched_at = Some((route, packets, started.elapsed().as_millis() as u64, session_generation)),
                 }
+            } else {
+                switched_at = None;
             }
             if dial.is_finished() && switched_at.is_none() {
                 match (&mut dial).await {
@@ -732,7 +737,7 @@ impl Link {
             }
         }
         match switched_at {
-            Some((r, _, _)) => fail(r, "connected, but nothing came back over it".into()),
+            Some((r, _, _, _)) => fail(r, "connected, but nothing came back over it".into()),
             None => fail(label, "timed out".into()),
         }
     }
@@ -1289,6 +1294,17 @@ impl Link {
         token: CancellationToken,
     ) {
         let (me, _) = self.me();
+        let local_interface = r.get_ref().local_addr().ok().and_then(|socket| {
+            let interfaces = if_addrs::get_if_addrs().ok()?;
+            let mut names: Vec<_> = interfaces
+                .into_iter()
+                .filter(|interface| interface.ip().to_canonical() == socket.ip().to_canonical())
+                .map(|interface| interface.name)
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            (names.len() == 1).then(|| names.remove(0))
+        });
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let generation = {
             let mut states = self.0.peers.lock().unwrap();
@@ -1296,6 +1312,7 @@ impl Link {
             s.generation += 1;
             s.tx = Some(tx.clone());
             s.route = Some(route);
+            s.local_interface = local_interface;
             s.rtt_ms = rtt_ms;
             s.last_seen_ms = now_ms();
             s.down_since_ms = 0;
@@ -1947,6 +1964,7 @@ mod tests {
         let r = &reports[0];
         assert_eq!(r.routes.len(), 2);
         assert!(r.routes[0].ok && r.routes[0].addr == good, "{:?}", r.routes[0]);
+        assert!(r.routes[0].detail.contains("local interface "));
         assert!(!r.routes[1].ok && r.routes[1].addr == dead, "{:?}", r.routes[1]);
         assert_eq!(r.restored.as_deref(), Some(good.as_str()), "back on the working route");
         assert!(wait_for(|| joiner.status().peers[0].connected).await);
@@ -1973,6 +1991,15 @@ mod tests {
         assert_eq!(host.0.cfg.lock().unwrap().peers[0].key, joiner.0.cfg.lock().unwrap().peers[0].key);
 
         assert!(wait_for(|| joiner.status().peers[0].connected && host.status().peers[0].connected).await, "session comes up");
+        let names: std::collections::HashSet<_> = if_addrs::get_if_addrs()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|interface| interface.ip().to_canonical() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+            .map(|interface| interface.name)
+            .collect();
+        let expected = (names.len() == 1).then(|| names.into_iter().next().unwrap());
+        assert_eq!(host.status().peers[0].local_interface, expected);
+        assert_eq!(joiner.status().peers[0].local_interface, expected);
         let id = joiner.send(PacketKind::Chat, json!({ "text": "hello from the PC" })).unwrap();
         assert!(wait_for(|| host_got.lock().unwrap().len() == 1).await);
         assert_eq!(host_got.lock().unwrap()[0].id, id);
@@ -1984,6 +2011,7 @@ mod tests {
         joiner.0.peers.lock().unwrap().get_mut(&view.node_id).unwrap().outbox.push_back(dup);
         joiner.stop();
         assert!(wait_for(|| !host.status().peers[0].connected).await, "host notices the drop");
+        assert_eq!(host.status().peers[0].local_interface, None);
         joiner.start();
         assert!(wait_for(|| joiner.status().peers[0].connected && joiner.status().peers[0].queued == 0).await, "reconnects and drains");
         assert_eq!(host_got.lock().unwrap().len(), 1);
