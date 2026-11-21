@@ -98,6 +98,10 @@ not complete the phase.
 | Obsidian search, secrets vault, fix-drafting watchdog, widget dock | 🕓 | |
 | Consensus tribunal | ✅ | Discuss mode |
 
+Chat follow behavior was verified in a Windows Edge preview. New content stayed pinned at the
+bottom, preserved the reading position after scrolling up, and resumed following after returning
+to the bottom. Content growth and shrinkage were both tested. Installed desktop retests are open.
+
 ## Document 3: Multi-computer link (3rd update)
 
 Goal: Consilium on the human's Mac and Windows PC find each other, stay linked and keep conversations,
