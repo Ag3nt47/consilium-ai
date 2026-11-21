@@ -2062,6 +2062,50 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_lost_active_route_redials_without_restarting_peerlink() {
+        let dir = std::env::temp_dir().join(format!("link-live-failover-{}", uuid::Uuid::new_v4()));
+        let (host, received) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        let direct = format!("127.0.0.1:{}", host.0.port);
+        let code = host.begin_pairing().unwrap();
+
+        // Two proxies give one peer two independent TCP endpoints inside loopback.
+        let mut routes = Vec::new();
+        let mut proxies = Vec::new();
+        for _ in 0..2 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            routes.push(listener.local_addr().unwrap().to_string());
+            let direct = direct.clone();
+            proxies.push(tokio::spawn(async move {
+                while let Ok((mut incoming, _)) = listener.accept().await {
+                    let Ok(mut outgoing) = TcpStream::connect(&direct).await else { break };
+                    let _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await;
+                }
+            }));
+        }
+
+        joiner.join(&routes[0], &code.code).await.unwrap();
+        host.0.cfg.lock().unwrap().peers[0].addrs.clear();
+        joiner.stop();
+        assert!(wait_for(|| !host.status().peers[0].connected).await);
+        joiner.0.cfg.lock().unwrap().peers[0].addrs = vec![routes[0].clone()];
+        joiner.start();
+        assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(routes[0].as_str())).await);
+        host.0.cfg.lock().unwrap().peers[0].addrs.clear();
+        joiner.0.cfg.lock().unwrap().peers[0].addrs = routes.clone();
+        proxies[0].abort();
+        assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(routes[1].as_str())).await);
+
+        let id = joiner.send(PacketKind::Chat, json!({ "text": "after automatic failover" })).unwrap();
+        assert!(wait_for(|| joiner.status().peers[0].queued == 0).await);
+        assert_eq!(received.lock().unwrap().iter().map(|packet| packet.id.as_str()).collect::<Vec<_>>(), [id.as_str()]);
+        joiner.stop();
+        host.stop();
+        proxies[1].abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn wrong_codes_fail_and_burn_the_code_after_three() {
         let dir = std::env::temp_dir().join(format!("link-test-{}", uuid::Uuid::new_v4()));
         let (host, _) = node(&dir, "host");
