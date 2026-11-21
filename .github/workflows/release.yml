@@ -170,6 +170,21 @@ jobs:
           if [ "$PREVIEW" != "true" ]; then
             gh release upload "$TAG" oneclick/* --clobber --repo "$GITHUB_REPOSITORY"
           fi
+      - name: Verify Windows preview installation
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Resolve-Path -LiteralPath 'oneclick/Consilium-Windows-Setup.exe'
+          $process = Start-Process -FilePath $installer.Path -ArgumentList '/S', '/UPDATE' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Preview installer exited with code $($process.ExitCode)."
+          }
+          $installed = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Consilium/consilium.exe')
+          $expected = (Get-Content -LiteralPath 'package.json' -Raw | ConvertFrom-Json).version
+          if ($installed.VersionInfo.ProductVersion -ne $expected) {
+            throw "Expected Consilium $expected, found $($installed.VersionInfo.ProductVersion)."
+          }
+          Write-Output "Verified Windows preview installation of Consilium $expected."
       - uses: actions/upload-artifact@v7
         if: needs.prepare.outputs.preview == 'true'
         with:
