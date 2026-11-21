@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed: auto-continue went quiet with no note whenever any AI had a request open, even one it
+  had withdrawn or one from a linked computer's AI (answered there). Those no longer hold rounds
+  back, and when a request here really is waiting, it says so once and lists it (#21).
+
 - Fixed: a freeze of up to a minute (and a freeze-guard restart) when messages arrived while
   AIs were answering. The turn table stayed locked while the window, linked computers, notes
   and the council were told of a message; it is now held only to file the message (#14).
