@@ -564,6 +564,7 @@ const appApi = {
   requestPeerResources: () => invoke<void>("request_peer_resources"),
   peerResources: () => invoke<Record<string, {
     total_memory_mb?: number;
+    available_memory_mb?: number;
     memory_percent: number;
     updated_at: number;
   }>>("get_peer_resources"),
