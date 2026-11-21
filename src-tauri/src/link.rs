@@ -2108,11 +2108,18 @@ mod tests {
         joiner.start();
         assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(routes[0].as_str())).await);
         host.0.cfg.lock().unwrap().peers[0].addrs.clear();
-        joiner.0.cfg.lock().unwrap().peers[0].addrs = routes.clone();
         proxies[0].abort();
-        assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(routes[1].as_str())).await);
+        assert!(wait_for(|| !joiner.status().peers[0].connected).await);
 
-        let id = joiner.send(PacketKind::Chat, json!({ "text": "after automatic failover" })).unwrap();
+        let id = joiner.send(PacketKind::Chat, json!({ "text": "during automatic failover" })).unwrap();
+        assert_eq!(joiner.status().peers[0].queued, 1);
+        assert!(received.lock().unwrap().is_empty());
+
+        // Make the second path available after the message is durably queued.
+        let backup = routes[1].clone();
+        joiner.0.cfg.lock().unwrap().peers[0].addrs = routes;
+        joiner.0.wake_dial.notify_one();
+        assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(backup.as_str())).await);
         assert!(wait_for(|| joiner.status().peers[0].queued == 0).await);
         assert_eq!(received.lock().unwrap().iter().map(|packet| packet.id.as_str()).collect::<Vec<_>>(), [id.as_str()]);
         joiner.stop();
