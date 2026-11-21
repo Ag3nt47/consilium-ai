@@ -217,6 +217,7 @@ pub struct PeerView {
     pub name: String,
     pub connected: bool,
     pub route: Option<String>,
+    pub local_interface: Option<String>,
     pub rtt_ms: Option<u64>,
     pub last_seen_ms: Option<u64>,
     pub queued: usize,
@@ -324,6 +325,7 @@ struct PeerState {
     tx: Option<mpsc::UnboundedSender<String>>,
     generation: u64,
     route: Option<String>,
+    local_interface: Option<String>,
     rtt_ms: Option<u64>,
     last_seen_ms: u64,
     down_since_ms: u64,
@@ -512,6 +514,7 @@ impl Link {
                         name: p.name.clone(),
                         connected: s.is_some_and(|s| s.tx.is_some()),
                         route: s.and_then(|s| s.tx.as_ref().and(s.route.clone())),
+                        local_interface: s.filter(|s| s.tx.is_some()).and_then(|s| s.local_interface.clone()),
                         rtt_ms: s.and_then(|s| s.rtt_ms),
                         last_seen_ms: s.map(|s| s.last_seen_ms).filter(|&t| t > 0),
                         queued: s.map_or(0, |s| s.outbox.len()),
@@ -1289,6 +1292,17 @@ impl Link {
         token: CancellationToken,
     ) {
         let (me, _) = self.me();
+        let local_interface = r.get_ref().local_addr().ok().and_then(|socket| {
+            let interfaces = if_addrs::get_if_addrs().ok()?;
+            let mut names: Vec<_> = interfaces
+                .into_iter()
+                .filter(|interface| interface.ip().to_canonical() == socket.ip().to_canonical())
+                .map(|interface| interface.name)
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            (names.len() == 1).then(|| names.remove(0))
+        });
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let generation = {
             let mut states = self.0.peers.lock().unwrap();
@@ -1296,6 +1310,7 @@ impl Link {
             s.generation += 1;
             s.tx = Some(tx.clone());
             s.route = Some(route);
+            s.local_interface = local_interface;
             s.rtt_ms = rtt_ms;
             s.last_seen_ms = now_ms();
             s.down_since_ms = 0;

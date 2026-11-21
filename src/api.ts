@@ -341,6 +341,7 @@ export type LinkPeer = {
   connected: boolean;
   /** The address in use, e.g. "192.168.1.20:8470"; the fastest answering route wins. */
   route: string | null;
+  local_interface?: string | null;
   rtt_ms: number | null;
   last_seen_ms: number | null;
   /** Packets sent but not yet acknowledged; re-sent when the link comes back. */

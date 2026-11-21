@@ -604,16 +604,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
   const statusClass = isOnline ? "online" : "offline";
   const statusText = isOnline ? "Connected" : "Disconnected";
 
-  // Classify route transport
-  const routeLabel = peer.route
-    ? peer.route.includes("100.")
-      ? "Tailscale Mesh"
-      : peer.route.includes("127.0.0.1")
-      ? "Loopback"
-      : peer.route.includes("169.254.")
-      ? "Direct Cable / Bluetooth"
-      : "Gigabit / Wi-Fi LAN"
-    : null;
+  const routeLabel = peer.local_interface ?? "Interface unavailable";
 
   const runTest = async () => {
     setTesting(true);
