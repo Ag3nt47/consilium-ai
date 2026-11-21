@@ -22,6 +22,14 @@ Consilium is a desktop app and terminal client for putting several AI assistants
 
 A Windows PC and an Intel Mac generated tokens from the same split Qwen3 0.6B model and, in a separate run, a split Llama model over wired Ethernet. Those small-model runs demonstrate weight partitioning across two computers. They do not establish throughput or memory fit for a larger model. Runner and model compatibility, per-device memory, and network performance all matter.
 
+From a source checkout with Node.js, run these checks while local model runners are idle.
+
+- Run `node scripts/audit-environment.mjs` to see tool availability, locked dependency versions, and Ollama models already on disk.
+- Run `node scripts/model-fit.mjs --host 10 --device "Mac=6" --weights 10` to compare single-machine and split memory fit. Replace `10` and `6` with usable RAM in GiB. Omit `--host` to use the current machine's free RAM.
+- In the desktop app, open **Add → AI** and use the local model estimator. Scan paired devices for their memory reports or enter their values manually.
+
+The estimator checks memory capacity. A split inference run also requires a runner that supports weight partitioning and a network fast enough for the model.
+
 Native Bluetooth transport, simultaneous transport use, phone workers, and automatic local fallback are tracked in the [upgrade ledger](docs/UPGRADE_STATUS.md). Check the ledger for the current verification state of each feature.
 
 The [deployment vision](docs/DEPLOYMENT_VISION.md) describes how this could grow into a cross-platform build farm, offline research and publishing workspace, and daily operations console.
@@ -63,6 +71,8 @@ npm run app:dev
 ```
 
 Use `npm run app:build` to package the desktop app. Run `npm test`, `npm run check:secrets`, and `cargo test --manifest-path src-tauri/Cargo.toml` to check changes.
+
+On v0.3.55 or later, open **Settings → Updates → Build draft installers** to request Windows, macOS, and Linux installers for `main`. Sign in to the GitHub CLI with permission to run workflows for this repository. GitHub Actions checks that CI passed for the exact commit before building. Use **Installer builds** to follow the run. Automatic updates use published releases.
 
 ## Data and permissions
 
