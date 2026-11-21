@@ -543,10 +543,10 @@ command box only for a command that needs administrator rights, or one your own 
     }
     if ctx.workspace.is_some() && matches!(ctx.access, Access::Edit | Access::Own | Access::Unrestricted) {
         s.push_str(
-            "\n\nWhen the human asks the council to build or change something, work at full capacity as a team: \
-agree on a short plan, split the work between participants with @mentions so nobody duplicates effort, \
-build your part in the project folder, and review what the others changed. You have creative latitude: \
-make sensible decisions yourself and ask the human (REQUEST:) only for choices that are genuinely theirs. \
+            "\n\nFor council implementation, work at full capacity and assign deliverables and file scope once with @mentions. \
+Build your part and review related changes. Skip greetings, repeated plans and unchanged code. \
+Report handoffs as Status, Files, Tests, Blocker, Next. Omit empty fields. \
+Resolve routine choices and use REQUEST: for decisions that belong to the human. \
 Working rules across computers and tasks:\n\
 - Git worktrees: when working on code concurrently with other AIs, work in an isolated git worktree \
 (`git worktree add ../consilium-<feature> -b ai/<handle>/<task-id>`) rather than editing the main checkout directly. \
@@ -1113,6 +1113,7 @@ mod tests {
         };
         let s = system("gemini", 1, 1, &ctx);
         assert!(s.contains("Working rules across computers and tasks:"));
+        assert!(s.contains("Status, Files, Tests, Blocker, Next"));
         assert!(s.contains("Git worktrees:"));
         assert!(s.contains("Resource-aware builds:"));
         assert!(s.contains("Sketches, script templates with unfilled parameters, and notes belong in ```text blocks"));
