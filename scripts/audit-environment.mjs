@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { constants, accessSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { constants, accessSync, opendirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,9 +62,33 @@ for (const name of ["git", "npm", "cargo", "rustc", "claude", "codex", "gemini",
 }
 
 const manifests = join(process.env.OLLAMA_MODELS || join(homedir(), ".ollama", "models"), "manifests");
+const models = [];
+let entriesLeft = 1024;
+
+function inventory(directory, parts = []) {
+  const handle = opendirSync(directory);
+  try {
+    while (entriesLeft > 0) {
+      const entry = handle.readSync();
+      if (!entry) break;
+      entriesLeft--;
+      const path = [...parts, entry.name];
+      if (entry.isDirectory() && path.length < 4) {
+        inventory(join(directory, entry.name), path);
+      } else if (entry.isFile() && path.length === 4) {
+        const [registry, namespace, model, tag] = path;
+        models.push(`${registry}/${namespace}/${model}:${tag}`);
+      }
+    }
+  } finally {
+    handle.closeSync();
+  }
+}
+
 try {
-  const registries = readdirSync(manifests, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length;
-  console.log(`Ollama inventory: local manifest directory found (${registries} registry directories).`);
+  inventory(manifests);
+  console.log(`Ollama inventory: ${models.length} local model manifest(s)${entriesLeft === 0 ? " (scan limit reached)" : ""}.`);
+  for (const model of models.sort()) console.log(`  ${JSON.stringify(model)}`);
 } catch (error) {
   console.log(`Ollama inventory: ${error.code === "ENOENT" ? "no local manifest directory found" : "manifest directory unreadable"}.`);
 }

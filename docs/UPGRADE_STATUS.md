@@ -147,7 +147,7 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 | Item | Status | Acceptance and dependencies |
 |---|---|---|
 | Peer update status and transport checks | 🔨 | Existing peer update requests and automatic installs are foundations. Verify progress emblem, signed release installation and restart on both computers. Add transport measurements after native paths work. |
-| Read-only environment and tool audit | 🔨 | Run `node scripts/audit-environment.mjs` for tracked Git changes, direct dependency versions, PATH availability and Ollama manifest presence without starting models. App integration, detailed model inventory and macOS verification remain open. |
+| Read-only environment and tool audit | 🔨 | Run `node scripts/audit-environment.mjs` for tracked Git changes, direct dependency versions, PATH availability and a bounded inventory of local Ollama manifests without starting models. App integration and macOS verification remain open. |
 | Distributed retrieval and state alignment | 🕓 | Reuse the conversation transport and offline retrieval work. Reconcile session and audit state across peers and verify duplicate handling. |
 | Local validation and mentor escalation | 🕓 | Reuse deterministic checks and the reviewed skills registry. After bounded failures, package a compact redacted report for an allowed mentor. Reuse reviewed repair lessons as retrieval material. |
 | Candidate update synthesis and review | 🕓 | Generate one scoped proposal from relevant diffs and diagnostics, validate it in an isolated worktree, and expose the review and release outcome through the existing update path. |
