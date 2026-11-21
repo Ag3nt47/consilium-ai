@@ -55,6 +55,7 @@ import { CustomAiForm } from "./customai";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const UpgradeProgress = lazy(() => import("./UpgradeProgress"));
+const OfflineSkills = lazy(() => import("./OfflineSkills"));
 
 const THEMES = [
   { id: "glass", name: "visionOS Glass", note: "Frosted translucent glass, ambient glow" },
@@ -3888,6 +3889,9 @@ export default function App() {
               </button>
               ; asks that site every 15 minutes at most)
             </label>
+            <Suspense fallback={null}>
+              <OfflineSkills />
+            </Suspense>
             <div className="section-label">Saved approvals</div>
             <p className="muted small">
               Admin and install commands you chose to <b>Always allow</b>. Any AI may run these exact commands on this
