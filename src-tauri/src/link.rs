@@ -694,7 +694,7 @@ impl Link {
         };
         let mut dial = spawn_dial();
         let mut switched_at: Option<(String, u64, u64, u64)> = None;
-        let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, detail };
+        let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, local_interface: None, detail };
         while started.elapsed() < STRESS_SWITCH_TIMEOUT {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let (route, packets, session_generation, interface) = {
@@ -717,7 +717,8 @@ impl Link {
                             addr: r.clone(),
                             ok: true,
                             ms: Some(*ms),
-                            detail: format!("switched in {ms} ms, traffic confirmed after {} ms, local interface {}", started.elapsed().as_millis(), interface.as_deref().unwrap_or("unavailable")),
+                            local_interface: interface,
+                            detail: format!("switched in {ms} ms, traffic confirmed after {} ms", started.elapsed().as_millis()),
                         };
                     }
                     Some((_, _, _, observed_generation)) if *observed_generation == session_generation => {}
@@ -1489,6 +1490,7 @@ pub struct RouteSwitch {
     pub ok: bool,
     /// How long the switch took.
     pub ms: Option<u64>,
+    pub local_interface: Option<String>,
     pub detail: String,
 }
 
@@ -1509,16 +1511,19 @@ impl StressReport {
         }
         let ok = self.routes.iter().filter(|r| r.ok).count();
         let mut s = format!(
-            "Communication stress test ({when}) with {}: {ok} of {} routes work. Each route was used on its own, with the others shut out, until a packet came back over it:",
+            "Communication stress test ({when}) with {}: {ok} of {} configured endpoints carried authenticated traffic during individual connection attempts.",
             self.computer,
             self.routes.len()
         );
         for r in &self.routes {
             s.push_str(&format!("\n{} {} {}: {}", if r.ok { "✓" } else { "✗" }, r.kind, r.addr, r.detail));
+            if let Some(interface) = &r.local_interface {
+                s.push_str(&format!(", local interface {interface}"));
+            }
         }
         match &self.restored {
-            Some(r) => s.push_str(&format!("\nThe link is back on the fastest route, {r}.")),
-            None => s.push_str("\nThe link didn't come back after the test; it keeps redialling every route."),
+            Some(r) => s.push_str(&format!("\nThe reconnect attempt confirmed traffic through {r}.")),
+            None => s.push_str("\nThe test did not confirm traffic after attempting to reconnect."),
         }
         s
     }
@@ -1962,12 +1967,13 @@ mod tests {
         let r = &reports[0];
         assert_eq!(r.routes.len(), 2);
         assert!(r.routes[0].ok && r.routes[0].addr == good, "{:?}", r.routes[0]);
-        assert!(r.routes[0].detail.contains("local interface "));
+        assert!(r.routes[0].detail.contains("traffic confirmed"));
+        assert_eq!(r.routes[1].local_interface, None);
         assert!(!r.routes[1].ok && r.routes[1].addr == dead, "{:?}", r.routes[1]);
         assert_eq!(r.restored.as_deref(), Some(good.as_str()), "back on the working route");
         assert!(wait_for(|| joiner.status().peers[0].connected).await);
         let note = r.summary("requested");
-        assert!(note.contains("1 of 2 routes work") && note.contains("✓ Loopback") && note.contains("✗ Loopback"), "{note}");
+        assert!(note.contains("1 of 2 configured endpoints carried authenticated traffic") && note.contains("✓ Loopback") && note.contains("✗ Loopback"), "{note}");
         host.stop();
         joiner.stop();
         let _ = std::fs::remove_dir_all(&dir);

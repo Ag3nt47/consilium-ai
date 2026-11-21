@@ -364,7 +364,7 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
                 className="btn small"
                 onClick={runStress}
                 disabled={stressing || !(status.peers ?? []).some((p) => p.connected)}
-                title="Shuts out every route but one, moves the link onto it and checks that traffic comes back, one route at a time, then returns to the fastest. Results are posted in the chat. It also runs after every restart."
+                title="Tries each configured endpoint in turn and checks for an authenticated packet. Shows the local interface when available, then tries to reconnect using the saved endpoints. Results are posted in chat. Physical failover requires a separate test with a transport disconnected."
               >
                 {stressing ? "Stress testing routes…" : "Communication stress test"}
               </button>
@@ -374,12 +374,20 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
                     {r.computer}:{" "}
                     {r.routes.length === 0
                       ? "not connected, nothing tested"
-                      : `${r.routes.filter((x) => x.ok).length} of ${r.routes.length} routes work${r.restored ? `, back on ${r.restored}` : ", link not back yet"}`}
+                      : `${r.routes.filter((x) => x.ok).length} of ${r.routes.length} endpoints carried traffic${r.restored ? `, reconnected through ${r.restored}` : ", reconnection unconfirmed"}`}
                   </div>
+                  {r.routes.some((x) => x.ok) && (
+                    <div className="muted small">
+                      Local interfaces observed carrying traffic{" "}
+                      {[...new Set(r.routes.flatMap((x) => x.local_interface ? [x.local_interface] : []))].length}
+                    </div>
+                  )}
                   {r.routes.map((x) => (
                     <div key={x.addr} className={`handshake-item ${x.ok ? "acknowledged" : "pending"}`}>
                       <span className="handshake-mark">{x.ok ? "✓" : "✗"}</span> {x.kind} <code>{x.addr}</code>{" "}
-                      <span className="muted small">{x.detail}</span>
+                      <span className="muted small">
+                        {x.detail}{x.ok && `, local interface ${x.local_interface ?? "unavailable"}`}
+                      </span>
                     </div>
                   ))}
                 </div>
