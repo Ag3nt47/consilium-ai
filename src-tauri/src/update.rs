@@ -536,6 +536,23 @@ fn stage_macos_app(data: &Path, version: &str, source: &Path) -> Result<(), Stri
     Ok(())
 }
 
+/// The user's keychain search list, in order, as `security list-keychains` prints it.
+#[cfg(target_os = "macos")]
+fn keychain_search_list() -> Option<Vec<String>> {
+    let out = std::process::Command::new("/usr/bin/security")
+        .args(["list-keychains", "-d", "user"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    Some(parse_keychain_list(&String::from_utf8_lossy(&out.stdout)))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_keychain_list(text: &str) -> Vec<String> {
+    text.lines().map(|l| l.trim().trim_matches('"').to_string()).filter(|l| !l.is_empty()).collect()
+}
+
 /// Stable local signing when this Mac has the private key, matching `scripts/stage-update.mjs`;
 /// otherwise a required ad-hoc signature keeps GitHub's unsigned release launchable.
 #[cfg(target_os = "macos")]
@@ -558,7 +575,24 @@ fn sign_macos_app(data: &Path, app: &Path) -> Result<(), String> {
                 .map(|s| s.success())
                 .unwrap_or(false)
         });
-    let mut signed = unlocked
+    // codesign only finds an identity in a keychain on the user's search list, even with
+    // `--keychain`; without this it fell back to ad-hoc, and every update then lost the app's
+    // firewall and privacy permissions. Join it for this signing only, as stage-update.mjs does.
+    let before = if unlocked { keychain_search_list() } else { None };
+    let joined = before.as_ref().is_some_and(|list| {
+        list.iter().any(|k| Path::new(k) == keychain.as_path())
+            || Command::new("/usr/bin/security")
+                .args(["list-keychains", "-d", "user", "-s"])
+                .args(list)
+                .arg(&keychain)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+    });
+    let mut signed = joined
         && Command::new("/usr/bin/codesign")
             .args(["--force", "--deep", "--sign", "Consilium Local Signing", "--keychain"])
             .arg(&keychain)
@@ -579,6 +613,16 @@ fn sign_macos_app(data: &Path, app: &Path) -> Result<(), String> {
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
+    }
+    if let Some(list) = before.as_ref().filter(|_| joined) {
+        // Put the user's search list back exactly.
+        let _ = Command::new("/usr/bin/security")
+            .args(["list-keychains", "-d", "user", "-s"])
+            .args(list)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
     if unlocked {
         let _ = Command::new("/usr/bin/security")
@@ -814,6 +858,18 @@ pub fn start_install(data: &Path) -> Result<Staged, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn keychain_search_list_parses_quoted_paths_in_order() {
+        let out = "    \"/kc/Keychains/login.keychain-db\"\n    \"/kc/Application Support/x/signing/consilium-signing.keychain-db\"\n\n";
+        assert_eq!(
+            parse_keychain_list(out),
+            vec![
+                "/kc/Keychains/login.keychain-db".to_string(),
+                "/kc/Application Support/x/signing/consilium-signing.keychain-db".to_string(),
+            ]
+        );
+    }
+
 
     #[test]
     fn the_wmi_launcher_quotes_the_helper_path_for_powershell() {
