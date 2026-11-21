@@ -583,7 +583,7 @@ impl Sync {
         let agent_name = crate::agents::by_id(&payload.agent).map_or(payload.agent.as_str(), |a| a.name);
         let state_str = if payload.on { "switched on" } else { "switched off" };
         let note = format!("Council: {agent_name} was {state_str} on {computer}.");
-        let event = self.store.append_imported(&local_conv, crate::council::CONSILIUM, "system", vec![], &note, None)?;
+        let event = self.store.append_imported(&local_conv, crate::council::CONSILIUM, "system", vec![], &note, None, None)?;
         self.notify(&local_conv, &event);
         Ok(Some(event))
     }
