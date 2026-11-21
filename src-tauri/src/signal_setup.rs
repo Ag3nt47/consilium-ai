@@ -228,12 +228,19 @@ fn run_setup(run: u64, cli: std::path::PathBuf, cfg_path: std::path::PathBuf, cf
     match verify(&cfg, &code, run) {
         Ok(aci) => {
             // Turn Signal on and allow the confirmed sender, keeping everything else as it was.
+            // Without the sender's account ID, the chat bridge would ignore every reply, so
+            // "verified" would be a lie.
+            let Some(a) = aci else {
+                return fail(
+                    run,
+                    "Your reply arrived, but signal-cli didn't say which account sent it, so Consilium can't \
+recognise your messages. Update signal-cli, then click Try again.",
+                );
+            };
             let mut next = BridgeConfig::load(&cfg_path).unwrap_or(cfg);
             next.enabled = true;
-            if let Some(a) = aci {
-                if !next.allowed_acis.iter().any(|x| x.eq_ignore_ascii_case(&a)) {
-                    next.allowed_acis.push(a);
-                }
+            if !next.allowed_acis.iter().any(|x| x.eq_ignore_ascii_case(&a)) {
+                next.allowed_acis.push(a);
             }
             if let Err(e) = next.save(&cfg_path) {
                 return fail(run, format!("Verified, but saving settings failed: {e}"));
@@ -476,10 +483,7 @@ fn verify(cfg: &BridgeConfig, code: &str, run: u64) -> Result<Option<String>, St
 /// Note to Self arrives as a sync "sent" message) and its text contains the code.
 /// Returns Some(aci) on a match; the inner value is None when the daemon gave no account ID.
 pub fn reply_with_code(v: &serde_json::Value, account: &str, code: &str) -> Option<Option<String>> {
-    if v.get("method").and_then(|m| m.as_str()) != Some("receive") {
-        return None;
-    }
-    let env = v.get("params")?.get("envelope")?;
+    let env = crate::signal_chat::receive_envelope(v)?;
     let from_self = env.get("sourceNumber").and_then(|n| n.as_str()) == Some(account)
         || env.get("source").and_then(|n| n.as_str()) == Some(account);
     if !from_self {
@@ -553,5 +557,20 @@ mod tests {
         let stranger = serde_json::json!({"method":"receive","params":{"envelope":{
             "sourceNumber": "+15559999999", "dataMessage": {"message": "4821"}}}});
         assert_eq!(reply_with_code(&stranger, acc, "4821"), None);
+    }
+
+    #[test]
+    fn the_reply_is_read_in_the_shape_signal_cli_sends_to_a_subscriber() {
+        // After `subscribeReceive`, signal-cli wraps each message as params.result.envelope.
+        let acc = "+15551234567";
+        let aci = "8f0c6e1a-1111-4222-8333-944455556666";
+        let sub = |env: serde_json::Value| serde_json::json!({"jsonrpc":"2.0","method":"receive",
+            "params":{"subscription":0,"result":{"account":acc,"envelope":env}}});
+        let mine = sub(serde_json::json!({"sourceNumber": acc, "sourceUuid": aci,
+            "syncMessage": {"sentMessage": {"message": "8575", "destinationNumber": acc}}}));
+        assert_eq!(reply_with_code(&mine, acc, "8575"), Some(Some(aci.to_string())));
+        assert_eq!(reply_with_code(&mine, acc, "1234"), None);
+        let stranger = sub(serde_json::json!({"sourceNumber": "+15559999999", "dataMessage": {"message": "8575"}}));
+        assert_eq!(reply_with_code(&stranger, acc, "8575"), None);
     }
 }
