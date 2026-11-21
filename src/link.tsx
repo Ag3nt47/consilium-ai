@@ -376,10 +376,18 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
                       ? "not connected, nothing tested"
                       : `${r.routes.filter((x) => x.ok).length} of ${r.routes.length} endpoints carried traffic${r.restored ? `, reconnected through ${r.restored}` : ", reconnection unconfirmed"}`}
                   </div>
+                  {r.routes.some((x) => x.ok) && (
+                    <div className="muted small">
+                      Local interfaces observed carrying traffic{" "}
+                      {[...new Set(r.routes.flatMap((x) => x.local_interface ? [x.local_interface] : []))].length}
+                    </div>
+                  )}
                   {r.routes.map((x) => (
                     <div key={x.addr} className={`handshake-item ${x.ok ? "acknowledged" : "pending"}`}>
                       <span className="handshake-mark">{x.ok ? "✓" : "✗"}</span> {x.kind} <code>{x.addr}</code>{" "}
-                      <span className="muted small">{x.detail}</span>
+                      <span className="muted small">
+                        {x.detail}{x.ok && `, local interface ${x.local_interface ?? "unavailable"}`}
+                      </span>
                     </div>
                   ))}
                 </div>
