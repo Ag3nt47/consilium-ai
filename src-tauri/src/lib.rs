@@ -46,6 +46,7 @@ mod searchpath;
 mod security_scan;
 mod store;
 mod tasks;
+mod runbooks;
 mod toolbox;
 mod update;
 mod usage;
@@ -1654,6 +1655,8 @@ pub fn run() {
             discard_agent_branch,
             save_approval,
             tool_catalog,
+            runbooks::list_runbooks,
+            runbooks::read_runbook,
             forget_approval,
             attach_files,
             attach_data,

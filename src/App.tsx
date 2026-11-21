@@ -3891,9 +3891,6 @@ export default function App() {
               </button>
               ; asks that site every 15 minutes at most)
             </label>
-            <Suspense fallback={null}>
-              <OfflineSkills />
-            </Suspense>
             <div className="section-label">Saved approvals</div>
             <p className="muted small">
               Admin and install commands you chose to <b>Always allow</b>. Any AI may run these exact commands on this
@@ -3922,6 +3919,9 @@ export default function App() {
               </ul>
             )}
             <div className="section-label">Tools</div>
+            <Suspense fallback={null}>
+              <OfflineSkills />
+            </Suspense>
             <ToolsSettings
               ais={members.map((a) => ({ id: a.id, name: a.name }))}
               onSend={async (text, to) => {
