@@ -2,7 +2,7 @@ import { realpathSync, statSync } from "node:fs";
 import { freemem } from "node:os";
 import { basename } from "node:path";
 import { parseArgs } from "node:util";
-import { gib, ggufShardError, modelFit } from "../src/model-fit.mjs";
+import { gib, ggufShardError, modelFit, weightBudgets } from "../src/model-fit.mjs";
 
 function memory(value, label) {
   const parsed = Number(value);
@@ -54,7 +54,11 @@ try {
     const custom = values.weights === undefined ? modelBytes / 2 ** 30 : memory(values.weights, "--weights");
     if (files.size) console.log(`GGUF on-disk size: ${gib(custom)} across ${files.size} file(s)`);
     console.log(`${bits}-bit weights; ${gib(overhead)} runtime allowance per device`);
-    for (const { name, memory: available } of devices) console.log(`${name}: ${gib(available)} usable`);
+    const capacities = weightBudgets(devices, overhead);
+    for (const [index, { name, memory: available }] of devices.entries()) {
+      console.log(`${name}: ${gib(available)} usable, ${gib(capacities[index].capacity)} for weights`);
+    }
+    console.log(`Combined weight capacity: ${gib(capacities.reduce((sum, device) => sum + device.capacity, 0))}`);
     for (const { name, weights, fit } of modelFit(devices, bits, overhead, custom)) console.log(`${name}: ${gib(weights)} weights — ${fit}`);
     console.log("Memory estimates only. Confirm model and split-runner compatibility before testing.");
   }

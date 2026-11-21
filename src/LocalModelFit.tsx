@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "./api";
 
-import { gib, ggufShardError, modelFit } from "./model-fit.mjs";
+import { gib, ggufShardError, modelFit, weightBudgets } from "./model-fit.mjs";
 
 type Device = { id: number | string; name: string; memory: string };
 const memoryInput = (gib: number) => (Math.floor(Math.max(0, gib) * 10) / 10).toFixed(1);
@@ -23,12 +23,15 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   const included = devices.filter((device) => typeof device.id === "string" || !reportedNames.has(deviceName(device.name)));
   const budgets = [{ name: "This computer", memory: host }, ...included];
   const models = modelFit(budgets, bits, overhead, customWeights);
+  const capacities = weightBudgets(budgets, overhead);
+  const totalCapacity = capacities.reduce((total, device) => total + device.capacity, 0);
 
   async function copyEstimate() {
     const report = [
       "Consilium local model memory estimate",
       `Catalog precision: ${bits}-bit. Runtime allowance: ${gib(Number(overhead))} per device.`,
-      ...budgets.map(({ name, memory }) => `${name || "Unnamed device"}: ${memory ? gib(Number(memory)) : "memory not entered"}`),
+      `Combined weight capacity: ${gib(totalCapacity)}.`,
+      ...budgets.map(({ name, memory }, index) => `${name || "Unnamed device"}: ${memory ? gib(Number(memory)) : "memory not entered"} usable, ${gib(capacities[index].capacity)} for weights.`),
       "",
       ...models.map(({ name, weights, fit }) => `${name}: ${gib(weights)} weights. ${fit}.`),
       "",
@@ -148,6 +151,12 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
         </label>
         {fileMessage && <p className="muted small" role="status">{fileMessage}</p>}
       </div>
+      <p className="muted">Combined capacity for model weights after runtime allowance: {gib(totalCapacity)}.</p>
+      <ul>
+        {capacities.map(({ name, capacity }, index) => (
+          <li key={index}>{name}: {gib(capacity)} for weights</li>
+        ))}
+      </ul>
       <table className="usage-table">
         <thead><tr><th scope="col">Model</th><th scope="col">Weights</th><th scope="col">Memory estimate</th></tr></thead>
         <tbody>
