@@ -1509,7 +1509,7 @@ impl StressReport {
         }
         let ok = self.routes.iter().filter(|r| r.ok).count();
         let mut s = format!(
-            "Communication stress test ({when}) with {}: {ok} of {} routes work. Each route was used on its own, with the others shut out, until a packet came back over it:",
+            "Communication stress test ({when}) with {}: {ok} of {} configured endpoints carried authenticated traffic during individual connection attempts.",
             self.computer,
             self.routes.len()
         );
@@ -1517,8 +1517,8 @@ impl StressReport {
             s.push_str(&format!("\n{} {} {}: {}", if r.ok { "✓" } else { "✗" }, r.kind, r.addr, r.detail));
         }
         match &self.restored {
-            Some(r) => s.push_str(&format!("\nThe link is back on the fastest route, {r}.")),
-            None => s.push_str("\nThe link didn't come back after the test; it keeps redialling every route."),
+            Some(r) => s.push_str(&format!("\nThe reconnect attempt confirmed traffic through {r}.")),
+            None => s.push_str("\nThe test did not confirm traffic after attempting to reconnect."),
         }
         s
     }
