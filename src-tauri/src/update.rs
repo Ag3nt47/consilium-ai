@@ -1004,7 +1004,7 @@ mod tests {
         assert!(setup.contains("$expected.Trim() -eq $actual.Trim()"));
         assert!(setup.contains("installer did not complete; preserved staged folder"));
         assert!(setup.contains("DisplayIcon"));
-        assert!(setup.contains("if ($p.ExitCode -eq 0)"));
+        assert!(setup.contains("if ($null -ne $p -and $p.ExitCode -eq 0)"));
         assert!(setup.trim_end().ends_with("catch { Log ('reopen failed: ' + $_) }"));
     }
 
