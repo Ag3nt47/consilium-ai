@@ -640,6 +640,14 @@ async fn stage_release_update(version: String, url: String, digest: Option<Strin
     update::stage_from_url(&data, &version, &url, digest.as_deref().unwrap_or("")).await
 }
 
+#[tauri::command]
+async fn request_draft_installers() -> Result<(), String> {
+    let data = data_dir().ok_or("can't find Consilium's data folder")?;
+    tauri::async_runtime::spawn_blocking(move || ci::request_draft_installers(&data))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 /// "deb" or "rpm" when this Linux copy came from a system package, so the update check
 /// downloads the matching package instead of the AppImage.
 #[tauri::command]
@@ -1596,6 +1604,7 @@ pub fn run() {
             update_download_status,
             update_now,
             stage_release_update,
+            request_draft_installers,
             linux_package_kind,
             ui_update_available,
             ui_update_apply,

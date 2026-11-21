@@ -56,6 +56,15 @@ fn gh() -> Option<PathBuf> {
     crate::bridge::find_tool("gh")
 }
 
+pub fn request_draft_installers(data: &Path) -> Result<(), String> {
+    let program = gh().ok_or("Install and sign in to the GitHub CLI to build installers.")?;
+    run(&program, data, &[
+        "workflow", "run", "release.yml", "--repo", "Ag3nt47/consilium-ai",
+        "--ref", "main", "--raw-field", "draft_only=true",
+    ])?;
+    Ok(())
+}
+
 /// Runs a command in `dir` with a hard timeout, returning stdout when it succeeds.
 fn run(program: &Path, dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut child = Command::new(program)
