@@ -70,6 +70,12 @@ try {
   }
   const text = readSource(file);
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const diagnostic = source.parseDiagnostics[0];
+  if (diagnostic) {
+    const { line, character } = source.getLineAndCharacterOfPosition(diagnostic.start ?? 0);
+    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, " ");
+    throw new Error(`Parse error at ${line + 1}:${character + 1}: ${message}`);
+  }
   const scope = functionName
     ? source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === functionName && node.body)
     : undefined;
