@@ -1,4 +1,4 @@
-import { openSync, closeSync, fstatSync, readSync } from "node:fs";
+import { constants, openSync, closeSync, fstatSync, readSync } from "node:fs";
 import { extname } from "node:path";
 import ts from "typescript-ast";
 
@@ -11,7 +11,7 @@ const clip = (text) => {
 };
 
 function readSource(file) {
-  const fd = openSync(file, "r");
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > SOURCE_LIMIT) throw new Error("Use a source file up to 1 MiB.");
