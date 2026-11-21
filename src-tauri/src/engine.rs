@@ -1013,14 +1013,8 @@ impl council::Host for RealHost {
         if let Some(w) = workspace.as_deref().filter(|_| !local) {
             system.push_str(&crate::ci::for_prompt(std::path::Path::new(w)));
         }
-        // Local models have small context windows: they get a smaller transcript, with long
-        // command outputs and files offloaded to the data folder (offline blueprint, phase 4).
-        let transcript = if agents::is_local(agent) {
-            let handoff = self.store.handoff_path(conv);
-            prompt::local_transcript(&events, agent.id, Some(&self.data), handoff.as_deref())
-        } else {
-            prompt::transcript(&events, agent.id)
-        };
+        let handoff = self.store.handoff_path(conv);
+        let data = self.data.clone();
         let mut elevated_commands = prompt::elevated_command_grants(&events, agent.id);
         // The Tools page's Install button: one pinned catalog install for the AI it was sent to.
         if let Some(command) = prompt::catalog_install_grant(&events, agent.id, &self.data) {
@@ -1133,6 +1127,18 @@ checking what it would remove (list the folder first), so everything else still 
                     system.push_str(&state);
                 }
             }
+            let local_window = match agents::provider_of(agent) {
+                Some(provider) => tokio::select! {
+                    window = crate::apiagent::local_window(provider) => window,
+                    _ = cancel.cancelled() => return Err("stopped".into()),
+                },
+                None => None,
+            };
+            let transcript = if local {
+                prompt::local_transcript(&events, agent.id, Some(&data), handoff.as_deref(), local_window, &system)
+            } else {
+                prompt::transcript(&events, agent.id)
+            };
             let reply = agents::run_with_files_observed(
                 agent,
                 access,
@@ -1144,6 +1150,7 @@ checking what it would remove (list the folder first), so everything else still 
                 Some(activity),
                 elevated_commands,
                 chosen_model.as_deref(),
+                local_window,
             )
             .await;
             drop(permit);

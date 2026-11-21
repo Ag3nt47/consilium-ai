@@ -1165,7 +1165,11 @@ pub async fn run_with_files(
     files: &crate::attach::Files,
     cancel: &CancellationToken,
 ) -> Result<AgentReply, String> {
-    run_with_files_observed(agent, access, workspace, system, prompt, files, cancel, None, Vec::new(), None).await
+    let window = match provider_of(agent) {
+        Some(provider) => crate::apiagent::local_window(provider).await,
+        None => None,
+    };
+    run_with_files_observed(agent, access, workspace, system, prompt, files, cancel, None, Vec::new(), None, window).await
 }
 
 /// `run_with_files`, reporting provider-native activity as structured output arrives.
@@ -1181,6 +1185,7 @@ pub async fn run_with_files_observed(
     activity: Option<ActivitySink>,
     elevated_commands: Vec<String>,
     model: Option<&str>,
+    local_window: Option<usize>,
 ) -> Result<AgentReply, String> {
     if let Some(provider) = provider_of(agent) {
         // Attached files aren't sent: the API agents see only the conversation text.
@@ -1192,7 +1197,7 @@ pub async fn run_with_files_observed(
             });
         }
         let (text, usage, model) =
-            crate::apiagent::run(agent.id, agent.name, provider, system, prompt, cancel, RUN_TIMEOUT).await?;
+            crate::apiagent::run(agent.id, agent.name, provider, system, prompt, cancel, RUN_TIMEOUT, local_window).await?;
         return Ok(AgentReply { text, usage, model: Some(model) });
     }
     let kind = effective_kind(agent);

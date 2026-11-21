@@ -287,6 +287,7 @@ pub fn parse_reply(body: &str) -> Result<(String, Option<TokenUsage>), String> {
 }
 
 /// One council turn.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     agent: &str,
     name: &str,
@@ -295,11 +296,11 @@ pub async fn run(
     prompt: &str,
     cancel: &CancellationToken,
     timeout: Duration,
+    window: Option<usize>,
 ) -> Result<(String, Option<TokenUsage>, String), String> {
     let key = key(agent, provider).ok_or_else(|| format!("No {name} API key. Add one in Add AI."))?;
     let model = model_for(agent, name, provider, &key).await?;
     // A local model's window is small: fit the prompt to the size its server reports.
-    let window = if provider.local { local_window(provider.base_url).await } else { None };
     let (system, prompt) = match window {
         Some(ctx) => fit_to_window(system, prompt, ctx),
         None => (system.to_string(), prompt.to_string()),
@@ -340,11 +341,15 @@ pub async fn run(
 
 /// Characters per token when budgeting a local window: low on purpose (code, paths and
 /// non-English text run denser than prose), so the estimate errs toward fitting.
-const CHARS_PER_TOKEN: usize = 3;
+pub(crate) const CHARS_PER_TOKEN: usize = 3;
 
 /// The context window (tokens) a local server has loaded its model with: llama.cpp's `/props`.
 /// None when the server doesn't say (Ollama), so the prompt goes as it is.
-async fn local_window(base_url: &str) -> Option<usize> {
+pub async fn local_window(provider: &Provider) -> Option<usize> {
+    if !provider.local {
+        return None;
+    }
+    let base_url = provider.base_url;
     let root = base_url.trim_end_matches('/').trim_end_matches("/v1");
     let resp = client().ok()?.get(format!("{root}/props")).timeout(Duration::from_secs(3)).send().await.ok()?;
     let v: serde_json::Value = resp.json().await.ok()?;
