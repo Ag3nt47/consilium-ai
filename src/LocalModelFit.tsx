@@ -51,12 +51,9 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
     setScanning(true);
     setScanStatus("");
     setHostRunners(null);
+    const localInventory = api.localToolInventory().catch(() => null);
     try {
-      const [before, localTools] = await Promise.all([
-        api.peerResources(),
-        api.localToolInventory().catch(() => null),
-      ]);
-      setHostRunners(localTools?.filter((tool) => runnerNames.has(tool)) ?? null);
+      const before = await api.peerResources();
       await api.requestPeerResources();
       await new Promise((resolve) => setTimeout(resolve, 3000));
       const reports = await api.peerResources();
@@ -78,6 +75,8 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
       setDevices((previous) => previous.filter((device) => typeof device.id === "number"));
       setScanStatus("Peer capability scan unavailable. Previous paired estimates were cleared. Enter device memory manually.");
     } finally {
+      const localTools = await localInventory;
+      setHostRunners(localTools?.filter((tool) => runnerNames.has(tool)) ?? null);
       setScanning(false);
     }
   }
