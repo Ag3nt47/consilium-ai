@@ -11,6 +11,7 @@ export const RELEASES_URL = `https://github.com/${REPO}/releases`;
 // The caller runs every 30 minutes. Keep the freshness window shorter so timer jitter cannot make
 // the next tick reuse a check that completed a few seconds after the previous tick started.
 const CACHE_FRESH_MS = 25 * 60 * 1000;
+const RELEASE_METADATA_TIMEOUT_MS = 15_000;
 const KEY = "consilium.updates";
 
 export interface UpdateInfo {
@@ -120,12 +121,14 @@ export async function checkForUpdate(
     stageRelease(current, cache.latest, cache.asset, onDownloadStart, onDownloadFailure);
     return cache.latest && compareVersions(cache.latest.latest, current) > 0 ? { current, ...cache.latest } : null;
   }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RELEASE_METADATA_TIMEOUT_MS);
   try {
     const headers: Record<string, string> = { Accept: "application/vnd.github+json" };
     // Old caches lack the installer metadata. Fetch the full release once to fill it rather than
     // accepting a 304 that would leave this computer unable to stage the known update.
     if (cache.etag && cache.latest && cache.asset) headers["If-None-Match"] = cache.etag;
-    const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers });
+    const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers, signal: controller.signal });
     if (res.status === 304 && cache.latest) {
       writeCache({ ...cache, lastCheck: Date.now() });
     } else if (res.ok) {
@@ -147,6 +150,8 @@ export async function checkForUpdate(
   } catch (error) {
     if (force) throw error;
     // A cached installer can still be reachable when release metadata is unavailable.
+  } finally {
+    clearTimeout(timer);
   }
   const c = readCache();
   stageRelease(current, c.latest, c.asset, onDownloadStart, onDownloadFailure);
@@ -154,9 +159,12 @@ export async function checkForUpdate(
   // Releases can lag behind the source: report a newer version on main too, marked unreleased,
   // so "up to date" is never claimed while GitHub has something newer.
   if (!force) return null;
+  const fallback = new AbortController();
+  const fallbackTimer = setTimeout(() => fallback.abort(), RELEASE_METADATA_TIMEOUT_MS);
   try {
     const res = await fetch(`https://api.github.com/repos/${REPO}/contents/package.json?ref=main`, {
       headers: { Accept: "application/vnd.github.raw+json" },
+      signal: fallback.signal,
     });
     if (!res.ok) return null;
     const main = String((await res.json()).version || "");
@@ -164,5 +172,7 @@ export async function checkForUpdate(
     return { current, latest: main, url: `https://github.com/${REPO}`, notes: "", publishedAt: "", unreleased: true };
   } catch {
     return null;
+  } finally {
+    clearTimeout(fallbackTimer);
   }
 }
