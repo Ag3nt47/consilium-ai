@@ -674,7 +674,12 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
             st.waiting.remove(&id);
             if failed && st.live.is_empty() && !st.paused && !s.cancel.is_cancelled() {
                 let now = now_ms();
-                let available = |a: &&'static agents::Agent| s.bench.until(a.id, now).is_none() && s.host.installed(a);
+                // An AI switched off in this chat never stands in for one that couldn't answer.
+                let available = |a: &&'static agents::Agent| {
+                    s.bench.until(a.id, now).is_none()
+                        && s.host.installed(a)
+                        && !crate::switched::is_off(s.store.dir(), &s.turn.conversation, a.id)
+                };
                 let unjoined: Vec<&'static agents::Agent> = s
                     .turn
                     .members
@@ -926,6 +931,19 @@ mod tests {
         assert!(!ev.iter().any(|e| e.sender == CONSILIUM && e.text.contains("couldn't answer")));
         assert!(!ev.iter().any(|e| e.sender == "claude" && e.kind == "error"));
         assert_eq!(f.asked.lock().unwrap().iter().filter(|(a, _)| a == "claude").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_ai_switched_off_in_the_chat_never_stands_in() {
+        let (store, c) = setup();
+        crate::switched::set(store.dir(), &c, "gpt", false).unwrap();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "claude" => Err("rate limit exceeded".into()),
+            _ => Ok(format!("{id} here")),
+        }));
+        let ev = go(&store, &c, f.clone(), &["claude"], 1, Arc::new(Bench::new())).await;
+        assert!(f.asked.lock().unwrap().iter().all(|(a, _)| a != "gpt"), "a switched-off AI was asked");
+        assert!(!ev.iter().any(|e| e.text.contains("ChatGPT is taking")));
     }
 
     #[tokio::test]
