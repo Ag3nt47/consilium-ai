@@ -954,6 +954,34 @@ mod tests {
         assert!(s.contains("relaunch failed"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn mac_helper_reopens_the_previous_bundle_when_swap_fails() {
+        let data = std::env::temp_dir().join(format!("consilium mac helper {}", uuid::Uuid::new_v4()));
+        let target = data.join("Consilium.app");
+        let missing_stage = data.join("missing.app");
+        let log = data.join("install.log");
+        let reopened = data.join("reopened");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("version"), "old").unwrap();
+        // Run the real swap against a fixture. Stub process signals and Launch Services.
+        let script = format!(
+            "kill() {{ return 1; }}\nsleep() {{ :; }}\nopen() {{ cat \"$1/version\" > {}; }}\n{}",
+            quote(&reopened),
+            helper_script(42, &missing_stage, &target, &log)
+        );
+        let result = std::process::Command::new("/bin/sh").arg("-c").arg(script).status().unwrap();
+        let restored = std::fs::read_to_string(target.join("version")).unwrap();
+        let launched = std::fs::read_to_string(reopened).unwrap();
+        let log = std::fs::read_to_string(log).unwrap();
+        std::fs::remove_dir_all(&data).unwrap();
+        assert!(result.success());
+        assert_eq!(restored, "old");
+        assert_eq!(launched, "old");
+        assert!(log.contains("application bundle replacement failed"));
+        assert!(log.contains("Launch Services accepted relaunch"));
+    }
+
     #[test]
     fn reads_a_windows_or_linux_staged_version_file() {
         let dir = std::env::temp_dir().join(format!("consilium-update-next-{}", std::process::id()));
