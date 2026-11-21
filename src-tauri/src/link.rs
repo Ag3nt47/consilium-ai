@@ -1988,6 +1988,15 @@ mod tests {
         assert_eq!(host.0.cfg.lock().unwrap().peers[0].key, joiner.0.cfg.lock().unwrap().peers[0].key);
 
         assert!(wait_for(|| joiner.status().peers[0].connected && host.status().peers[0].connected).await, "session comes up");
+        let names: std::collections::HashSet<_> = if_addrs::get_if_addrs()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|interface| interface.ip().to_canonical() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+            .map(|interface| interface.name)
+            .collect();
+        let expected = (names.len() == 1).then(|| names.into_iter().next().unwrap());
+        assert_eq!(host.status().peers[0].local_interface, expected);
+        assert_eq!(joiner.status().peers[0].local_interface, expected);
         let id = joiner.send(PacketKind::Chat, json!({ "text": "hello from the PC" })).unwrap();
         assert!(wait_for(|| host_got.lock().unwrap().len() == 1).await);
         assert_eq!(host_got.lock().unwrap()[0].id, id);
@@ -1999,6 +2008,7 @@ mod tests {
         joiner.0.peers.lock().unwrap().get_mut(&view.node_id).unwrap().outbox.push_back(dup);
         joiner.stop();
         assert!(wait_for(|| !host.status().peers[0].connected).await, "host notices the drop");
+        assert_eq!(host.status().peers[0].local_interface, None);
         joiner.start();
         assert!(wait_for(|| joiner.status().peers[0].connected && joiner.status().peers[0].queued == 0).await, "reconnects and drains");
         assert_eq!(host_got.lock().unwrap().len(), 1);
