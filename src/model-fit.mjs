@@ -10,13 +10,17 @@ const MODELS = [
 const positive = (value) => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
 export const gib = (value) => `${value.toFixed(1)} GiB`;
 
-export function modelFit(devices, bits, overhead, customWeights) {
+export function weightBudgets(devices, overhead) {
   const runtime = positive(overhead);
-  const hasMemory = devices.some(({ memory }) => positive(memory) > 0);
-  const budgets = devices.map(({ name, memory }) => ({
+  return devices.map(({ name, memory }) => ({
     name: name || "Unnamed device",
     capacity: Math.max(0, positive(memory) - runtime),
-  })).filter(({ capacity }) => capacity > 0).sort((a, b) => b.capacity - a.capacity);
+  }));
+}
+
+export function modelFit(devices, bits, overhead, customWeights) {
+  const hasMemory = devices.some(({ memory }) => positive(memory) > 0);
+  const budgets = weightBudgets(devices, overhead).filter(({ capacity }) => capacity > 0).sort((a, b) => b.capacity - a.capacity);
   const combined = budgets.reduce((sum, { capacity }) => sum + capacity, 0);
   const models = MODELS.map(([name, parameters]) => ({
     name,
