@@ -139,7 +139,7 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 
 | Item | Status | Acceptance and dependencies |
 |---|---|---|
-| Deterministic symbol maps and bounded edits | ⏭ | Expose compact symbols/imports and targeted edits through supported tools. Compare token usage and check patch applicability and formatting. |
+| Deterministic symbol maps and bounded edits | 🔨 | `node scripts/symbol-map.mjs src/App.tsx` lists imports, declarations and line spans offline, with bounded input and output. Additional languages, tool integration and targeted edits remain open. |
 | Output offload and resumable checkpoints | ⏭ | Store large output locally and pass a bounded summary plus reference. Resume a task from a checkpoint with decisions, changes, tests and open work intact. |
 | Skill registry and batch export | 🕓 | Keep reviewed manifests, helpers and runbooks locally. Load content on demand and allow one compact export for approved cloud assistance. |
 | Offline model tiering and retrieval | 🔨 | Add AI estimates single or split weight fit using paired-device RAM reports or manual entries. From a checkout, `node scripts/model-fit.mjs --device "Mac=3.4"` runs the same calculator with local free RAM and a manually entered peer budget. Browser fixtures verify single, split and insufficient memory. Live peer capability discovery, runner compatibility, throughput and local retrieval remain open. |
