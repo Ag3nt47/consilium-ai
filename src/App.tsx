@@ -1313,16 +1313,18 @@ export default function App() {
   const [requestingUpdate, setRequestingUpdate] = useState(false);
   const [downloadError, setDownloadError] = useState("");
   const [requestingInstallers, setRequestingInstallers] = useState(false);
-  const [installerRequest, setInstallerRequest] = useState("");
+  const [installerRequest, setInstallerRequest] = useState<{ message: string; url?: string } | null>(null);
 
   async function buildInstallers() {
     setRequestingInstallers(true);
-    setInstallerRequest("");
+    setInstallerRequest(null);
     try {
-      await api.requestDraftInstallers();
-      setInstallerRequest("GitHub accepted the workflow request. Open Installer builds to follow it.");
+      const url = await api.requestDraftInstallers();
+      setInstallerRequest(url
+        ? { message: "GitHub accepted the installer build request.", url }
+        : { message: "GitHub accepted the workflow request. Open Installer builds to follow it." });
     } catch (error) {
-      setInstallerRequest(`Couldn't request installer builds: ${String(error)}`);
+      setInstallerRequest({ message: `Couldn't request installer builds: ${String(error)}` });
     } finally {
       setRequestingInstallers(false);
     }
@@ -4011,7 +4013,14 @@ export default function App() {
                 Installer builds
               </button>
             </div>
-            {installerRequest && <p className="muted small" role="status">{installerRequest}</p>}
+            {installerRequest && (
+              <p className="muted small" role="status">
+                {installerRequest.message}{" "}
+                {installerRequest.url && (
+                  <button className="link" onClick={() => openUrl(installerRequest.url!)}>Open this build</button>
+                )}
+              </p>
+            )}
             <p className="muted small">
               Consilium checks the downloaded installer against GitHub's fingerprint.
               {" "}{council?.auto_install_updates ?? true
