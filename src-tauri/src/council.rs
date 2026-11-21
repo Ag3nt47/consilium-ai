@@ -1002,7 +1002,7 @@ mod tests {
         let runner = council.clone();
         let done = tokio::spawn(async move { runner.run().await });
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let ask = store.append_imported(&c, "claude", "message", vec![], "@gemini-pc can you check?", Some("MacBook".into())).unwrap();
+        let ask = store.append_imported(&c, "claude", "message", vec![], "@gemini-pc can you check?", Some("MacBook".into()), None).unwrap();
         assert!(council.mentioned(&ask, &ids(&["gemini"])));
         tokio::time::timeout(Duration::from_secs(10), done).await.expect("the turn ends").unwrap();
         let s = said(&store.load(&c).unwrap());
@@ -1024,7 +1024,7 @@ mod tests {
         let done = tokio::spawn(async move { runner.run().await });
         // While ChatGPT is answering, the MacBook's Claude answers; ChatGPT reads it next.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let remote = store.append_imported(&c, "claude", "message", vec![], "from the Mac", Some("MacBook".into())).unwrap();
+        let remote = store.append_imported(&c, "claude", "message", vec![], "from the Mac", Some("MacBook".into()), None).unwrap();
         assert!(council.heard(&remote));
         tokio::time::timeout(Duration::from_secs(10), done).await.expect("the turn ends").unwrap();
         let s = said(&store.load(&c).unwrap());

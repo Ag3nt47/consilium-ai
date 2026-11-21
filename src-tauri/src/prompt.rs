@@ -1090,6 +1090,7 @@ mod tests {
             usage: None,
             attachments: vec![],
             via: None,
+            source_event: None,
         }
     }
 
