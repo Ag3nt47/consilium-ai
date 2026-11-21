@@ -4,6 +4,7 @@ import { api } from "./api";
 import { gib, modelFit } from "./model-fit.mjs";
 
 type Device = { id: number | string; name: string; memory: string };
+const deviceName = (name: string) => name.trim().toLowerCase();
 
 export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   const [devices, setDevices] = useState<Device[]>([]);
@@ -15,7 +16,9 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
   const host = hostMemory ?? (availableGiB && availableGiB > 0 ? availableGiB.toFixed(1) : "");
-  const models = modelFit([{ name: "This computer", memory: host }, ...devices], bits, overhead, customWeights);
+  const reportedNames = new Set(devices.filter((device) => typeof device.id === "string").map((device) => deviceName(device.name)));
+  const included = devices.filter((device) => typeof device.id === "string" || !reportedNames.has(deviceName(device.name)));
+  const models = modelFit([{ name: "This computer", memory: host }, ...included], bits, overhead, customWeights);
 
   async function scanPeers() {
     setScanning(true);
@@ -31,14 +34,15 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
         return [{ id: name, name, memory: memory.toFixed(1) }];
       });
       setDevices((previous) => [
-        ...previous.filter((device) => !found.some((peer) => peer.id === device.id)),
+        ...previous.filter((device) => typeof device.id === "number"),
         ...found,
       ]);
       setScanStatus(found.length
-        ? `Imported ${found.length} paired computer(s). Review the estimates and remove any duplicate manual entry.`
-        : "No new memory reports arrived. Check that paired computers are online and updated, or enter memory manually.");
+        ? `Imported ${found.length} fresh paired-computer report(s).`
+        : "No new memory reports arrived. Previous paired estimates were cleared. Check that the computers are online and updated, or enter memory manually.");
     } catch {
-      setScanStatus("Peer capability scan unavailable. Enter device memory manually.");
+      setDevices((previous) => previous.filter((device) => typeof device.id === "number"));
+      setScanStatus("Peer capability scan unavailable. Previous paired estimates were cleared. Enter device memory manually.");
     } finally {
       setScanning(false);
     }
@@ -74,6 +78,7 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
               }} />
             </label>
             <button type="button" className="btn ghost small-btn" onClick={() => setDevices((previous) => previous.filter((item) => item.id !== device.id))}>Remove device {device.id}</button>
+            {!included.includes(device) && <span className="muted">Excluded because a paired report uses the same name.</span>}
           </div>
         ))}
         <button type="button" className="btn ghost small-btn" onClick={() => {
