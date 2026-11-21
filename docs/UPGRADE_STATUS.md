@@ -87,7 +87,8 @@ not complete the phase.
 | Persona chips above the prompt | ✅ | Applied instantly on 0.3.6 without restarting |
 | Phone "launch" actions | ✅ | 0.3.7. Allowlisted targets (terminal, vscode, dashboard) executed without shell |
 | Telegram / Discord | 🕓 | After Signal |
-| Quick-summon hotkey, clipboard/screenshot capture, Whisper, Ollama + HUD | 🕓 | |
+| Clipboard image capture | 🔨 | Composer action attaches copied screenshots to the draft where clipboard permission is available. Live desktop checks pending. |
+| Quick-summon hotkey, direct screenshot capture, Whisper, Ollama + HUD | 🕓 | |
 | Obsidian search, secrets vault, fix-drafting watchdog, widget dock | 🕓 | |
 | Consensus tribunal | ✅ | Discuss mode |
 

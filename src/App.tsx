@@ -2020,10 +2020,38 @@ export default function App() {
       try {
         const data = Array.from(new Uint8Array(await f.arrayBuffer()));
         const name = f.name && f.name !== "image.png" ? f.name : `pasted-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.${f.type.split("/")[1] || "png"}`;
+        if (current !== currentRef.current) return;
         const a = await api.attachData(current, name, data);
+        if (current !== currentRef.current) return;
         setPending((p) => [...p, a]);
       } catch (e) {
         setError(`Couldn't attach ${f.name || "the pasted file"}: ${e}`);
+      }
+    }
+  }
+
+  async function attachClipboardImage() {
+    if (!current) return;
+    const conversation = current;
+    try {
+      const items = await navigator.clipboard.read();
+      const files: File[] = [];
+      for (const item of items) {
+        const format = item.types.find((type) => ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(type));
+        if (!format) continue;
+        const blob = await item.getType(format);
+        const extension = format === "image/jpeg" ? "jpg" : format.split("/")[1];
+        files.push(new File([blob], `clipboard-${files.length + 1}.${extension}`, { type: format }));
+      }
+      if (conversation !== currentRef.current) return;
+      if (files.length === 0) {
+        setError("Copy a screenshot or image first, then try again.");
+        return;
+      }
+      await attachPasted(files);
+    } catch {
+      if (conversation === currentRef.current) {
+        setError("Couldn't read an image from the clipboard. Paste the copied image directly into the message box instead.");
       }
     }
   }
@@ -3548,6 +3576,10 @@ export default function App() {
             <div className="send-buttons">
               <button className="btn ghost" onClick={attachPicked} title="Attach files: documents, Word files, pictures, PDFs, code" aria-label="Attach files">
                 📎
+              </button>
+              <button className="btn ghost" onClick={attachClipboardImage} disabled={!current}
+                title="Attach a copied screenshot or image from the clipboard" aria-label="Attach clipboard image">
+                📋
               </button>
               {busy && (
                 <button
