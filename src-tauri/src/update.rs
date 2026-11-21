@@ -217,15 +217,22 @@ fn ps_quote(p: &Path) -> String {
 
 /// The macOS helper: wait for `pid` to exit (30 s, then force it), swap, relaunch. On a failed
 /// swap the old app is put back and reopened, so the human is never left without Consilium.
-pub fn helper_script(pid: u32, staged: &Path, target: &Path) -> String {
-    let (s, t) = (quote(staged), quote(target));
+pub fn helper_script(pid: u32, staged: &Path, target: &Path, log: &Path) -> String {
+    let (s, t, g) = (quote(staged), quote(target), quote(log));
     let old = quote(&target.with_extension("app.old"));
     format!(
-        "for i in $(seq 1 60); do kill -0 {pid} 2>/dev/null || break; sleep 0.5; done\n\
+        "if ( : > {g} ); then exec > {g} 2>&1; fi\n\
+         log() {{ printf '%s %s\\n' \"$(date '+%Y-%m-%dT%H:%M:%S%z')\" \"$1\"; }}\n\
+         log 'update helper started for pid {pid}'\n\
+         for i in $(seq 1 60); do kill -0 {pid} 2>/dev/null || break; sleep 0.5; done\n\
          kill -9 {pid} 2>/dev/null; sleep 0.3\n\
          rm -rf {old}\n\
-         if mv {t} {old} && mv {s} {t}; then rm -rf {old}; else [ -e {t} ] || mv {old} {t}; fi\n\
-         open {t}\n"
+         if mv {t} {old} && mv {s} {t}; then\n\
+             log 'application bundle replaced'; rm -rf {old}\n\
+         else\n\
+             log 'application bundle replacement failed'; [ -e {t} ] || mv {old} {t}\n\
+         fi\n\
+         if open {t}; then log 'Launch Services accepted relaunch'; else log 'relaunch failed'; fi\n"
     )
 }
 
@@ -724,7 +731,7 @@ pub fn start_install(data: &Path) -> Result<Staged, String> {
     if cfg!(target_os = "macos") {
         let target = running_bundle()?;
         cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg(helper_script(pid, &staged_app(data), &target));
+        cmd.arg("-c").arg(helper_script(pid, &staged_app(data), &target, &install_log(data)));
     } else {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let appimage = std::env::var_os("APPIMAGE").filter(|_| cfg!(target_os = "linux")).map(PathBuf::from);
@@ -931,12 +938,20 @@ mod tests {
 
     #[test]
     fn helper_waits_swaps_and_restores_on_failure() {
-        let s = helper_script(42, Path::new("/d/update/Consilium.app"), Path::new("/Applications/Consilium.app"));
-        assert!(s.starts_with("for i in"));
+        let s = helper_script(
+            42,
+            Path::new("/d/update/Consilium.app"),
+            Path::new("/Applications/Consilium.app"),
+            Path::new("/d/update/install.log"),
+        );
+        assert!(s.contains("exec > '/d/update/install.log' 2>&1"));
+        assert!(s.contains("application bundle replacement failed"));
         assert!(s.contains("kill -0 42"));
         assert!(s.contains("mv '/Applications/Consilium.app' '/Applications/Consilium.app.old' && mv '/d/update/Consilium.app' '/Applications/Consilium.app'"));
         assert!(s.contains("mv '/Applications/Consilium.app.old' '/Applications/Consilium.app'"));
-        assert!(s.trim_end().ends_with("open '/Applications/Consilium.app'"));
+        assert!(s.contains("if open '/Applications/Consilium.app'"));
+        assert!(s.contains("Launch Services accepted relaunch"));
+        assert!(s.contains("relaunch failed"));
     }
 
     #[test]
