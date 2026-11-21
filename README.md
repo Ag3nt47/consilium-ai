@@ -15,9 +15,13 @@ Consilium is free and open source. Download free local AI models such as Qwen or
 
 *The walkthrough uses the built-in demo workspace and invented conversation data.*
 
-**[From online to offline: finish the same project](docs/media/online-to-offline-demo.mp4)** · 20-second illustrated demo
+**From online to offline: finish the same project** · 20-second illustrated demo
 
 A cloud council starts building a trail-map app across a Windows PC and a Mac. When the internet goes away, the machines stay connected over the LAN and a local AI picks up the shared handoff. It completes the remaining work and runs the offline tests so the finished map is ready for review. This clip illustrates the workflow.
+
+![Four scenes showing cloud agents starting a trail map, a local agent taking over offline, and offline tests passing](docs/media/online-to-offline-demo.gif)
+
+[Download the MP4](https://raw.githubusercontent.com/Ag3nt47/consilium-ai/main/docs/media/online-to-offline-demo.mp4)
 
 | Council workspace | Add an AI |
 | --- | --- |
