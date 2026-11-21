@@ -313,7 +313,7 @@ pub fn command_box_coding(workspace: &str, os: &str, auto_run: bool) -> String {
         "\n\nCODING THROUGH COMMAND BOXES\nYou can still work on the project in {workspace}: every command box you post \
 runs there{runs} and its output comes back to you as the next message. Work in small steps, one command per \
 ```{shell} box:\n\
-- Look first: list files (`git status`, `git ls-files`) and read what you'll change ({read}).\n\
+- Look first: check `git status --short` and read what you'll change ({read}). If you need to find tracked source, scope `git ls-files -- . ':(exclude,attr:linguist-generated)'` to the relevant directory.\n\
 - Change a file by writing it whole ({write}). Never write a file you haven't read this turn.\n\
 - Then build or run the tests, and fix what fails before saying it's done.\n\
 - Work on a branch of your own (`git switch -c ai/<you>/<task>`) and commit with a clear message; leave pushing \
