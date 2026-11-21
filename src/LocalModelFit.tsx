@@ -3,8 +3,9 @@ import { api } from "./api";
 
 import { gib, modelFit, weightBudgets } from "./model-fit.mjs";
 
-type Device = { id: number | string; name: string; memory: string };
+type Device = { id: number | string; name: string; memory: string; runners?: string[] };
 const memoryInput = (gib: number) => (Math.floor(Math.max(0, gib) * 10) / 10).toFixed(1);
+const runnerNames = new Set(["ollama", "llama-cli", "llama-server", "ggml-rpc-server", "rpc-server"]);
 const deviceName = (name: string) => name.trim().toLowerCase();
 
 export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
@@ -57,7 +58,8 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
         if (report.updated_at <= (before[name]?.updated_at ?? 0) || !report.total_memory_mb) return [];
         const availableMiB = report.available_memory_mb ?? report.total_memory_mb * (1 - report.memory_percent / 100);
         const memory = Math.max(0, Math.min(report.total_memory_mb, availableMiB)) / 1024;
-        return [{ id: name, name, memory: memoryInput(memory) }];
+        const runners = report.tools?.filter((tool) => runnerNames.has(tool)) ?? [];
+        return [{ id: name, name, memory: memoryInput(memory), runners }];
       });
       setDevices((previous) => [
         ...previous.filter((device) => typeof device.id === "number"),
@@ -104,6 +106,7 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
               }} />
             </label>
             <button type="button" className="btn ghost small-btn" onClick={() => setDevices((previous) => previous.filter((item) => item.id !== device.id))}>Remove device {device.id}</button>
+            {device.runners && <span className="muted">Model tools detected: {device.runners.join(", ") || "none reported"}.</span>}
             {!included.includes(device) && <span className="muted">Excluded because a paired report uses the same name.</span>}
           </div>
         ))}

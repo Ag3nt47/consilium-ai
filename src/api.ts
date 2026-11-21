@@ -567,6 +567,7 @@ const appApi = {
     total_memory_mb?: number;
     available_memory_mb?: number;
     memory_percent: number;
+    tools?: string[];
     updated_at: number;
   }>>("get_peer_resources"),
   securityScanStatus: () => invoke<SecurityScanStatus>("security_scan_status"),
