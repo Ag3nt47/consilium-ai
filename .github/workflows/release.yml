@@ -36,6 +36,7 @@ jobs:
       tag: ${{ steps.v.outputs.tag }}
       sha: ${{ steps.v.outputs.sha }}
       id: ${{ steps.v.outputs.id }}
+      preview: ${{ steps.v.outputs.preview }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -61,11 +62,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          PREVIEW_ALLOWED: ${{ github.event_name == 'workflow_dispatch' && inputs.draft_only }}
         run: |
           set -euo pipefail
           tag="v$(node -p 'require("./package.json").version')"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null | grep -qx false; then
-            echo "$tag is already published; nothing to do."; exit 0
+            if [ "$PREVIEW_ALLOWED" = "true" ]; then
+              echo "$tag is already published; building workflow artifacts for $SHA."
+              { echo "tag=$tag"; echo "sha=$SHA"; echo "preview=true"; } >> "$GITHUB_OUTPUT"
+            else
+              echo "$tag is already published; nothing to do."
+            fi
+            exit 0
           fi
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$SHA" \
@@ -85,7 +93,7 @@ jobs:
 
   build:
     needs: prepare
-    if: needs.prepare.outputs.id != ''
+    if: needs.prepare.outputs.id != '' || needs.prepare.outputs.preview == 'true'
     permissions:
       contents: write # to create the draft release
     strategy:
@@ -120,7 +128,16 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
       - run: node scripts/check-secrets.mjs
       - run: npm ci
+      - name: Build preview bundles
+        if: needs.prepare.outputs.preview == 'true'
+        shell: bash
+        env:
+          TAURI_ARGS: ${{ matrix.args }}
+        run: |
+          read -r -a build_args <<< "$TAURI_ARGS"
+          npm run app:build -- "${build_args[@]}"
       - uses: tauri-apps/tauri-action@v0
+        if: needs.prepare.outputs.id != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -128,11 +145,12 @@ jobs:
           args: ${{ matrix.args }}
       # Fixed-name copies, so the README's one-click links
       # (releases/latest/download/<name>) always fetch the newest installer.
-      - name: Attach one-click download names
+      - name: Collect named installers
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
+          PREVIEW: ${{ needs.prepare.outputs.preview }}
         run: |
           set -euo pipefail
           mkdir -p oneclick
@@ -149,11 +167,19 @@ jobs:
                      copy '*.deb' Consilium-Linux-amd64.deb
                      copy '*.rpm' Consilium-Linux-x86_64.rpm ;;
           esac
-          gh release upload "$TAG" oneclick/* --clobber --repo "$GITHUB_REPOSITORY"
+          if [ "$PREVIEW" != "true" ]; then
+            gh release upload "$TAG" oneclick/* --clobber --repo "$GITHUB_REPOSITORY"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: needs.prepare.outputs.preview == 'true'
+        with:
+          name: Consilium-preview-${{ matrix.platform }}-${{ github.run_attempt }}
+          path: oneclick/
+          if-no-files-found: error
 
   publish:
     needs: [prepare, build]
-    if: github.event_name != 'workflow_dispatch' || !inputs.draft_only
+    if: needs.prepare.outputs.id != '' && (github.event_name != 'workflow_dispatch' || !inputs.draft_only)
     runs-on: ubuntu-latest
     permissions:
       contents: write # to publish the release
