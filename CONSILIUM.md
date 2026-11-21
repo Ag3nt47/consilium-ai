@@ -22,6 +22,7 @@ Consilium: a Tauri 2 desktop app (Rust back end in `src-tauri/`, React + TypeScr
 - An update is not delivered until its focused commit is integrated onto `main`, pushed to `origin/main`, and GitHub checks pass on macOS, Windows and Linux. Stage or publish from that pushed `main` commit, never from an unpushed side branch.
 - Before changing a file another participant may have touched this turn, re-read it.
 - For long JavaScript or TypeScript files, run `node scripts/symbol-map.mjs <file>` first, then read the relevant line ranges. To locate an inner declaration, pass the top-level function and a name filter, such as `node scripts/symbol-map.mjs src/App.tsx App send`.
+- For Python, run `python scripts/python-symbol-map.py <file> --filter <name>` to find declarations offline before reading the relevant lines.
 - Full-capacity CLI agents may use the host's native PowerShell/Command Prompt or Unix shells. Administrator/root elevation always needs a fresh REQUEST for one exact command and the normal visible OS authentication prompt; never collect or pipe credentials.
 - Treat `docs/UPGRADE_STATUS.md` as the canonical backlog for the six Word blueprints. For **Request App Update**, prefer its in-progress and next items before later roadmap work and update it when work is verified.
 - New AI connectors follow `docs/CONNECTORS.md`; record known issues in `self-improvement/ledger.json`.
