@@ -4,6 +4,7 @@ import { api } from "./api";
 import { gib, modelFit } from "./model-fit.mjs";
 
 type Device = { id: number | string; name: string; memory: string };
+const memoryInput = (gib: number) => (Math.floor(Math.max(0, gib) * 10) / 10).toFixed(1);
 const deviceName = (name: string) => name.trim().toLowerCase();
 
 export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
@@ -15,7 +16,7 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   const [customWeights, setCustomWeights] = useState("");
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
-  const host = hostMemory ?? (availableGiB && availableGiB > 0 ? availableGiB.toFixed(1) : "");
+  const host = hostMemory ?? (availableGiB && availableGiB > 0 ? memoryInput(availableGiB) : "");
   const reportedNames = new Set(devices.filter((device) => typeof device.id === "string").map((device) => deviceName(device.name)));
   const included = devices.filter((device) => typeof device.id === "string" || !reportedNames.has(deviceName(device.name)));
   const models = modelFit([{ name: "This computer", memory: host }, ...included], bits, overhead, customWeights);
@@ -32,7 +33,7 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
         if (report.updated_at <= (before[name]?.updated_at ?? 0) || !report.total_memory_mb) return [];
         const availableMiB = report.available_memory_mb ?? report.total_memory_mb * (1 - report.memory_percent / 100);
         const memory = Math.max(0, Math.min(report.total_memory_mb, availableMiB)) / 1024;
-        return [{ id: name, name, memory: (Math.floor(memory * 10) / 10).toFixed(1) }];
+        return [{ id: name, name, memory: memoryInput(memory) }];
       });
       setDevices((previous) => [
         ...previous.filter((device) => typeof device.id === "number"),
