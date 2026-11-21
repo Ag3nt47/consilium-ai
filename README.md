@@ -3,7 +3,7 @@
 <h1 align="center">Consilium - Local-First Multi-Agent AI Mesh</h1>
 <p align="center"><i>A council of minds: the offline capable, peer-linked AI hive mind.</i></p>
 
-Consilium is a local-first, multi-AI hive mind that connects any mix of Windows, macOS, and Linux computers into a shared mesh. Each computer can contribute AI agents using the hardware, local models, or cloud providers available to it. Across the mesh, those agents share conversations and tasks, divide a project into parallel work, and bring their results back for review.
+Put every computer you own to work on the same project. Consilium connects any mix of Windows, macOS, and Linux computers into a local-first AI hive mind, so online assistants and local models can tackle different parts of a job at the same time. Each computer can contribute AI agents using the hardware, local models, or cloud providers available to it. Across the mesh, those agents share conversations and tasks, divide a project into parallel work, and bring their results back for review.
 
 Mix cloud assistants such as ChatGPT, Claude, and Gemini with local models such as Qwen and Llama. Pair devices over your local network and use supported local models for offline work. For software projects, agents can work in separate Git worktrees while you track their progress on a shared task board and review their changes before merging.
 
@@ -14,6 +14,10 @@ Consilium is free and open source. Download free local AI models such as Qwen or
 <p align="center"><img src="docs/media/demo.gif" width="860" alt="Consilium demo showing agents working through a shared task board and a review request"></p>
 
 *The walkthrough uses the built-in demo workspace and invented conversation data.*
+
+**[From online to offline: finish the same project](docs/media/online-to-offline-demo.mp4)** · 20-second illustrated demo
+
+A cloud council starts building a trail-map app across a Windows PC and a Mac. When the internet goes away, the machines stay connected over the LAN and a local AI picks up the shared handoff. It completes the remaining work and runs the offline tests so the finished map is ready for review. This clip illustrates the workflow.
 
 | Council workspace | Add an AI |
 | --- | --- |
