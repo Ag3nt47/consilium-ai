@@ -523,6 +523,7 @@ const appApi = {
   forgetApproval: (grant: string) => invoke<Council>("forget_approval", { grant }),
   /** Settings → Tools: not-bundled tools the AIs know about, with install state and pinned commands. */
   toolCatalog: () => invoke<CatalogTool[]>("tool_catalog"),
+  localToolInventory: () => invoke<string[]>("local_tool_inventory"),
   /** Whether the `consilium` terminal command is installed. */
   quickSummonAvailable: () => invoke<boolean>("quick_summon_available"),
   cliStatus: () => invoke<CliInstall>("cli_status"),
