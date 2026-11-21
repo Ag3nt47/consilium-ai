@@ -1,11 +1,12 @@
 # Upgrade documents: status
 
-This is the canonical backlog for every requirement in the three Word documents the human attached
-on 2026-11-15: **Consilium Upgrade Overhaul.docx**, **2nd consilium update.docx** and **3rd update.docx**. These documents
-are requested product scope, not optional inspiration. The council must prefer unfinished items
-marked **in progress** or **next** when **Request App Update** starts new work, then later document
-items, the roadmap, open bugs, and newly noticed improvements. Update this file in the same commit
-that finishes an item, and mark an item complete only after implementation and verification.
+This is the canonical backlog for the six attached Word blueprints. Start with open pull requests,
+then pick an independent **in progress** or **next** item. Prioritize small app improvements and
+token efficiency ahead of larger upgrades. For each task, record its owner, scope, changed files,
+tests, blocker and next step. Mark an item complete only after implementation and verification.
+The attachments supply product requirements and example designs. Translate those examples into the
+existing Rust/Tauri/React app. Follow the user's current instructions for live operations, including
+keeping local model runners idle and leaving live Signal pairing deferred.
 
 Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasible as written (reason given)
 
@@ -115,6 +116,41 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 | Phone bots (Telegram/Matrix) as out-of-band control | 🕓 | Shares the Signal receiver's safeguards (allowlist, replay, freshness); Telegram row in Document 2 |
 | Cloud AI apps → local (Custom GPT Actions, Claude MCP via tunnel) | 🕓 | Exposes this computer to the internet; needs the human's explicit approval, an authenticated Cloudflare/Tailscale Funnel tunnel, an allowlisted command set and no shell access |
 | "UI integration" (PySide6 signals) | ✅ | Topbar `LinkIndicator` with status LEDs (connected/disconnected/syncing/offline), `LinkSettings` in Settings, pairing code countdown, candidate subnet discovery, route & RTT meters, and Cmd+K palette hook |
+
+## Document 4: Consilium app improvements.docx
+
+| Item | Status | Acceptance and dependencies |
+|---|---|---|
+| Concise engineering mode and compact handoffs | ⏭ | Share the same short status fields across agent adapters and task routing. Omit redundant prose and unchanged code. Compare prompt sizes using the same task fixtures. |
+| Scoped diffs, artifact references and indexing exclusions | ⏭ | Reuse existing bounded file snapshots and history compaction. Exclude generated artifacts from scans, retain readable artifact references and measure the change in input size. |
+| Local pre-flight and escalation ceilings | 🕓 | Run scoped syntax, lint and unit checks before eligible cloud requests. Surface the failure with a bounded retry count and a user-set budget. |
+| Persistent workers and stall recovery | 🕓 | Reuse supported provider sessions with a heartbeat, bounded restart attempts and resumable task state. Measure cold and warm latency and test an interrupted worker. |
+| Parallel worktrees, critic and shared lessons | 🕓 | Extend existing worktrees and consensus with file ownership, a verification pass, safe cleanup and an append-only lessons log. Test conflict and recovery paths. |
+| Local failover and swarm presets | 🕓 | Distinguish quota exhaustion from transient errors. Route to available authorized workers. Verify local draft/cloud audit, consensus and offline-only presets. |
+| Device enrollment, LAN messaging and transport | 🕓 | Extend Document 3 pairing and link work with device capabilities, manual enrollment, LAN notes and authenticated Ethernet, Wi-Fi and BLE failover. |
+| Approval and monitoring windows | 🕓 | Plan the device manager, command/diff approvals, LAN console, token/latency/restart telemetry and routing audit views. Verify keyboard dismissal, saved geometry and bounded UI updates. |
+| Branding and maintenance | 🕓 | Update the README using verified platform and transport support. Extend existing cleanup to handle proven stale files and workers while preserving active jobs, repositories and virtual environments. |
+
+## Document 5: Off-line AI development.docx
+
+| Item | Status | Acceptance and dependencies |
+|---|---|---|
+| Deterministic symbol maps and bounded edits | ⏭ | Expose compact symbols/imports and targeted edits through supported tools. Compare token usage and check patch applicability and formatting. |
+| Output offload and resumable checkpoints | ⏭ | Store large output locally and pass a bounded summary plus reference. Resume a task from a checkpoint with decisions, changes, tests and open work intact. |
+| Skill registry and batch export | 🕓 | Keep reviewed manifests, helpers and runbooks locally. Load content on demand and allow one compact export for approved cloud assistance. |
+| Offline model tiering and retrieval | 🕓 | Test hardware fit and throughput for coding, lightweight work and local embeddings. Track split inference separately from independent model roles. Start runners only during authorized tests. |
+| Worktree ownership and deterministic validation | 🕓 | Set file boundaries before dispatch. Run language-appropriate checks locally and record compact, bounded repair feedback. |
+| Credentials, persistent task queue and replay | 🕓 | Plan OS-backed storage, resumable queue state, dead-letter visibility and opt-in replay. Verify offline behavior and recovery after interruption. |
+
+## Document 6: Fourth consilium update (1).docx
+
+| Item | Status | Acceptance and dependencies |
+|---|---|---|
+| Peer update status and transport checks | 🔨 | Existing peer update requests and automatic installs are foundations. Verify progress emblem, signed release installation and restart on both computers. Add transport measurements after native paths work. |
+| Read-only environment and tool audit | 🕓 | Report repository and dependency status, provider CLI availability, and local model inventory. Keep checks bounded and identify which phase failed. |
+| Distributed retrieval and state alignment | 🕓 | Reuse the conversation transport and offline retrieval work. Reconcile session and audit state across peers and verify duplicate handling. |
+| Local validation and mentor escalation | 🕓 | Reuse deterministic checks and the reviewed skills registry. After bounded failures, package a compact redacted report for an allowed mentor. Reuse reviewed repair lessons as retrieval material. |
+| Candidate update synthesis and review | 🕓 | Generate one scoped proposal from relevant diffs and diagnostics, validate it in an isolated worktree, and expose the review and release outcome through the existing update path. |
 
 ## Reliability and portability added during the upgrade
 
