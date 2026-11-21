@@ -137,4 +137,18 @@ jobs:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
-        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+        run: |
+          set -euo pipefail
+          assets="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets)"
+          for name in Consilium-Windows-Setup.exe Consilium-macOS.dmg Consilium-Linux-x86_64.AppImage Consilium-Linux-amd64.deb Consilium-Linux-x86_64.rpm; do
+            if ! jq -e --arg name "$name" '
+              [.assets[] | select(.name == $name)] |
+              length == 1 and (.[0] |
+                .state == "uploaded" and .size > 0
+                and ((.digest // "") | test("^sha256:[0-9a-f]{64}$")))
+            ' <<< "$assets" > /dev/null; then
+              echo "::error::Release asset $name is incomplete or has no GitHub SHA-256 digest."
+              exit 1
+            fi
+          done
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
