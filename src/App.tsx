@@ -3987,16 +3987,24 @@ export default function App() {
               onError={(e) => setError(e)}
             />
             <div className="section-label">In the council</div>
-            {members.map((a) => (
-              <div key={a.id} className="member-row">
-                <span className={`agent-name agent-${a.id}`}>{a.name}</span>
-                <span className="muted small">{a.company}</span>
-                <span className="spacer" />
-                <button title="Take this AI out of the council (at least one must stay)" className="link danger-link" disabled={members.length < 2} onClick={() => removeMember(a)}>
-                  remove
-                </button>
-              </div>
-            ))}
+            {members.map((a) => {
+              const check = checks[a.id];
+              return (
+                <div key={a.id} className="member-row">
+                  <span className={`agent-name agent-${a.id}`}>{a.name}</span>
+                  <span className="muted small">{a.company}</span>
+                  {check && (
+                    <small className="muted" role="status" title={check === "running" ? undefined : check.detail}>
+                      {check === "running" ? "Testing…" : check.ok ? "Replied" : "Couldn't reply"}
+                    </small>
+                  )}
+                  <span className="spacer" />
+                  <button title="Take this AI out of the council (at least one must stay)" className="link danger-link" disabled={members.length < 2} onClick={() => removeMember(a)}>
+                    remove
+                  </button>
+                </div>
+              );
+            })}
             <div className="row end">
               <button className="btn ghost" onClick={() => setAddPanel("choose")}>Back</button>
               <button title="Check install and sign-in status" className="btn ghost" onClick={refreshAgents} disabled={agentsRefreshing}>
