@@ -27,6 +27,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// The newest council-memory characters a local model is shown.
+const LOCAL_MEMORY_CHARS: usize = 1_500;
+
 /// Upper bound on discussion rounds, whatever the UI asks for, so agents can't loop indefinitely.
 pub const MAX_ROUNDS: u32 = 8;
 
@@ -949,7 +952,9 @@ impl council::Host for RealHost {
         // The model chosen in this AI's council box (#29), read fresh like the folder.
         let chosen_model = self.config.model(agent.id);
         let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w)));
-        let shared = self.memory.for_prompt();
+        // A local model's window is small (often 4k–8k tokens): it gets only the newest notes.
+        let local = agents::is_local(agent);
+        let shared = if local { self.memory.for_prompt_within(LOCAL_MEMORY_CHARS) } else { self.memory.for_prompt() };
         let members = self.config.get().members;
         let ctx = prompt::Context {
             members: &members,
@@ -980,14 +985,17 @@ impl council::Host for RealHost {
                 system.push_str(&crate::skills::for_flagship(&library, &locals, crate::skills::index(&library).len()));
             }
         }
-        // Everyone's plan usage and reset times, as last read.
-        if let Some(usage) = crate::usage::for_prompt(&crate::usage::load(&self.data), &members, agent.id, store::now_ms()) {
+        // Everyone's plan usage and reset times, as last read (not for local models: no plan).
+        if let Some(usage) = (!local)
+            .then(|| crate::usage::for_prompt(&crate::usage::load(&self.data), &members, agent.id, store::now_ms()))
+            .flatten()
+        {
             system.push_str(&usage);
         }
         // The conversation's shared task board, and how to change it.
         system.push_str(&crate::tasks::for_prompt(&crate::tasks::load(self.store.dir(), conv)));
         // The projects' GitHub checks, as last read by the background watcher.
-        if let Some(w) = workspace.as_deref() {
+        if let Some(w) = workspace.as_deref().filter(|_| !local) {
             system.push_str(&crate::ci::for_prompt(std::path::Path::new(w)));
         }
         // Local models have small context windows: they get a smaller transcript, with long
@@ -1014,7 +1022,10 @@ checking what it would remove (list the folder first), so everything else still 
             );
         }
         if access == Access::Unrestricted || access == Access::Own {
-            system.push_str(&prompt::saved_grants_note(&saved_grants));
+            // The list is long; a local model can still use the grants, it just isn't shown them.
+            if !local {
+                system.push_str(&prompt::saved_grants_note(&saved_grants));
+            }
             for grant in saved_grants {
                 if !elevated_commands.contains(&grant) {
                     elevated_commands.push(grant);
