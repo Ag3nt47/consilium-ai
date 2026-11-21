@@ -1633,7 +1633,7 @@ export default function App() {
     const el = messagesRef.current;
     if (!el) return;
     const top = el.scrollTop;
-    const nearBottom = el.scrollHeight - top - el.clientHeight < 80;
+    const nearBottom = el.scrollHeight - top - el.clientHeight <= 4;
     // The jump button shows whenever the view is off the bottom, not only when far up.
     setAwayFromLatest(!nearBottom);
     // Only an upward scroll unpins: smooth auto-scrolls and growing content never move scrollTop up.
@@ -1650,7 +1650,6 @@ export default function App() {
   // event; while following, keep the newest content in view.
   useEffect(() => {
     const el = messagesRef.current;
-    followRef.current = true; // a newly opened conversation starts at its newest message
     if (!el || typeof ResizeObserver === "undefined") return;
     let frame = 0;
     const stick = () => {
@@ -1663,6 +1662,7 @@ export default function App() {
       });
     };
     const ro = new ResizeObserver(stick);
+    ro.observe(el);
     Array.from(el.children).forEach((c) => ro.observe(c));
     const mo = new MutationObserver((records) => {
       for (const r of records) {
