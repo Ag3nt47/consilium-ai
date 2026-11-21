@@ -127,6 +127,9 @@ pub struct Event {
     /// Transport or bridge the message arrived through (e.g. "Signal"), if not sent directly in-app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+    /// Source node and event identity for a message imported from a linked computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -491,7 +494,7 @@ impl Store {
         attachments: Vec<crate::attach::Attachment>,
         via: Option<&str>,
     ) -> Result<Event, String> {
-        self.append_full(id, "human", "message", to, text, None, attachments, vec![], via.map(String::from), false)
+        self.append_full(id, "human", "message", to, text, None, attachments, vec![], via.map(String::from), false, None)
     }
 
     pub fn append_with_usage(
@@ -503,11 +506,12 @@ impl Store {
         text: &str,
         usage: Option<TokenUsage>,
     ) -> Result<Event, String> {
-        self.append_full(id, sender, kind, to, text, usage, vec![], vec![], None, false)
+        self.append_full(id, sender, kind, to, text, usage, vec![], vec![], None, false, None)
     }
 
     /// A message copied from a linked computer. Its REQUEST lines get no buttons here: the
     /// computer it came from owns that turn.
+    #[allow(clippy::too_many_arguments)]
     pub fn append_imported(
         &self,
         id: &str,
@@ -516,13 +520,14 @@ impl Store {
         to: Vec<String>,
         text: &str,
         via: Option<String>,
+        source_event: Option<String>,
     ) -> Result<Event, String> {
-        self.append_full(id, sender, kind, to, text, None, vec![], vec![], via, true)
+        self.append_full(id, sender, kind, to, text, None, vec![], vec![], via, true, source_event)
     }
 
     /// Records the messages that were handed to an AI in one compact, hidden receipt event.
     pub fn append_seen(&self, id: &str, sender: &str, seen: Vec<String>) -> Result<Event, String> {
-        self.append_full(id, sender, "seen", vec![], "", None, vec![], seen, None, false)
+        self.append_full(id, sender, "seen", vec![], "", None, vec![], seen, None, false, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -538,6 +543,7 @@ impl Store {
         seen: Vec<String>,
         via: Option<String>,
         foreign: bool,
+        source_event: Option<String>,
     ) -> Result<Event, String> {
         Self::check(id)?;
         // Everything in a conversation is sent to every AI's provider, so secrets are masked first.
@@ -575,6 +581,7 @@ impl Store {
             usage,
             attachments,
             via,
+            source_event,
         };
         let mut line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
         line.push('\n');

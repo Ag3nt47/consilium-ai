@@ -59,8 +59,9 @@ const CATCH_UP: usize = 20;
 /// How often to check for conversations a linked computer hasn't been sent yet.
 const CATCH_UP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 /// `filed` marker for a packet whose message is being written: its retry checks the conversation first.
-const PENDING: &str = "pending:";
-/// How many of a conversation's newest events that check looks through.
+const PENDING: &str = "pending-event:";
+const LEGACY_PENDING: &str = "pending:";
+/// How many events to inspect when recovering a pending write from an older version.
 const RECHECK_EVENTS: usize = 50;
 
 #[derive(Default, Serialize, Deserialize)]
@@ -259,7 +260,7 @@ impl Sync {
     /// the owning computer. Nothing runs here.
     fn reply(&self, mirror: &str, text: &str, targets: &[String]) -> Result<(Event, Value), String> {
         let (owner, conversation) = self.origin(mirror).ok_or("this isn't another computer's conversation")?;
-        let event = self.store.append_imported(mirror, "human", "message", targets.to_vec(), text, None)?;
+        let event = self.store.append_imported(mirror, "human", "message", targets.to_vec(), text, None, None)?;
         self.sent.lock().unwrap().push((mirror.to_string(), text.to_string()));
         // Sent here, so `outgoing` doesn't send it a second time when the window shows it.
         self.first_time(&event.id);
@@ -412,13 +413,14 @@ impl Sync {
         let via = shown_via(&shared.sender, &None, computer);
         let text = capped(shared.text);
         let pending = format!("{PENDING}{}", packet.id);
-        if m.filed.contains(&pending) && self.already_written(&shared.conversation, &shared.sender, &text) {
+        if self.already_written(&m, &packet.id, &shared.conversation, &seen, &shared.sender, &text)? {
             self.settle(&mut m, &packet.id, Some(seen))?;
             return Ok(None);
         }
+        m.filed.remove(&format!("{LEGACY_PENDING}{}", packet.id));
         m.filed.insert(pending);
         self.save(&m)?;
-        let event = self.store.append_imported(&shared.conversation, &shared.sender, "message", shared.to, &text, via)?;
+        let event = self.store.append_imported(&shared.conversation, &shared.sender, "message", shared.to, &text, via, Some(seen.clone()))?;
         self.settle(&mut m, &packet.id, Some(seen))?;
         drop(m);
         // The shared board lives here: the other computer's AI's TASK lines count, under its handle.
@@ -481,7 +483,7 @@ impl Sync {
             return Ok(None);
         }
         let note = format!("Tasks: the shared board was updated on {computer}. {}", snapshot.board.progress());
-        self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None).map(Some)
+        self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None, None).map(Some)
     }
 
     /// Receives host resources reported by a linked peer computer.
@@ -734,7 +736,7 @@ impl Sync {
                     "Paused copying from {computer} for a minute: it sent more than {MAX_PER_MINUTE} messages in a minute, \
                      which usually means AIs are caught in a loop. Messages it sent during the pause are not copied here."
                 );
-                self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None)?;
+                self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None, None)?;
             }
             return Ok(None);
         }
@@ -761,13 +763,14 @@ impl Sync {
         let text = capped(shared.text);
         // Pending while it's written and filed after: a crash in between is retried without a copy.
         let pending = format!("{PENDING}{}", packet.id);
-        if m.filed.contains(&pending) && self.already_written(&local, &shared.sender, &text) {
+        if self.already_written(&m, &packet.id, &local, &seen, &shared.sender, &text)? {
             self.settle(&mut m, &packet.id, Some(seen))?;
             return Ok(None);
         }
+        m.filed.remove(&format!("{LEGACY_PENDING}{}", packet.id));
         m.filed.insert(pending);
         self.save(&m)?;
-        let event = self.store.append_imported(&local, &shared.sender, &shared.kind, shared.to, &text, via)?;
+        let event = self.store.append_imported(&local, &shared.sender, &shared.kind, shared.to, &text, via, Some(seen.clone()))?;
         self.settle(&mut m, &packet.id, Some(seen))?;
         drop(m);
         // The AIs here answer the human's message too, and read the other computer's AIs.
@@ -778,17 +781,31 @@ impl Sync {
     /// Files a conversation's earlier messages in its mirror, skipping any already there (by id,
     /// or by sender and text for ones copied before ids were recorded). Returns the last one filed.
     fn file_history(&self, m: &mut Mirrors, node: &str, local: &str, earlier: Vec<Earlier>, computer: &str) -> Result<Option<Event>, String> {
-        let have: HashSet<(String, String)> =
-            self.store.load(local).unwrap_or_default().into_iter().map(|e| (e.sender, e.text)).collect();
+        let mut sources = HashSet::new();
+        let mut legacy = HashSet::new();
+        for event in self.store.load(local)? {
+            if let Some(source) = event.source_event {
+                sources.insert(source);
+            } else {
+                legacy.insert((event.sender, event.text));
+            }
+        }
         let mut last = None;
         for item in earlier.into_iter().take(HISTORY_LIMIT) {
             let seen = format!("ev:{node}/{}", item.id);
             let text = capped(item.text);
-            if !known_sender(&item.sender) || m.filed.contains(&seen) || have.contains(&(item.sender.clone(), text.clone())) {
+            if !known_sender(&item.sender) || m.filed.contains(&seen) {
+                continue;
+            }
+            if sources.contains(&seen) {
+                m.filed.insert(seen);
+                continue;
+            }
+            if legacy.contains(&(item.sender.clone(), crate::redact::scrub(&text))) {
                 continue;
             }
             let via = shown_via(&item.sender, &item.via, computer);
-            last = Some(self.store.append_imported(local, &item.sender, "message", item.to, &text, via)?);
+            last = Some(self.store.append_imported(local, &item.sender, "message", item.to, &text, via, Some(seen.clone()))?);
             m.filed.insert(seen);
         }
         self.save(m)?;
@@ -798,6 +815,7 @@ impl Sync {
     /// Records `packet_id` (and its event key) as filed and clears its pending mark.
     fn settle(&self, m: &mut Mirrors, packet_id: &str, seen: Option<String>) -> Result<(), String> {
         m.filed.remove(&format!("{PENDING}{packet_id}"));
+        m.filed.remove(&format!("{LEGACY_PENDING}{packet_id}"));
         m.filed.insert(packet_id.to_string());
         if let Some(seen) = seen {
             m.filed.insert(seen);
@@ -805,11 +823,31 @@ impl Sync {
         self.save(m)
     }
 
-    /// Whether `conversation`'s newest events already hold `sender`'s `text`: a crash after the
-    /// write but before it was recorded as filed leaves it there, and the retry mustn't add it again.
-    fn already_written(&self, conversation: &str, sender: &str, text: &str) -> bool {
-        let want = crate::redact::scrub(text);
-        self.store.load(conversation).unwrap_or_default().iter().rev().take(RECHECK_EVENTS).any(|e| e.sender == sender && e.text == want)
+    /// Checks the log after an interrupted write. Older pending markers predate source IDs.
+    fn already_written(
+        &self,
+        mirrors: &Mirrors,
+        packet_id: &str,
+        conversation: &str,
+        source_event: &str,
+        sender: &str,
+        text: &str,
+    ) -> Result<bool, String> {
+        let legacy = mirrors.filed.contains(&format!("{LEGACY_PENDING}{packet_id}"));
+        if !legacy && !mirrors.filed.contains(&format!("{PENDING}{packet_id}")) {
+            return Ok(false);
+        }
+        let events = self.store.load(conversation)?;
+        if events.iter().any(|event| event.source_event.as_deref() == Some(source_event)) {
+            return Ok(true);
+        }
+        if legacy {
+            let text = crate::redact::scrub(text);
+            return Ok(events.iter().rev().take(RECHECK_EVENTS).any(|event| {
+                event.source_event.is_none() && event.sender == sender && event.text == text
+            }));
+        }
+        Ok(false)
     }
     fn save(&self, m: &Mirrors) -> Result<(), String> {
         let tmp = self.path.with_extension("json.tmp");
@@ -1090,12 +1128,13 @@ mod tests {
         }
 
         // Crash before the write: pending, but not in the chat, so the retry writes it once.
-        let next = a.store.append(&conv.id, "claude", "message", vec![], "second").unwrap();
+        // Identical sender and text can belong to a different source event.
+        let next = a.store.append(&conv.id, "human", "message", vec![], "hello").unwrap();
         let p2 = packet("node-a", "p2", a.outgoing(&next).unwrap());
         b.mirrors.lock().unwrap().filed.insert(format!("{PENDING}p2"));
         assert!(b.file(&p2, "MacBook").unwrap().is_some(), "a lost write is retried");
         assert!(b.file(&p2, "MacBook").unwrap().is_none());
-        assert_eq!(count("second"), 1);
+        assert_eq!(count("hello"), 2);
         let _ = std::fs::remove_dir_all(&root);
     }
     #[test]
