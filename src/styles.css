@@ -3832,3 +3832,6 @@ button.attachment {
   justify-content: space-evenly;
 }
 .council-box-controls > .link { padding: 0 3px !important; line-height: 1 !important; }
+
+.add-choice { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; text-align: left; padding: 10px 12px; }
+.add-choice small { grid-column: 2; color: var(--muted); font-weight: normal; }
