@@ -1311,6 +1311,21 @@ export default function App() {
   const [requestingStatus, setRequestingStatus] = useState(false);
   const [requestingUpdate, setRequestingUpdate] = useState(false);
   const [downloadError, setDownloadError] = useState("");
+  const [requestingInstallers, setRequestingInstallers] = useState(false);
+  const [installerRequest, setInstallerRequest] = useState("");
+
+  async function buildInstallers() {
+    setRequestingInstallers(true);
+    setInstallerRequest("");
+    try {
+      await api.requestDraftInstallers();
+      setInstallerRequest("GitHub accepted the workflow request. Open Installer builds to follow it.");
+    } catch (error) {
+      setInstallerRequest(`Couldn't request installer builds: ${String(error)}`);
+    } finally {
+      setRequestingInstallers(false);
+    }
+  }
   const markDownloadStarting = useCallback((version: string) => {
     setDownloadError("");
     setDownloadStatus({ active: true, version: version.replace(/^v/i, "") });
@@ -3949,6 +3964,15 @@ export default function App() {
               </span>
             </div>
             {downloadError && <p className="error small" role="status">{downloadError}</p>}
+            <div className="row wrap">
+              <button className="btn ghost" disabled={requestingInstallers} onClick={() => void buildInstallers()}>
+                {requestingInstallers ? "Requesting installer builds…" : "Build draft installers"}
+              </button>
+              <button className="link" onClick={() => openUrl("https://github.com/Ag3nt47/consilium-ai/actions/workflows/release.yml")}>
+                Installer builds
+              </button>
+            </div>
+            {installerRequest && <p className="muted small" role="status">{installerRequest}</p>}
             <p className="muted small">
               Consilium checks the downloaded installer against GitHub's fingerprint.
               {" "}{council?.auto_install_updates ?? true
