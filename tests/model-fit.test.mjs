@@ -15,7 +15,7 @@ test("split estimate reserves runtime memory on each device", () => {
   const mac = { name: "Mac", memory: 6 };
   assert.equal(customFit([windows], 10), "Needs at least 2.0 GiB more for weights");
   assert.equal(customFit([mac], 10), "Needs at least 6.0 GiB more for weights");
-  assert.equal(customFit([mac, windows], 10), "Split estimate: Windows + Mac");
+  assert.equal(customFit([mac, windows], 10), "Split estimate: Windows + Mac (Windows 8.0 GiB, Mac 2.0 GiB)");
   assert.equal(customFit([mac, windows], 13), "Needs at least 1.0 GiB more for weights");
 });
 

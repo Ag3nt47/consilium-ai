@@ -35,13 +35,18 @@ export function modelFit(devices, bits, overhead, customWeights) {
       name, weights, fit: hasMemory ? `Needs at least ${gib(weights - combined)} more for weights` : "Enter usable memory",
     };
     const selected = [];
-    let capacity = 0;
+    let remaining = weights;
     for (const device of budgets) {
-      selected.push(device.name);
-      capacity += device.capacity;
-      if (capacity >= weights) break;
+      const allocated = Math.min(device.capacity, remaining);
+      selected.push({ name: device.name, allocated });
+      remaining -= allocated;
+      if (remaining <= 0) break;
     }
-    return { name, weights, fit: `Split estimate: ${selected.join(" + ")}` };
+    const names = selected.map((device) => device.name).join(" + ");
+    const allocation = selected.map(({ name, allocated }) =>
+      `${name} ${allocated < 0.05 ? "<0.1 GiB" : gib(allocated)}`
+    ).join(", ");
+    return { name, weights, fit: `Split estimate: ${names} (${allocation})` };
   });
 }
 
