@@ -7,6 +7,7 @@
 - Estimate local model memory requirements and ask paired computers for current memory reports.
 - Run the same memory calculator offline from a source checkout with `node scripts/model-fit.mjs`.
 - Show GitHub update checks, download progress, and installer staging failures in Settings.
+- Request draft Windows, macOS, and Linux installers from Settings for a main commit that passed CI.
 - Use NSIS update mode on Windows and preserve staged installers when the expected version is missing after setup.
 - Use shorter task-board instructions to reduce repeated prompt text.
 
