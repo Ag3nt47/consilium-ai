@@ -162,6 +162,37 @@ code {
   height: 40px;
 }
 
+.brand-icon.update-downloading {
+  animation: update-emblem-pulse 1.15s ease-in-out infinite;
+}
+
+@keyframes update-emblem-pulse {
+  50% {
+    opacity: 0.72;
+    transform: scale(0.91);
+    filter: drop-shadow(0 0 9px var(--accent));
+  }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-icon.update-downloading {
+    animation: none;
+    filter: drop-shadow(0 0 7px var(--accent));
+  }
+}
+
 .brand-name {
   font: 600 21px/1.1 var(--brand-font);
   letter-spacing: 0.3px;
@@ -2427,6 +2458,7 @@ button.attachment {
 .msg-input { min-width: 0; flex: 1 1 160px; max-width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: inherit; font: inherit; }
 .msg-advanced summary { cursor: pointer; font-size: 12px; }
 .msg-field { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 12px; }
+.msg-field > .msg-input { flex: none; }
 .msg-save-row { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 .msg-note { flex: 1; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
 .msg-note.ok { color: #16a34a; }

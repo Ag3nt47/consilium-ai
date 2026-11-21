@@ -58,6 +58,10 @@ const MENTION_TURNS: u32 = 3;
 const CATCH_UP: usize = 20;
 /// How often to check for conversations a linked computer hasn't been sent yet.
 const CATCH_UP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+/// `filed` marker for a packet whose message is being written: its retry checks the conversation first.
+const PENDING: &str = "pending:";
+/// How many of a conversation's newest events that check looks through.
+const RECHECK_EVENTS: usize = 50;
 
 #[derive(Default, Serialize, Deserialize)]
 struct Mirrors {
@@ -399,17 +403,24 @@ impl Sync {
             && !m.map.values().any(|v| *v == shared.conversation)
             && self.store.meta(&shared.conversation).is_ok()
             && !shared.text.trim().is_empty();
-        // Recorded before acting, so a crash can't file the same answer twice.
-        m.filed.insert(packet.id.clone());
-        m.filed.insert(seen);
-        self.save(&m)?;
-        drop(m);
+        // Pending while it's written and filed after, so a crash in between neither loses the
+        // answer nor, when the inbox is replayed, files it twice (see `already_written`).
         if !valid || self.admit(&packet.node_id, packet.timestamp_ms) != Verdict::Accept {
+            self.settle(&mut m, &packet.id, Some(seen))?;
             return Ok(None);
         }
         let via = shown_via(&shared.sender, &None, computer);
         let text = capped(shared.text);
+        let pending = format!("{PENDING}{}", packet.id);
+        if m.filed.contains(&pending) && self.already_written(&shared.conversation, &shared.sender, &text) {
+            self.settle(&mut m, &packet.id, Some(seen))?;
+            return Ok(None);
+        }
+        m.filed.insert(pending);
+        self.save(&m)?;
         let event = self.store.append_imported(&shared.conversation, &shared.sender, "message", shared.to, &text, via)?;
+        self.settle(&mut m, &packet.id, Some(seen))?;
+        drop(m);
         // The shared board lives here: the other computer's AI's TASK lines count, under its handle.
         let ops = crate::tasks::task_lines(&text);
         let who = format!("{}-{}", shared.sender, crate::prompt::slug(computer));
@@ -838,10 +849,17 @@ impl Sync {
             }
         }
         let via = shown_via(&shared.sender, &shared.via, computer);
-        let event = self.store.append_imported(&local, &shared.sender, &shared.kind, shared.to, &capped(shared.text), via)?;
-        m.filed.insert(packet.id.clone());
-        m.filed.insert(seen);
+        let text = capped(shared.text);
+        // Pending while it's written and filed after: a crash in between is retried without a copy.
+        let pending = format!("{PENDING}{}", packet.id);
+        if m.filed.contains(&pending) && self.already_written(&local, &shared.sender, &text) {
+            self.settle(&mut m, &packet.id, Some(seen))?;
+            return Ok(None);
+        }
+        m.filed.insert(pending);
         self.save(&m)?;
+        let event = self.store.append_imported(&local, &shared.sender, &shared.kind, shared.to, &text, via)?;
+        self.settle(&mut m, &packet.id, Some(seen))?;
         drop(m);
         // The AIs here answer the human's message too, and read the other computer's AIs.
         self.notify(&local, &event);
@@ -868,6 +886,22 @@ impl Sync {
         Ok(last)
     }
 
+    /// Records `packet_id` (and its event key) as filed and clears its pending mark.
+    fn settle(&self, m: &mut Mirrors, packet_id: &str, seen: Option<String>) -> Result<(), String> {
+        m.filed.remove(&format!("{PENDING}{packet_id}"));
+        m.filed.insert(packet_id.to_string());
+        if let Some(seen) = seen {
+            m.filed.insert(seen);
+        }
+        self.save(m)
+    }
+
+    /// Whether `conversation`'s newest events already hold `sender`'s `text`: a crash after the
+    /// write but before it was recorded as filed leaves it there, and the retry mustn't add it again.
+    fn already_written(&self, conversation: &str, sender: &str, text: &str) -> bool {
+        let want = crate::redact::scrub(text);
+        self.store.load(conversation).unwrap_or_default().iter().rev().take(RECHECK_EVENTS).any(|e| e.sender == sender && e.text == want)
+    }
     fn save(&self, m: &Mirrors) -> Result<(), String> {
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec(m).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -944,10 +978,17 @@ pub fn init(engine: Arc<crate::engine::Engine>, link_dir: &Path) {
     let _ = SYNC.set(s);
     // Files anything saved in the inbox but not filed before the last quit or crash.
     if let Some((s, link)) = SYNC.get().zip(crate::link_handle()) {
-        for p in link.inbox() {
+        let replayed = link.inbox();
+        let mut failed = HashSet::new();
+        for p in &replayed {
             let name = link.peer_name(&p.node_id);
-            let _ = s.file(&p, &name);
+            if s.file(p, &name).is_err() {
+                failed.insert(p.id.clone());
+            }
         }
+        // Everything offered is filed (or had nothing to file): keep only failures and late arrivals.
+        let offered: HashSet<String> = replayed.into_iter().map(|p| p.id).collect();
+        let _ = link.retain_inbox(|p| failed.contains(&p.id) || !offered.contains(&p.id));
     }
 }
 
@@ -1131,6 +1172,40 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_while_a_message_is_pending_files_it_exactly_once() {
+        let root = std::env::temp_dir().join(format!("peer-sync-pending-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        let conv = a.store.create("Plans").unwrap();
+        let typed = a.store.append(&conv.id, "human", "message", vec![], "hello").unwrap();
+        let p1 = packet("node-a", "p1", a.outgoing(&typed).unwrap());
+        let filed = b.file(&p1, "MacBook").unwrap().expect("filed");
+        let count = |text: &str| b.store.load(&filed.conversation).unwrap().iter().filter(|e| e.text == text).count();
+
+        // Crash after the write, before it was recorded as filed: only the pending mark survived.
+        {
+            let mut m = b.mirrors.lock().unwrap();
+            m.filed.retain(|k| k != "p1" && !k.starts_with("ev:"));
+            m.filed.insert(format!("{PENDING}p1"));
+        }
+        assert!(b.file(&p1, "MacBook").unwrap().is_none(), "already in the chat, so not written again");
+        assert_eq!(count("hello"), 1);
+        {
+            let m = b.mirrors.lock().unwrap();
+            assert!(m.filed.contains("p1") && !m.filed.contains(&format!("{PENDING}p1")), "settled as filed");
+        }
+
+        // Crash before the write: pending, but not in the chat, so the retry writes it once.
+        let next = a.store.append(&conv.id, "claude", "message", vec![], "second").unwrap();
+        let p2 = packet("node-a", "p2", a.outgoing(&next).unwrap());
+        b.mirrors.lock().unwrap().filed.insert(format!("{PENDING}p2"));
+        assert!(b.file(&p2, "MacBook").unwrap().is_some(), "a lost write is retried");
+        assert!(b.file(&p2, "MacBook").unwrap().is_none());
+        assert_eq!(count("second"), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
     fn shared_messages_land_once_in_a_mirror_and_never_echo_back() {
         let root = std::env::temp_dir().join(format!("peer-sync-test-{}", uuid::Uuid::new_v4()));
         let (a_dir, b_dir) = (root.join("a"), root.join("b"));
@@ -1156,6 +1231,32 @@ mod tests {
 
         let note = a.store.append(&conv.id, "system", "system", vec![], "note").unwrap();
         assert!(a.outgoing(&note).is_none(), "status notes stay local");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The startup replay of `inbox.jsonl` after a quit or crash files each packet once, even
+    /// though a fresh `Sync` reads it again (the filed ids are saved with the mirrors).
+    #[test]
+    fn replaying_the_inbox_after_a_restart_files_nothing_twice() {
+        let root = std::env::temp_dir().join(format!("peer-sync-replay-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let conv = a.store.create("Plans").unwrap();
+        let typed = a.store.append(&conv.id, "human", "message", vec![], "hello").unwrap();
+        let p = packet("node-a", "p1", a.outgoing(&typed).unwrap());
+
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        let filed = b.file(&p, "MacBook").unwrap().expect("filed");
+        drop(b);
+        // Restart: a new Sync over the same folder replays the whole inbox.
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        assert!(b.file(&p, "MacBook").unwrap().is_none(), "filed once across a restart");
+        let copies = b.store.load(&filed.conversation).unwrap().iter().filter(|e| e.text == "hello").count();
+        assert_eq!(copies, 1);
+        // A packet that arrived but wasn't filed before the crash is filed on replay.
+        let more = a.store.append(&conv.id, "human", "message", vec![], "after").unwrap();
+        let q = packet("node-a", "p2", a.outgoing(&more).unwrap());
+        assert_eq!(b.file(&q, "MacBook").unwrap().expect("filed on replay").conversation, filed.conversation);
         let _ = std::fs::remove_dir_all(&root);
     }
 

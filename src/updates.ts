@@ -52,7 +52,7 @@ export function compareVersions(a: string, b: string): number {
 }
 
 /** Returns update details when a newer release exists, otherwise null. */
-export async function checkForUpdate(force = false): Promise<UpdateInfo | null> {
+export async function checkForUpdate(force = false, onDownloadStart?: (version: string) => void): Promise<UpdateInfo | null> {
   const current = await getVersion();
   const cache = readCache();
   const fresh = Date.now() - cache.lastCheck < DAY_MS;
@@ -87,6 +87,7 @@ export async function checkForUpdate(force = false): Promise<UpdateInfo | null> 
           return false;
         });
         if (asset && typeof asset.browser_download_url === "string" && typeof asset.digest === "string") {
+          onDownloadStart?.(latest.latest);
           api.stageReleaseUpdate(latest.latest, asset.browser_download_url, asset.digest).catch(() => undefined);
         }
       }

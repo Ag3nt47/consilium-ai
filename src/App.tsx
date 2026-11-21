@@ -32,6 +32,7 @@ import {
   type StagedUpdate,
   type TokenUsageReport,
   type TurnState,
+  type UpdateDownloadStatus,
   type UsageWindow,
   type ModelChoice,
 } from "./api";
@@ -1287,10 +1288,14 @@ export default function App() {
   const [claudeResets, setClaudeResets] = useState<ClaudeResetHistory | null>(null);
   const [pressure, setPressure] = useState<SystemPressure | null>(null);
   const [staged, setStaged] = useState<StagedUpdate | null>(null);
+  const [downloadStatus, setDownloadStatus] = useState<UpdateDownloadStatus>({ active: false, version: "" });
   const [updating, setUpdating] = useState(false);
   const [stagedUi, setStagedUi] = useState<{ version: string } | null>(null);
   const [requestingStatus, setRequestingStatus] = useState(false);
   const [requestingUpdate, setRequestingUpdate] = useState(false);
+  const markDownloadStarting = useCallback((version: string) => {
+    setDownloadStatus({ active: true, version: version.replace(/^v/i, "") });
+  }, []);
 
   // Quick hover explanations for every control that has a title.
   useEffect(() => installHoverTips(), []);
@@ -1308,9 +1313,9 @@ export default function App() {
     api.uiUpdateAvailable().then(setStagedUi).catch(() => undefined);
     // A linked computer is installing an update: look for the release now, so this one follows.
     api.releaseCheckRequested()
-      .then((now) => (now ? checkForUpdate(true).then(setUpdate) : undefined))
+      .then((now) => (now ? checkForUpdate(true, markDownloadStarting).then(setUpdate) : undefined))
       .catch(() => undefined);
-  }, []);
+  }, [markDownloadStarting]);
   useEffect(() => {
     pollStaged();
     const t = setInterval(pollStaged, 4000);
@@ -1325,6 +1330,12 @@ export default function App() {
       document.removeEventListener("visibilitychange", onShow);
     };
   }, [pollStaged]);
+
+  useEffect(() => {
+    const poll = () => api.updateDownloadStatus().then(setDownloadStatus).catch(() => undefined);
+    const t = window.setInterval(poll, downloadStatus.active ? 500 : 4000);
+    return () => window.clearInterval(t);
+  }, [downloadStatus.active]);
 
   // Screen-only update: swap the page in place; the AIs' work carries on untouched.
   const applyUi = async () => {
@@ -1546,11 +1557,11 @@ export default function App() {
   // with automatic install on (Settings → Updates) Consilium installs it and restarts by itself.
   useEffect(() => {
     if (!prefs.autoUpdate) return;
-    const check = () => checkForUpdate(false).then(setUpdate).catch(() => undefined);
+    const check = () => checkForUpdate(false, markDownloadStarting).then(setUpdate).catch(() => undefined);
     check();
     const t = setInterval(check, 30 * 60 * 1000);
     return () => clearInterval(t);
-  }, [prefs.autoUpdate]);
+  }, [prefs.autoUpdate, markDownloadStarting]);
 
   useEffect(() => {
     if (!current) return;
@@ -2328,7 +2339,7 @@ export default function App() {
 
   async function checkNow() {
     setUpdateNote("Checking…");
-    const u = await checkForUpdate(true).catch(() => null);
+    const u = await checkForUpdate(true, markDownloadStarting).catch(() => null);
     setUpdate(u);
     setUpdateNote(
       !u ? "You're up to date (or offline)."
@@ -2646,11 +2657,21 @@ export default function App() {
       <div className="fx-scanlines" aria-hidden />
       <aside className="sidebar" ref={sidebarRef}>
         <div className="brand">
-          <img src="/icon.png" alt="" className="brand-icon" />
+          <img
+            src="/icon.png"
+            alt=""
+            className={`brand-icon${downloadStatus.active ? " update-downloading" : ""}`}
+            title={downloadStatus.active ? `Downloading Consilium ${downloadStatus.version || "update"} from GitHub` : undefined}
+          />
           <div>
             <div className="brand-name">Consilium</div>
             <div className="brand-tagline">A council of minds</div>
           </div>
+          {downloadStatus.active && (
+            <span className="visually-hidden" role="status">
+              Downloading Consilium {downloadStatus.version || "update"} from GitHub
+            </span>
+          )}
         </div>
         <button title="Start a new, empty conversation with the council" className="btn primary wide" onClick={newConversation}>
           + New conversation

@@ -627,6 +627,12 @@ fn update_available() -> Option<update::Staged> {
     data_dir().and_then(|d| update::staged(&d))
 }
 
+/// Live state for the sidebar emblem while an installer downloads from GitHub.
+#[tauri::command]
+fn update_download_status() -> update::DownloadStatus {
+    update::download_status()
+}
+
 /// Stages a release update downloaded from GitHub into `<data>/update/next`.
 #[tauri::command]
 async fn stage_release_update(version: String, url: String, digest: Option<String>) -> Result<(), String> {
@@ -1535,6 +1541,7 @@ pub fn run() {
             ingest_repo,
             run_command,
             update_available,
+            update_download_status,
             update_now,
             stage_release_update,
             linux_package_kind,
