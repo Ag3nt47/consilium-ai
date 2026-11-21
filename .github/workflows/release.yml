@@ -198,7 +198,7 @@ jobs:
           ditto "$mount/Consilium.app" "$staging/Consilium.app"
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$staging/Consilium.app/Contents/Info.plist")"
           binary="$staging/Consilium.app/Contents/MacOS/$executable"
-          lipo -verify_arch arm64 x86_64 "$binary"
+          lipo "$binary" -verify_arch arm64 x86_64
           expected="$(node -p 'require("./package.json").version')"
           actual="$("$binary" --version)"
           if [[ "$actual" != "consilium $expected" ]]; then
