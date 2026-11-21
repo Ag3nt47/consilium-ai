@@ -266,10 +266,11 @@ jobs:
             echo "::error::AppImage expected $expected, found $actual."
             exit 1
           fi
-          sudo apt-get install -y rpm2cpio cpio
+          sudo apt-get install -y libarchive-tools
           mkdir rpm-root
           cd rpm-root
-          rpm2cpio "$rpm" | cpio -idm --quiet
+          bsdtar -xf "$rpm"
+          echo 'Extracted RPM payload. Checking its executable.'
           actual="$(./usr/bin/consilium --version)"
           if [[ "$actual" != "$expected" ]]; then
             echo "::error::RPM expected $expected, found $actual."
