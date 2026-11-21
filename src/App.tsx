@@ -3934,12 +3934,19 @@ export default function App() {
               <button title="Open the list of all Consilium releases on GitHub" className="link" onClick={() => openUrl(RELEASES_URL)}>
                 All releases
               </button>
-              <span className="muted">{updateNote}</span>
+              <span className="muted">
+                {downloadStatus.active ? `Downloading Consilium ${downloadStatus.version || "update"} from GitHub…` : updateNote}
+              </span>
             </div>
             <p className="muted small">
-              A new version downloads in the background and is checked against GitHub's fingerprint; it's only installed when you click Update Now.
-              Your conversations stay on this computer. CLI agents use their provider's existing sign-in;
-              optional API-agent keys are saved locally and are never added to the conversation or returned to this UI.
+              Consilium checks the downloaded installer against GitHub's fingerprint.
+              {" "}{council?.auto_install_updates ?? true
+                ? "The app installs the update and restarts automatically after running commands finish."
+                : "Click Update Now when the installer is ready."}
+            </p>
+            <p className="muted small">
+              Conversations stay on this computer. CLI agents use their provider's existing sign-in.
+              Optional API-agent keys are stored locally.
             </p>
             <Suspense fallback={null}>
               <UpgradeProgress />
