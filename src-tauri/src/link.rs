@@ -1562,18 +1562,21 @@ impl StressReport {
 }
 
 async fn fastest_route(addrs: &[String]) -> Option<(TcpStream, String, u64)> {
-    let (tx, mut rx) = mpsc::channel(addrs.len().max(1));
+    let mut probes = tokio::task::JoinSet::new();
     for addr in addrs.iter().take(12).cloned() {
-        let tx = tx.clone();
-        tokio::spawn(async move {
+        probes.spawn(async move {
             let started = std::time::Instant::now();
-            if let Ok(Ok(s)) = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr)).await {
-                let _ = tx.send((s, addr, started.elapsed().as_millis() as u64)).await;
-            }
+            let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr)).await.ok()?.ok()?;
+            Some((stream, addr, started.elapsed().as_millis() as u64))
         });
     }
-    drop(tx);
-    rx.recv().await
+    while let Some(result) = probes.join_next().await {
+        if let Ok(Some(connected)) = result {
+            // Dropping the set cancels the remaining probes before route authentication.
+            return Some(connected);
+        }
+    }
+    None
 }
 
 // ---- framing, crypto and helpers --------------------------------------------------------------
