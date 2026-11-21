@@ -1252,27 +1252,59 @@ impl Link {
 
     /// Connects to `peer` over the fastest of `addrs` and runs the session until it ends.
     async fn dial_on(self, peer: Peer, addrs: &[String], token: CancellationToken) -> Result<(), String> {
-        let (stream, route, rtt) = fastest_route(addrs).await.ok_or("no route answered")?;
-        let _ = stream.set_nodelay(true);
         let key = peer_key(&peer)?;
-        let (r, mut w) = stream.into_split();
-        let mut r = BufReader::new(r);
+        let mut remaining: Vec<_> = addrs.iter().take(12).cloned().collect();
+        let mut failure = "no route answered".to_string();
+        loop {
+            let result = tokio::select! {
+                _ = token.cancelled() => return Ok(()),
+                result = fastest_route(&remaining) => result,
+            };
+            let Some((stream, route, rtt)) = result else { return Err(failure) };
+            let _ = stream.set_nodelay(true);
+            let (r, mut w) = stream.into_split();
+            let mut r = BufReader::new(r);
+            let reply = tokio::select! {
+                _ = token.cancelled() => return Ok(()),
+                reply = self.authenticate_route(&peer, &key, &mut r, &mut w) => reply,
+            };
+            match reply {
+                Ok(reply) => {
+                    self.learn_addrs(&peer.node_id, &reply, route.parse().ok());
+                    self.session(peer, key, r, w, route, Some(rtt), token).await;
+                    return Ok(());
+                }
+                Err(error) => {
+                    failure = error;
+                    remaining.retain(|addr| addr != &route);
+                }
+            }
+        }
+    }
+
+    async fn authenticate_route(
+        &self,
+        peer: &Peer,
+        key: &[u8],
+        r: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+        w: &mut tokio::net::tcp::OwnedWriteHalf,
+    ) -> Result<Value, String> {
         let (me, _) = self.me();
-        let reply = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-            let Wire::Challenge { nonce } = read_wire(&mut r).await? else {
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            let Wire::Challenge { nonce } = read_wire(r).await? else {
                 return Err("expected challenge".to_string());
             };
             let mine = random_hex(16);
-            let hello = self.hello(&me, &key, &nonce, &mine)?;
-            w.write_all(format!("{}\n", seal(&me, &key, &hello)?).as_bytes()).await.map_err(|e| e.to_string())?;
-            let Wire::Sealed { from, n, c } = read_wire(&mut r).await? else {
+            let hello = self.hello(&me, key, &nonce, &mine)?;
+            w.write_all(format!("{}\n", seal(&me, key, &hello)?).as_bytes()).await.map_err(|e| e.to_string())?;
+            let Wire::Sealed { from, n, c } = read_wire(r).await? else {
                 return Err("expected hello".to_string());
             };
             if from != peer.node_id {
                 return Err("a different computer answered".to_string());
             }
-            let reply = open(&from, &key, &n, &c)?;
-            reply.validate(&peer.node_id, &key, now_ms())?;
+            let reply = open(&from, key, &n, &c)?;
+            reply.validate(&peer.node_id, key, now_ms())?;
             let h = reply.payload.get("hello").cloned().ok_or("expected hello")?;
             if h.get("challenge").and_then(Value::as_str) != Some(mine.as_str()) {
                 return Err("stale hello".to_string());
@@ -1280,10 +1312,7 @@ impl Link {
             Ok(h)
         })
         .await
-        .map_err(|_| "handshake timed out".to_string())??;
-        self.learn_addrs(&peer.node_id, &reply, route.parse().ok());
-        self.session(peer, key, r, w, route, Some(rtt), token).await;
-        Ok(())
+        .map_err(|_| "handshake timed out".to_string())?
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2125,6 +2154,50 @@ mod tests {
         joiner.stop();
         host.stop();
         proxies[1].abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dial_tries_another_endpoint_after_a_failed_handshake() {
+        let dir = std::env::temp_dir().join(format!("link-auth-fallback-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        let direct = format!("127.0.0.1:{}", host.0.port);
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&direct, &code.code).await.unwrap();
+        joiner.stop();
+        assert!(wait_for(|| !host.status().peers[0].connected).await);
+        host.0.cfg.lock().unwrap().peers[0].addrs.clear();
+        let peer = joiner.0.cfg.lock().unwrap().peers[0].clone();
+
+        let broken = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first = broken.local_addr().unwrap().to_string();
+        let backup = tokio::net::TcpSocket::new_v4().unwrap();
+        backup.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let second = backup.local_addr().unwrap().to_string();
+        let proxy = tokio::spawn(async move {
+            let (untrusted, _) = broken.accept().await.unwrap();
+            // Only expose the backup after the first TCP connection had time to win.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let backup = backup.listen(4).unwrap();
+            drop(untrusted);
+            let (mut incoming, _) = backup.accept().await.unwrap();
+            let mut outgoing = TcpStream::connect(direct).await.unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await;
+        });
+
+        let token = CancellationToken::new();
+        let dial = {
+            let me = joiner.clone();
+            let token = token.clone();
+            let routes = [first, second.clone()];
+            tokio::spawn(async move { me.dial_on(peer, &routes, token).await })
+        };
+        assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(second.as_str())).await);
+        token.cancel();
+        dial.await.unwrap().unwrap();
+        proxy.abort();
+        host.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
