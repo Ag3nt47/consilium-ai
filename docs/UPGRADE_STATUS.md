@@ -14,7 +14,7 @@ Run `node scripts/upgrade-progress.mjs` to report completed items and percentage
 documents. Each feasible ledger row counts equally. In-progress and partially verified rows count
 toward the total, and infeasible rows are listed separately.
 
-## Document 1: Master upgrade blueprint
+## Document 1: Consilium Upgrade Overhaul.docx
 
 | Item | Status | Notes |
 |---|---|---|
@@ -77,7 +77,7 @@ not complete the phase.
 | Phase 26: Consilium self-improvement | 🕓 | Low-overhead profiling, bounded code/prompt experiments, isolated regression/security harnesses and rollback-safe closed-loop deployment; pre-commit and update foundations are built |
 | Phase 27: Deployment roadmap | 🕓 | Finish Stages 2–3 safety/skill work, then evaluate the Stage 4 multi-node mesh only with explicit security and hardware gates |
 
-## Document 2: Second update blueprint
+## Document 2: 2nd consilium update.docx
 
 | Item | Status | Notes |
 |---|---|---|
@@ -102,7 +102,7 @@ Chat follow behavior was verified in a Windows Edge preview. New content stayed 
 bottom, preserved the reading position after scrolling up, and resumed following after returning
 to the bottom. Content growth and shrinkage were both tested. Installed desktop retests are open.
 
-## Document 3: Multi-computer link (3rd update)
+## Document 3: 3rd update.docx
 
 Goal: Consilium on the human's Mac and Windows PC find each other, stay linked and keep conversations,
 REQUEST decisions and project state in sync, choosing the best working channel automatically and
