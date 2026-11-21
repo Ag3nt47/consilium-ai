@@ -140,13 +140,21 @@ fn fetch_file(cfg: &BridgeConfig, group: Option<&str>, f: &RemoteFile) -> Result
     decode_base64(data).ok_or_else(|| "bad data".to_string())
 }
 
-/// Reads a daemon `receive` notification. Returns the human's own message when it was sent into
-/// one of Consilium's groups or to Note to Self; everything else is None.
-pub fn parse_incoming(v: &Value, account: &str, groups: &bridge::SignalGroups) -> Option<Incoming> {
+/// The envelope of a daemon `receive` notification. A client that sent `subscribeReceive` (as
+/// Consilium does, since the daemon runs in manual receive mode) gets it at
+/// `params.result.envelope`; a daemon that receives on its own puts it at `params.envelope`.
+pub fn receive_envelope(v: &Value) -> Option<&Value> {
     if v.get("method").and_then(Value::as_str) != Some("receive") {
         return None;
     }
-    let env = v.get("params")?.get("envelope")?;
+    let params = v.get("params")?;
+    params.pointer("/result/envelope").or_else(|| params.get("envelope")).filter(|e| e.is_object())
+}
+
+/// Reads a daemon `receive` notification. Returns the human's own message when it was sent into
+/// one of Consilium's groups or to Note to Self; everything else is None.
+pub fn parse_incoming(v: &Value, account: &str, groups: &bridge::SignalGroups) -> Option<Incoming> {
+    let env = receive_envelope(v)?;
     let from_self = env.get("sourceNumber").and_then(Value::as_str) == Some(account)
         || env.get("source").and_then(Value::as_str) == Some(account);
     if !from_self || account.is_empty() {
@@ -756,6 +764,24 @@ mod tests {
             "dataMessage": {"message": "x", "groupInfo": {"groupId": "MAIN="}}}}});
         assert_eq!(parse_incoming(&incoming, ACC, &g), None);
         assert_eq!(parse_incoming(&main_without_setup(), ACC, &bridge::SignalGroups::default()), None);
+    }
+
+    #[test]
+    fn reads_messages_in_the_subscribed_shape() {
+        // What signal-cli actually sends to a client that asked with `subscribeReceive`.
+        let g = groups();
+        let wrap = |legacy: Value| {
+            let env = legacy["params"]["envelope"].clone();
+            json!({"jsonrpc": "2.0", "method": "receive",
+                "params": {"subscription": 0, "result": {"account": ACC, "envelope": env}}})
+        };
+        let note = wrap(sync(ACC, json!({"message": "hello", "destinationNumber": ACC, "timestamp": 7})));
+        let got = parse_incoming(&note, ACC, &g).expect("Note to Self in the subscribed shape is read");
+        assert_eq!(got.text, "hello");
+        assert_eq!(got.timestamp, 7);
+        let stranger = wrap(sync("+15559999999", json!({"message": "x", "groupInfo": {"groupId": "MAIN="}})));
+        assert_eq!(parse_incoming(&stranger, ACC, &g), None);
+        assert!(receive_envelope(&json!({"jsonrpc": "2.0", "id": "x", "result": 0})).is_none());
     }
 
     fn main_without_setup() -> Value {
