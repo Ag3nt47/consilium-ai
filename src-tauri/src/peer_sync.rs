@@ -797,8 +797,11 @@ impl Sync {
             if !known_sender(&item.sender) || m.filed.contains(&seen) {
                 continue;
             }
-            if sources.contains(&seen) || legacy.contains(&(item.sender.clone(), crate::redact::scrub(&text))) {
+            if sources.contains(&seen) {
                 m.filed.insert(seen);
+                continue;
+            }
+            if legacy.contains(&(item.sender.clone(), crate::redact::scrub(&text))) {
                 continue;
             }
             let via = shown_via(&item.sender, &item.via, computer);
