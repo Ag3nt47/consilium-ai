@@ -718,8 +718,16 @@ fn clipped(text: &str, max: usize) -> String {
 fn compact_handoff(text: &str) -> Option<String> {
     let mut fields = [None; 5];
     let labels = ["Status", "Files", "Tests", "Blocker", "Next"];
-    for line in text.lines() {
-        let Some((label, value)) = line.trim().split_once(':') else { continue };
+    let mut fenced = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let Some((label, value)) = line.split_once(':') else { continue };
         let label = label.trim_start_matches("- ").trim_matches('*');
         let value = value.trim_start_matches('*').trim();
         if !value.is_empty() {
@@ -1242,6 +1250,8 @@ mod tests {
         assert!(compact.contains("Tests: cargo test passed"));
         assert!(compact.ends_with("Next: verify Mac restart"));
         assert!(compact_handoff("Status: ordinary line").is_none());
+        let example = "Status: ready\nTests: cargo test passed\n```text\nStatus: example\nTests: example\n```";
+        assert_eq!(compact_handoff(example).as_deref(), Some("Status: ready | Tests: cargo test passed"));
     }
 
     #[test]
