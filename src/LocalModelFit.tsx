@@ -17,10 +17,30 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   const [fileMessage, setFileMessage] = useState("");
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
+  const [copyStatus, setCopyStatus] = useState("");
   const host = hostMemory ?? (availableGiB && availableGiB > 0 ? memoryInput(availableGiB) : "");
   const reportedNames = new Set(devices.filter((device) => typeof device.id === "string").map((device) => deviceName(device.name)));
   const included = devices.filter((device) => typeof device.id === "string" || !reportedNames.has(deviceName(device.name)));
-  const models = modelFit([{ name: "This computer", memory: host }, ...included], bits, overhead, customWeights);
+  const budgets = [{ name: "This computer", memory: host }, ...included];
+  const models = modelFit(budgets, bits, overhead, customWeights);
+
+  async function copyEstimate() {
+    const report = [
+      "Consilium local model memory estimate",
+      `Catalog precision: ${bits}-bit. Runtime allowance: ${gib(Number(overhead))} per device.`,
+      ...budgets.map(({ name, memory }) => `${name || "Unnamed device"}: ${memory ? gib(Number(memory)) : "memory not entered"}`),
+      "",
+      ...models.map(({ name, weights, fit }) => `${name}: ${gib(weights)} weights. ${fit}.`),
+      "",
+      "Memory estimate only. Verify runner compatibility and inference performance separately.",
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(report);
+      setCopyStatus("Memory estimate copied.");
+    } catch {
+      setCopyStatus("Could not copy the memory estimate.");
+    }
+  }
 
   async function scanPeers() {
     setScanning(true);
@@ -131,6 +151,8 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
           ))}
         </tbody>
       </table>
+      <button type="button" className="btn ghost small-btn" onClick={() => void copyEstimate()}>Copy memory estimate</button>
+      {copyStatus && <span className="muted small" role="status"> {copyStatus}</span>}
       <p className="muted">Weights use parameter count × precision, with 15% packed-weight overhead at 4 or 8 bits. Increase the runtime allowance for longer contexts or larger batches. A split estimate requires a runner that supports the model and can partition it across those devices. Check available disk space, supported GPU memory, and wired-network throughput before testing.</p>
     </details>
   );
