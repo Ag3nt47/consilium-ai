@@ -1139,7 +1139,7 @@ mod tests {
         };
         let s = system("gemini", 1, 1, &ctx);
         assert!(s.contains("Working rules across computers and tasks:"));
-        assert!(s.contains("Status, Files, Tests, Blocker, Next"));
+        assert!(s.contains("one field per line: Status:, Files:, Tests:, Blocker:, Next:"));
         assert!(s.contains("Git worktrees:"));
         assert!(s.contains("Resource-aware builds:"));
         assert!(s.contains("Sketches, script templates with unfilled parameters, and notes belong in ```text blocks"));
