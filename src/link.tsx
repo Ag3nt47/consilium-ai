@@ -795,7 +795,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         <div className="peer-test-report">
           <div className="row between align-center test-header">
             <span className="test-summary-title">
-              {testReport.handshake_ok ? "✔ Handshake & Sync Verified" : "⚠️ Handshake Warning"}
+              {testReport.handshake_ok ? "✔ Authenticated connection" : "⚠️ Handshake Warning"}
             </span>
             <button className="btn small ghost" onClick={() => setTestReport(null)}>
               Dismiss
@@ -804,7 +804,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
           <p className="test-summary-text small">{testReport.summary}</p>
           {testReport.routes.length > 0 && (
             <div className="test-routes-list">
-              <span className="muted small">Network Routes & Failovers Tested:</span>
+              <span className="muted small">TCP reachability by endpoint</span>
               {testReport.routes.map((r) => (
                 <div key={r.addr} className="test-route-row">
                   <div className="test-route-info">
