@@ -11,6 +11,7 @@ const deviceName = (name: string) => name.trim().toLowerCase();
 export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [nextId, setNextId] = useState(1);
+  const [hostRunners, setHostRunners] = useState<string[] | null>(null);
   const [hostMemory, setHostMemory] = useState<string | null>(null);
   const [bits, setBits] = useState(4);
   const [overhead, setOverhead] = useState("2");
@@ -49,8 +50,13 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   async function scanPeers() {
     setScanning(true);
     setScanStatus("");
+    setHostRunners(null);
     try {
-      const before = await api.peerResources();
+      const [before, localTools] = await Promise.all([
+        api.peerResources(),
+        api.localToolInventory().catch(() => null),
+      ]);
+      setHostRunners(localTools?.filter((tool) => runnerNames.has(tool)) ?? null);
       await api.requestPeerResources();
       await new Promise((resolve) => setTimeout(resolve, 3000));
       const reports = await api.peerResources();
@@ -89,6 +95,9 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
           This computer usable memory (GiB)
           <input type="number" min="0" step="0.1" value={host} onChange={(e) => setHostMemory(e.target.value)} />
         </label>
+        {hostRunners && (
+          <span className="muted">Model tools on this computer: {hostRunners.join(", ") || "none detected"}.</span>
+        )}
         {devices.map((device) => (
           <div className="row wrap" key={device.id}>
             <label>
