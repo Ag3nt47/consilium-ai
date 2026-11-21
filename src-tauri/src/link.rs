@@ -517,7 +517,7 @@ impl Link {
                         connected: s.is_some_and(|s| s.tx.is_some()),
                         route: s.and_then(|s| s.tx.as_ref().and(s.route.clone())),
                         local_interface: s.filter(|s| s.tx.is_some()).and_then(|s| s.local_interface.clone()),
-                        rtt_ms: s.and_then(|s| s.rtt_ms),
+                        rtt_ms: s.filter(|s| s.tx.is_some()).and_then(|s| s.rtt_ms),
                         last_seen_ms: s.map(|s| s.last_seen_ms).filter(|&t| t > 0),
                         queued: s.map_or(0, |s| s.outbox.len()),
                         // Only while connected: an old heartbeat's activity would be stale.
@@ -759,8 +759,9 @@ impl Link {
             let states = self.0.peers.lock().unwrap();
             let s = states.get(node_id);
             let connected = s.is_some_and(|s| s.tx.is_some());
-            let active_route = s.and_then(|s| s.route.clone());
-            let rtt = s.and_then(|s| s.rtt_ms);
+            let session = s.filter(|s| s.tx.is_some());
+            let active_route = session.and_then(|s| s.route.clone());
+            let rtt = session.and_then(|s| s.rtt_ms);
             let queued = s.map_or(0, |s| s.outbox.len());
             (peer, connected, active_route, rtt, queued)
         };
@@ -2057,7 +2058,13 @@ mod tests {
         joiner.0.peers.lock().unwrap().get_mut(&view.node_id).unwrap().outbox.push_back(dup);
         joiner.stop();
         assert!(wait_for(|| !host.status().peers[0].connected).await, "host notices the drop");
-        assert_eq!(host.status().peers[0].local_interface, None);
+        let disconnected = &host.status().peers[0];
+        assert_eq!(disconnected.local_interface, None);
+        assert_eq!(disconnected.rtt_ms, None);
+        let report = host.test_peer(&disconnected.node_id).await.unwrap();
+        assert!(!report.connected);
+        assert_eq!(report.active_route, None);
+        assert_eq!(report.rtt_ms, None);
         joiner.start();
         assert!(wait_for(|| joiner.status().peers[0].connected && joiner.status().peers[0].queued == 0).await, "reconnects and drains");
         assert_eq!(host_got.lock().unwrap().len(), 1);
