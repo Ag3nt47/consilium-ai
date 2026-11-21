@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.3.53
+
+- Follow new chat messages while the reader is at the bottom, and keep their place when they scroll up.
+- Reduce prompt size with exact council-memory deduplication and previews of older successful command results.
+- Read replies from Signal subscriptions, including the reply used to verify setup.
+- Keep switched-off council members out of resumed turns, stand-in selection, and linked-computer requests.
+- Use source event IDs to prevent duplicate imports and preserve separate messages with identical text.
+- Follow published macOS installers and keep the Signal settings address field on one line.
+
 - Fixed: when a linked PC announced an update, macOS no longer starts a full source rebuild while
   the GitHub release is still publishing. It checks every 30 minutes (and immediately after the
   announcement), verifies the published DMG's SHA-256, stages its app bundle atomically, and lets
