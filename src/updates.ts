@@ -8,7 +8,9 @@ import { api } from "./api";
 
 export const REPO = "Ag3nt47/consilium-ai";
 export const RELEASES_URL = `https://github.com/${REPO}/releases`;
-const CHECK_EVERY_MS = 30 * 60 * 1000;
+// The caller runs every 30 minutes. Keep the freshness window shorter so timer jitter cannot make
+// the next tick reuse a check that completed a few seconds after the previous tick started.
+const CACHE_FRESH_MS = 25 * 60 * 1000;
 const KEY = "consilium.updates";
 
 export interface UpdateInfo {
@@ -108,7 +110,7 @@ function stageRelease(
 export async function checkForUpdate(force = false, onDownloadStart?: (version: string) => void): Promise<UpdateInfo | null> {
   const current = await getVersion();
   const cache = readCache();
-  const fresh = Date.now() - cache.lastCheck < CHECK_EVERY_MS;
+  const fresh = Date.now() - cache.lastCheck < CACHE_FRESH_MS;
   if (!force && fresh) {
     stageRelease(current, cache.latest, cache.asset, onDownloadStart);
     return cache.latest && compareVersions(cache.latest.latest, current) > 0 ? { current, ...cache.latest } : null;

@@ -377,6 +377,29 @@ pub fn install_log(data: &Path) -> PathBuf {
     data.join("update").join("install.log")
 }
 
+/// The most recent failure to download or stage a GitHub release. The front end retries quietly,
+/// so this file preserves the reason for diagnosis instead of losing it in a caught promise.
+pub fn download_error_log(data: &Path) -> PathBuf {
+    data.join("update").join("update_error.log")
+}
+
+fn record_download_result(data: &Path, version: &str, result: &Result<(), String>) {
+    let path = download_error_log(data);
+    match result {
+        Ok(()) => {
+            let _ = std::fs::remove_file(path);
+        }
+        Err(error) => {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let clean_version = version.trim_start_matches(['v', 'V']).trim();
+            let line = format!("{} Consilium {clean_version}: {error}\n", crate::store::now_ms());
+            let _ = crate::store::write_atomic(&path, line.as_bytes());
+        }
+    }
+}
+
 /// Downloads and stages a release installer. macOS extracts `Consilium.app` from the release DMG;
 /// Windows and Linux keep their installer or executable in `<data>/update/next`.
 /// Release downloads are only taken from this project's own GitHub releases.
@@ -402,8 +425,12 @@ fn check_release_download(version: &str, url: &str, digest: &str) -> Result<Stri
 }
 
 pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str) -> Result<(), String> {
-    let want = check_release_download(version, url, digest)?;
-    track_download(download_state(), version, stage_from_url_inner(data, version, url, &want)).await
+    let result = match check_release_download(version, url, digest) {
+        Ok(want) => track_download(download_state(), version, stage_from_url_inner(data, version, url, &want)).await,
+        Err(error) => Err(error),
+    };
+    record_download_result(data, version, &result);
+    result
 }
 
 async fn stage_from_url_inner(data: &Path, version: &str, url: &str, want: &str) -> Result<(), String> {
@@ -982,6 +1009,19 @@ mod tests {
         assert!(check_release_download("v0.3.28", "https://evil.example/x.exe", &d).is_err());
         assert!(check_release_download("v0.3.28", "https://github.com/Ag3nt47/consilium-ai/releases/download/v1/../../x/y.exe", &d).is_err());
         assert!(check_release_download("0.3.28; rm", url, &d).is_err());
+    }
+
+    #[test]
+    fn release_staging_failure_is_recorded_and_success_clears_it() {
+        let data = std::env::temp_dir().join(format!("consilium-update-error-{}", uuid::Uuid::new_v4()));
+        let failed = Err("download returned HTTP 503".to_string());
+        record_download_result(&data, "v9.8.7", &failed);
+        let log = std::fs::read_to_string(download_error_log(&data)).unwrap();
+        assert!(log.contains("Consilium 9.8.7: download returned HTTP 503"));
+
+        record_download_result(&data, "v9.8.7", &Ok(()));
+        assert!(!download_error_log(&data).exists());
+        let _ = std::fs::remove_dir_all(data);
     }
 
     #[test]
