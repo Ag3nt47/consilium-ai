@@ -981,6 +981,26 @@ fn get_peer_resources() -> Result<std::collections::HashMap<String, resources::H
     Ok(peer_sync::peer_resources())
 }
 
+#[tauri::command]
+fn request_peer_resources() -> Result<(), String> {
+    let Some(link) = link_handle().filter(|link| link.enabled() && link.has_peers()) else {
+        return Err("No paired computers are available.".into());
+    };
+    if !link.status().peers.iter().any(|peer| peer.connected) {
+        return Err("No paired computers are connected.".into());
+    }
+    link.send(peer_protocol::PacketKind::Chat, serde_json::json!({
+        "conversation": "",
+        "title": "",
+        "id": uuid::Uuid::new_v4().to_string(),
+        "sender": "system",
+        "kind": "resources_request",
+        "to": [],
+        "text": "",
+    }))?;
+    Ok(())
+}
+
 /// Broadcasts this computer's host resources to linked peers.
 #[tauri::command]
 fn broadcast_host_resources() -> Result<(), String> {
@@ -1625,6 +1645,7 @@ pub fn run() {
             session_safety_status,
             session_safety_restore,
             get_peer_resources,
+            request_peer_resources,
             broadcast_host_resources
         ])
         .build(context)

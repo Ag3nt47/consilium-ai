@@ -15,6 +15,8 @@ pub struct HostResources {
     pub total_disk_bytes: u64,
     pub cpu_percent: u8,
     pub memory_percent: u8,
+    #[serde(default)]
+    pub total_memory_mb: u64,
     pub cores: usize,
     pub tools: Vec<String>,
     pub updated_at: u64,
@@ -45,6 +47,7 @@ impl HostResources {
             total_disk_bytes,
             cpu_percent: pressure.cpu_percent,
             memory_percent: pressure.memory_percent,
+            total_memory_mb: pressure.total_memory_mb,
             cores: pressure.cores,
             tools,
             updated_at,
@@ -107,10 +110,15 @@ mod tests {
         let r = HostResources::sample("lukes-mbp", Some(Path::new("/tmp")));
         assert_eq!(r.computer, "lukes-mbp");
         assert!(!r.os.is_empty());
+        assert!(r.total_memory_mb > 0);
         assert!(r.cores >= 1);
         let summary = r.format_summary();
         assert!(summary.contains("lukes-mbp"));
         assert!(summary.contains("GB free"));
+        let mut old_report = serde_json::to_value(&r).unwrap();
+        old_report.as_object_mut().unwrap().remove("total_memory_mb");
+        let old: HostResources = serde_json::from_value(old_report).unwrap();
+        assert_eq!(old.total_memory_mb, 0);
     }
 
     #[test]
@@ -122,6 +130,7 @@ mod tests {
             total_disk_bytes: 512 * 1024 * 1024 * 1024,
             cpu_percent: 25,
             memory_percent: 45,
+            total_memory_mb: 16384,
             cores: 16,
             tools: vec!["cargo".into(), "git".into(), "rea".into()],
             updated_at: 12345678,

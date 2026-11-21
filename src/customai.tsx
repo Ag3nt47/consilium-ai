@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, type OllamaModel } from "./api";
+import { LocalModelFit } from "./LocalModelFit";
 
 /** Common services and local model servers. Each only fills in the form; the person can change anything. */
 const PRESETS: { label: string; name: string; url: string; local: boolean; model?: string; hint: string }[] = [
@@ -14,7 +15,7 @@ const PRESETS: { label: string; name: string; url: string; local: boolean; model
 ];
 
 /** "Add your own AI": any OpenAI-compatible service with a key, or a model on this computer or home network. */
-export function CustomAiForm({ onAdded, onError }: { onAdded: (id: string) => void; onError: (e: string) => void }) {
+export function CustomAiForm({ onAdded, onError, availableGiB }: { onAdded: (id: string) => void; onError: (e: string) => void; availableGiB?: number }) {
   const [preset, setPreset] = useState(-1);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -100,6 +101,7 @@ export function CustomAiForm({ onAdded, onError }: { onAdded: (id: string) => vo
         ))}
       </div>
       {preset >= 0 && <p className="muted small">{PRESETS[preset].hint}</p>}
+      <LocalModelFit availableGiB={availableGiB} />
       <div className="custom-ai-fields">
         <label>
           Name <span className="muted small">(you'll @mention it by this)</span>
