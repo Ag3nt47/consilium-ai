@@ -428,6 +428,13 @@ struct Outbox {
 fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), String> {
     crate::link::set_signal_on(false);
     let cfg = BridgeConfig::load(cfg_path)?;
+    if cfg.enabled && bridge::valid_account(&cfg.account) && cfg.allowed_acis.is_empty() {
+        // Saved but never verified: say so once (not every 5 s), so it isn't mistaken for a dead bridge.
+        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("signal chat: number saved but not verified (no allowed sender yet); waiting for the Note to Self code from Settings > Signal");
+        }
+    }
     if !cfg.enabled || !bridge::valid_account(&cfg.account) || cfg.allowed_acis.is_empty() {
         // Not set up, switched off, or the setup's round trip hasn't been verified yet.
         return Ok(());
