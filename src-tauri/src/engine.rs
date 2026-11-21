@@ -1016,7 +1016,8 @@ impl council::Host for RealHost {
         // Local models have small context windows: they get a smaller transcript, with long
         // command outputs and files offloaded to the data folder (offline blueprint, phase 4).
         let transcript = if agents::is_local(agent) {
-            prompt::local_transcript(&events, agent.id, Some(&self.data))
+            let handoff = self.store.handoff_path(conv);
+            prompt::local_transcript(&events, agent.id, Some(&self.data), handoff.as_deref())
         } else {
             prompt::transcript(&events, agent.id)
         };

@@ -808,16 +808,16 @@ pub fn visible_message_ids(events: &[Event], me: &str) -> Vec<String> {
 /// crossed. The latest window remains verbatim so current code, requests and corrections retain
 /// their exact wording.
 pub fn transcript(events: &[Event], me: &str) -> String {
-    transcript_within(events, me, &CLOUD_LIMITS)
+    transcript_within(events, me, &CLOUD_LIMITS, None)
 }
 
 /// The transcript for a local model: a small budget, with long messages offloaded to files in
 /// `data`'s offload folder (see `offload`) so one command's output can't fill its context window.
-pub fn local_transcript(events: &[Event], me: &str, data: Option<&Path>) -> String {
-    transcript_within(events, me, &local_limits(data))
+pub fn local_transcript(events: &[Event], me: &str, data: Option<&Path>, handoff: Option<&Path>) -> String {
+    transcript_within(events, me, &local_limits(data), handoff)
 }
 
-fn transcript_within(events: &[Event], me: &str, limits: &Limits) -> String {
+fn transcript_within(events: &[Event], me: &str, limits: &Limits, handoff: Option<&Path>) -> String {
     let (older, parts) = transcript_parts(events, me, limits);
     let mut out = String::from("CONVERSATION SO FAR\n\n");
     if events.iter().any(|e| e.kind == "message" && e.sender != "human" && e.via.is_some()) {
@@ -825,7 +825,12 @@ fn transcript_within(events: &[Event], me: &str, limits: &Limits) -> String {
         out.push_str(&handles_note(events, me));
     }
     if !older.is_empty() {
-        out.push_str(&transcript_digest(&older, limits.summary));
+        let digest = transcript_digest(&older, limits.summary);
+        if let Some(path) = handoff {
+            let checkpoint = format!("# Consilium handoff\n\n{}\n", crate::redact::scrub(&digest));
+            let _ = crate::store::write_atomic(path, checkpoint.as_bytes());
+        }
+        out.push_str(&digest);
         out.push_str("\n\nRECENT MESSAGES\n\n");
     }
     out.push_str(&parts.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n\n"));
@@ -1274,7 +1279,13 @@ mod tests {
         let mut events: Vec<Event> = (0..30).map(|i| ev("gpt", &format!("progress note {i} {}", "x".repeat(1_500)))).collect();
         events.push(ev("human", &output));
         events.push(ev("human", "now fix the linker error"));
-        let t = local_transcript(&events, "qwen", Some(&data));
+        let path = data.join("test.HANDOFF.md");
+        let t = local_transcript(&events, "qwen", Some(&data), Some(&path));
+        let checkpoint = std::fs::read_to_string(path).unwrap();
+        assert!(checkpoint.starts_with("# Consilium handoff"));
+        assert!(t.contains(checkpoint.trim_start_matches("# Consilium handoff\n\n").trim_end()));
+        assert!(!checkpoint.contains("now fix the linker error"));
+        assert!(checkpoint.len() <= LOCAL_SUMMARY_CHARS + 64);
         assert!(t.len() <= LOCAL_TRANSCRIPT_CHARS + 2_000, "{}", t.len());
         assert!(t.contains("now fix the linker error"));
         assert!(t.contains("error: linker failed"));
@@ -1291,7 +1302,7 @@ mod tests {
     fn the_newest_human_message_keeps_more_room_for_local_models() {
         let task = format!("TASK START {} TASK END", "spec ".repeat(1_000));
         let events = vec![ev("human", &task)];
-        let t = local_transcript(&events, "qwen", None);
+        let t = local_transcript(&events, "qwen", None, None);
         assert!(t.contains("TASK START") && t.contains("TASK END"));
         assert!(!t.contains("left out"));
     }
