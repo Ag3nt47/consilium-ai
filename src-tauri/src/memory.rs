@@ -105,67 +105,35 @@ fn clip(text: &str) -> Option<String> {
     Some(format!("(earlier notes omitted)\n{tail}"))
 }
 
-/// Drops a note when a later note says the same thing, so repeats don't cost every AI tokens on
-/// every turn or push older, still-useful notes past `MAX_CHARS`. Two notes are the same when
-/// their words mostly match (Jaccard >= 0.5, ignoring the "(who, date)" stamp and `[tags]`) and
-/// every word with a digit in the older one (versions, ports, paths) is also in the newer one,
-/// so "Qwen on :8080" and "DeepSeek on :8081" both stay. The file itself is never changed.
+/// Keeps the newest copy of each repeated note in the prompt. Match the exact
+/// note text apart from the recorded author and date. Similar notes can carry
+/// different decisions, so keep both unless the text matches.
 fn without_repeats(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let keys: Vec<Option<std::collections::HashSet<String>>> = lines
-        .iter()
-        .map(|l| l.trim_start().starts_with('-').then(|| note_words(l)))
-        .collect();
-    let repeated = |i: usize| {
-        let Some(a) = keys[i].as_ref().filter(|a| !a.is_empty()) else {
-            return false;
-        };
-        keys[i + 1..].iter().flatten().any(|b| {
-            let shared = a.intersection(b).count();
-            shared * 2 >= a.union(b).count()
-                && a.iter()
-                    .filter(|w| w.chars().any(|c| c.is_ascii_digit()))
-                    .all(|w| b.contains(w))
-        })
-    };
-    lines
-        .iter()
-        .enumerate()
-        .filter(|&(i, _)| !repeated(i))
-        .map(|(_, l)| *l)
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut seen = std::collections::HashSet::new();
+    let mut lines = Vec::new();
+    for line in text.lines().rev() {
+        if let Some(note) = line.trim_start().strip_prefix("- ") {
+            if !seen.insert(without_stamp(note.trim_end())) {
+                continue;
+            }
+        }
+        lines.push(line);
+    }
+    lines.reverse();
+    lines.join("\n")
 }
 
-/// The words of a memory note that carry its meaning, lowercased.
-fn note_words(line: &str) -> std::collections::HashSet<String> {
-    const SKIP: &[&str] = &[
-        "the", "and", "for", "with", "are", "was", "this", "that", "its", "has", "have", "from",
-        "into", "now",
-    ];
-    let mut body = line.trim();
-    // The "(Claude, 2026-11-17)" stamp at the end.
-    if let Some(open) = body.rfind(" (").filter(|_| body.ends_with(')')) {
-        if body[open..].contains(", ") {
-            body = &body[..open];
-        }
-    }
-    let mut plain = String::with_capacity(body.len());
-    let mut depth = 0u32;
-    for c in body.to_lowercase().chars() {
-        match c {
-            '[' => depth += 1,
-            ']' => depth = depth.saturating_sub(1),
-            _ if depth == 0 => plain.push(c),
-            _ => {}
-        }
-    }
-    plain
-        .split(|c: char| !(c.is_alphanumeric() || "._+-".contains(c)))
-        .map(|w| w.trim_matches(|c: char| ".-".contains(c)))
-        .filter(|w| w.len() > 2 && !SKIP.contains(w))
-        .map(str::to_string)
-        .collect()
+fn without_stamp(note: &str) -> &str {
+    let Some((body, stamp)) = note.strip_suffix(')').and_then(|s| s.rsplit_once(" (")) else {
+        return note;
+    };
+    let Some((author, date)) = stamp.rsplit_once(", ") else {
+        return note;
+    };
+    let is_date = date.len() == 10 && date.bytes().enumerate().all(|(i, b)| {
+        if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() }
+    });
+    if !author.is_empty() && is_date { body } else { note }
 }
 
 /// Extracts an optional replacement target tag like `[replaces: needle]` or `[replace: needle]`
@@ -219,15 +187,21 @@ mod tests {
 
     #[test]
     fn repeated_notes_are_left_out_of_the_prompt_newest_kept() {
-        let text = "- Keep me: builds use npm (Claude, 2026-11-14)\n\
-- AnonRouter 0.1.3.post1 is installed in standalone Python 3.11 at ~/.local/opt/python-3.11 (Gemini, 2026-11-17)\n\
-- On Lukes-MBP, Qwen2.5-Coder-3B runs locally via llama-server on http://127.0.0.1:8080/v1 (Gemini, 2026-11-18)\n\
-- On Lukes-MBP, DeepSeek-R1-8B runs locally via llama-server on http://127.0.0.1:8081/v1 (Gemini, 2026-11-18)\n\
-- [replaces: AnonRouter] [verified] On Lukes-MBP, AnonRouter 0.1.3.post1 is installed in standalone Python 3.11 at ~/.local/opt/python-3.11 (Gemini, 2026-11-18)";
+        let text = concat!(
+            "## Council memory\n",
+            "- Keep restart disabled on this host (Claude, 2026-11-14)\n",
+            "- Build installers on the Mac (Gemini, 2026-11-15)\n",
+            "- Keep restart enabled on this host (Gemini, 2026-11-18)\n",
+            "- Build installers on the Mac (Claude, 2026-11-19)\n",
+            "- Use local mode (old, separate)\n",
+            "- Use local mode (new, separate)\n",
+        );
         let out = without_repeats(text);
-        assert_eq!(out.matches("AnonRouter 0.1.3.post1").count(), 1);
-        assert!(out.contains("[verified] On Lukes-MBP, AnonRouter"));
-        assert!(out.contains("Qwen2.5") && out.contains("DeepSeek") && out.contains("Keep me"));
+        assert!(out.starts_with("## Council memory\n"));
+        assert_eq!(out.matches("Build installers").count(), 1);
+        assert!(out.contains("Build installers on the Mac (Claude, 2026-11-19)"));
+        assert!(out.contains("Keep restart disabled") && out.contains("Keep restart enabled"));
+        assert_eq!(out.matches("Use local mode").count(), 2);
     }
 
     #[test]
