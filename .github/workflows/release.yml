@@ -185,6 +185,31 @@ jobs:
             throw "Expected Consilium $expected, found $($installed.VersionInfo.ProductVersion)."
           }
           Write-Output "Verified Windows preview installation of Consilium $expected."
+      - name: Verify Windows preview desktop launch
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:CONSILIUM_DATA = Join-Path $env:RUNNER_TEMP 'consilium-preview-desktop'
+          New-Item -ItemType Directory -Path $env:CONSILIUM_DATA -Force | Out-Null
+          '{"auto_install_updates":false,"members":[]}' |
+            Set-Content -LiteralPath (Join-Path $env:CONSILIUM_DATA 'council.json')
+          $installed = Join-Path $env:LOCALAPPDATA 'Consilium/consilium.exe'
+          $app = Start-Process -FilePath $installed -PassThru
+          try {
+            $deadline = [Diagnostics.Stopwatch]::StartNew()
+            while ($deadline.Elapsed.TotalSeconds -lt 30) {
+              $app.Refresh()
+              if ($app.HasExited) { throw "Consilium exited before opening a window ($($app.ExitCode))." }
+              if ($app.MainWindowHandle -ne [IntPtr]::Zero -and $app.Responding) {
+                Write-Output 'Verified a responsive Consilium desktop window.'
+                return
+              }
+              Start-Sleep -Milliseconds 250
+            }
+            throw 'Consilium did not open a responsive desktop window within 30 seconds.'
+          } finally {
+            if (-not $app.HasExited) { Stop-Process -Id $app.Id }
+          }
       - name: Verify macOS preview installation
         if: needs.prepare.outputs.preview == 'true' && runner.os == 'macOS'
         shell: bash
