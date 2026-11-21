@@ -1236,6 +1236,7 @@ export default function App() {
   const [repoOpen, setRepoOpen] = useState(false);
   const [branchesOpen, setBranchesOpen] = useState(false);
   const [wallpaper, setWallpaper] = useState<DailyWallpaper | null>(null);
+  const [wallpaperRefresh, setWallpaperRefresh] = useState(0);
   const setPersona = (id: string) => {
     setPersonaState(id);
     savePersona(id);
@@ -1413,12 +1414,38 @@ export default function App() {
   }, [adaptiveMode]);
 
   useEffect(() => {
-    if (prefs.bingWallpaper) {
-      api.getDailyWallpaper().then(setWallpaper).catch(() => undefined);
-    } else {
+    if (!prefs.bingWallpaper) {
       setWallpaper(null);
+      return;
     }
-  }, [prefs.bingWallpaper]);
+    let disposed = false;
+    let pending = false;
+    let lastAttempt = -Infinity;
+    let lastDay = "";
+    const refresh = () => {
+      if (pending || document.visibilityState !== "visible") return;
+      const now = new Date();
+      const day = now.toDateString();
+      const elapsed = now.getTime() - lastAttempt;
+      if (day === lastDay && elapsed >= 0 && elapsed < 30 * 60_000) return;
+      lastDay = day;
+      lastAttempt = now.getTime();
+      pending = true;
+      api.getDailyWallpaper().then((next) => {
+        if (!disposed && next) setWallpaper(next);
+      }).catch(() => undefined).finally(() => { pending = false; });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 60_000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [prefs.bingWallpaper, wallpaperRefresh]);
 
   const refreshAgents = useCallback(() => {
     // Focus, turn completion and the refresh button can all fire together. Share one request so
@@ -3586,10 +3613,7 @@ export default function App() {
                   type="button"
                   className="btn small-btn"
                   title="Download and apply today's wallpaper from Bing automatically"
-                  onClick={() => {
-                    setWallpaper(null);
-                    api.getDailyWallpaper().then(setWallpaper).catch(() => undefined);
-                  }}
+                  onClick={() => setWallpaperRefresh((request) => request + 1)}
                 >
                   🔄 Download & Apply Today's Wallpaper
                 </button>

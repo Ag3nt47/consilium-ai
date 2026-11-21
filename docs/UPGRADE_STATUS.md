@@ -82,7 +82,7 @@ not complete the phase.
 | Voice interrupt with 5-second resume; spoken "Consilium, …" commands, programs opened only after a click | 🟡 | 0.3.22. Not yet tried with a real microphone and speakers |
 | Distinct AI voices and reliable speaker handoff | ✅ | Per-AI system voice picker and preview in Settings; a WebKit completion watchdog clears a stuck speaker and returns control to the next AI or human microphone |
 | Daily Bing wallpaper with frosted layer, off switch | ✅ | 0.3.7. Cached in ~/.config/consilium/wallpapers, base64 data-URL, off switch in Settings |
-| Wallpaper refresh across midnight or system wake | 🕓 | Preserve the current cached image on failure; refresh asynchronously without blocking startup |
+| Wallpaper refresh across midnight or system wake | 🔨 | Background refresh on date change and return to the window. Keep the displayed and cached image until a replacement succeeds. Live wake verification pending. |
 | Audit log drawer | ✅ | Applied instantly on 0.3.6 without restarting |
 | Persona chips above the prompt | ✅ | Applied instantly on 0.3.6 without restarting |
 | Phone "launch" actions | ✅ | 0.3.7. Allowlisted targets (terminal, vscode, dashboard) executed without shell |
