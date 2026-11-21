@@ -1428,12 +1428,17 @@ impl Link {
                 };
                 // Stored durably before the ack; on failure the sender keeps it queued and retries.
                 // A crash between storing and committing stores it again, which `inbox` dedupes.
-                if deliver && (self.append_inbox(&packet).is_err() || self.0.ledger.commit(&packet).is_err()) {
-                    return;
-                }
                 if deliver {
-                    // Only a notification now: the packet is already safe in the inbox.
-                    let _ = (self.0.handler)(&packet);
+                    if self.append_inbox(&packet).is_err() {
+                        return;
+                    }
+                    match self.0.ledger.commit(&packet) {
+                        // Two active routes can both reserve the same packet before either commits.
+                        // The first successful commit owns the notification.
+                        Ok(true) => { let _ = (self.0.handler)(&packet); }
+                        Ok(false) => {}
+                        Err(_) => return,
+                    }
                 }
                 let ack = PeerPacket::signed(me, now_ms(), PacketKind::Acknowledgement, self.0.seq.fetch_add(1, Ordering::SeqCst), json!({ "ack": packet.id }), key);
                 if let Ok(line) = ack.and_then(|p| seal(me, key, &p)) {
