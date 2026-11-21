@@ -185,6 +185,44 @@ jobs:
             throw "Expected Consilium $expected, found $($installed.VersionInfo.ProductVersion)."
           }
           Write-Output "Verified Windows preview installation of Consilium $expected."
+      - name: Verify macOS preview installation
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="$(mktemp -d)"
+          mount="$staging/mount"
+          mkdir "$mount"
+          hdiutil attach oneclick/Consilium-macOS.dmg -readonly -nobrowse -mountpoint "$mount"
+          trap 'hdiutil detach "$mount"' EXIT
+          ditto "$mount/Consilium.app" "$staging/Consilium.app"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$staging/Consilium.app/Contents/Info.plist")"
+          binary="$staging/Consilium.app/Contents/MacOS/$executable"
+          lipo -verify_arch arm64 x86_64 "$binary"
+          expected="$(node -p 'require("./package.json").version')"
+          actual="$("$binary" --version)"
+          if [[ "$actual" != "consilium $expected" ]]; then
+            echo "::error::Expected Consilium $expected, found $actual."
+            exit 1
+          fi
+          echo "Verified macOS preview bundle installation of Consilium $expected."
+      - name: Verify Linux DEB preview installation
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=oneclick/Consilium-Linux-amd64.deb
+          sudo apt-get install -y "./$package"
+          package_name="$(dpkg-deb -f "$package" Package)"
+          dpkg-query -L "$package_name" | grep -Fx /usr/bin/consilium
+          expected="$(node -p 'require("./package.json").version')"
+          actual="$(/usr/bin/consilium --version)"
+          if [[ "$actual" != "consilium $expected" ]]; then
+            echo "::error::Expected Consilium $expected, found $actual."
+            exit 1
+          fi
+          echo "Verified Linux DEB preview installation of Consilium $expected."
+
       - uses: actions/upload-artifact@v7
         if: needs.prepare.outputs.preview == 'true'
         with:
