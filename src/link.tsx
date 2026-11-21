@@ -612,6 +612,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
   const statusClass = isOnline ? "online" : "offline";
   const statusText = isOnline ? "Connected" : "Disconnected";
 
+  const routeCount = peer.addrs?.length ?? 0;
   const routeLabel = peer.local_interface ?? "Interface unavailable";
 
   const runTest = async () => {
@@ -645,15 +646,9 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
           <div>
             <div className="row align-center gap-xs">
               <strong className="peer-name">{peer.name}</strong>
-              {(peer.addrs || []).length >= 2 ? (
-                <span className="failover-badge ready" title="Redundant failover routes ready">
-                  ⚡ {(peer.addrs || []).length} routes (failover ready)
-                </span>
-              ) : (
-                <span className="failover-badge single" title="Single route; connect Ethernet or Wi-Fi for auto-failover">
-                  1 route
-                </span>
-              )}
+              <span className="failover-badge single" title="Configured endpoints may share a physical interface. Run the Communication stress test to check which interfaces carry authenticated traffic.">
+                {routeCount} configured {routeCount === 1 ? "endpoint" : "endpoints"}
+              </span>
             </div>
             <code className="peer-node-id">{peer.node_id.slice(0, 10)}…</code>
           </div>
