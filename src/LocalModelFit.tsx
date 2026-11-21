@@ -11,6 +11,7 @@ const deviceName = (name: string) => name.trim().toLowerCase();
 export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [nextId, setNextId] = useState(1);
+  const [hostRunners, setHostRunners] = useState<string[] | null>(null);
   const [hostMemory, setHostMemory] = useState<string | null>(null);
   const [bits, setBits] = useState(4);
   const [overhead, setOverhead] = useState("2");
@@ -49,6 +50,8 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   async function scanPeers() {
     setScanning(true);
     setScanStatus("");
+    setHostRunners(null);
+    const localInventory = api.localToolInventory().catch(() => null);
     try {
       const before = await api.peerResources();
       await api.requestPeerResources();
@@ -72,6 +75,8 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
       setDevices((previous) => previous.filter((device) => typeof device.id === "number"));
       setScanStatus("Peer capability scan unavailable. Previous paired estimates were cleared. Enter device memory manually.");
     } finally {
+      const localTools = await localInventory;
+      setHostRunners(localTools?.filter((tool) => runnerNames.has(tool)) ?? null);
       setScanning(false);
     }
   }
@@ -89,6 +94,9 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
           This computer usable memory (GiB)
           <input type="number" min="0" step="0.1" value={host} onChange={(e) => setHostMemory(e.target.value)} />
         </label>
+        {hostRunners && (
+          <span className="muted">Model tools on this computer: {hostRunners.join(", ") || "none detected"}.</span>
+        )}
         {devices.map((device) => (
           <div className="row wrap" key={device.id}>
             <label>

@@ -250,6 +250,9 @@ const ACTIVE_CONV = isBuild ? BUILD : CONV;
 const demoCouncilForApprovals = { members: isBuild ? ALL : ["gpt", "claude", "gemini"], access: {}, default_workspace: null, default_access: "chat" as const, saved_grants: [] };
 
 export const demoApi = {
+  localToolInventory: async () => [],
+  peerResources: async () => ({}),
+  requestPeerResources: async () => {},
   agents: async () => activeAgents,
   usage: async () => Object.fromEntries(activeAgents.flatMap((a) => (a.usage ? [[a.id, a.usage]] : []))),
   list: async () => (isBuild ? (demoStep === 0 ? [{ ...buildConversations[0], title: "New conversation" }, ...buildConversations.slice(1)] : buildConversations) : demoStep === 0 ? [{ ...conversations[0], title: "New conversation" }, ...conversations.slice(1)] : conversations),
