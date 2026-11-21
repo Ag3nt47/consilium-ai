@@ -693,26 +693,25 @@ impl Link {
             tokio::spawn(async move { me.dial_on(p, &a, t).await })
         };
         let mut dial = spawn_dial();
-        let mut switched_at: Option<(String, u64, u64)> = None;
+        let mut switched_at: Option<(String, u64, u64, u64)> = None;
         let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, detail };
         while started.elapsed() < STRESS_SWITCH_TIMEOUT {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let (route, packets) = {
+            let (route, packets, session_generation) = {
                 let states = self.0.peers.lock().unwrap();
                 let Some(s) = states.get(&peer.node_id) else { continue };
                 // Only a session over one of the routes under test counts. The other computer may
                 // dial in meanwhile, and that session's route is its own outgoing port: crediting
                 // it passed a dead route, or reported the working one under the wrong address.
                 if s.generation <= generation || s.tx.is_none() {
-                    (None, 0)
+                    (None, 0, s.generation)
                 } else {
-                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in)
+                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in, s.generation)
                 }
             };
             if let Some(route) = route {
                 match &switched_at {
-                    None => switched_at = Some((route, packets, started.elapsed().as_millis() as u64)),
-                    Some((r, before, ms)) if packets > *before => {
+                    Some((r, before, ms, observed_generation)) if *observed_generation == session_generation && packets > *before => {
                         return RouteSwitch {
                             kind: route_kind(r).into(),
                             addr: r.clone(),
@@ -721,8 +720,11 @@ impl Link {
                             detail: format!("switched in {ms} ms, traffic confirmed after {} ms", started.elapsed().as_millis()),
                         };
                     }
-                    _ => {}
+                    Some((_, _, _, observed_generation)) if *observed_generation == session_generation => {}
+                    _ => switched_at = Some((route, packets, started.elapsed().as_millis() as u64, session_generation)),
                 }
+            } else {
+                switched_at = None;
             }
             if dial.is_finished() && switched_at.is_none() {
                 match (&mut dial).await {
@@ -735,7 +737,7 @@ impl Link {
             }
         }
         match switched_at {
-            Some((r, _, _)) => fail(r, "connected, but nothing came back over it".into()),
+            Some((r, _, _, _)) => fail(r, "connected, but nothing came back over it".into()),
             None => fail(label, "timed out".into()),
         }
     }
