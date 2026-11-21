@@ -21,6 +21,7 @@ Consilium: a Tauri 2 desktop app (Rust back end in `src-tauri/`, React + TypeScr
 - Small, focused commits with a clear message; tests with every behavior change.
 - An update is not delivered until its focused commit is integrated onto `main`, pushed to `origin/main`, and GitHub checks pass on macOS, Windows and Linux. Stage or publish from that pushed `main` commit, never from an unpushed side branch.
 - Before changing a file another participant may have touched this turn, re-read it.
+- List reviewed offline helpers with `node scripts/offline-skills.mjs`. Pass a skill ID to load only its command and guidance.
 - For long JavaScript or TypeScript files, run `node scripts/symbol-map.mjs <file>` first, then read the relevant line ranges. To locate an inner declaration, pass the top-level function and a name filter, such as `node scripts/symbol-map.mjs src/App.tsx App send`.
 - For Python, run `python scripts/python-symbol-map.py <file> --filter <name>` to find declarations offline before reading the relevant lines.
 - For PowerShell, run `./scripts/powershell-symbol-map.ps1 <file> -Filter <name>` to outline functions and types without executing the source.
