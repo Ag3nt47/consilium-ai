@@ -25,8 +25,8 @@ function Runbook({ id }: { id: string }) {
   }
 
   return (
-    <details onToggle={(event) => { if (event.target === event.currentTarget && event.currentTarget.open) void load(); }}>
-      <summary>{id}</summary>
+    <details>
+      <summary onClick={(event) => { if (!event.currentTarget.closest("details")?.open) void load(); }}>{id}</summary>
       {error ? <p role="alert">{error}</p> : <pre style={{ whiteSpace: "pre-wrap" }}>{content ?? "Loading…"}</pre>}
     </details>
   );
@@ -57,8 +57,8 @@ export default function OfflineSkills() {
           <pre><code>{skill.command}</code></pre>
         </details>
       ))}
-      <details onToggle={(event) => { if (event.target === event.currentTarget && event.currentTarget.open) void refresh(); }}>
-        <summary>Local runbooks</summary>
+      <details>
+        <summary onClick={(event) => { if (!event.currentTarget.closest("details")?.open) void refresh(); }}>Local runbooks</summary>
         <p className="muted small">Save Markdown files in ~/.consilium/skills. Open a runbook to read it.</p>
         {error && <p role="alert">{error}</p>}
         {!error && !ids && <p role="status">Loading runbooks…</p>}
