@@ -143,6 +143,13 @@ pub fn stale_signal_cli(args: &[String], account: &str, running_secs: u64) -> bo
     ours && rest.iter().any(|a| a == "daemon") && !rest.iter().any(|a| a == "manual")
 }
 
+/// Checks the executable name before considering signal-cli arguments. AI prompts and
+/// shell scripts can contain those same arguments and must never select their processes.
+pub fn stale_signal_cli_process(name: &str, args: &[String], account: &str, running_secs: u64) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "java" | "java.exe" | "javaw" | "javaw.exe")
+        && stale_signal_cli(args, account, running_secs)
+}
+
 /// Stops the signal-cli processes `stale_signal_cli` picks out. Returns how many were stopped.
 fn stop_stale_signal_cli(account: &str) -> usize {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -155,7 +162,7 @@ fn stop_stale_signal_cli(account: &str) -> usize {
     let mut stopped = 0;
     for p in sys.processes().values() {
         let args: Vec<String> = p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        if stale_signal_cli(&args, account, p.run_time()) && p.kill() {
+        if stale_signal_cli_process(&p.name().to_string_lossy(), &args, account, p.run_time()) && p.kill() {
             stopped += 1;
         }
     }
@@ -572,5 +579,41 @@ mod tests {
         assert_eq!(reply_with_code(&mine, acc, "1234"), None);
         let stranger = sub(serde_json::json!({"sourceNumber": "+15559999999", "dataMessage": {"message": "8575"}}));
         assert_eq!(reply_with_code(&stranger, acc, "8575"), None);
+    }
+}
+
+#[cfg(test)]
+mod stale_cleanup_process_tests {
+    use super::*;
+
+    fn args(command: &str) -> Vec<String> {
+        ["java", "org.asamk.signal.Main", "-a", "+15550001000", command]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn stale_cleanup_never_selects_ai_or_shell_processes() {
+        for command in ["daemon", "listAccounts"] {
+            let args = args(command);
+            assert!(stale_signal_cli(&args, "+15550001000", 180));
+            for name in ["claude.exe", "codex.exe", "node.exe", "powershell.exe", "pwsh.exe", "cmd.exe"] {
+                assert!(
+                    !stale_signal_cli_process(name, &args, "+15550001000", 180),
+                    "selected {name} for {command}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_cleanup_still_selects_the_matching_java_process() {
+        for command in ["daemon", "listAccounts"] {
+            let args = args(command);
+            for name in ["java", "java.exe", "javaw", "javaw.exe", "JAVA.EXE"] {
+                assert!(stale_signal_cli_process(name, &args, "+15550001000", 180));
+            }
+        }
     }
 }
