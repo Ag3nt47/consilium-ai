@@ -220,6 +220,7 @@ pub fn inventory() -> Vec<(String, PathBuf)> {
     let dirs_ = search_dirs();
     known_tools(std::env::consts::OS)
         .iter()
+        .chain(&["ollama", "llama-cli", "llama-server", "ggml-rpc-server", "rpc-server"])
         .filter_map(|name| present(name, &dirs_).map(|path| (name.to_string(), path)))
         .collect()
 }
