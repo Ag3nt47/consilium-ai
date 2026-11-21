@@ -237,6 +237,10 @@ impl Store {
         self.dir.join(format!("{id}.files"))
     }
 
+    pub fn handoff_path(&self, id: &str) -> Option<PathBuf> {
+        valid_id(id).then(|| self.dir.join(format!("{id}.HANDOFF.md")))
+    }
+
     fn stop_path(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.stop"))
     }
@@ -441,6 +445,9 @@ impl Store {
         let _ = fs::remove_file(self.stop_path(id));
         let _ = fs::remove_dir_all(self.files_dir(id));
         let _ = fs::remove_file(self.dir.join(format!("{id}.tasks.json")));
+        if let Some(path) = self.handoff_path(id) {
+            let _ = fs::remove_file(path);
+        }
         Ok(())
     }
 
