@@ -155,7 +155,7 @@ pub fn workspace_state(workspace: &Path) -> Option<String> {
     let diff = git_output(
         workspace,
         &[
-            "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".",
+            "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".", ":(exclude,attr:linguist-generated)",
         ],
         MAX_WORKSPACE_DIFF_BYTES,
     )
@@ -163,7 +163,7 @@ pub fn workspace_state(workspace: &Path) -> Option<String> {
         // An unborn repository has no HEAD yet, but its index can still be described.
         git_output(
             workspace,
-            &["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", "."],
+            &["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".", ":(exclude,attr:linguist-generated)"],
             MAX_WORKSPACE_DIFF_BYTES,
         )
     })?;
@@ -184,7 +184,7 @@ pub fn workspace_state(workspace: &Path) -> Option<String> {
         }
     }
     if !diff_text.is_empty() {
-        out.push_str("\n\nCurrent diff excerpt:\n");
+        out.push_str("\n\nCurrent diff excerpt (files marked linguist-generated appear in Git status above):\n");
         out.push_str(&diff_text);
         if diff.truncated {
             out.push_str("\n… diff truncated; inspect the workspace for the complete change");
@@ -1319,12 +1319,17 @@ mod tests {
         git(&["config", "user.name", "Consilium Test"]);
         git(&["config", "user.email", "test@invalid.example"]); // consilium-allow-secret-scan (non-routable test identity)
         std::fs::write(repo.join("note.txt"), "base\n").unwrap();
-        git(&["add", "note.txt"]);
+        std::fs::write(repo.join(".gitattributes"), "bundle.txt linguist-generated\n").unwrap();
+        std::fs::write(repo.join("bundle.txt"), "initial generated content\n").unwrap();
+        git(&["add", "note.txt", "bundle.txt", ".gitattributes"]);
         git(&["commit", "-qm", "base", "--no-gpg-sign"]);
 
         let secret = format!("sk-{}", "Ab3_".repeat(8));
         std::fs::write(repo.join("note.txt"), format!("base\nAPI_KEY={secret}\n")).unwrap();
+        std::fs::write(repo.join("bundle.txt"), "bulky generated output\n".repeat(1_000)).unwrap();
         let state = workspace_state(&repo).unwrap();
+        assert!(state.contains("bundle.txt"));
+        assert!(!state.contains("bulky generated output"));
         assert!(state.contains("PROJECT STATE") && state.contains("note.txt"));
         assert!(state.contains("Current diff excerpt"));
         assert!(state.contains("[REDACTED OpenAI key]"));
