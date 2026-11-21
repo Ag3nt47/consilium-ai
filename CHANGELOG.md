@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.55
+
+- Estimate local model memory requirements and ask paired computers for current memory reports.
+- Run the same memory calculator offline from a source checkout with `node scripts/model-fit.mjs`.
+- Show GitHub update checks, download progress, and installer staging failures in Settings.
+- Use shorter task-board instructions to reduce repeated prompt text.
+
 ## 0.3.54
 
 - Guide AI setup and device pairing from the Add menu.
