@@ -7,6 +7,8 @@ Consilium is a local-first, multi-AI hive mind that connects any mix of Windows,
 
 Mix cloud assistants such as ChatGPT, Claude, and Gemini with local models such as Qwen and Llama. Pair devices over your local network and use supported local models for offline work. For software projects, agents can work in separate Git worktrees while you track their progress on a shared task board and review their changes before merging.
 
+Consilium is free and open source. Download free local AI models such as Qwen or Llama through a compatible runner and use them without a cloud subscription. Put older Windows PCs, Macs, or Linux machines back to work by connecting them over your local network. Each can handle part of a project, and a compatible inference runner can split a supported model across machines when it needs more memory than one can provide. Use the mesh to build and test an app across operating systems, edit and prepare a book for publication, or turn home lab logs into a maintenance checklist without sending them to a cloud provider.
+
 ## Screenshots and walkthrough
 
 <p align="center"><img src="docs/media/demo.gif" width="860" alt="Consilium demo showing agents working through a shared task board and a review request"></p>
