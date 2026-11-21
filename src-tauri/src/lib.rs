@@ -633,7 +633,7 @@ fn update_download_status() -> update::DownloadStatus {
     update::download_status()
 }
 
-/// Stages a release update downloaded from GitHub into `<data>/update/next`.
+/// Downloads and stages this platform's release update from GitHub.
 #[tauri::command]
 async fn stage_release_update(version: String, url: String, digest: Option<String>) -> Result<(), String> {
     let data = data_dir().ok_or("can't find Consilium's data folder")?;

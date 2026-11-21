@@ -503,6 +503,91 @@ impl Sync {
         Ok(None)
     }
 
+    /// A packet carrying an AI's on/off switch state in `conversation`.
+    fn switched_packet(&self, conversation: &str, agent: &str, on: bool) -> Option<Value> {
+        let (conv_id, owner) = if let Some((owner, remote_conv)) = self.origin(conversation) {
+            (remote_conv, Some(owner))
+        } else {
+            let m = self.mirrors.lock().unwrap();
+            if !(m.backfilled.contains(conversation) || m.shared_with.contains_key(conversation)) {
+                return None;
+            }
+            (conversation.to_string(), None)
+        };
+        let payload = serde_json::json!({
+            "agent": agent,
+            "on": on,
+        });
+        serde_json::to_value(Shared {
+            conversation: conv_id,
+            title: String::new(),
+            id: uuid::Uuid::new_v4().to_string(),
+            sender: "human".into(),
+            kind: "switched".into(),
+            to: vec![],
+            text: serde_json::to_string(&payload).ok()?,
+            via: None,
+            owner,
+            history: vec![],
+        })
+        .ok()
+    }
+
+    /// An AI was switched on or off in a linked conversation: updates local state and notifies.
+    fn take_switched(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
+        let mut m = self.mirrors.lock().unwrap();
+        if m.filed.contains(&packet.id) {
+            return Ok(None);
+        }
+        m.filed.insert(packet.id.clone());
+        let _ = self.save(&m);
+        drop(m);
+
+        #[derive(Deserialize)]
+        struct SwitchedPayload {
+            agent: String,
+            on: bool,
+        }
+        let Ok(payload) = serde_json::from_str::<SwitchedPayload>(&shared.text) else {
+            return Ok(None);
+        };
+        let is_owner = shared.owner.is_some();
+        let local_conv = if let Some(owner) = &shared.owner {
+            let me = self.me.lock().unwrap().clone();
+            if owner != &me {
+                return Ok(None);
+            }
+            if self.store.meta(&shared.conversation).is_err() {
+                return Ok(None);
+            }
+            shared.conversation.clone()
+        } else {
+            let m = self.mirrors.lock().unwrap();
+            let key = format!("{}/{}", packet.node_id, shared.conversation);
+            let Some(local) = m.map.get(&key).filter(|id| self.store.meta(id).is_ok()).cloned() else {
+                return Ok(None);
+            };
+            local
+        };
+
+        crate::switched::set(self.store.dir(), &local_conv, &payload.agent, payload.on)?;
+
+        if is_owner {
+            if let Some(link) = crate::link_handle().filter(|l| l.enabled() && l.has_peers()) {
+                if let Some(p) = self.switched_packet(&local_conv, &payload.agent, payload.on) {
+                    let _ = link.send(PacketKind::Chat, p);
+                }
+            }
+        }
+
+        let agent_name = crate::agents::by_id(&payload.agent).map_or(payload.agent.as_str(), |a| a.name);
+        let state_str = if payload.on { "switched on" } else { "switched off" };
+        let note = format!("Council: {agent_name} was {state_str} on {computer}.");
+        let event = self.store.append_imported(&local_conv, crate::council::CONSILIUM, "system", vec![], &note, None, None)?;
+        self.notify(&local_conv, &event);
+        Ok(Some(event))
+    }
+
     /// Shares this computer's host resources with linked peers.
     pub fn share_resources(&self, target_path: Option<&Path>) -> Result<(), String> {
         let Some(link) = crate::link_handle().filter(|l| l.enabled() && l.has_peers()) else { return Ok(()) };
@@ -677,6 +762,9 @@ impl Sync {
             if !crate::tasks::load(self.store.dir(), &c.id).tasks.is_empty() {
                 out.extend(self.board_packet(&c.id));
             }
+            for agent in crate::switched::off(self.store.dir(), &c.id) {
+                out.extend(self.switched_packet(&c.id, &agent, false));
+            }
         }
         out
     }
@@ -702,6 +790,9 @@ impl Sync {
         }
         if shared.kind == "resources" {
             return self.take_resources(packet, shared, computer);
+        }
+        if shared.kind == "switched" {
+            return self.take_switched(packet, shared, computer);
         }
         if shared.owner.is_some() {
             if shared.sender == "human" {
@@ -956,6 +1047,11 @@ pub fn share(e: &Event) {
         if let Some(board) = s.board_packet(&e.conversation) {
             let _ = link.send(PacketKind::Chat, board);
         }
+        for agent in crate::switched::off(s.store.dir(), &e.conversation) {
+            if let Some(switched) = s.switched_packet(&e.conversation, &agent, false) {
+                let _ = link.send(PacketKind::Chat, switched);
+            }
+        }
     }
     if let Some(payload) = s.outgoing(e) {
         let _ = link.send(PacketKind::Chat, payload);
@@ -986,6 +1082,17 @@ pub fn share_board(conversation: &str) {
         return;
     }
     if let Some(packet) = s.board_packet(conversation) {
+        let _ = link.send(PacketKind::Chat, packet);
+    }
+}
+
+/// Sends an AI's switched on/off state in `conversation` to linked computers.
+pub fn share_switched(conversation: &str, agent: &str, on: bool) {
+    let (Some(s), Some(link)) = (SYNC.get(), crate::link_handle()) else { return };
+    if !link.enabled() || !link.has_peers() {
+        return;
+    }
+    if let Some(packet) = s.switched_packet(conversation, agent, on) {
         let _ = link.send(PacketKind::Chat, packet);
     }
 }
@@ -1189,6 +1296,39 @@ mod tests {
         let more = a.store.append(&conv.id, "human", "message", vec![], "after").unwrap();
         let q = packet("node-a", "p2", a.outgoing(&more).unwrap());
         assert_eq!(b.file(&q, "MacBook").unwrap().expect("filed on replay").conversation, filed.conversation);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn switched_state_syncs_between_owner_and_mirror() {
+        let root = std::env::temp_dir().join(format!("peer-sync-switched-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        *a.me.lock().unwrap() = "node-a".into();
+        *b.me.lock().unwrap() = "node-b".into();
+
+        let conv = a.store.create("Plans").unwrap();
+        let typed = a.store.append(&conv.id, "human", "message", vec![], "hello").unwrap();
+        let payload = a.outgoing(&typed).expect("a human message is shared");
+        let filed = b.file(&packet("node-a", "p1", payload), "MacBook").unwrap().expect("filed");
+        let mirror_conv = filed.conversation;
+        a.mirrors.lock().unwrap().backfilled.insert(conv.id.clone());
+
+        // 1. Owner switches an AI off, packet sent to mirror
+        crate::switched::set(a.store.dir(), &conv.id, "claude", false).unwrap();
+        let p_off = a.switched_packet(&conv.id, "claude", false).expect("switched packet generated");
+        let res = b.file(&packet("node-a", "p_sw_1", p_off), "MacBook").unwrap().expect("event logged");
+        assert!(res.text.contains("Claude was switched off on MacBook"));
+        assert!(crate::switched::is_off(b.store.dir(), &mirror_conv, "claude"), "claude is now off in mirror");
+
+        // 2. Mirror switches an AI on, packet sent back to owner
+        crate::switched::set(b.store.dir(), &mirror_conv, "claude", true).unwrap();
+        let p_on = b.switched_packet(&mirror_conv, "claude", true).expect("mirror switched packet generated");
+        let res_owner = a.file(&packet("node-b", "p_sw_2", p_on), "MSI").unwrap().expect("event logged on owner");
+        assert!(res_owner.text.contains("Claude was switched on on MSI"));
+        assert!(!crate::switched::is_off(a.store.dir(), &conv.id, "claude"), "claude is now on in owner");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

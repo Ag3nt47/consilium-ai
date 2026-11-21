@@ -381,12 +381,21 @@ impl Engine {
     /// `join` and an AI's as `heard`. Otherwise this computer's council members answer it in a
     /// turn of their own, if `may_start` allows (it limits how often AIs alone can start one).
     pub fn from_linked(self: &Arc<Self>, id: &str, event: &Event, may_start: &dyn Fn() -> bool) {
-        let members = self.config.get().members;
+        let members: Vec<String> = self
+            .config
+            .get()
+            .members
+            .into_iter()
+            .filter(|m| !crate::switched::is_off(self.store.dir(), id, m))
+            .collect();
         // Another computer's AI may address AIs here by handle, e.g. "@claude-<this computer>".
         let addressed: Vec<String> = if event.sender == "human" {
             vec![]
         } else {
-            prompt::mentioned_here(&event.text).into_iter().filter(|m| members.contains(m)).collect()
+            prompt::mentioned_here(&event.text)
+                .into_iter()
+                .filter(|m| members.contains(m) && !crate::switched::is_off(self.store.dir(), id, m))
+                .collect()
         };
         // As in `send_via`: the turn table is never held while the council takes the message in.
         let mut tried: Option<String> = None;
@@ -514,7 +523,7 @@ impl Engine {
                 *c = last;
                 (messages, last)
             };
-            let targets = self.targets_of(&unanswered);
+            let targets = self.targets_of(&unanswered, &conv);
             let mut running = self.running.lock().unwrap();
             if !targets.is_empty() && running.get(&conv).is_some_and(|r| r.turn == pending.turn) {
                 self.journal.finish(&conv, &pending.turn);
@@ -532,7 +541,7 @@ impl Engine {
         // A message sent from the other process just before the lock was let go found it still
         // taken, so its sender left it to this process.
         let (late, last) = self.sent_elsewhere(&conv, cursor);
-        let targets = self.targets_of(&late);
+        let targets = self.targets_of(&late, &conv);
         if targets.is_empty() || late.iter().any(|m| self.answered(&conv, m.seq)) {
             return;
         }
@@ -603,11 +612,11 @@ impl Engine {
     }
 
     /// Council members addressed by any of `messages`.
-    fn targets_of(&self, messages: &[Event]) -> Vec<String> {
+    fn targets_of(&self, messages: &[Event], conv: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for m in messages {
             for t in &m.to {
-                if self.config.is_member(t) && !out.contains(t) {
+                if self.config.is_member(t) && !out.contains(t) && !crate::switched::is_off(self.store.dir(), conv, t) {
                     out.push(t.clone());
                 }
             }
@@ -792,6 +801,7 @@ don't repeat changes that are already made.",
                 c.stop_agent(agent);
             }
         }
+        crate::peer_sync::share_switched(conversation, agent, on);
         Ok(now_off)
     }
 
@@ -837,6 +847,11 @@ don't repeat changes that are already made.",
                 let mut all = true;
                 for m in messages {
                     let targets = self.addressed(m.to.clone(), &m.text);
+                    let targets: Vec<String> = targets.into_iter().filter(|t| !crate::switched::is_off(self.store.dir(), conv, t)).collect();
+                    if targets.is_empty() {
+                        *c = m.seq;
+                        continue;
+                    }
                     if !council.join(&m, &targets) {
                         // The turn is ending; `run` gives this message a turn of its own.
                         all = false;

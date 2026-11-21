@@ -110,6 +110,9 @@ fn alarm(s: &Arc<Shared>, failed: &'static Agent, why: &str) {
     if st.alarmed || st.paused || s.cancel.is_cancelled() || ALARMED.lock().unwrap().get(&key).is_some_and(|w| w == why) {
         return;
     }
+    if crate::switched::is_off(s.store.dir(), &s.turn.conversation, failed.id) {
+        return;
+    }
     let helpers: Vec<&'static Agent> = s
         .turn
         .members
@@ -196,11 +199,6 @@ pub fn progress(events: &[Event]) -> Progress {
     p
 }
 
-/// Whether `agent` is switched off in this turn's chat (see `switched`): it isn't started there.
-fn switched_off(s: &Shared, agent: &str) -> bool {
-    crate::switched::is_off(s.store.dir(), &s.turn.conversation, agent)
-}
-
 /// Runs the turn to its end (the app uses `Council` directly, to take messages while it runs).
 #[cfg(test)]
 pub async fn run(turn: Turn, store: Arc<Store>, bench: Arc<Bench>, host: Arc<dyn Host>, cancel: CancellationToken) {
@@ -266,7 +264,11 @@ impl Council {
             st.generation += 1;
             st.latest.insert(message.sender.clone(), message.seq);
             for t in targets {
-                if agents::by_id(t).is_some() && s.bench.until(t, now_ms()).is_none() && !st.live.contains(t) && !switched_off(s, t) {
+                if agents::by_id(t).is_some()
+                    && s.bench.until(t, now_ms()).is_none()
+                    && !st.live.contains(t)
+                    && !crate::switched::is_off(s.store.dir(), &s.turn.conversation, t)
+                {
                     st.live.insert(t.clone());
                     st.joined.insert(t.clone());
                     start.push(t.clone());
@@ -320,7 +322,10 @@ impl Council {
                 if st.pulled_in >= limit {
                     break;
                 }
-                if agents::by_id(m).is_none() || s.bench.until(m, now).is_some() || switched_off(s, m) {
+                if agents::by_id(m).is_none()
+                    || s.bench.until(m, now).is_some()
+                    || crate::switched::is_off(s.store.dir(), &s.turn.conversation, m)
+                {
                     continue;
                 }
                 let used = st.answered.get(m).copied().unwrap_or(0);
@@ -429,6 +434,9 @@ fn worker(s: Arc<Shared>, id: String, last_seen: Option<u64>) -> Pin<Box<dyn Fut
 /// out of usage), and the newest message it has read.
 async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool, Option<u64>) {
     let agent = agents::by_id(&id).expect("known agent");
+    if crate::switched::is_off(s.store.dir(), &s.turn.conversation, &id) {
+        return (false, last_seen);
+    }
     let rounds = s.turn.rounds;
     let mut failed = false;
     loop {
@@ -633,10 +641,13 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                         &format!("{} ran out of usage ({when}); the council carries on without it.", agent.name),
                     );
                 } else {
-                    if let Ok(e) = s.store.append(&s.turn.conversation, &id, "error", vec![], &format!("{} couldn't answer: {why}", agent.name)) {
-                        s.host.event(&e);
+                    let off_here = crate::switched::is_off(s.store.dir(), &s.turn.conversation, &id);
+                    if !off_here {
+                        if let Ok(e) = s.store.append(&s.turn.conversation, &id, "error", vec![], &format!("{} couldn't answer: {why}", agent.name)) {
+                            s.host.event(&e);
+                        }
+                        alarm(&s, agent, &why);
                     }
-                    alarm(&s, agent, &why);
                 }
                 failed = true;
                 break;
@@ -665,7 +676,9 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
                 let now = now_ms();
                 // An AI switched off in this chat never stands in for one that couldn't answer.
                 let available = |a: &&'static agents::Agent| {
-                    s.bench.until(a.id, now).is_none() && s.host.installed(a) && !switched_off(&s, a.id)
+                    s.bench.until(a.id, now).is_none()
+                        && s.host.installed(a)
+                        && !crate::switched::is_off(s.store.dir(), &s.turn.conversation, a.id)
                 };
                 let unjoined: Vec<&'static agents::Agent> = s
                     .turn
@@ -685,7 +698,7 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
                     st.live.insert(a.id.to_string());
                     st.joined.insert(a.id.to_string());
                     Some(Some(a))
-                } else if s.turn.members.iter().filter(|m| **m != id).filter_map(|m| agents::by_id(m)).any(|a| available(&a)) {
+                } else if s.turn.members.iter().filter(|m| **m != id).filter_map(|m| agents::by_id(m)).any(|a| s.bench.until(a.id, now).is_none() && s.host.installed(a)) {
                     // Others could answer; they have already taken part in this turn.
                     None
                 } else {
@@ -907,6 +920,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn switched_off_ai_is_not_asked_and_raises_no_alarm_or_error() {
+        let (store, c) = setup();
+        crate::switched::set(store.dir(), &c, "claude", false).unwrap();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "claude" => Err("Claude crashed".into()),
+            _ => Ok(format!("{id} here")),
+        }));
+        let ev = go(&store, &c, f.clone(), &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
+        assert!(!ev.iter().any(|e| e.sender == CONSILIUM && e.text.contains("couldn't answer")));
+        assert!(!ev.iter().any(|e| e.sender == "claude" && e.kind == "error"));
+        assert_eq!(f.asked.lock().unwrap().iter().filter(|(a, _)| a == "claude").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_ai_switched_off_in_the_chat_never_stands_in() {
+        let (store, c) = setup();
+        crate::switched::set(store.dir(), &c, "gpt", false).unwrap();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "claude" => Err("rate limit exceeded".into()),
+            _ => Ok(format!("{id} here")),
+        }));
+        let ev = go(&store, &c, f.clone(), &["claude"], 1, Arc::new(Bench::new())).await;
+        assert!(f.asked.lock().unwrap().iter().all(|(a, _)| a != "gpt"), "a switched-off AI was asked");
+        assert!(!ev.iter().any(|e| e.text.contains("ChatGPT is taking")));
+    }
+
+    #[tokio::test]
+    async fn switched_off_ai_is_not_started_by_mention() {
+        let (store, c) = setup();
+        crate::switched::set(store.dir(), &c, "claude", false).unwrap();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "gpt" => Ok("Hey @claude check this out".into()),
+            _ => Ok(format!("{id} here")),
+        }));
+        let ev = go(&store, &c, f.clone(), &["gpt"], 2, Arc::new(Bench::new())).await;
+        assert_eq!(f.asked.lock().unwrap().iter().filter(|(a, _)| a == "claude").count(), 0);
+        assert!(!ev.iter().any(|e| e.sender == "claude"));
+    }
+
+    #[tokio::test]
     async fn an_ai_out_of_usage_is_benched_and_the_others_carry_on() {
         let (store, c) = setup();
         let bench = Arc::new(Bench::new());
@@ -933,29 +986,6 @@ mod tests {
         let ev = go(&store, &c, f, &["claude"], 1, Arc::new(Bench::new())).await;
         assert_eq!(said(&ev), vec![("gpt".into(), "gpt here".into())]);
         assert!(ev.iter().any(|e| e.text == "ChatGPT is taking Claude's turn."));
-    }
-
-    #[tokio::test]
-    async fn an_ai_switched_off_in_the_chat_never_stands_in() {
-        let (store, c) = setup();
-        crate::switched::set(store.dir(), &c, "gpt", false).unwrap();
-        let f = Arc::new(fake(|id, _, _| match id {
-            "claude" => Err("rate limit exceeded".into()),
-            _ => Ok(format!("{id} here")),
-        }));
-        let ev = go(&store, &c, f.clone(), &["claude"], 1, Arc::new(Bench::new())).await;
-        assert!(f.asked.lock().unwrap().iter().all(|(a, _)| a != "gpt"), "a switched-off AI was asked");
-        assert!(!ev.iter().any(|e| e.text.contains("ChatGPT is taking")));
-    }
-
-    #[tokio::test]
-    async fn a_mention_never_brings_in_an_ai_switched_off_in_the_chat() {
-        let (store, c) = setup();
-        crate::switched::set(store.dir(), &c, "gemini", false).unwrap();
-        let f = Arc::new(fake(|id, _, _| Ok(if id == "gpt" { "@gemini what do you think?".into() } else { format!("{id} agrees") })));
-        let ev = go(&store, &c, f.clone(), &["gpt"], 1, Arc::new(Bench::new())).await;
-        assert!(!said(&ev).iter().any(|(a, _)| a == "gemini"));
-        assert!(f.asked.lock().unwrap().iter().all(|(a, _)| a != "gemini"));
     }
 
     #[tokio::test]
