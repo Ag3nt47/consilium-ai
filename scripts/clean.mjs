@@ -11,7 +11,7 @@
 //   node scripts/clean.mjs --dry-run  Lists files and bytes to clean without deleting
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,16 +28,23 @@ const DATA =
       ? join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), ID)
       : join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), ID));
 
-// Patterns in temporary directories that belong to Consilium builds, tests, and stages.
-const TEMP_FILE_PATTERNS = [
-  /^c0\d+/, // e.g. /tmp/c0311, /tmp/c0310 staging workspaces
-  /^stage.*\.log$/,
-  /^stage.*\.sh$/,
-  /^stage-ui-.*\.log$/,
-  /^stage-ui-.*\.sh$/,
-  /^consilium-/,
-  /^reaper-\d+/,
-];
+// Only dedicated disposable folders explicitly marked by a producer belong to us.
+const TEMP_OWNER_FILE = ".consilium-temp-owner";
+const TEMP_OWNER_CONTENT = ID + "\n";
+
+function isOwnedTemp(folder) {
+  try {
+    const dir = lstatSync(folder);
+    if (!dir.isDirectory() || dir.isSymbolicLink()) return false;
+    const marker = join(folder, TEMP_OWNER_FILE);
+    const st = lstatSync(marker);
+    return st.isFile() && !st.isSymbolicLink()
+      && st.size === Buffer.byteLength(TEMP_OWNER_CONTENT)
+      && readFileSync(marker, "utf8") === TEMP_OWNER_CONTENT;
+  } catch {
+    return false;
+  }
+}
 
 // A full hour avoids mistaking a slow AI turn or release link for abandoned work.
 const DEFAULT_MIN_AGE_MS = 60 * 60 * 1000;
@@ -77,12 +84,14 @@ function inspectPath(path) {
   let bytes = 0;
   let newestMtimeMs = 0;
   try {
-    const st = statSync(path);
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) return { bytes: 0, newestMtimeMs: st.mtimeMs };
     newestMtimeMs = st.mtimeMs;
     if (!st.isDirectory()) return { bytes: st.size, newestMtimeMs };
     bytes += st.size;
     const entries = readdirSync(path, { withFileTypes: true });
     for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
       const full = join(path, entry.name);
       try {
         if (entry.isDirectory()) {
@@ -90,7 +99,8 @@ function inspectPath(path) {
           bytes += child.bytes;
           newestMtimeMs = Math.max(newestMtimeMs, child.newestMtimeMs);
         } else {
-          const child = statSync(full);
+          const child = lstatSync(full);
+          if (child.isSymbolicLink()) continue;
           bytes += child.size;
           newestMtimeMs = Math.max(newestMtimeMs, child.mtimeMs);
         }
@@ -128,6 +138,7 @@ export function findCleanableTargets(opts = {}) {
   const turnActive = opts.turnActive ?? detected.turnActive;
 
   const add = (path, category, { aged = false, buildSensitive = false, turnSensitive = false } = {}) => {
+    try { if (lstatSync(path).isSymbolicLink()) return; } catch { return; }
     const info = inspectPath(path);
     if (aged && !force && minAgeMs > 0 && nowMs - info.newestMtimeMs < minAgeMs) return;
     if (buildSensitive && buildActive) return;
@@ -142,12 +153,12 @@ export function findCleanableTargets(opts = {}) {
     try {
       const entries = readdirSync(dir);
       for (const name of entries) {
-        if (TEMP_FILE_PATTERNS.some((re) => re.test(name))) {
+        if (isOwnedTemp(join(dir, name))) {
           const full = join(dir, name);
           add(full, "temporary artifact", {
             aged: true,
             buildSensitive: true,
-            turnSensitive: name.startsWith("consilium-"),
+            turnSensitive: true,
           });
         }
       }
@@ -216,6 +227,11 @@ export function runClean(opts = {}) {
   let cleanedCount = 0;
 
   for (const item of targets) {
+    // Recheck ownership immediately before acting, including when --force is used.
+    if (item.category === "temporary artifact" && !isOwnedTemp(item.path)) {
+      console.warn("Skipped temporary artifact whose ownership changed: " + item.path);
+      continue;
+    }
     if (dryRun) {
       console.log(`[dry-run] Would remove: ${item.path} (${item.category}, ${formatBytes(item.bytes)})`);
     } else {

@@ -1,10 +1,18 @@
 // Tests for scripts/clean.mjs: verify safe detection and removal of temporary files and workspaces.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findCleanableTargets, runClean } from "../scripts/clean.mjs";
+
+function ownedTemp(root, name) {
+  const folder = join(root, name);
+  mkdirSync(folder);
+  writeFileSync(join(folder, ".consilium-temp-owner"), "io.github.ag3nt47.consilium\n");
+  writeFileSync(join(folder, "payload.txt"), "temporary data");
+  return folder;
+}
 
 test("identifies Consilium temporary artifacts while preserving unrelated files", () => {
   const fakeTmp = mkdtempSync(join(tmpdir(), "consilium-test-clean-tmp-"));
@@ -12,7 +20,12 @@ test("identifies Consilium temporary artifacts while preserving unrelated files"
   const fakeRoot = mkdtempSync(join(tmpdir(), "consilium-test-clean-root-"));
 
   try {
-    // Matching artifacts
+    const owned = ownedTemp(fakeTmp, "consilium-owned");
+    const wrongOwner = join(fakeTmp, "consilium-wrong-owner");
+    mkdirSync(wrongOwner);
+    writeFileSync(join(wrongOwner, ".consilium-temp-owner"), "another application\n");
+
+    // Names alone do not establish ownership.
     mkdirSync(join(fakeTmp, "c0311"));
     writeFileSync(join(fakeTmp, "c0311", "test.txt"), "build");
     writeFileSync(join(fakeTmp, "stage0311.log"), "log content");
@@ -38,6 +51,7 @@ test("identifies Consilium temporary artifacts while preserving unrelated files"
     writeFileSync(join(fakeRoot, "dist", "index.html"), "<html></html>");
 
     const targets = findCleanableTargets({
+      force: true,
       customTmpDirs: [fakeTmp],
       customDataDir: fakeData,
       customRootDir: fakeRoot,
@@ -46,11 +60,13 @@ test("identifies Consilium temporary artifacts while preserving unrelated files"
     });
 
     const targetPaths = targets.map((t) => t.path);
-    assert.ok(targetPaths.some((p) => p.endsWith("c0311")));
-    assert.ok(targetPaths.some((p) => p.endsWith("stage0311.log")));
-    assert.ok(targetPaths.some((p) => p.endsWith("stage-ui-after0311.sh")));
-    assert.ok(targetPaths.some((p) => p.endsWith("consilium-screenshots")));
-    assert.ok(targetPaths.some((p) => p.endsWith("reaper-99999")));
+    assert.ok(targetPaths.includes(owned));
+    assert.ok(!targetPaths.includes(wrongOwner));
+    assert.ok(!targetPaths.some((p) => p.endsWith("c0311")));
+    assert.ok(!targetPaths.some((p) => p.endsWith("stage0311.log")));
+    assert.ok(!targetPaths.some((p) => p.endsWith("stage-ui-after0311.sh")));
+    assert.ok(!targetPaths.some((p) => p.endsWith("consilium-screenshots")));
+    assert.ok(!targetPaths.some((p) => p.endsWith("reaper-99999")));
     assert.ok(targetPaths.some((p) => p.endsWith("dist")));
 
     // Unrelated files must NOT be in targets
@@ -66,8 +82,7 @@ test("identifies Consilium temporary artifacts while preserving unrelated files"
 test("respects minimum idle age unless force is passed", () => {
   const fakeTmp = mkdtempSync(join(tmpdir(), "consilium-test-age-tmp-"));
   try {
-    const activeFile = join(fakeTmp, "stage-active.log");
-    writeFileSync(activeFile, "currently writing");
+    const activeFile = ownedTemp(fakeTmp, "consilium-active");
 
     // Fresh file (modified right now) should be skipped by default
     const freshTargets = findCleanableTargets({
@@ -99,8 +114,7 @@ test("respects minimum idle age unless force is passed", () => {
 test("dry-run reports targets without deleting them", () => {
   const fakeTmp = mkdtempSync(join(tmpdir(), "consilium-test-dry-tmp-"));
   try {
-    const artifact = join(fakeTmp, "stage-0310.sh");
-    writeFileSync(artifact, "#!/bin/sh\necho test\n");
+    const artifact = ownedTemp(fakeTmp, "consilium-dry-run");
 
     const res = runClean({
       dryRun: true,
@@ -122,9 +136,8 @@ test("dry-run reports targets without deleting them", () => {
 test("runClean deletes matching artifacts and leaves unrelated files", () => {
   const fakeTmp = mkdtempSync(join(tmpdir(), "consilium-test-run-tmp-"));
   try {
-    const artifact = join(fakeTmp, "stage039.log");
+    const artifact = ownedTemp(fakeTmp, "consilium-delete");
     const unrelated = join(fakeTmp, "user_work.txt");
-    writeFileSync(artifact, "build output");
     writeFileSync(unrelated, "hello");
 
     const res = runClean({
@@ -150,11 +163,9 @@ test("preserves live builds, AI workspaces, updates, and capacity locks", () => 
   const fakeData = mkdtempSync(join(tmpdir(), "consilium-test-active-data-"));
   const fakeRoot = mkdtempSync(join(tmpdir(), "consilium-test-active-root-"));
   try {
-    const buildDir = join(fakeTmp, "c0312");
-    const turnDir = join(fakeTmp, "consilium-11111111-1111-1111-1111-111111111111");
+    const buildDir = ownedTemp(fakeTmp, "consilium-build");
+    const turnDir = ownedTemp(fakeTmp, "consilium-turn");
     const updateTmp = join(fakeData, "update", "next.tmp");
-    mkdirSync(buildDir);
-    mkdirSync(turnDir);
     mkdirSync(updateTmp, { recursive: true });
     mkdirSync(join(fakeData, "agent-slots"));
     writeFileSync(join(fakeData, "agent-slots", "0"), "capacity lock");
@@ -164,6 +175,7 @@ test("preserves live builds, AI workspaces, updates, and capacity locks", () => 
 
     const targets = findCleanableTargets({
       all: true,
+      force: true,
       customTmpDirs: [fakeTmp],
       customDataDir: fakeData,
       customRootDir: fakeRoot,
@@ -186,8 +198,7 @@ test("preserves live builds, AI workspaces, updates, and capacity locks", () => 
 test("counts only successful deletions as reclaimed space", () => {
   const fakeTmp = mkdtempSync(join(tmpdir(), "consilium-test-failure-tmp-"));
   try {
-    const artifact = join(fakeTmp, "stage-failure.log");
-    writeFileSync(artifact, "still present");
+    const artifact = ownedTemp(fakeTmp, "consilium-failure");
     const result = runClean({
       force: true,
       customTmpDirs: [fakeTmp],
@@ -212,11 +223,11 @@ test("detects a real stage process without matching future shell text", () => {
   const fakeData = mkdtempSync(join(tmpdir(), "consilium-test-process-data-"));
   const fakeRoot = mkdtempSync(join(tmpdir(), "consilium-test-process-root-"));
   try {
-    const buildDir = join(fakeTmp, "c0312");
-    mkdirSync(buildDir);
+    const buildDir = ownedTemp(fakeTmp, "consilium-build");
     const old = (Date.now() - 2 * 60 * 60 * 1000) / 1000;
     utimesSync(buildDir, old, old);
     const common = {
+      minAgeMs: 0,
       customTmpDirs: [fakeTmp],
       customDataDir: fakeData,
       customRootDir: fakeRoot,
@@ -238,5 +249,36 @@ test("detects a real stage process without matching future shell text", () => {
     rmSync(fakeTmp, { recursive: true, force: true });
     rmSync(fakeData, { recursive: true, force: true });
     rmSync(fakeRoot, { recursive: true, force: true });
+  }
+});
+
+
+test("preserves links to marked directories", (t) => {
+  const fakeTmp = mkdtempSync(join(tmpdir(), "consilium-test-link-tmp-"));
+  const outside = mkdtempSync(join(tmpdir(), "consilium-test-link-outside-"));
+  try {
+    const owned = ownedTemp(outside, "owned");
+    const link = join(fakeTmp, "consilium-linked");
+    try {
+      symlinkSync(owned, link, process.platform === "win32" ? "junction" : "dir");
+    } catch (err) {
+      if (!["EPERM", "EACCES", "ENOSYS"].includes(err.code)) throw err;
+      t.skip("Directory links unavailable");
+      return;
+    }
+    const result = runClean({
+      force: true,
+      customTmpDirs: [fakeTmp],
+      customDataDir: fakeTmp,
+      customRootDir: fakeTmp,
+      buildActive: false,
+      turnActive: false,
+    });
+    assert.equal(result.count, 0);
+    assert.ok(existsSync(link));
+    assert.ok(existsSync(join(owned, "payload.txt")));
+  } finally {
+    rmSync(fakeTmp, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
