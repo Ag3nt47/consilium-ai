@@ -492,14 +492,12 @@ fn split_reason(arg: &str) -> (String, Option<String>) {
 /// The board and how to change it, for an AI's instructions.
 pub fn for_prompt(board: &Board) -> String {
     let mut s = String::from(
-        "\n\nTASK BOARD (Consilium keeps this shared checklist for the conversation; the human sees it and can edit it). \
-Say what you take, finish, hand off or are blocked on with lines of their own, in addition to saying it in words: \
-`TASK: take <title or #n>` (a new title adds it), `TASK: done <title or #n>`, `TASK: blocked <#n> - <why>`, \
-`TASK: hand <#n> to @name`, `TASK: add <title>` (for someone to pick up), `TASK: drop <#n>`. \
-Take a task before starting work, don't take one someone else is doing unless they hand it to you, and mark it done when it's committed and checked. \
-Linked computers share this one board: a task number means the same task on every computer, an owner shown as \"<AI> (<computer>)\" is on another computer, \
-and your TASK lines count wherever the conversation is open. Check the board before planning work, so nobody builds the same thing twice. \
-If the conversation's title no longer fits the project, rename it with a line `TITLE: <short new title>` (60 characters at most; the human can also rename it).",
+        "\n\nTASK BOARD (shared across computers; editable by the human). \
+Check ownership before work, claim once, wait for handoff on owned tasks, and mark done after commit and checks. \
+Put each action on its own line: `TASK: take <title or #n>` (adds a new title), `TASK: done <title or #n>`, \
+`TASK: blocked <#n> - <why>`, `TASK: hand <#n> to @name`, `TASK: add <title>`, `TASK: drop <#n>`. \
+Task numbers are shared. An owner shown as \"<AI> (<computer>)\" is remote. \
+Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
     );
     if board.tasks.is_empty() {
         s.push_str("\nThe board is empty.");
