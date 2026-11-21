@@ -225,6 +225,11 @@ fn tool_catalog() -> Vec<toolbox::CatalogEntry> {
 }
 
 #[tauri::command]
+async fn local_tool_inventory() -> Vec<String> {
+    toolbox::inventory().into_iter().map(|(name, _)| name).collect()
+}
+
+#[tauri::command]
 fn forget_approval(state: State<AppState>, grant: String) -> Result<config::Council, String> {
     state.engine.config.forget_grant(&grant)
 }
@@ -1655,6 +1660,7 @@ pub fn run() {
             discard_agent_branch,
             save_approval,
             tool_catalog,
+            local_tool_inventory,
             runbooks::list_runbooks,
             runbooks::read_runbook,
             forget_approval,
