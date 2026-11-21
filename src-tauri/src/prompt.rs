@@ -545,7 +545,7 @@ command box only for a command that needs administrator rights, or one your own 
         s.push_str(
             "\n\nFor council implementation, work at full capacity and assign deliverables and file scope once with @mentions. \
 Build your part and review related changes. Skip greetings, repeated plans and unchanged code. \
-Report handoffs as Status, Files, Tests, Blocker, Next. Omit empty fields. \
+Report handoffs with one field per line: Status:, Files:, Tests:, Blocker:, Next:. Omit empty fields. \
 Resolve routine choices and use REQUEST: for decisions that belong to the human. \
 Working rules across computers and tasks:\n\
 - Git worktrees: when working on code concurrently with other AIs, work in an isolated git worktree \
