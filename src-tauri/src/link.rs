@@ -359,6 +359,7 @@ struct Inner {
     running: Mutex<Option<CancellationToken>>,
     error: Mutex<Option<String>>,
     wake_dial: Notify,
+    stress_test_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -406,6 +407,7 @@ impl Link {
             running: Mutex::new(None),
             error: Mutex::new(None),
             wake_dial: Notify::new(),
+            stress_test_lock: tokio::sync::Mutex::new(()),
         })))
     }
 
@@ -659,6 +661,7 @@ impl Link {
     /// packet received over it, and finally returns the link to the fastest route. A route that
     /// doesn't connect, or carries nothing, fails and the test moves on.
     pub async fn stress_test(&self) -> Result<Vec<StressReport>, String> {
+        let _run = self.0.stress_test_lock.try_lock().map_err(|_| "A communication stress test is already running")?;
         let token = self.0.running.lock().unwrap().clone().ok_or("linking is off")?;
         let peers = self.0.cfg.lock().unwrap().peers.clone();
         let mut out = Vec::new();
@@ -1962,6 +1965,13 @@ mod tests {
         // One route that works and one that is down (nothing listens there).
         let dead = format!("127.0.0.1:{}", free_port());
         joiner.0.cfg.lock().unwrap().peers[0].addrs = vec![good.clone(), dead.clone()];
+        // A startup test holding the guard blocks a second diagnostic on the same device.
+        let running = joiner.0.stress_test_lock.lock().await;
+        assert_eq!(
+            joiner.stress_test().await.unwrap_err(),
+            "A communication stress test is already running"
+        );
+        drop(running);
         let reports = joiner.stress_test().await.unwrap();
         assert_eq!(reports.len(), 1);
         let r = &reports[0];
