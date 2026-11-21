@@ -32,7 +32,7 @@ toward the total, and infeasible rows are listed separately.
 | Pre-commit lint/test before self-modification | ✅ | `.githooks/pre-commit`: secret scan, then `tsc` and `npm test` on an export of the staged index |
 | Rollback + oscillation circuit breaker | 🕓 | |
 | Global drag-and-drop | ✅ | Drop anywhere in the window |
-| Parsers: images, PDF, docx, pptx, code | ✅ | `attach.rs`; AST analysis 🕓 |
+| Parsers: images, PDF, docx, pptx, code | ✅ | `attach.rs`; Offline JavaScript and TypeScript symbol maps now show declaration names and line ranges without reading function bodies into agent context (#87). Verified across CI platforms and on App.tsx (200 KB reduced to a 2.4 KB outline). |
 | /deconstruct and /reassemble commands | 🕓 | |
 | GitHub repo ingest, sandboxed clone, inspection | ✅ | 0.3.11. `repo.rs`: https github.com only, shallow clone with hooks/submodules/LFS/symlinks/file transports off, 2-min kill; read-only report. Repos button + Cmd+K |
 | Wrapper generation, local skill vault, public index | 🕓 | After repo ingest |
