@@ -320,6 +320,9 @@ impl Board {
                     return None;
                 }
                 let t = &mut self.tasks[i];
+                if who != "human" && t.owner.as_deref().is_some_and(|owner| owner != who) {
+                    return None;
+                }
                 t.owner = Some(to.clone());
                 t.status = Status::Doing;
                 t.note = None;
@@ -617,7 +620,9 @@ mod tests {
         assert!(board.apply("claude", &Op::Block { task: "#1".into(), note: Some("Waiting for data".into()) }, 3).is_some());
         assert!(board.apply("gemini", &take, 4).is_none());
         assert_eq!(board.tasks[0].owner.as_deref(), Some("claude"));
-        assert!(board.apply("human", &Op::Hand { task: "#1".into(), to: "gemini".into() }, 5).is_some());
+        let handoff = Op::Hand { task: "#1".into(), to: "gemini".into() };
+        assert!(board.apply("gemini", &handoff, 5).is_none());
+        assert!(board.apply("claude", &handoff, 6).is_some());
         assert_eq!(board.tasks[0].owner.as_deref(), Some("gemini"));
         assert_eq!(board.tasks[0].status, Status::Doing);
     }
