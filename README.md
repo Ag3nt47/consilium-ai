@@ -3,9 +3,9 @@
 <h1 align="center">Consilium - Local-First Multi-Agent AI Mesh</h1>
 <p align="center"><i>A council of minds: the offline capable, peer-linked AI hive mind.</i></p>
 
-Consilium is an elite, cross-platform desktop application and command-line environment that transforms your local hardware network into an autonomous Hive Mind home server. Effortlessly link any mix of computers running Windows, macOS, or Linux into a seamless, offline LAN cluster where each node hosts its own dedicated AI instances—uniting heavyweights like ChatGPT, Claude, Gemini, Grok, and DeepSeek alongside local powerhouses like Llama 3, Qwen 2.5 Coder, and DeepSeek-R1—to tackle massive, complex projects faster than ever, entirely on your own terms and with the capability for complete air-gap from the cloud.
+Consilium is a local-first, multi-AI hive mind that connects any mix of Windows, macOS, and Linux computers into a shared mesh. Each computer can contribute AI agents using the hardware, local models, or cloud providers available to it. Across the mesh, those agents share conversations and tasks, divide a project into parallel work, and bring their results back for review.
 
-Build a council around the hardware and models you already use. Give agents different parts of a project, let them work in parallel, and follow their progress on a shared task board. For software projects, Git worktrees give agents separate places to edit and give you a way to review their changes before merging. Pair computers over a local network to sync conversations and tasks, and use supported local models for offline work when cloud access is unavailable or you want to keep the work on your own machines.
+Mix cloud assistants such as ChatGPT, Claude, and Gemini with local models such as Qwen and Llama. Pair devices over your local network and use supported local models for offline work. For software projects, agents can work in separate Git worktrees while you track their progress on a shared task board and review their changes before merging.
 
 [Download Consilium](https://github.com/Ag3nt47/consilium-ai/releases/latest) · [Six-document upgrade status](docs/UPGRADE_STATUS.md) · [Privacy](PRIVACY.md)
 
