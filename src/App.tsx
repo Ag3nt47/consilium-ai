@@ -78,13 +78,13 @@ const PROVIDER_PORTALS: Record<string, { account: string; accountLabel: string; 
 
 const knownTheme = (id: string | null | undefined) => THEMES.some((t) => t.id === id);
 
-type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean };
+type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean; dailyTokenWarning: number };
 const PREFS_KEY = "consilium.prefs";
 const REQUEST_FLOOR_KEY = "consilium.request-floor.v2";
 
 function loadPrefs(): Prefs {
   // New installs start in Netrunner; anyone who has already picked a theme keeps it.
-  const defaults: Prefs = { theme: "netrunner", effects: true, autoUpdate: true, bingWallpaper: true };
+  const defaults: Prefs = { theme: "netrunner", effects: true, autoUpdate: true, bingWallpaper: true, dailyTokenWarning: 0 };
   // Demo mode (README screenshots) uses Netrunner unless ?theme= says otherwise.
   if (!IN_APP) return { ...defaults, theme: knownTheme(demoTheme) ? demoTheme! : "netrunner", autoUpdate: false };
   try {
@@ -1254,6 +1254,8 @@ export default function App() {
     addTrigger.current?.focus();
   }
   const [showUsage, setShowUsage] = useState(false);
+  const [budgetWarning, setBudgetWarning] = useState<{ id: string; text: string; message: string } | null>(null);
+  const budgetCheck = useRef(false);
   const [showPalette, setShowPalette] = useState(false);
   // Voice chat: whether replies are being read aloud right now, and what the recogniser is hearing.
   const [speakingAgent, setSpeakingAgent] = useState<string | null>(null);
@@ -1906,9 +1908,33 @@ export default function App() {
   const others = useMemo(() => agents.filter((a) => !a.member), [agents]);
 
   // Sending while the AIs are answering doesn't interrupt them: they read it and carry on. Stop interrupts.
-  async function send() {
+  async function send(budgetChecked = false) {
     const text = draftBox.current?.get() ?? "";
-    if (!text.trim() && !pending.length) return;
+    if (budgetCheck.current || (!budgetChecked && budgetWarning) || (!text.trim() && !pending.length)) return;
+    const limit = prefs.dailyTokenWarning;
+    if (!budgetChecked && current && discuss && !busy && Number.isSafeInteger(limit) && limit > 0) {
+      budgetCheck.current = true;
+      let message = "";
+      try {
+        const dayStart = new Date().setHours(0, 0, 0, 0);
+        const report = await api.tokenUsage(current, dayStart);
+        const total = Object.values(report.today).reduce((sum, agent) => sum + agent.total_tokens, 0);
+        if (total >= limit) {
+          message = `Consilium recorded ${num(total)} tokens today. Your warning threshold is ${num(limit)} tokens.`;
+        }
+      } catch {
+        message = "Consilium couldn't check today's recorded token usage.";
+      } finally {
+        budgetCheck.current = false;
+      }
+      if (current !== currentRef.current || text !== (draftBox.current?.get() ?? "")) return;
+      if (message) {
+        setBudgetWarning({ id: current, text, message });
+      } else {
+        await sendRef.current(true);
+      }
+      return;
+    }
     // Enter used to do nothing at all when no conversation was open (for example when the list
     // failed to load at startup). Open the newest one, or start one, and send there instead.
     let id = current;
@@ -3595,7 +3621,7 @@ export default function App() {
               )}
               <button
                 className="btn primary"
-                onClick={send}
+                onClick={() => void send()}
                 disabled={draftEmpty && !pending.length}
                 title={busy ? "Add this to the discussion; the AIs read it without being interrupted (Enter)" : "Send (Enter)"}
               >
@@ -4206,6 +4232,36 @@ export default function App() {
         </div>
       )}
 
+      {budgetWarning && (
+        <div className="modal-backdrop" onClick={() => setBudgetWarning(null)}>
+          <div
+            className="modal"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="token-warning-title"
+            aria-describedby="token-warning-detail"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => { if (e.key === "Escape") setBudgetWarning(null); }}
+          >
+            <h2 id="token-warning-title" className="error">REQUEST — Daily token warning</h2>
+            <p id="token-warning-detail">{budgetWarning.message}</p>
+            <div className="row end">
+              <button className="btn" autoFocus onClick={() => setBudgetWarning(null)}>Keep draft</button>
+              <button
+                className="btn primary"
+                disabled={budgetWarning.id !== current || budgetWarning.text !== (draftBox.current?.get() ?? "")}
+                onClick={() => {
+                  setBudgetWarning(null);
+                  void send(true);
+                }}
+              >
+                Send anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showUsage && (
         <div className="modal-backdrop" onClick={() => setShowUsage(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -4213,6 +4269,24 @@ export default function App() {
             <p className="muted small">
               Provider-reported token counts recorded from CLI outputs (Codex, Claude Code, Antigravity) for each turn.
             </p>
+            <label className="row">
+              Daily Discuss warning
+              <input
+                type="number"
+                min={0}
+                max={Number.MAX_SAFE_INTEGER}
+                step={1}
+                value={prefs.dailyTokenWarning || ""}
+                placeholder="Off"
+                onChange={(e) => {
+                  const value = e.currentTarget.valueAsNumber;
+                  if (e.currentTarget.value === "" || (Number.isSafeInteger(value) && value >= 0)) {
+                    setPrefs((previous) => ({ ...previous, dailyTokenWarning: value || 0 }));
+                  }
+                }}
+              />
+            </label>
+            <p className="muted small">Enter a token count to warn before starting Discuss once today's recorded usage reaches it. Clear the field to turn it off.</p>
             {usageLoading ? (
               <div className="muted small">Loading token usage…</div>
             ) : tokenReport ? (

@@ -59,7 +59,7 @@ not complete the phase.
 | Phase 13: Frontier-model intelligence | 🕓 | Multimodal UI-to-code, digital-twin sandboxes and theorem-prover integration; provider-internal speculative decoding and latent/KV sharing remain unavailable through public CLIs/APIs |
 | Phase 14: Enterprise architectures | 🕓 | Air-gapped compliance evidence, local GPU cache pooling where supported, accessibility-driven cross-app automation, defensive threat simulation and fleet consensus |
 | Phase 15: Ultra-cutting-edge capabilities | 🕓 | Ephemeral micro-VM isolation, local model adaptation/pruning, post-quantum agent-mesh security and explicitly opt-in ambient context |
-| Phase 16: Cost and explainability | 🕓 | User-set token/spend limits, complexity-aware local/cloud routing and inspectable decision/debate traces; usage reporting and live activity are foundations |
+| Phase 16: Cost and explainability | 🔨 | Token Usage offers an optional daily warning before Discuss based on recorded tokens. Projected usage and spend limits, complexity-aware routing, decision traces and live desktop verification remain open |
 | Phase 17: P2P local compute mesh | 🕓 | Private-LAN discovery, distributed offline inference, task sharding and disconnect-aware load balancing |
 | Phase 18: Evolutionary code optimization | 🕓 | Sandboxed candidate mutation/crossover, benchmark fitness selection and approval-gated promotion of winners |
 | Phase 19: Universal deconstruction | 🕓 | Deconstruct/reassemble commands, command-intent analysis and dependency/architecture mapping; attachment parsing and repo inspection are foundations |
