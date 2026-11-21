@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fixed: when a linked PC announced an update, macOS no longer starts a full source rebuild while
+  the GitHub release is still publishing. It checks every 30 minutes (and immediately after the
+  announcement), verifies the published DMG's SHA-256, stages its app bundle atomically, and lets
+  the existing automatic installer restart into it (#10).
+
 - Fixed: auto-continue went quiet with no note whenever any AI had a request open, even one it
   had withdrawn or one from a linked computer's AI (answered there). Those no longer hold rounds
   back, and when a request here really is waiting, it says so once and lists it (#21).
