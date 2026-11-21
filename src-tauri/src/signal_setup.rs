@@ -169,6 +169,56 @@ fn stop_stale_signal_cli(account: &str) -> usize {
     stopped
 }
 
+/// Whether a process is a signal-cli daemon for `account`, in any receive mode. The process is
+/// picked by name first (java running signal-cli, or a native signal-cli build), never by text alone.
+pub fn daemon_for(name: &str, args: &[String], account: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let rest: &[String] = if matches!(name.as_str(), "java" | "java.exe" | "javaw" | "javaw.exe") {
+        match args.iter().position(|a| a == "org.asamk.signal.Main") {
+            Some(i) => &args[i + 1..],
+            None => return false,
+        }
+    } else if matches!(name.as_str(), "signal-cli" | "signal-cli.exe") {
+        args.get(1..).unwrap_or(&[])
+    } else {
+        return false;
+    };
+    rest.windows(2).any(|w| w[0] == "-a" && w[1] == account) && rest.iter().any(|a| a == "daemon")
+}
+
+/// After a fresh link, stops any daemon for the account (it still has the old keys) and waits
+/// for the endpoint port to be free, so ensure_daemon starts one with the new link.
+fn replace_old_daemon(run: u64, cfg: &BridgeConfig) -> Result<(), String> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    let mut stopped = 0;
+    for p in sys.processes().values() {
+        let args: Vec<String> = p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        if daemon_for(&p.name().to_string_lossy(), &args, &cfg.account) && p.kill() {
+            stopped += 1;
+        }
+    }
+    if stopped == 0 {
+        return Ok(());
+    }
+    set(run, |s| {
+        s.detail = format!("Stopped {stopped} older Signal background process(es) that still had the old link.");
+    });
+    let addr = endpoint_addr(cfg)?;
+    let started = Instant::now();
+    while TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+        if started.elapsed() > Duration::from_secs(15) {
+            return Err(format!("An older signal-cli is still using {addr} after being stopped. Close it and click Try again."));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    Ok(())
+}
 /// Pulls "+15551234567" out of signal-cli's "Associated with: +15551234567" line.
 pub fn associated_number(text: &str) -> Option<String> {
     text.lines()
@@ -213,6 +263,11 @@ pub fn cancel() {
 fn run_setup(run: u64, cli: std::path::PathBuf, cfg_path: std::path::PathBuf, cfg: BridgeConfig) {
     if !already_linked(&cli, &cfg.account) {
         if let Err(e) = link(run, &cli, &cfg.account) {
+            return fail(run, e);
+        }
+        // A daemon started before this link still holds the old keys and the port, and
+        // ensure_daemon would take it as running; replace it so the code reply reaches setup.
+        if let Err(e) = replace_old_daemon(run, &cfg) {
             return fail(run, e);
         }
     }
@@ -615,5 +670,33 @@ mod stale_cleanup_process_tests {
                 assert!(stale_signal_cli_process(name, &args, "+15550001000", 180));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod relink_tests {
+    use super::*;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_manual_mode_daemon_for_the_account_is_replaced_after_relinking() {
+        let args = v(&["java", "-cp", "x", "org.asamk.signal.Main", "-a", "+15550001111", "daemon", "--tcp", "127.0.0.1:7583", "--receive-mode", "manual"]);
+        assert!(daemon_for("java.exe", &args, "+15550001111"));
+        assert!(daemon_for("signal-cli", &v(&["signal-cli", "-a", "+15550001111", "daemon"]), "+15550001111"));
+    }
+
+    #[test]
+    fn other_accounts_commands_and_processes_are_left_alone() {
+        let other = v(&["java", "org.asamk.signal.Main", "-a", "+15550002222", "daemon"]);
+        assert!(!daemon_for("java.exe", &other, "+15550001111"));
+        let link = v(&["java", "org.asamk.signal.Main", "-a", "+15550001111", "link"]);
+        assert!(!daemon_for("java.exe", &link, "+15550001111"));
+        // An AI CLI or shell whose prompt mentions the same words is never picked.
+        let shell = v(&["pwsh", "-c", "org.asamk.signal.Main -a +15550001111 daemon"]);
+        assert!(!daemon_for("pwsh.exe", &shell, "+15550001111"));
+        assert!(!daemon_for("claude.exe", &shell, "+15550001111"));
     }
 }
