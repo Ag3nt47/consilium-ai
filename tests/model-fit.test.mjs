@@ -55,3 +55,16 @@ test("the CLI estimates fit from the combined size of separate GGUF shards", (t)
   assert.equal(conflict.status, 1);
   assert.match(conflict.stderr, /Choose either --weights or --gguf/);
 });
+
+test("the CLI reports per-device and combined weight capacity after runtime reserve", () => {
+  const result = spawnSync(process.execPath, [
+    "scripts/model-fit.mjs", "--host", "10", "--device", "Mac=6", "--device", "Phone=1",
+    "--overhead", "2", "--weights", "11",
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /This computer: 10\.0 GiB usable, 8\.0 GiB for weights/);
+  assert.match(result.stdout, /Mac: 6\.0 GiB usable, 4\.0 GiB for weights/);
+  assert.match(result.stdout, /Phone: 1\.0 GiB usable, 0\.0 GiB for weights/);
+  assert.match(result.stdout, /Combined weight capacity: 12\.0 GiB/);
+  assert.match(result.stdout, /Custom model: 11\.0 GiB weights.*Split estimate: This computer \+ Mac/);
+});
