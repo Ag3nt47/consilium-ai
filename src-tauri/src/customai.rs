@@ -77,16 +77,11 @@ pub fn by_id(id: &str) -> Option<&'static Agent> {
     LIST.read().unwrap().iter().copied().find(|a| a.id == id)
 }
 
-/// Registers an in-memory custom AI without touching settings. Tests use this to exercise the
-/// same local/cloud routing as user-added providers without sharing a temporary settings file.
+/// Builds an in-memory custom AI without adding it to the process-wide catalogue. Routing tests
+/// use this instead of changing `LIST`, which would make unrelated parallel tests see the provider.
 #[cfg(test)]
-pub fn register_test(c: CustomAi) -> &'static Agent {
-    if let Some(existing) = by_id(&c.id) {
-        return existing;
-    }
-    let agent = leak(&c);
-    LIST.write().unwrap().push(agent);
-    agent
+pub fn test_agent(c: CustomAi) -> &'static Agent {
+    leak(&c)
 }
 
 fn leak_str(s: &str) -> &'static str {

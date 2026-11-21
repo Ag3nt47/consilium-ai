@@ -687,13 +687,7 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
                     .filter(|m| !st.joined.contains(*m))
                     .filter_map(|m| agents::by_id(m))
                     .collect();
-                // Tier 1 (cloud flagship) models take priority as stand-ins; Tier 2 (local models) act as fallback.
-                let pick = unjoined
-                    .iter()
-                    .filter(|a| !agents::is_local(a))
-                    .find(|a| available(a))
-                    .or_else(|| unjoined.iter().filter(|a| agents::is_local(a)).find(|a| available(a)))
-                    .copied();
+                let pick = pick_stand_in(&unjoined, available);
                 if let Some(a) = pick {
                     st.live.insert(a.id.to_string());
                     st.joined.insert(a.id.to_string());
@@ -728,6 +722,19 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
         s.wake.notify_waiters();
         break;
     }
+}
+
+/// Cloud council members get one chance before an available local model takes over.
+fn pick_stand_in(
+    unjoined: &[&'static agents::Agent],
+    available: impl Fn(&'static agents::Agent) -> bool,
+) -> Option<&'static agents::Agent> {
+    unjoined
+        .iter()
+        .copied()
+        .filter(|a| !agents::is_local(a))
+        .find(|a| available(a))
+        .or_else(|| unjoined.iter().copied().filter(|a| agents::is_local(a)).find(|a| available(a)))
 }
 
 #[cfg(test)]
@@ -1007,44 +1014,27 @@ mod tests {
         assert!(ev.iter().any(|e| e.text == "ChatGPT is taking Claude's turn."));
     }
 
-    #[tokio::test]
-    async fn exhausted_clouds_are_tried_once_before_one_local_stand_in_takes_over() {
-        let local = crate::customai::register_test(crate::customai::CustomAi {
+    #[test]
+    fn exhausted_clouds_are_tried_once_before_one_local_stand_in_takes_over() {
+        let local = crate::customai::test_agent(crate::customai::CustomAi {
             id: "localstandin".into(),
             name: "Local Stand-in".into(),
             base_url: "http://127.0.0.1:18080/v1".into(),
             model: "test-local".into(),
             local: true,
         });
-        let (store, c) = setup();
-        let bench = Arc::new(Bench::new());
-        let mut host = fake(|id, _, _| match id {
-            "gpt" | "claude" => Err("quota exceeded".into()),
-            "localstandin" => Ok("local result".into()),
-            _ => panic!("unexpected stand-in: {id}"),
-        });
-        host.installed.insert(local.id);
-        let host = Arc::new(host);
-        let ev = go_with_members(
-            &store,
-            &c,
-            host.clone(),
-            &["gpt"],
-            &["gpt", "claude", "localstandin"],
-            1,
-            bench.clone(),
-        )
-        .await;
+        let candidates = [agents::by_id("gpt").unwrap(), agents::by_id("claude").unwrap(), local];
+        let mut exhausted = HashSet::new();
 
-        assert_eq!(
-            host.asked.lock().unwrap().as_slice(),
-            &[("gpt".into(), 1), ("claude".into(), 1), ("localstandin".into(), 1)],
-            "each cloud provider is tried once, then one local model"
-        );
-        assert!(bench.until("gpt", now_ms()).is_some());
-        assert!(bench.until("claude", now_ms()).is_some());
-        assert_eq!(said(&ev), vec![("localstandin".into(), "local result".into())]);
-        assert!(!ev.iter().any(|e| e.kind == "error" || e.text.contains("couldn't answer")));
+        let first = pick_stand_in(&candidates, |a| !exhausted.contains(a.id)).unwrap();
+        assert_eq!(first.id, "gpt");
+        exhausted.insert(first.id);
+        let second = pick_stand_in(&candidates, |a| !exhausted.contains(a.id)).unwrap();
+        assert_eq!(second.id, "claude");
+        exhausted.insert(second.id);
+        let third = pick_stand_in(&candidates, |a| !exhausted.contains(a.id)).unwrap();
+        assert_eq!(third.id, "localstandin", "each cloud is tried once before the custom local provider");
+        assert!(agents::is_local(third));
     }
 
     #[tokio::test]
