@@ -1,3 +1,4 @@
+import { realpathSync, statSync } from "node:fs";
 import { freemem } from "node:os";
 import { parseArgs } from "node:util";
 import { gib, modelFit } from "../src/model-fit.mjs";
@@ -17,10 +18,11 @@ try {
       bits: { type: "string", default: "4" },
       overhead: { type: "string", default: "2" },
       weights: { type: "string" },
+      gguf: { type: "string", multiple: true, default: [] },
     },
   });
   if (values.help) {
-    console.log('Usage: node scripts/model-fit.mjs [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--weights GiB]');
+    console.log('Usage: node scripts/model-fit.mjs [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--weights GiB | --gguf PATH ...]');
     console.log("Device memory is usable RAM before inference overhead. Repeat --device for additional computers.");
   } else {
     const bits = Number(values.bits);
@@ -35,7 +37,19 @@ try {
       devices.push({ name: name.trim(), memory: memory(size, name) });
     }
     const overhead = memory(values.overhead, "--overhead");
-    const custom = values.weights === undefined ? 0 : memory(values.weights, "--weights");
+    if (values.weights !== undefined && values.gguf.length) throw new Error("Choose either --weights or --gguf.");
+    const files = new Set();
+    let modelBytes = 0;
+    for (const entry of values.gguf) {
+      const path = realpathSync(entry);
+      const stat = statSync(path);
+      if (!/\.gguf$/i.test(path) || !stat.isFile() || stat.size === 0) throw new Error("--gguf requires a nonempty GGUF file.");
+      if (files.has(path)) throw new Error("List each GGUF shard only once.");
+      files.add(path);
+      modelBytes += stat.size;
+    }
+    const custom = values.weights === undefined ? modelBytes / 2 ** 30 : memory(values.weights, "--weights");
+    if (files.size) console.log(`GGUF on-disk size: ${gib(custom)} across ${files.size} file(s)`);
     console.log(`${bits}-bit weights; ${gib(overhead)} runtime allowance per device`);
     for (const { name, memory: available } of devices) console.log(`${name}: ${gib(available)} usable`);
     for (const { name, weights, fit } of modelFit(devices, bits, overhead, custom)) console.log(`${name}: ${gib(weights)} weights — ${fit}`);
