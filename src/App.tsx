@@ -15,6 +15,7 @@ import {
   onActivity,
   onEvent,
   onTurn,
+  onQuickSummon,
   senderName,
   type Access,
   type AgentActivity,
@@ -1244,6 +1245,7 @@ export default function App() {
   const agentNames = useMemo(() => Object.fromEntries(agents.map((a) => [a.id, a.name])), [agents]);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(!IN_APP && demoSettings);
+  const [quickSummonAvailable, setQuickSummonAvailable] = useState(false);
   const [addPanel, setAddPanel] = useState<"choose" | "ai" | "device" | null>(!IN_APP && demoAddAi ? "ai" : null);
   const addTrigger = useRef<HTMLButtonElement>(null);
   const focusAddHeading = useCallback((heading: HTMLHeadingElement | null) => {
@@ -2011,6 +2013,23 @@ export default function App() {
   // Stable handles for the prompt box, so it doesn't re-render when the app does.
   const sendRef = useRef(send);
   sendRef.current = send;
+  useEffect(() => {
+    if (!IN_APP) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    api.quickSummonAvailable().then((available) => {
+      if (!disposed) setQuickSummonAvailable(available);
+    }).catch(() => undefined);
+    onQuickSummon(() => draftBox.current?.focus()).then((remove) => {
+      if (disposed) remove();
+      else unlisten = remove;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const attachPastedRef = useRef(attachPasted);
   attachPastedRef.current = attachPasted;
 
@@ -3833,6 +3852,12 @@ export default function App() {
             <LinkSettings />
             <div className="section-label">Security scans</div>
             <SecurityScanSettings />
+            <div className="section-label">Keyboard shortcut</div>
+            <p className="muted small">
+              {quickSummonAvailable
+                ? `Press ${OS === "mac" ? "Command+Option" : "Ctrl+Alt"}+Space to bring Consilium forward and focus the current draft.`
+                : "The global quick-summon shortcut is unavailable on this computer."}
+            </p>
             <div className="section-label">Updates</div>
             <label className="toggle">
               <input

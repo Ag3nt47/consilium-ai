@@ -1350,6 +1350,37 @@ async fn link_send(payload: serde_json::Value) -> Result<String, String> {
     the_link()?.send(peer_protocol::PacketKind::Chat, payload)
 }
 
+struct QuickSummon(bool);
+
+#[tauri::command]
+fn quick_summon_available(shortcut: State<QuickSummon>) -> bool {
+    shortcut.inner().0
+}
+
+fn register_quick_summon(app: &AppHandle) -> bool {
+    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+    let primary = if cfg!(target_os = "macos") { Modifiers::SUPER } else { Modifiers::CONTROL };
+    let shortcut = Shortcut::new(Some(primary | Modifiers::ALT), Code::Space);
+    let plugin = tauri_plugin_global_shortcut::Builder::new()
+        .with_handler(move |app, pressed, event| {
+            if pressed != &shortcut || event.state() != ShortcutState::Pressed {
+                return;
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+                let _ = window.emit("consilium://quick-summon", ());
+            }
+        })
+        .build();
+    if app.plugin(plugin).is_err() {
+        return false;
+    }
+    app.global_shortcut().register(shortcut).is_ok()
+}
+
 pub fn run() {
     let mut context = tauri::generate_context!();
     if let Some(data) = data_dir() {
@@ -1364,6 +1395,7 @@ pub fn run() {
         // Remembers the window's size, position, maximized and full-screen state across restarts.
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
+            app.manage(QuickSummon(register_quick_summon(app.handle())));
             let handle = app.handle().clone();
             let _ = RESTART_HOOK.set(Box::new(move || {
                 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
@@ -1550,6 +1582,7 @@ pub fn run() {
             ui_loaded,
             self_check,
             unbench,
+            quick_summon_available,
             cli_status,
             install_cli,
             reset_forecast,

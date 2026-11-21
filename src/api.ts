@@ -522,6 +522,7 @@ const appApi = {
   /** Settings → Tools: not-bundled tools the AIs know about, with install state and pinned commands. */
   toolCatalog: () => invoke<CatalogTool[]>("tool_catalog"),
   /** Whether the `consilium` terminal command is installed. */
+  quickSummonAvailable: () => invoke<boolean>("quick_summon_available"),
   cliStatus: () => invoke<CliInstall>("cli_status"),
   installCli: () => invoke<CliInstall>("install_cli"),
   /** Asks every council member for a one-word reply, in parallel. Uses a little of each AI's allowance. */
@@ -669,4 +670,9 @@ export interface AgentBranch {
   uncommitted: number;
   /** "<short hash> <subject>", newest first, at most 20. */
   commits: string[];
+}
+
+
+export function onQuickSummon(fn: () => void): Promise<UnlistenFn> {
+  return listen("consilium://quick-summon", fn);
 }
