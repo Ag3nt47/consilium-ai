@@ -1715,6 +1715,7 @@ mod tests {
             cpu_percent: 18,
             memory_percent: 32,
             total_memory_mb: 16384,
+            available_memory_mb: Some(11000),
             cores: 16,
             tools: vec!["cargo".into(), "git".into(), "npm".into()],
             updated_at: 100000,
