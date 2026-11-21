@@ -1310,8 +1310,14 @@ export default function App() {
   const [stagedUi, setStagedUi] = useState<{ version: string } | null>(null);
   const [requestingStatus, setRequestingStatus] = useState(false);
   const [requestingUpdate, setRequestingUpdate] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
   const markDownloadStarting = useCallback((version: string) => {
+    setDownloadError("");
     setDownloadStatus({ active: true, version: version.replace(/^v/i, "") });
+  }, []);
+  const markDownloadFailed = useCallback((error: unknown) => {
+    setDownloadStatus({ active: false, version: "" });
+    setDownloadError(`Couldn't prepare the GitHub update: ${String(error)}`);
   }, []);
 
   // Quick hover explanations for every control that has a title.
@@ -1330,9 +1336,9 @@ export default function App() {
     api.uiUpdateAvailable().then(setStagedUi).catch(() => undefined);
     // A linked computer is installing an update: look for the release now, so this one follows.
     api.releaseCheckRequested()
-      .then((now) => (now ? checkForUpdate(true, markDownloadStarting).then(setUpdate) : undefined))
+      .then((now) => (now ? checkForUpdate(true, markDownloadStarting, markDownloadFailed).then(setUpdate) : undefined))
       .catch(() => undefined);
-  }, [markDownloadStarting]);
+  }, [markDownloadStarting, markDownloadFailed]);
   useEffect(() => {
     pollStaged();
     const t = setInterval(pollStaged, 4000);
@@ -1602,11 +1608,11 @@ export default function App() {
   // with automatic install on (Settings → Updates) Consilium installs it and restarts by itself.
   useEffect(() => {
     if (!prefs.autoUpdate) return;
-    const check = () => checkForUpdate(false, markDownloadStarting).then(setUpdate).catch(() => undefined);
+    const check = () => checkForUpdate(false, markDownloadStarting, markDownloadFailed).then(setUpdate).catch(() => undefined);
     check();
     const t = setInterval(check, 30 * 60 * 1000);
     return () => clearInterval(t);
-  }, [prefs.autoUpdate, markDownloadStarting]);
+  }, [prefs.autoUpdate, markDownloadStarting, markDownloadFailed]);
 
   useEffect(() => {
     if (!current) return;
@@ -2509,13 +2515,17 @@ export default function App() {
 
   async function checkNow() {
     setUpdateNote("Checking…");
-    const u = await checkForUpdate(true, markDownloadStarting).catch(() => null);
-    setUpdate(u);
-    setUpdateNote(
-      !u ? "You're up to date (or offline)."
-        : u.unreleased ? `Version ${u.latest} is on GitHub but has no installer yet (you have ${u.current}). Build it from source, or ask the AIs to publish a release.`
-        : `Version ${u.latest} is available (you have ${u.current}).`,
-    );
+    try {
+      const u = await checkForUpdate(true, markDownloadStarting, markDownloadFailed);
+      setUpdate(u);
+      setUpdateNote(
+        !u ? "You're up to date."
+          : u.unreleased ? `Version ${u.latest} is on GitHub but has no installer yet (you have ${u.current}). Build it from source, or ask the AIs to publish a release.`
+          : `Version ${u.latest} is available (you have ${u.current}).`,
+      );
+    } catch (error) {
+      setUpdateNote(`Couldn't check GitHub for updates: ${String(error)}`);
+    }
   }
 
   const notReady = members.filter((a) => !a.available);
@@ -3915,7 +3925,7 @@ export default function App() {
             </label>
             <div className="row">
               <button title="Check GitHub for a newer Consilium release now" className="btn ghost" onClick={checkNow}>
-                Check now
+                Check GitHub now
               </button>
               <button
                 className="btn primary"
@@ -3938,6 +3948,7 @@ export default function App() {
                 {downloadStatus.active ? `Downloading Consilium ${downloadStatus.version || "update"} from GitHub…` : updateNote}
               </span>
             </div>
+            {downloadError && <p className="error small" role="status">{downloadError}</p>}
             <p className="muted small">
               Consilium checks the downloaded installer against GitHub's fingerprint.
               {" "}{council?.auto_install_updates ?? true

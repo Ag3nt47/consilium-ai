@@ -92,6 +92,7 @@ function stageRelease(
   latest: Omit<UpdateInfo, "current"> | undefined,
   asset: ReleaseAsset | undefined,
   onStart?: (version: string) => void,
+  onFailure?: (error: unknown) => void,
 ) {
   if (!latest || !asset || compareVersions(latest.latest, current) <= 0 || staging) return;
   staging = (async () => {
@@ -100,19 +101,23 @@ function stageRelease(
     onStart?.(latest.latest);
     await api.stageReleaseUpdate(latest.latest, asset.url, asset.digest);
   })()
-    .catch(() => undefined)
+    .catch((error: unknown) => { onFailure?.(error); })
     .finally(() => {
       staging = null;
     });
 }
 
 /** Returns update details when a newer release exists, otherwise null. */
-export async function checkForUpdate(force = false, onDownloadStart?: (version: string) => void): Promise<UpdateInfo | null> {
+export async function checkForUpdate(
+  force = false,
+  onDownloadStart?: (version: string) => void,
+  onDownloadFailure?: (error: unknown) => void,
+): Promise<UpdateInfo | null> {
   const current = await getVersion();
   const cache = readCache();
   const fresh = Date.now() - cache.lastCheck < CACHE_FRESH_MS;
   if (!force && fresh) {
-    stageRelease(current, cache.latest, cache.asset, onDownloadStart);
+    stageRelease(current, cache.latest, cache.asset, onDownloadStart, onDownloadFailure);
     return cache.latest && compareVersions(cache.latest.latest, current) > 0 ? { current, ...cache.latest } : null;
   }
   try {
@@ -137,12 +142,14 @@ export async function checkForUpdate(force = false, onDownloadStart?: (version: 
     } else {
       // 404 (no releases yet), rate limits, etc.: remember we checked, then try again on schedule.
       writeCache({ ...cache, lastCheck: Date.now() });
+      if (force) throw new Error(`GitHub returned HTTP ${res.status}`);
     }
-  } catch {
-    return null; // offline: stay quiet
+  } catch (error) {
+    if (force) throw error;
+    return null;
   }
   const c = readCache();
-  stageRelease(current, c.latest, c.asset, onDownloadStart);
+  stageRelease(current, c.latest, c.asset, onDownloadStart, onDownloadFailure);
   if (c.latest && compareVersions(c.latest.latest, current) > 0) return { current, ...c.latest };
   // Releases can lag behind the source: report a newer version on main too, marked unreleased,
   // so "up to date" is never claimed while GitHub has something newer.
