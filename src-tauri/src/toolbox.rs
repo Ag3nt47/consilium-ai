@@ -217,11 +217,14 @@ fn present(name: &str, dirs_: &[PathBuf]) -> Option<PathBuf> {
 
 /// The known tools installed on this host, with where they live. Cheap: a few `stat` calls.
 pub fn inventory() -> Vec<(String, PathBuf)> {
-    let dirs_ = search_dirs();
+    inventory_in(&search_dirs())
+}
+
+fn inventory_in(dirs_: &[PathBuf]) -> Vec<(String, PathBuf)> {
     known_tools(std::env::consts::OS)
         .iter()
         .chain(&["ollama", "llama-cli", "llama-server", "ggml-rpc-server", "rpc-server"])
-        .filter_map(|name| present(name, &dirs_).map(|path| (name.to_string(), path)))
+        .filter_map(|name| present(name, dirs_).map(|path| (name.to_string(), path)))
         .collect()
 }
 
@@ -395,6 +398,18 @@ mod tests {
         ] {
             assert!(!install_command(command), "ordinary work should be allowed: {command}");
         }
+    }
+
+    #[test]
+    fn inventory_detects_model_runner_files_without_executing_them() {
+        let directory = std::env::temp_dir().join(format!("consilium-runner-inventory-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let file = directory.join(if cfg!(windows) { "ggml-rpc-server.exe" } else { "ggml-rpc-server" });
+        std::fs::write(&file, b"not an executable").unwrap();
+        let found = inventory_in(std::slice::from_ref(&directory));
+        std::fs::remove_file(&file).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+        assert_eq!(found, vec![("ggml-rpc-server".to_string(), file)]);
     }
 
     #[test]

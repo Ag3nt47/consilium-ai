@@ -1717,7 +1717,7 @@ mod tests {
             total_memory_mb: 16384,
             available_memory_mb: Some(11000),
             cores: 16,
-            tools: vec!["cargo".into(), "git".into(), "npm".into()],
+            tools: vec!["cargo".into(), "git".into(), "ggml-rpc-server".into()],
             updated_at: 100000,
         };
         let packet = packet(
