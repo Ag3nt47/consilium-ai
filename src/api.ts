@@ -590,7 +590,7 @@ const appApi = {
   updateAvailable: () => invoke<StagedUpdate | null>("update_available"),
   /** Whether a GitHub release installer is currently downloading. */
   updateDownloadStatus: () => invoke<UpdateDownloadStatus>("update_download_status"),
-  requestDraftInstallers: () => invoke<void>("request_draft_installers"),
+  requestDraftInstallers: () => invoke<string | null>("request_draft_installers"),
   /** Pauses the AIs, installs the staged build and relaunches; their turns resume afterwards. */
   updateNow: () => invoke<void>("update_now"),
   /** Downloads, verifies and stages this platform's GitHub release installer. */

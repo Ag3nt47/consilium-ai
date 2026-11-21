@@ -660,7 +660,7 @@ async fn stage_release_update(version: String, url: String, digest: Option<Strin
 }
 
 #[tauri::command]
-async fn request_draft_installers() -> Result<(), String> {
+async fn request_draft_installers() -> Result<Option<String>, String> {
     let data = data_dir().ok_or("can't find Consilium's data folder")?;
     tauri::async_runtime::spawn_blocking(move || ci::request_draft_installers(&data))
         .await

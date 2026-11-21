@@ -56,13 +56,21 @@ fn gh() -> Option<PathBuf> {
     crate::bridge::find_tool("gh")
 }
 
-pub fn request_draft_installers(data: &Path) -> Result<(), String> {
+pub fn request_draft_installers(data: &Path) -> Result<Option<String>, String> {
     let program = gh().ok_or("Install and sign in to the GitHub CLI to build installers.")?;
-    run(&program, data, &[
+    let output = run(&program, data, &[
         "workflow", "run", "release.yml", "--repo", "Ag3nt47/consilium-ai",
         "--ref", "main", "--raw-field", "draft_only=true",
     ])?;
-    Ok(())
+    Ok(installer_run_url(&output))
+}
+
+fn installer_run_url(output: &str) -> Option<String> {
+    const PREFIX: &str = "https://github.com/Ag3nt47/consilium-ai/actions/runs/";
+    output.lines().map(str::trim).find_map(|line| {
+        let id = line.strip_prefix(PREFIX)?;
+        (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())).then(|| line.to_string())
+    })
 }
 
 /// Runs a command in `dir` with a hard timeout, returning stdout when it succeeds.
