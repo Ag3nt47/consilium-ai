@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { modelFit } from "../src/model-fit.mjs";
+import { ggufShardError, modelFit } from "../src/model-fit.mjs";
 
 function customFit(devices, weights) {
   return modelFit(devices, 4, 2, weights).find(({ name }) => name === "Custom model").fit;
@@ -54,6 +54,14 @@ test("the CLI estimates fit from the combined size of separate GGUF shards", (t)
   const conflict = run("--gguf", first, "--weights", "1");
   assert.equal(conflict.status, 1);
   assert.match(conflict.stderr, /Choose either --weights or --gguf/);
+});
+
+test("numbered GGUF shard sets must be complete and match one model", () => {
+  assert.equal(ggufShardError(["model-00002-of-00002.gguf", "model-00001-of-00002.gguf"]), undefined);
+  assert.match(ggufShardError(["model-00001-of-00002.gguf"]), /all 2/);
+  assert.match(ggufShardError(["model-00001-of-00002.gguf", "other-00002-of-00002.gguf"]), /one model/);
+  assert.match(ggufShardError(["model-00000-of-00002.gguf", "model-00002-of-00002.gguf"]), /all 2/);
+  assert.equal(ggufShardError(["single.gguf"]), undefined);
 });
 
 test("the CLI reports per-device and combined weight capacity after runtime reserve", () => {

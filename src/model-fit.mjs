@@ -44,3 +44,19 @@ export function modelFit(devices, bits, overhead, customWeights) {
     return { name, weights, fit: `Split estimate: ${selected.join(" + ")}` };
   });
 }
+
+export function ggufShardError(names) {
+  const shards = names.map((name) => /^(.*)-(\d{5})-of-(\d{5})\.gguf$/i.exec(name));
+  const first = shards.find(Boolean);
+  if (!first) return undefined;
+  const [, model, , countText] = first;
+  const count = Number(countText);
+  if (shards.some((shard) => !shard || shard[1] !== model || shard[3] !== countText)) {
+    return "Select GGUF shards from one model and one shard set.";
+  }
+  const indices = new Set(shards.map((shard) => Number(shard[2])));
+  if (indices.size !== count || shards.length !== count || [...indices].some((index) => index < 1 || index > count)) {
+    return `Select all ${count} GGUF shards exactly once.`;
+  }
+  return undefined;
+}

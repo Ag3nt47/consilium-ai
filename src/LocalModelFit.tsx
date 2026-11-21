@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "./api";
 
-import { gib, modelFit, weightBudgets } from "./model-fit.mjs";
+import { gib, ggufShardError, modelFit, weightBudgets } from "./model-fit.mjs";
 
 type Device = { id: number | string; name: string; memory: string; runners?: string[] };
 const memoryInput = (gib: number) => (Math.floor(Math.max(0, gib) * 10) / 10).toFixed(1);
@@ -141,6 +141,11 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
             if (!files.length) return;
             if (files.some((file) => !/\.gguf$/i.test(file.name) || file.size === 0)) {
               setFileMessage("Choose nonempty .gguf files for a single model.");
+              return;
+            }
+            const shardError = ggufShardError(files.map((file) => file.name));
+            if (shardError) {
+              setFileMessage(shardError);
               return;
             }
             setCustomWeights(String(files.reduce((total, file) => total + file.size, 0) / 2 ** 30));

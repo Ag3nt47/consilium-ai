@@ -1,7 +1,8 @@
 import { realpathSync, statSync } from "node:fs";
 import { freemem } from "node:os";
+import { basename } from "node:path";
 import { parseArgs } from "node:util";
-import { gib, modelFit, weightBudgets } from "../src/model-fit.mjs";
+import { gib, ggufShardError, modelFit, weightBudgets } from "../src/model-fit.mjs";
 
 function memory(value, label) {
   const parsed = Number(value);
@@ -48,6 +49,8 @@ try {
       files.add(path);
       modelBytes += stat.size;
     }
+    const shardError = ggufShardError([...files].map((file) => basename(file)));
+    if (shardError) throw new Error(shardError);
     const custom = values.weights === undefined ? modelBytes / 2 ** 30 : memory(values.weights, "--weights");
     if (files.size) console.log(`GGUF on-disk size: ${gib(custom)} across ${files.size} file(s)`);
     console.log(`${bits}-bit weights; ${gib(overhead)} runtime allowance per device`);
