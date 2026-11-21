@@ -24,6 +24,8 @@ A Windows PC and an Intel Mac generated tokens from the same split Qwen3 0.6B mo
 
 Native Bluetooth transport, simultaneous transport use, phone workers, and automatic local fallback are tracked in the [upgrade ledger](docs/UPGRADE_STATUS.md). Check the ledger for the current verification state of each feature.
 
+The [deployment vision](docs/DEPLOYMENT_VISION.md) describes how this could grow into a cross-platform build farm, offline research and publishing workspace, and daily operations console.
+
 ## Try the interface
 
 | Council workspace | Add an AI |
