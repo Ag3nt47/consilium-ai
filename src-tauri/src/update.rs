@@ -311,13 +311,14 @@ pub fn windows_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &
          for ($i = 0; $i -lt 10; $i++) {{ if (-not (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ break }}; Start-Sleep -Milliseconds 500 }}\n\
          $run = {t}\n\
          if ({s} -like '*-Setup.exe' -or {s} -like '*-setup.exe') {{\n\
-             $p = Start-Process -FilePath {s} -ArgumentList '/S' -Wait -PassThru\n\
-             Log ('installer exit code ' + $p.ExitCode)\n\
+             $p = $null\n\
+             try {{ $p = Start-Process -FilePath {s} -ArgumentList '/S', '/UPDATE' -Wait -PassThru -ErrorAction Stop }} catch {{ Log ('installer launch failed: ' + $_) }}\n\
+             if ($null -ne $p) {{ Log ('installer exit code ' + $p.ExitCode) }}\n\
              $keys = @('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',\n\
                        'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',\n\
                        'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*')\n\
              $entry = Get-ItemProperty -Path $keys -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -eq 'Consilium' }} | Select-Object -First 1\n\
-             if ($entry) {{\n\
+             if ($entry -and $null -ne $p -and $p.ExitCode -eq 0) {{\n\
                  if ($entry.DisplayIcon) {{\n\
                      $icon = $entry.DisplayIcon.Trim([char]34).Split(',')[0]\n\
                      if (Test-Path -LiteralPath $icon) {{ $run = $icon }}\n\
@@ -326,7 +327,14 @@ pub fn windows_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &
                      if (Test-Path -LiteralPath $locExe) {{ $run = $locExe }}\n\
                  }}\n\
              }}\n\
-             if ($p.ExitCode -eq 0) {{ Remove-Item -LiteralPath {l} -Recurse -Force -ErrorAction SilentlyContinue }}\n\
+             if ($null -ne $p -and $p.ExitCode -eq 0) {{\n\
+                 $expected = Get-Content -LiteralPath (Join-Path {l} 'VERSION') -ErrorAction SilentlyContinue | Select-Object -First 1\n\
+                 $actual = (Get-Item -LiteralPath $run -ErrorAction SilentlyContinue).VersionInfo.ProductVersion\n\
+                 if ($expected -and $actual -and $expected.Trim() -eq $actual.Trim()) {{\n\
+                     Log ('verified installed version ' + $actual)\n\
+                     Remove-Item -LiteralPath {l} -Recurse -Force -ErrorAction SilentlyContinue\n\
+                 }} else {{ Log ('installer reported success but expected ' + $expected + ', found ' + $actual + '; preserved staged folder') }}\n\
+             }} else {{ Log 'installer did not complete; preserved staged folder' }}\n\
          }} else {{\n\
              Remove-Item -LiteralPath {old} -Force -ErrorAction SilentlyContinue\n\
              $swapped = $false\n\
@@ -992,7 +1000,9 @@ mod tests {
             Path::new(r"C:\Users\O'Neil\AppData\Roaming\c\update\next"),
             Path::new(r"C:\Users\O'Neil\AppData\Roaming\c\update\install.log"),
         );
-        assert!(setup.contains("Start-Process -FilePath 'C:\\Users\\O''Neil\\AppData\\Roaming\\c\\update\\next\\Consilium-Windows-Setup.exe' -ArgumentList '/S' -Wait -PassThru"));
+        assert!(setup.contains("Start-Process -FilePath 'C:\\Users\\O''Neil\\AppData\\Roaming\\c\\update\\next\\Consilium-Windows-Setup.exe' -ArgumentList '/S', '/UPDATE' -Wait -PassThru -ErrorAction Stop"));
+        assert!(setup.contains("$expected.Trim() -eq $actual.Trim()"));
+        assert!(setup.contains("installer did not complete; preserved staged folder"));
         assert!(setup.contains("DisplayIcon"));
         assert!(setup.contains("if ($p.ExitCode -eq 0)"));
         assert!(setup.trim_end().ends_with("catch { Log ('reopen failed: ' + $_) }"));
