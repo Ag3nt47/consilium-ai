@@ -77,6 +77,18 @@ pub fn by_id(id: &str) -> Option<&'static Agent> {
     LIST.read().unwrap().iter().copied().find(|a| a.id == id)
 }
 
+/// Registers an in-memory custom AI without touching settings. Tests use this to exercise the
+/// same local/cloud routing as user-added providers without sharing a temporary settings file.
+#[cfg(test)]
+pub fn register_test(c: CustomAi) -> &'static Agent {
+    if let Some(existing) = by_id(&c.id) {
+        return existing;
+    }
+    let agent = leak(&c);
+    LIST.write().unwrap().push(agent);
+    agent
+}
+
 fn leak_str(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
 }

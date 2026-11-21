@@ -675,7 +675,7 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
             if failed && st.live.is_empty() && !st.paused && !s.cancel.is_cancelled() {
                 let now = now_ms();
                 // An AI switched off in this chat never stands in for one that couldn't answer.
-                let available = |a: &&'static agents::Agent| {
+                let available = |a: &agents::Agent| {
                     s.bench.until(a.id, now).is_none()
                         && s.host.installed(a)
                         && !crate::switched::is_off(s.store.dir(), &s.turn.conversation, a.id)
@@ -698,7 +698,14 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
                     st.live.insert(a.id.to_string());
                     st.joined.insert(a.id.to_string());
                     Some(Some(a))
-                } else if s.turn.members.iter().filter(|m| **m != id).filter_map(|m| agents::by_id(m)).any(|a| s.bench.until(a.id, now).is_none() && s.host.installed(a)) {
+                } else if s
+                    .turn
+                    .members
+                    .iter()
+                    .filter(|m| **m != id)
+                    .filter_map(|m| agents::by_id(m))
+                    .any(available)
+                {
                     // Others could answer; they have already taken part in this turn.
                     None
                 } else {
@@ -782,7 +789,19 @@ mod tests {
     }
 
     async fn go(store: &Arc<Store>, c: &str, host: Arc<Fake>, targets: &[&str], rounds: u32, bench: Arc<Bench>) -> Vec<Event> {
-        let turn = Turn { conversation: c.into(), targets: ids(targets), rounds, members: ids(&["gpt", "claude", "gemini"]) };
+        go_with_members(store, c, host, targets, &["gpt", "claude", "gemini"], rounds, bench).await
+    }
+
+    async fn go_with_members(
+        store: &Arc<Store>,
+        c: &str,
+        host: Arc<Fake>,
+        targets: &[&str],
+        members: &[&str],
+        rounds: u32,
+        bench: Arc<Bench>,
+    ) -> Vec<Event> {
+        let turn = Turn { conversation: c.into(), targets: ids(targets), rounds, members: ids(members) };
         tokio::time::timeout(Duration::from_secs(10), run(turn, store.clone(), bench, host, CancellationToken::new()))
             .await
             .expect("the turn ends");
@@ -986,6 +1005,59 @@ mod tests {
         let ev = go(&store, &c, f, &["claude"], 1, Arc::new(Bench::new())).await;
         assert_eq!(said(&ev), vec![("gpt".into(), "gpt here".into())]);
         assert!(ev.iter().any(|e| e.text == "ChatGPT is taking Claude's turn."));
+    }
+
+    #[tokio::test]
+    async fn exhausted_clouds_are_tried_once_before_one_local_stand_in_takes_over() {
+        let local = crate::customai::register_test(crate::customai::CustomAi {
+            id: "localstandin".into(),
+            name: "Local Stand-in".into(),
+            base_url: "http://127.0.0.1:18080/v1".into(),
+            model: "test-local".into(),
+            local: true,
+        });
+        let (store, c) = setup();
+        let bench = Arc::new(Bench::new());
+        let mut host = fake(|id, _, _| match id {
+            "gpt" | "claude" => Err("quota exceeded".into()),
+            "localstandin" => Ok("local result".into()),
+            _ => panic!("unexpected stand-in: {id}"),
+        });
+        host.installed.insert(local.id);
+        let host = Arc::new(host);
+        let ev = go_with_members(
+            &store,
+            &c,
+            host.clone(),
+            &["gpt"],
+            &["gpt", "claude", "localstandin"],
+            1,
+            bench.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            host.asked.lock().unwrap().as_slice(),
+            &[("gpt".into(), 1), ("claude".into(), 1), ("localstandin".into(), 1)],
+            "each cloud provider is tried once, then one local model"
+        );
+        assert!(bench.until("gpt", now_ms()).is_some());
+        assert!(bench.until("claude", now_ms()).is_some());
+        assert_eq!(said(&ev), vec![("localstandin".into(), "local result".into())]);
+        assert!(!ev.iter().any(|e| e.kind == "error" || e.text.contains("couldn't answer")));
+    }
+
+    #[tokio::test]
+    async fn switched_off_last_stand_in_reports_that_nobody_can_answer() {
+        let (store, c) = setup();
+        crate::switched::set(store.dir(), &c, "gpt", false).unwrap();
+        crate::switched::set(store.dir(), &c, "gemini", false).unwrap();
+        let host = Arc::new(fake(|id, _, _| match id {
+            "claude" => Err("quota exceeded".into()),
+            _ => panic!("switched-off stand-in was asked: {id}"),
+        }));
+        let ev = go(&store, &c, host, &["claude"], 1, Arc::new(Bench::new())).await;
+        assert!(ev.iter().any(|e| e.text.starts_with("No other AI in the council can answer")));
     }
 
     #[tokio::test]
