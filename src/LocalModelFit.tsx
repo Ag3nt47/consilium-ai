@@ -1,19 +1,9 @@
 import { useState } from "react";
 import { api } from "./api";
 
-const MODELS = [
-  { name: "Qwen3 0.6B", parameters: 0.6 },
-  { name: "Qwen3 8B", parameters: 8 },
-  { name: "Llama 3.1 8B", parameters: 8 },
-  { name: "14B class", parameters: 14 },
-  { name: "32B class", parameters: 32 },
-  { name: "Llama 3.1 70B", parameters: 70 },
-  { name: "Custom model", parameters: 0 },
-];
+import { gib, modelFit } from "./model-fit.mjs";
 
 type Device = { id: number | string; name: string; memory: string };
-const gib = (value: number) => `${value.toFixed(1)} GiB`;
-const positive = (value: string) => Math.max(0, Number(value) || 0);
 
 export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   const [devices, setDevices] = useState<Device[]>([]);
@@ -25,13 +15,7 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
   const host = hostMemory ?? (availableGiB && availableGiB > 0 ? availableGiB.toFixed(1) : "");
-  const runtime = positive(overhead);
-  const hasMemory = [host, ...devices.map(({ memory }) => memory)].some((memory) => positive(memory) > 0);
-  const budgets = [{ name: "This computer", memory: host }, ...devices]
-    .map(({ name, memory }) => ({ name, capacity: Math.max(0, positive(memory) - runtime) }))
-    .filter(({ capacity }) => Number.isFinite(capacity) && capacity > 0)
-    .sort((a, b) => b.capacity - a.capacity);
-  const combined = budgets.reduce((sum, { capacity }) => sum + capacity, 0);
+  const models = modelFit([{ name: "This computer", memory: host }, ...devices], bits, overhead, customWeights);
 
   async function scanPeers() {
     setScanning(true);
@@ -116,23 +100,9 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
       <table className="usage-table">
         <thead><tr><th scope="col">Model</th><th scope="col">Weights</th><th scope="col">Memory estimate</th></tr></thead>
         <tbody>
-          {MODELS.filter(({ parameters }) => parameters || Number(customWeights) > 0).map(({ name, parameters }) => {
-            const weights = parameters ? parameters * 1e9 * bits / 8 / 2 ** 30 * (bits < 16 ? 1.15 : 1) : Number(customWeights);
-            let count = 0;
-            let capacity = 0;
-            for (const device of budgets) {
-              capacity += device.capacity;
-              count++;
-              if (capacity >= weights) break;
-            }
-            const single = budgets.filter((device) => device.capacity >= weights);
-            const fit = single.length
-              ? `One device: ${single.map((device) => device.name || "Unnamed device").join(", ")}`
-              : combined >= weights
-                ? `Split estimate: ${budgets.slice(0, count).map((device) => device.name || "Unnamed device").join(" + ")}`
-                : hasMemory ? `Needs at least ${gib(weights - combined)} more for weights` : "Enter usable memory";
-            return <tr key={name}><th scope="row">{name}</th><td>{gib(weights)}</td><td>{fit}</td></tr>;
-          })}
+          {models.map(({ name, weights, fit }) => (
+            <tr key={name}><th scope="row">{name}</th><td>{gib(weights)}</td><td>{fit}</td></tr>
+          ))}
         </tbody>
       </table>
       <p className="muted">Weights use parameter count × precision, with 15% packed-weight overhead at 4 or 8 bits. Increase the runtime allowance for longer contexts or larger batches. A split estimate requires a runner that supports the model and can partition it across those devices. Check available disk space, supported GPU memory, and wired-network throughput before testing.</p>
