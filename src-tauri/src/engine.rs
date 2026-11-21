@@ -1014,7 +1014,6 @@ impl council::Host for RealHost {
             system.push_str(&crate::ci::for_prompt(std::path::Path::new(w)));
         }
         let handoff = self.store.handoff_path(conv);
-        let data = self.data.clone();
         let mut elevated_commands = prompt::elevated_command_grants(&events, agent.id);
         // The Tools page's Install button: one pinned catalog install for the AI it was sent to.
         if let Some(command) = prompt::catalog_install_grant(&events, agent.id, &self.data) {
