@@ -46,13 +46,14 @@ try {
     throw new Error("Usage: node scripts/offline-skills.mjs [skill-id | --export skill-id ...]");
   }
 
-  const runbooks = new Map(listRunbooks().map((name) => [`runbook:${name.slice(0, -3)}`, name]));
+  let runbooks;
   if (selected.length) {
     const entries = selected.map((name) => {
       if (Object.hasOwn(manifest, name)) {
         const { summary, command, guidance } = manifest[name];
         return [`## ${name}`, summary, command, guidance].join("\n");
       }
+      runbooks ??= new Map(listRunbooks().map((file) => [`runbook:${file.slice(0, -3)}`, file]));
       const runbook = runbooks.get(name);
       if (!runbook) throw new Error(`Unknown offline skill: ${JSON.stringify(name)}`);
       return [`## ${name}`, readRunbook(runbook)].join("\n");
@@ -60,7 +61,7 @@ try {
     console.log(entries.join("\n\n"));
   } else {
     for (const [name, { summary }] of Object.entries(manifest)) console.log(`${name}  ${summary}`);
-    for (const name of runbooks.keys()) console.log(`${name}  Local Markdown runbook.`);
+    for (const name of listRunbooks()) console.log(`runbook:${name.slice(0, -3)}  Local Markdown runbook.`);
   }
 } catch (error) {
   console.error(error.message);
