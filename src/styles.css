@@ -2458,6 +2458,7 @@ button.attachment {
 .msg-input { min-width: 0; flex: 1 1 160px; max-width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: inherit; font: inherit; }
 .msg-advanced summary { cursor: pointer; font-size: 12px; }
 .msg-field { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 12px; }
+.msg-field > .msg-input { flex: none; }
 .msg-save-row { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 .msg-note { flex: 1; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
 .msg-note.ok { color: #16a34a; }
