@@ -40,7 +40,7 @@ import {
 import { canListen, canSpeak, isEcho, Listener, parseVoiceCommand, RESUME_AFTER_MS, Speaker, startsInterrupt, voiceOn } from "./voice";
 import { VoiceSettings } from "./voicesettings";
 import { AgentVoiceMeter, VoiceVisualizer } from "./visualizer";
-import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
+import { checkForUpdate, nextUpdateCheckDelay, RELEASES_URL, type UpdateInfo } from "./updates";
 import { installHoverTips } from "./tooltip";
 import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
 import { MessagingIndicator, MessagingSettings } from "./messaging";
@@ -1626,26 +1626,30 @@ export default function App() {
     let lastCheck = 0;
     let checking = false;
     let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const check = () => {
-      if (checking) return;
+      if (checking || disposed) return;
+      clearTimeout(timer);
       checking = true;
       lastCheck = Date.now();
       void checkForUpdate(false, markDownloadStarting, markDownloadFailed)
         .then((result) => { if (!disposed) setUpdate(result); })
         .catch(() => undefined)
-        .finally(() => { checking = false; });
+        .finally(() => {
+          checking = false;
+          if (!disposed) timer = setTimeout(check, nextUpdateCheckDelay());
+        });
     };
     const onResume = () => {
       if (document.visibilityState === "visible" && Date.now() - lastCheck >= 30_000) check();
     };
     check();
-    const t = setInterval(check, 30 * 60 * 1000);
     window.addEventListener("focus", onResume);
     window.addEventListener("online", onResume);
     document.addEventListener("visibilitychange", onResume);
     return () => {
       disposed = true;
-      clearInterval(t);
+      clearTimeout(timer);
       window.removeEventListener("focus", onResume);
       window.removeEventListener("online", onResume);
       document.removeEventListener("visibilitychange", onResume);

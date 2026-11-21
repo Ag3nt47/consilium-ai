@@ -8,8 +8,7 @@ import { api } from "./api";
 
 export const REPO = "Ag3nt47/consilium-ai";
 export const RELEASES_URL = `https://github.com/${REPO}/releases`;
-// The caller runs every 30 minutes. Keep the freshness window shorter so timer jitter cannot make
-// the next tick reuse a check that completed a few seconds after the previous tick started.
+// Successful metadata checks remain fresh for 25 minutes across app restarts.
 const CACHE_FRESH_MS = 25 * 60 * 1000;
 const RELEASE_METADATA_TIMEOUT_MS = 15_000;
 const KEY = "consilium.updates";
@@ -46,6 +45,12 @@ function readCache(): Cache {
   } catch {
     return { lastCheck: 0 };
   }
+}
+
+export function nextUpdateCheckDelay(): number {
+  const remaining = CACHE_FRESH_MS - (Date.now() - readCache().lastCheck);
+  // Back off after a failed check. For a usable cache, check again as soon as it expires.
+  return remaining > 0 && remaining <= CACHE_FRESH_MS ? Math.max(remaining, 1000) : 30 * 60 * 1000;
 }
 
 function writeCache(c: Cache) {
