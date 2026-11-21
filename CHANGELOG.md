@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.3.54
+
+- Guide AI setup and device pairing from the Add menu.
+- Bring Consilium forward and focus the current draft with a global shortcut.
+- Attach clipboard screenshots and refresh the daily wallpaper after wake or a date change.
+- Set an optional daily Discuss token warning and skip background usage scans when the usage panel is closed.
+- View progress across the six upgrade documents in Settings. Council handoffs use a shorter format.
+- Show when Signal is still waiting for verification and stop a stale Signal daemon before relinking.
+
 ## 0.3.53
 
 - Follow new chat messages while the reader is at the bottom, and keep their place when they scroll up.
