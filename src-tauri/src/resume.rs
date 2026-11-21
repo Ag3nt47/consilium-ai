@@ -52,11 +52,8 @@ impl Journal {
     }
 
     fn save(&self, items: &HashMap<String, Pending>) {
-        let tmp = self.path.with_extension("json.tmp");
         if let Ok(bytes) = serde_json::to_vec_pretty(items) {
-            if std::fs::write(&tmp, bytes).is_ok() {
-                let _ = crate::store::replace_file(&tmp, &self.path);
-            }
+            let _ = crate::store::write_atomic(&self.path, &bytes);
         }
     }
 
