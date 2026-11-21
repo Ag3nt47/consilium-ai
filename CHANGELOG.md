@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.56
+
+- Recheck for updates after reconnecting, returning to the app, or when cached release metadata expires. Use cached installers when GitHub metadata is unavailable and time out stalled metadata requests.
+- Read clipboard screenshots through the native desktop clipboard.
+- Estimate local model fit using measured available RAM from updated paired devices.
+- Map JavaScript and TypeScript symbols offline to reduce agent context.
+
 ## 0.3.55
 
 - Estimate local model memory requirements and ask paired computers for current memory reports.
