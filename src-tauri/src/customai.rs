@@ -77,6 +77,13 @@ pub fn by_id(id: &str) -> Option<&'static Agent> {
     LIST.read().unwrap().iter().copied().find(|a| a.id == id)
 }
 
+/// Builds an in-memory custom AI without adding it to the process-wide catalogue. Routing tests
+/// use this instead of changing `LIST`, which would make unrelated parallel tests see the provider.
+#[cfg(test)]
+pub fn test_agent(c: CustomAi) -> &'static Agent {
+    leak(&c)
+}
+
 fn leak_str(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
 }
