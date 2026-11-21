@@ -2286,8 +2286,10 @@ fn antigravity_reply(stdout: &str) -> Result<String, String> {
     if text.trim().is_empty() {
         if let Some(denied) = r["denied_actions"].as_array().filter(|d| !d.is_empty()) {
             let names: Vec<&str> = denied.iter().filter_map(|d| d["display_name"].as_str()).collect();
-            return Err(format!(
-                "Gemini tried to use a tool its access doesn't allow ({}) and wrote no reply. Ask again, or raise its access in Settings.",
+            // A refused tool is not a failed turn (#37): say so in the reply, so the council sees it
+            // and Gemini posts a command box next time, without the "couldn't answer" alarm.
+            return Ok(format!(
+                "[Antigravity refused Gemini's tool call ({}), so this turn has no text. Gemini: post commands in a command box instead of running them yourself.]",
                 names.join(", ")
             ));
         }
@@ -2698,10 +2700,16 @@ mod plan_tests {
 {"event":"result","result":{"status":"SUCCESS","response":""}}"#;
         assert_eq!(antigravity_reply(streamed).unwrap(), "Hello council");
         let blocked = r#"{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}}"#;
-        let e = antigravity_reply(blocked).unwrap_err();
-        assert!(e.contains("Bash") && e.contains("access"), "{e}");
+        let note = antigravity_reply(blocked).expect("a refused tool is not a failed turn");
+        assert!(note.contains("Bash") && note.contains("command box"), "{note}");
+        let partial = r#"{"event":"step_update","step_update":{"text_delta":"Checking"}}
+{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}}"#;
+        assert_eq!(antigravity_reply(partial).unwrap(), "Checking", "text written before a refusal is kept");
         let failed = r#"{"event":"result","result":{"status":"ERROR","response":"","error":"authentication failed or timed out"}}"#;
         assert_eq!(antigravity_reply(failed).unwrap_err(), "authentication failed or timed out (ERROR)");
+        let failed_after_text = r#"{"event":"step_update","step_update":{"text_delta":"Partial"}}
+{"event":"result","result":{"status":"ERROR","response":"","error":"model overloaded"}}"#;
+        assert_eq!(antigravity_reply(failed_after_text).unwrap_err(), "model overloaded (ERROR)", "streamed text never hides a real error");
     }
 
     #[test]
