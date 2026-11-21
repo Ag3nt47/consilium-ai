@@ -14,6 +14,8 @@ Run `node scripts/upgrade-progress.mjs` to report completed items and percentage
 documents. Each feasible ledger row counts equally. In-progress and partially verified rows count
 toward the total, and infeasible rows are listed separately.
 
+The [physical PeerLink trial](PEERLINK_PHYSICAL_TRIAL.md) records the Windows–Mac proof-of-concept procedure and pass criteria.
+
 ## Document 1: Consilium Upgrade Overhaul.docx
 
 | Item | Status | Notes |
