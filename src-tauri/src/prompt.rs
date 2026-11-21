@@ -543,7 +543,7 @@ command box only for a command that needs administrator rights, or one your own 
     }
     if ctx.workspace.is_some() && matches!(ctx.access, Access::Edit | Access::Own | Access::Unrestricted) {
         s.push_str(
-            "\n\nFor council implementation, assign deliverables and file scope once with @mentions. \
+            "\n\nFor council implementation, work at full capacity and assign deliverables and file scope once with @mentions. \
 Build your part and review related changes. Skip greetings, repeated plans and unchanged code. \
 Report handoffs as Status, Files, Tests, Blocker, Next. Omit empty fields. \
 Resolve routine choices and use REQUEST: for decisions that belong to the human. \
