@@ -30,8 +30,9 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
       const reports = await api.peerResources();
       const found = Object.entries(reports).flatMap(([name, report]) => {
         if (report.updated_at <= (before[name]?.updated_at ?? 0) || !report.total_memory_mb) return [];
-        const memory = Math.max(0, report.total_memory_mb * (1 - report.memory_percent / 100) / 1024);
-        return [{ id: name, name, memory: memory.toFixed(1) }];
+        const availableMiB = report.available_memory_mb ?? report.total_memory_mb * (1 - report.memory_percent / 100);
+        const memory = Math.max(0, Math.min(report.total_memory_mb, availableMiB)) / 1024;
+        return [{ id: name, name, memory: (Math.floor(memory * 10) / 10).toFixed(1) }];
       });
       setDevices((previous) => [
         ...previous.filter((device) => typeof device.id === "number"),

@@ -266,6 +266,7 @@ export interface SystemPressure {
   memory_percent: number;
   cores: number;
   total_memory_mb: number;
+  available_memory_mb?: number;
   label: string;
   hardware_profile: "conservative" | "balanced" | "performance";
   adaptive_mode: "eco" | "balanced" | "full";
