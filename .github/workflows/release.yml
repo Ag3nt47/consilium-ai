@@ -3,7 +3,7 @@ name: Release
 # Publishes installers for macOS, Windows and Linux for every new version, so a copy of Consilium
 # on any computer can find and install it. It runs after the CI workflow passes on main: when
 # package.json's version has no GitHub release yet, it creates one, builds the installers into it
-# and publishes it. A pushed version tag (v1.2.3) or a manual run does the same for that version.
+# and publishes it. A pushed version tag (v1.2.3) also publishes. Manual runs default to a draft.
 on:
   workflow_run:
     workflows: ["CI"]
@@ -12,6 +12,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      draft_only:
+        description: Build installers and leave the release as a draft
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -26,6 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # to create the release
+      actions: read # to verify the exact commit passed CI before a manual build
     outputs:
       tag: ${{ steps.v.outputs.tag }}
       sha: ${{ steps.v.outputs.sha }}
@@ -34,6 +40,23 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Confirm CI for manual build
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Build installers from main after the changes merge."
+            exit 1
+          fi
+          ci="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main \
+            --commit "$GITHUB_SHA" --event push --limit 1 --json status,conclusion \
+            --jq '.[0] | .status == "completed" and .conclusion == "success"')"
+          if [ "$ci" != "true" ]; then
+            echo "::error::The latest CI run for $GITHUB_SHA must pass before an installer build."
+            exit 1
+          fi
       - id: v
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -130,6 +153,7 @@ jobs:
 
   publish:
     needs: [prepare, build]
+    if: github.event_name != 'workflow_dispatch' || !inputs.draft_only
     runs-on: ubuntu-latest
     permissions:
       contents: write # to publish the release
