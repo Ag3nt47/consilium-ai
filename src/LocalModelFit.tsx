@@ -14,6 +14,7 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
   const [bits, setBits] = useState(4);
   const [overhead, setOverhead] = useState("2");
   const [customWeights, setCustomWeights] = useState("");
+  const [fileMessage, setFileMessage] = useState("");
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
   const host = hostMemory ?? (availableGiB && availableGiB > 0 ? memoryInput(availableGiB) : "");
@@ -101,8 +102,26 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
         </label>
         <label>
           Custom model weight file size (GiB)
-          <input type="number" min="0" step="0.1" value={customWeights} onChange={(e) => setCustomWeights(e.target.value)} />
+          <input type="number" min="0" step="any" value={customWeights} onChange={(e) => {
+            setCustomWeights(e.target.value);
+            setFileMessage("");
+          }} />
         </label>
+        <label>
+          Estimate from GGUF files
+          <input type="file" accept=".gguf" multiple onChange={(e) => {
+            const files = Array.from(e.currentTarget.files ?? []);
+            e.currentTarget.value = "";
+            if (!files.length) return;
+            if (files.some((file) => !/\.gguf$/i.test(file.name) || file.size === 0)) {
+              setFileMessage("Choose nonempty .gguf files for a single model.");
+              return;
+            }
+            setCustomWeights(String(files.reduce((total, file) => total + file.size, 0) / 2 ** 30));
+            setFileMessage(`Estimated from ${files.length} GGUF ${files.length === 1 ? "file" : "files"}.`);
+          }} />
+        </label>
+        {fileMessage && <p className="muted small" role="status">{fileMessage}</p>}
       </div>
       <table className="usage-table">
         <thead><tr><th scope="col">Model</th><th scope="col">Weights</th><th scope="col">Memory estimate</th></tr></thead>
