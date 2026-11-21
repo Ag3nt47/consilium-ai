@@ -770,7 +770,7 @@ fn request_words(text: &str) -> String {
 }
 
 /// Whether a WITHDRAW line's text names `request`: the same words, the start of them, or "all".
-fn withdraws(withdrawal: &str, request: &str) -> bool {
+pub(crate) fn withdraws(withdrawal: &str, request: &str) -> bool {
     let (w, r) = (request_words(withdrawal), request_words(request));
     w == "all" || w == "all requests" || w == r || (w.chars().count() >= 12 && (r.starts_with(&w) || w.starts_with(&r)))
 }
@@ -1090,6 +1090,7 @@ mod tests {
             usage: None,
             attachments: vec![],
             via: None,
+            source_event: None,
         }
     }
 

@@ -110,6 +110,9 @@ fn alarm(s: &Arc<Shared>, failed: &'static Agent, why: &str) {
     if st.alarmed || st.paused || s.cancel.is_cancelled() || ALARMED.lock().unwrap().get(&key).is_some_and(|w| w == why) {
         return;
     }
+    if crate::switched::is_off(s.store.dir(), &s.turn.conversation, failed.id) {
+        return;
+    }
     let helpers: Vec<&'static Agent> = s
         .turn
         .members
@@ -226,7 +229,13 @@ impl Council {
                 who.push((a.clone(), Some(*seq)));
             }
         }
-        who.retain(|(a, _)| !done.passed.contains(a) && agents::by_id(a).is_some());
+        // An AI switched off in this chat isn't asked, even when a turn recorded before it was
+        // switched off resumes after a restart.
+        who.retain(|(a, _)| {
+            !done.passed.contains(a)
+                && agents::by_id(a).is_some()
+                && !crate::switched::is_off(store.dir(), &turn.conversation, a)
+        });
         for (a, _) in &who {
             state.live.insert(a.clone());
             state.joined.insert(a.clone());
@@ -255,7 +264,11 @@ impl Council {
             st.generation += 1;
             st.latest.insert(message.sender.clone(), message.seq);
             for t in targets {
-                if agents::by_id(t).is_some() && s.bench.until(t, now_ms()).is_none() && !st.live.contains(t) {
+                if agents::by_id(t).is_some()
+                    && s.bench.until(t, now_ms()).is_none()
+                    && !st.live.contains(t)
+                    && !crate::switched::is_off(s.store.dir(), &s.turn.conversation, t)
+                {
                     st.live.insert(t.clone());
                     st.joined.insert(t.clone());
                     start.push(t.clone());
@@ -309,7 +322,10 @@ impl Council {
                 if st.pulled_in >= limit {
                     break;
                 }
-                if agents::by_id(m).is_none() || s.bench.until(m, now).is_some() {
+                if agents::by_id(m).is_none()
+                    || s.bench.until(m, now).is_some()
+                    || crate::switched::is_off(s.store.dir(), &s.turn.conversation, m)
+                {
                     continue;
                 }
                 let used = st.answered.get(m).copied().unwrap_or(0);
@@ -418,6 +434,9 @@ fn worker(s: Arc<Shared>, id: String, last_seen: Option<u64>) -> Pin<Box<dyn Fut
 /// out of usage), and the newest message it has read.
 async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool, Option<u64>) {
     let agent = agents::by_id(&id).expect("known agent");
+    if crate::switched::is_off(s.store.dir(), &s.turn.conversation, &id) {
+        return (false, last_seen);
+    }
     let rounds = s.turn.rounds;
     let mut failed = false;
     loop {
@@ -622,10 +641,13 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                         &format!("{} ran out of usage ({when}); the council carries on without it.", agent.name),
                     );
                 } else {
-                    if let Ok(e) = s.store.append(&s.turn.conversation, &id, "error", vec![], &format!("{} couldn't answer: {why}", agent.name)) {
-                        s.host.event(&e);
+                    let off_here = crate::switched::is_off(s.store.dir(), &s.turn.conversation, &id);
+                    if !off_here {
+                        if let Ok(e) = s.store.append(&s.turn.conversation, &id, "error", vec![], &format!("{} couldn't answer: {why}", agent.name)) {
+                            s.host.event(&e);
+                        }
+                        alarm(&s, agent, &why);
                     }
-                    alarm(&s, agent, &why);
                 }
                 failed = true;
                 break;
@@ -893,6 +915,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn switched_off_ai_is_not_asked_and_raises_no_alarm_or_error() {
+        let (store, c) = setup();
+        crate::switched::set(store.dir(), &c, "claude", false).unwrap();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "claude" => Err("Claude crashed".into()),
+            _ => Ok(format!("{id} here")),
+        }));
+        let ev = go(&store, &c, f.clone(), &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
+        assert!(!ev.iter().any(|e| e.sender == CONSILIUM && e.text.contains("couldn't answer")));
+        assert!(!ev.iter().any(|e| e.sender == "claude" && e.kind == "error"));
+        assert_eq!(f.asked.lock().unwrap().iter().filter(|(a, _)| a == "claude").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn switched_off_ai_is_not_started_by_mention() {
+        let (store, c) = setup();
+        crate::switched::set(store.dir(), &c, "claude", false).unwrap();
+        let f = Arc::new(fake(|id, _, _| match id {
+            "gpt" => Ok("Hey @claude check this out".into()),
+            _ => Ok(format!("{id} here")),
+        }));
+        let ev = go(&store, &c, f.clone(), &["gpt"], 2, Arc::new(Bench::new())).await;
+        assert_eq!(f.asked.lock().unwrap().iter().filter(|(a, _)| a == "claude").count(), 0);
+        assert!(!ev.iter().any(|e| e.sender == "claude"));
+    }
+
+    #[tokio::test]
     async fn an_ai_out_of_usage_is_benched_and_the_others_carry_on() {
         let (store, c) = setup();
         let bench = Arc::new(Bench::new());
@@ -1002,7 +1051,7 @@ mod tests {
         let runner = council.clone();
         let done = tokio::spawn(async move { runner.run().await });
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let ask = store.append_imported(&c, "claude", "message", vec![], "@gemini-pc can you check?", Some("MacBook".into())).unwrap();
+        let ask = store.append_imported(&c, "claude", "message", vec![], "@gemini-pc can you check?", Some("MacBook".into()), None).unwrap();
         assert!(council.mentioned(&ask, &ids(&["gemini"])));
         tokio::time::timeout(Duration::from_secs(10), done).await.expect("the turn ends").unwrap();
         let s = said(&store.load(&c).unwrap());
@@ -1024,7 +1073,7 @@ mod tests {
         let done = tokio::spawn(async move { runner.run().await });
         // While ChatGPT is answering, the MacBook's Claude answers; ChatGPT reads it next.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let remote = store.append_imported(&c, "claude", "message", vec![], "from the Mac", Some("MacBook".into())).unwrap();
+        let remote = store.append_imported(&c, "claude", "message", vec![], "from the Mac", Some("MacBook".into()), None).unwrap();
         assert!(council.heard(&remote));
         tokio::time::timeout(Duration::from_secs(10), done).await.expect("the turn ends").unwrap();
         let s = said(&store.load(&c).unwrap());

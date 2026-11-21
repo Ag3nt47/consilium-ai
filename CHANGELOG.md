@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Fixed: when a linked PC announced an update, macOS no longer starts a full source rebuild while
+  the GitHub release is still publishing. It checks every 30 minutes (and immediately after the
+  announcement), verifies the published DMG's SHA-256, stages its app bundle atomically, and lets
+  the existing automatic installer restart into it (#10).
+
+- Fixed: auto-continue went quiet with no note whenever any AI had a request open, even one it
+  had withdrawn or one from a linked computer's AI (answered there). Those no longer hold rounds
+  back, and when a request here really is waiting, it says so once and lists it (#21).
+
+- Fixed: a freeze of up to a minute (and a freeze-guard restart) when messages arrived while
+  AIs were answering. The turn table stayed locked while the window, linked computers, notes
+  and the council were told of a message; it is now held only to file the message (#14).
+
 - Fixed: the council list in the sidebar now fills the space down to PC pressure. With five or
   more AIs it was capped at 46% of the window (at most 480 px), leaving a gap above PC pressure
   and cutting cards off; it now takes the remaining height and scrolls inside it. Council card

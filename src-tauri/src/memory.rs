@@ -81,7 +81,12 @@ impl Memory {
 
     /// The memory as given to the AIs: the most recent part if it is too long.
     pub fn for_prompt(&self) -> Option<String> {
-        clip(&self.read())
+        clip(&without_repeats(&self.read()))
+    }
+
+    /// Like `for_prompt`, but only the newest `max` characters: for local models' small windows.
+    pub fn for_prompt_within(&self, max: usize) -> Option<String> {
+        clip_to(&self.read(), max)
     }
 }
 
@@ -92,17 +97,52 @@ pub fn project_notes(folder: &Path) -> Option<String> {
 
 /// Keeps the last MAX_CHARS characters (newest notes are at the end), trimmed to whole lines.
 fn clip(text: &str) -> Option<String> {
+    clip_to(text, MAX_CHARS)
+}
+
+fn clip_to(text: &str, max: usize) -> Option<String> {
     let t = text.trim();
     if t.is_empty() {
         return None;
     }
-    if t.chars().count() <= MAX_CHARS {
+    if t.chars().count() <= max {
         return Some(t.to_string());
     }
-    let skip = t.chars().count() - MAX_CHARS;
+    let skip = t.chars().count() - max;
     let tail: String = t.chars().skip(skip).collect();
     let tail = tail.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap_or(tail);
     Some(format!("(earlier notes omitted)\n{tail}"))
+}
+
+/// Keeps the newest copy of each repeated note in the prompt. Match the exact
+/// note text apart from the recorded author and date. Similar notes can carry
+/// different decisions, so keep both unless the text matches.
+fn without_repeats(text: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut lines = Vec::new();
+    for line in text.lines().rev() {
+        if let Some(note) = line.trim_start().strip_prefix("- ") {
+            if !seen.insert(without_stamp(note.trim_end())) {
+                continue;
+            }
+        }
+        lines.push(line);
+    }
+    lines.reverse();
+    lines.join("\n")
+}
+
+fn without_stamp(note: &str) -> &str {
+    let Some((body, stamp)) = note.strip_suffix(')').and_then(|s| s.rsplit_once(" (")) else {
+        return note;
+    };
+    let Some((author, date)) = stamp.rsplit_once(", ") else {
+        return note;
+    };
+    let is_date = date.len() == 10 && date.bytes().enumerate().all(|(i, b)| {
+        if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() }
+    });
+    if !author.is_empty() && is_date { body } else { note }
 }
 
 /// Extracts an optional replacement target tag like `[replaces: needle]` or `[replace: needle]`
@@ -153,6 +193,25 @@ fn looks_secret(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_notes_are_left_out_of_the_prompt_newest_kept() {
+        let text = concat!(
+            "## Council memory\n",
+            "- Keep restart disabled on this host (Claude, 2026-11-14)\n",
+            "- Build installers on the Mac (Gemini, 2026-11-15)\n",
+            "- Keep restart enabled on this host (Gemini, 2026-11-18)\n",
+            "- Build installers on the Mac (Claude, 2026-11-19)\n",
+            "- Use local mode (old, separate)\n",
+            "- Use local mode (new, separate)\n",
+        );
+        let out = without_repeats(text);
+        assert!(out.starts_with("## Council memory\n"));
+        assert_eq!(out.matches("Build installers").count(), 1);
+        assert!(out.contains("Build installers on the Mac (Claude, 2026-11-19)"));
+        assert!(out.contains("Keep restart disabled") && out.contains("Keep restart enabled"));
+        assert_eq!(out.matches("Use local mode").count(), 2);
+    }
 
     #[test]
     fn remember_lines_are_parsed_and_secrets_refused() {

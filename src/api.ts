@@ -578,9 +578,11 @@ const appApi = {
   signalSetupCancel: () => invoke<void>("signal_setup_cancel"),
   /** A newer build staged for Update Now, or null. */
   updateAvailable: () => invoke<StagedUpdate | null>("update_available"),
+  /** Whether a GitHub release installer is currently downloading. */
+  updateDownloadStatus: () => invoke<UpdateDownloadStatus>("update_download_status"),
   /** Pauses the AIs, installs the staged build and relaunches; their turns resume afterwards. */
   updateNow: () => invoke<void>("update_now"),
-  /** Downloads and stages a release binary into `<data>/update/next`. */
+  /** Downloads, verifies and stages this platform's GitHub release installer. */
   stageReleaseUpdate: (version: string, url: string, digest: string) =>
     invoke<void>("stage_release_update", { version, url, digest }),
   /** "deb" or "rpm" when this Linux copy was installed from a system package, else null. */
@@ -623,6 +625,11 @@ export interface DailyWallpaper {
 export interface StagedUpdate {
   version: string;
   current: string;
+}
+
+export interface UpdateDownloadStatus {
+  active: boolean;
+  version: string;
 }
 
 export const api: typeof appApi = IN_APP ? appApi : (demoApi as unknown as typeof appApi);

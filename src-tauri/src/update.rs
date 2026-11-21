@@ -13,6 +13,7 @@
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Staged {
@@ -21,6 +22,77 @@ pub struct Staged {
     /// The staged and running builds, e.g. "0.3.37 #812 (76debf3a1b2c)" (see `build_id`).
     pub build: String,
     pub current_build: String,
+}
+
+/// Whether a GitHub release installer is currently being downloaded. The sidebar emblem reads
+/// this independently of `staged`, so the download is visible before Update Now appears.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct DownloadStatus {
+    pub active: bool,
+    pub version: String,
+}
+
+#[derive(Default)]
+struct DownloadState {
+    active: usize,
+    version: String,
+}
+
+static DOWNLOAD_STATE: OnceLock<Mutex<DownloadState>> = OnceLock::new();
+
+fn download_state() -> &'static Mutex<DownloadState> {
+    DOWNLOAD_STATE.get_or_init(|| Mutex::new(DownloadState::default()))
+}
+
+fn download_started(state: &Mutex<DownloadState>, version: &str) {
+    if let Ok(mut state) = state.lock() {
+        state.active = state.active.saturating_add(1);
+        state.version = version.trim_start_matches(['v', 'V']).trim().to_string();
+    }
+}
+
+fn download_finished(state: &Mutex<DownloadState>) {
+    if let Ok(mut state) = state.lock() {
+        state.active = state.active.saturating_sub(1);
+        if state.active == 0 {
+            state.version.clear();
+        }
+    }
+}
+
+/// Keeps the download indicator balanced even when the async download is cancelled. Locals held
+/// across an `.await` are dropped with their future, so cleanup cannot be skipped by cancellation.
+struct DownloadActivity<'a> {
+    state: &'a Mutex<DownloadState>,
+}
+
+impl<'a> DownloadActivity<'a> {
+    fn start(state: &'a Mutex<DownloadState>, version: &str) -> Self {
+        download_started(state, version);
+        Self { state }
+    }
+}
+
+impl Drop for DownloadActivity<'_> {
+    fn drop(&mut self) {
+        download_finished(self.state);
+    }
+}
+
+fn download_status_for(state: &Mutex<DownloadState>) -> DownloadStatus {
+    state
+        .lock()
+        .map(|state| DownloadStatus { active: state.active > 0, version: state.version.clone() })
+        .unwrap_or_default()
+}
+
+pub fn download_status() -> DownloadStatus {
+    download_status_for(download_state())
+}
+
+async fn track_download<T>(state: &Mutex<DownloadState>, version: &str, operation: impl std::future::Future<Output = T>) -> T {
+    let _activity = DownloadActivity::start(state, version);
+    operation.await
 }
 
 /// Which build is staged, written by `scripts/stage-update.mjs` after the build is in place.
@@ -305,7 +377,31 @@ pub fn install_log(data: &Path) -> PathBuf {
     data.join("update").join("install.log")
 }
 
-/// Downloads and stages a release binary into `<data>/update/next`.
+/// The most recent failure to download or stage a GitHub release. The front end retries quietly,
+/// so this file preserves the reason for diagnosis instead of losing it in a caught promise.
+pub fn download_error_log(data: &Path) -> PathBuf {
+    data.join("update").join("update_error.log")
+}
+
+fn record_download_result(data: &Path, version: &str, result: &Result<(), String>) {
+    let path = download_error_log(data);
+    match result {
+        Ok(()) => {
+            let _ = std::fs::remove_file(path);
+        }
+        Err(error) => {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let clean_version = version.trim_start_matches(['v', 'V']).trim();
+            let line = format!("{} Consilium {clean_version}: {error}\n", crate::store::now_ms());
+            let _ = crate::store::write_atomic(&path, line.as_bytes());
+        }
+    }
+}
+
+/// Downloads and stages a release installer. macOS extracts `Consilium.app` from the release DMG;
+/// Windows and Linux keep their installer or executable in `<data>/update/next`.
 /// Release downloads are only taken from this project's own GitHub releases.
 const RELEASE_PREFIX: &str = "https://github.com/Ag3nt47/consilium-ai/releases/download/";
 
@@ -329,8 +425,16 @@ fn check_release_download(version: &str, url: &str, digest: &str) -> Result<Stri
 }
 
 pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str) -> Result<(), String> {
+    let result = match check_release_download(version, url, digest) {
+        Ok(want) => track_download(download_state(), version, stage_from_url_inner(data, version, url, &want)).await,
+        Err(error) => Err(error),
+    };
+    record_download_result(data, version, &result);
+    result
+}
+
+async fn stage_from_url_inner(data: &Path, version: &str, url: &str, want: &str) -> Result<(), String> {
     use sha2::{Digest, Sha256};
-    let want = check_release_download(version, url, digest)?;
     let client = reqwest::Client::builder()
         .user_agent("Consilium-Updater")
         .build()
@@ -344,27 +448,215 @@ pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str)
     if got != want {
         return Err("the downloaded update didn't match GitHub's checksum, so it was thrown away".into());
     }
-    let next_dir = staged_dir(data);
-    // A release download has no build stamp; one left from an earlier build mustn't describe it.
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = url;
+        stage_macos_dmg(data, version, &bytes)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        stage_non_macos_download(data, version, url, &bytes)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn command_failure(action: &str, output: &std::process::Output) -> String {
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let detail = detail.lines().map(str::trim).rfind(|line| !line.is_empty()).unwrap_or("unknown error");
+    format!("{action}: {detail}")
+}
+
+/// Copies a complete app bundle into the place the existing macOS installer already swaps in.
+/// `ditto` preserves the bundle's symlinks, extended attributes and code-signing resources.
+#[cfg(target_os = "macos")]
+fn stage_macos_app(data: &Path, version: &str, source: &Path) -> Result<(), String> {
+    use std::process::Command;
+
+    if !source.is_dir() {
+        return Err("the macOS update DMG contains no Consilium.app".into());
+    }
+    let update_dir = data.join("update");
+    std::fs::create_dir_all(&update_dir).map_err(|e| format!("create update folder: {e}"))?;
+    let pending = update_dir.join("Consilium.app.download");
+    let previous = update_dir.join("Consilium.app.previous");
+    let staged = staged_app(data);
+    let _ = std::fs::remove_dir_all(&pending);
+    let output = Command::new("/usr/bin/ditto")
+        .arg(source)
+        .arg(&pending)
+        .output()
+        .map_err(|e| format!("copy the app from the update DMG: {e}"))?;
+    if !output.status.success() {
+        let _ = std::fs::remove_dir_all(&pending);
+        return Err(command_failure("copy the app from the update DMG", &output));
+    }
+
+    let clean_version = version.trim_start_matches(['v', 'V']).trim();
+    let found = bundle_version(&pending).ok_or_else(|| {
+        let _ = std::fs::remove_dir_all(&pending);
+        "the app in the update DMG has no version".to_string()
+    })?;
+    if found != clean_version {
+        let _ = std::fs::remove_dir_all(&pending);
+        return Err(format!("the update DMG contains Consilium {found}, not {clean_version}"));
+    }
+
+    // Local source builds use this identity so macOS keeps microphone and automation grants.
+    // A release download is signed the same way when this Mac's private signing key exists, and
+    // at least ad-hoc signed otherwise; GitHub's current release bundle itself is unsigned.
+    if let Err(e) = sign_macos_app(data, &pending) {
+        let _ = std::fs::remove_dir_all(&pending);
+        return Err(e);
+    }
+
+    let _ = std::fs::remove_dir_all(&previous);
+    if staged.exists() {
+        std::fs::rename(&staged, &previous).map_err(|e| format!("preserve the previously staged app: {e}"))?;
+    }
+    if let Err(e) = std::fs::rename(&pending, &staged) {
+        if previous.exists() {
+            let _ = std::fs::rename(&previous, &staged);
+        }
+        return Err(format!("stage the macOS app: {e}"));
+    }
+    let _ = std::fs::remove_dir_all(&previous);
+    // A GitHub release has no local build stamp. Remove an older stamp only after the new app is
+    // complete, so a failed download never damages an update that was already staged.
     let _ = std::fs::remove_file(build_stamp(data));
+    Ok(())
+}
+
+/// Stable local signing when this Mac has the private key, matching `scripts/stage-update.mjs`;
+/// otherwise a required ad-hoc signature keeps GitHub's unsigned release launchable.
+#[cfg(target_os = "macos")]
+fn sign_macos_app(data: &Path, app: &Path) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    let signing = data.join("signing");
+    let keychain = signing.join("consilium-signing.keychain-db");
+    let password_file = signing.join("keychain-password");
+    let password = std::fs::read_to_string(password_file).ok();
+    let unlocked = keychain.is_file()
+        && password.as_deref().is_some_and(|password| {
+            Command::new("/usr/bin/security")
+                .args(["unlock-keychain", "-p", password.trim()])
+                .arg(&keychain)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+    let mut signed = unlocked
+        && Command::new("/usr/bin/codesign")
+            .args(["--force", "--deep", "--sign", "Consilium Local Signing", "--keychain"])
+            .arg(&keychain)
+            .arg(app)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    if !signed {
+        signed = Command::new("/usr/bin/codesign")
+            .args(["--force", "--deep", "--sign", "-"])
+            .arg(app)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+    if unlocked {
+        let _ = Command::new("/usr/bin/security")
+            .arg("lock-keychain")
+            .arg(&keychain)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    if !signed {
+        return Err("sign the app from the update DMG: codesign failed".into());
+    }
+    let verified = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(app)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("verify the app from the update DMG: {e}"))?;
+    if !verified.success() {
+        return Err("verify the app from the update DMG: codesign rejected it".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn stage_macos_dmg(data: &Path, version: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::process::Command;
+
+    let work = data.join("update").join(format!("dmg-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&work).map_err(|e| format!("create DMG work folder: {e}"))?;
+    let dmg = work.join("Consilium-macOS.dmg");
+    let mount = work.join("mount");
+    std::fs::write(&dmg, bytes).map_err(|e| format!("write update DMG: {e}"))?;
+    std::fs::create_dir_all(&mount).map_err(|e| format!("create DMG mount folder: {e}"))?;
+    let attached = Command::new("/usr/bin/hdiutil")
+        .args(["attach", "-readonly", "-nobrowse", "-mountpoint"])
+        .arg(&mount)
+        .arg(&dmg)
+        .output()
+        .map_err(|e| format!("mount update DMG: {e}"))?;
+    if !attached.status.success() {
+        let _ = std::fs::remove_dir_all(&work);
+        return Err(command_failure("mount update DMG", &attached));
+    }
+
+    let exact = mount.join("Consilium.app");
+    let source = if exact.is_dir() {
+        Some(exact)
+    } else {
+        std::fs::read_dir(&mount)
+            .ok()
+            .and_then(|entries| entries.filter_map(Result::ok).map(|e| e.path()).find(|p| p.extension().and_then(|e| e.to_str()) == Some("app")))
+    };
+    let result = source.as_deref().ok_or_else(|| "the macOS update DMG contains no app bundle".to_string()).and_then(|app| stage_macos_app(data, version, app));
+    let detached = Command::new("/usr/bin/hdiutil").arg("detach").arg(&mount).output();
+    let _ = std::fs::remove_dir_all(&work);
+    result?;
+    match detached {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(command_failure("unmount update DMG", &output)),
+        Err(e) => Err(format!("unmount update DMG: {e}")),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn stage_non_macos_download(data: &Path, version: &str, url: &str, bytes: &[u8]) -> Result<(), String> {
+    let next_dir = staged_dir(data);
     let tmp_dir = data.join("update").join("tmp_download");
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("create tmp dir: {e}"))?;
 
     let filename = if cfg!(windows) {
         "Consilium-Windows-Setup.exe"
-    } else if cfg!(target_os = "linux") {
+    } else {
         match url.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
             Some("deb") => "Consilium.deb",
             Some("rpm") => "Consilium.rpm",
             _ => "Consilium.AppImage",
         }
-    } else {
-        "update.bin"
     };
 
     let target_file = tmp_dir.join(filename);
-    std::fs::write(&target_file, &bytes).map_err(|e| format!("write asset: {e}"))?;
+    std::fs::write(&target_file, bytes).map_err(|e| format!("write asset: {e}"))?;
 
     #[cfg(unix)]
     {
@@ -377,6 +669,7 @@ pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str)
 
     let _ = std::fs::remove_dir_all(&next_dir);
     std::fs::rename(&tmp_dir, &next_dir).map_err(|e| format!("stage update: {e}"))?;
+    let _ = std::fs::remove_file(build_stamp(data));
     Ok(())
 }
 
@@ -710,9 +1003,89 @@ mod tests {
         let url = "https://github.com/Ag3nt47/consilium-ai/releases/download/v0.3.28/Consilium-Windows-Setup.exe";
         let d = format!("sha256:{}", "a".repeat(64));
         assert_eq!(check_release_download("v0.3.28", url, &d).unwrap(), "a".repeat(64));
+        let dmg = "https://github.com/Ag3nt47/consilium-ai/releases/download/v0.3.28/Consilium-macOS.dmg";
+        assert_eq!(check_release_download("v0.3.28", dmg, &d).unwrap(), "a".repeat(64));
         assert!(check_release_download("v0.3.28", url, "").is_err());
         assert!(check_release_download("v0.3.28", "https://evil.example/x.exe", &d).is_err());
         assert!(check_release_download("v0.3.28", "https://github.com/Ag3nt47/consilium-ai/releases/download/v1/../../x/y.exe", &d).is_err());
         assert!(check_release_download("0.3.28; rm", url, &d).is_err());
+    }
+
+    #[test]
+    fn release_staging_failure_is_recorded_and_success_clears_it() {
+        let data = std::env::temp_dir().join(format!("consilium-update-error-{}", uuid::Uuid::new_v4()));
+        let failed = Err("download returned HTTP 503".to_string());
+        record_download_result(&data, "v9.8.7", &failed);
+        let log = std::fs::read_to_string(download_error_log(&data)).unwrap();
+        assert!(log.contains("Consilium 9.8.7: download returned HTTP 503"));
+
+        record_download_result(&data, "v9.8.7", &Ok(()));
+        assert!(!download_error_log(&data).exists());
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn download_status_tracks_overlapping_and_cancelled_downloads() {
+        // Keep this test isolated from the process-global production counter: Rust runs unit tests
+        // concurrently, and a cancellation assertion must not race another status test.
+        let state = Mutex::new(DownloadState::default());
+        let remaining_download = DownloadActivity::start(&state, "v1.2.3");
+        let pending_download = track_download(&state, "V1.2.4", std::future::pending::<()>());
+        let mut pending_download = Box::pin(pending_download);
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+
+        // Constructing an async future does nothing. Poll it once so its guard is alive across the
+        // pending await, then cancel it by dropping the future.
+        assert!(std::future::Future::poll(pending_download.as_mut(), &mut context).is_pending());
+        assert_eq!(state.lock().unwrap().active, 2);
+        assert_eq!(download_status_for(&state), DownloadStatus { active: true, version: "1.2.4".into() });
+
+        drop(pending_download);
+        assert_eq!(state.lock().unwrap().active, 1);
+        assert!(download_status_for(&state).active);
+
+        drop(remaining_download);
+        assert_eq!(download_status_for(&state), DownloadStatus::default());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_copied_mac_app_is_complete_before_it_replaces_the_previous_stage() {
+        let data = std::env::temp_dir().join(format!("consilium-mac-stage-{}", uuid::Uuid::new_v4()));
+        let source = data.join("source").join("Consilium.app");
+        let plist = |version: &str| {
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <plist version=\"1.0\"><dict>\
+                 <key>CFBundleExecutable</key><string>consilium</string>\
+                 <key>CFBundleIdentifier</key><string>io.github.ag3nt47.consilium.test</string>\
+                 <key>CFBundlePackageType</key><string>APPL</string>\
+                 <key>CFBundleShortVersionString</key><string>{version}</string>\
+                 </dict></plist>"
+            )
+        };
+        std::fs::create_dir_all(source.join("Contents/MacOS")).unwrap();
+        std::fs::write(source.join("Contents/Info.plist"), plist("999.1.0")).unwrap();
+        let executable = source.join("Contents/MacOS/consilium");
+        std::fs::write(&executable, b"#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(source.join("Contents/copied"), b"complete").unwrap();
+
+        let old = staged_app(&data);
+        std::fs::create_dir_all(old.join("Contents")).unwrap();
+        std::fs::write(old.join("Contents/Info.plist"), plist("998.0.0")).unwrap();
+        std::fs::write(old.join("Contents/old"), b"preserve on failure").unwrap();
+
+        stage_macos_app(&data, "v999.1.0", &source).unwrap();
+        assert_eq!(bundle_version(&old).as_deref(), Some("999.1.0"));
+        assert_eq!(std::fs::read(old.join("Contents/copied")).unwrap(), b"complete");
+        assert!(!old.join("Contents/old").exists());
+
+        std::fs::write(source.join("Contents/Info.plist"), plist("1000.0.0")).unwrap();
+        assert!(stage_macos_app(&data, "v999.2.0", &source).is_err());
+        assert_eq!(bundle_version(&old).as_deref(), Some("999.1.0"));
+        let _ = std::fs::remove_dir_all(&data);
     }
 }

@@ -627,7 +627,13 @@ fn update_available() -> Option<update::Staged> {
     data_dir().and_then(|d| update::staged(&d))
 }
 
-/// Stages a release update downloaded from GitHub into `<data>/update/next`.
+/// Live state for the sidebar emblem while an installer downloads from GitHub.
+#[tauri::command]
+fn update_download_status() -> update::DownloadStatus {
+    update::download_status()
+}
+
+/// Downloads and stages this platform's release update from GitHub.
 #[tauri::command]
 async fn stage_release_update(version: String, url: String, digest: Option<String>) -> Result<(), String> {
     let data = data_dir().ok_or("can't find Consilium's data folder")?;
@@ -1535,6 +1541,7 @@ pub fn run() {
             ingest_repo,
             run_command,
             update_available,
+            update_download_status,
             update_now,
             stage_release_update,
             linux_package_kind,
