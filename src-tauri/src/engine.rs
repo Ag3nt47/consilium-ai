@@ -1435,6 +1435,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resumed_turn_skips_an_ai_switched_off_after_it_was_recorded() {
+        let (app, _term, dir) = pair(0);
+        let conv = app.store.create("x").unwrap().id;
+        app.store.append(&conv, "human", "message", vec!["gpt".into(), "claude".into()], "hello").unwrap();
+        // The turn was recorded with both, then Claude was switched off before the restart.
+        app.journal.begin(Pending::new(&conv, vec!["gpt".into(), "claude".into()], 1));
+        crate::switched::set(app.store.dir(), &conv, "claude", false).unwrap();
+        app.resume_interrupted(None);
+        until_idle(&[&app], &conv).await;
+        let said = said(&app, &conv);
+        assert!(said.iter().any(|m| m.starts_with("gpt:")), "{said:?}");
+        assert!(!said.iter().any(|m| m.starts_with("claude:")), "a switched-off AI answered: {said:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A window that counts the events it was shown while the turn table was locked (#14).
     #[derive(Default)]
     struct LockCheck {

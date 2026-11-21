@@ -226,7 +226,13 @@ impl Council {
                 who.push((a.clone(), Some(*seq)));
             }
         }
-        who.retain(|(a, _)| !done.passed.contains(a) && agents::by_id(a).is_some());
+        // An AI switched off in this chat isn't asked, even when a turn recorded before it was
+        // switched off resumes after a restart.
+        who.retain(|(a, _)| {
+            !done.passed.contains(a)
+                && agents::by_id(a).is_some()
+                && !crate::switched::is_off(store.dir(), &turn.conversation, a)
+        });
         for (a, _) in &who {
             state.live.insert(a.clone());
             state.joined.insert(a.clone());
