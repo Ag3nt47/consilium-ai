@@ -5,3 +5,5 @@ export function modelFit(
   overhead: string | number,
   customWeights?: string | number,
 ): { name: string; weights: number; fit: string }[];
+
+export function ggufShardError(names: string[]): string | undefined;
