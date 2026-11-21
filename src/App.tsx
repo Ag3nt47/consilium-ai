@@ -2,7 +2,7 @@ import { TypedText, TYPED_THEMES } from "./typed";
 import { clock, clockShort, day, num } from "./fmt";
 import { commandElementId, fencedBlocks, handledCommands, needsAdmin, pendingCommands, runsOn, shellName, shellSystem, deniedText, type Fence } from "./commands";
 import { OS, dictationHint, paletteKey, paletteKeyWords, terminalName } from "./platform";
-import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, lazy, memo, Suspense, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -53,6 +53,8 @@ import { RepoDrawer } from "./repo";
 import { BranchesDrawer } from "./branches";
 import { CustomAiForm } from "./customai";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
+
+const UpgradeProgress = lazy(() => import("./UpgradeProgress"));
 
 const THEMES = [
   { id: "glass", name: "visionOS Glass", note: "Frosted translucent glass, ambient glow" },
@@ -3939,6 +3941,9 @@ export default function App() {
               Your conversations stay on this computer. CLI agents use their provider's existing sign-in;
               optional API-agent keys are saved locally and are never added to the conversation or returned to this UI.
             </p>
+            <Suspense fallback={null}>
+              <UpgradeProgress />
+            </Suspense>
             <div className="row end">
               <button title="Close Settings" className="btn primary" onClick={() => setShowSettings(false)}>
                 Done

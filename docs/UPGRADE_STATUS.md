@@ -8,7 +8,11 @@ The attachments supply product requirements and example designs. Translate those
 existing Rust/Tauri/React app. Follow the user's current instructions for live operations, including
 keeping local model runners idle and leaving live Signal pairing deferred.
 
-Legend: ✅ built · 🔨 in progress · ⏭ next · 🕓 later · ⛔ not feasible as written (reason given)
+Legend: ✅ built · 🔨 in progress · 🟡 partially verified · ⏭ next · 🕓 later · ⛔ not feasible as written (reason given)
+
+Run `node scripts/upgrade-progress.mjs` to report completed items and percentages across all six
+documents. Each feasible ledger row counts equally. In-progress and partially verified rows count
+toward the total, and infeasible rows are listed separately.
 
 ## Document 1: Master upgrade blueprint
 
