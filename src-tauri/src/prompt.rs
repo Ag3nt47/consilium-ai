@@ -621,17 +621,62 @@ in the council: {}. Never use ADD_AI for a current participant; @mention them in
     )
 }
 
+/// Older successful command runs can dominate a prompt even after the AI has read them.
+const KEEP_FULL_COMMAND_RESULTS: usize = 3;
+const COMMAND_PREVIEW_CHARS: usize = 2400;
+
+fn successful_command_output(event: &Event) -> Option<(&str, &str, &str)> {
+    if event.kind != "message" || event.sender != "human" || !event.attachments.is_empty() {
+        return None;
+    }
+    let (header, body) = event.text.split_once("\n```text\n")?;
+    if !header.starts_with("Ran command from ") || !header.contains("(exit 0, succeeded, ") {
+        return None;
+    }
+    let (output, reference) = body.rsplit_once("\n```\n")?;
+    let (id, index) = reference.strip_prefix("(command ref ")?.strip_suffix(')')?.rsplit_once('#')?;
+    if id.is_empty() || id.chars().any(char::is_whitespace) || index.parse::<usize>().is_err() {
+        return None;
+    }
+    Some((header, output, reference))
+}
+
+fn command_prompt_preview(event: &Event) -> Option<String> {
+    let (header, output, reference) = successful_command_output(event)?;
+    let chars: Vec<_> = output.chars().collect();
+    if chars.len() <= COMMAND_PREVIEW_CHARS {
+        return None;
+    }
+    let half = COMMAND_PREVIEW_CHARS / 2;
+    let head: String = chars[..half].iter().collect();
+    let tail: String = chars[chars.len() - half..].iter().collect();
+    Some(format!(
+        "{header}\n```text\n{head}\n[Earlier command output shortened in this prompt. Full output is in the chat.]\n{tail}\n```\n{reference}"
+    ))
+}
+
 /// Transcript entries, newest last. Once the safety threshold is crossed, returns the older
-/// entries separately for condensation and keeps a generous recent window verbatim.
+/// entries separately for condensation and keeps a generous recent window in full where possible.
 fn transcript_parts<'a>(events: &'a [Event], me: &str, limits: &Limits) -> (Vec<TranscriptPart<'a>>, Vec<TranscriptPart<'a>>) {
     let latest_human = events.iter().rposition(|e| e.kind == "message" && e.sender == "human");
+    let recent_command_boundary = if limits.per_message.is_none() {
+        events.iter().enumerate().rev()
+            .filter(|(_, event)| successful_command_output(event).is_some())
+            .nth(KEEP_FULL_COMMAND_RESULTS - 1)
+            .map(|(i, _)| i)
+    } else {
+        None
+    };
     let mut parts: Vec<TranscriptPart<'a>> = events
         .iter()
         .enumerate()
         .filter(|(_, e)| e.kind == "message" || (e.kind == "system" && e.sender == crate::council::CONSILIUM))
         .map(|(i, e)| {
             let who = if e.sender == me && e.via.is_none() { format!("{} (you)", label(me)) } else { named(e) };
-            let body = format!("{}{}", e.text, crate::attach::for_transcript(&e.attachments, me));
+            let preview = recent_command_boundary.filter(|&boundary| i < boundary)
+                .filter(|_| Some(i) != latest_human)
+                .and_then(|_| command_prompt_preview(e));
+            let body = preview.unwrap_or_else(|| format!("{}{}", e.text, crate::attach::for_transcript(&e.attachments, me)));
             let body = match limits.per_message {
                 Some((max, data)) => {
                     let max = if Some(i) == latest_human { max.max(LOCAL_LATEST_HUMAN_CHARS) } else { max };
@@ -755,7 +800,7 @@ fn transcript_within(events: &[Event], me: &str, limits: &Limits) -> String {
     }
     if !older.is_empty() {
         out.push_str(&transcript_digest(&older, limits.summary));
-        out.push_str("\n\nRECENT MESSAGES (verbatim)\n\n");
+        out.push_str("\n\nRECENT MESSAGES\n\n");
     }
     out.push_str(&parts.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n\n"));
     out.push_str(&command_boxes_note(events, me, crate::runcmd::is_running));
@@ -1104,6 +1149,32 @@ mod tests {
     }
 
     #[test]
+    fn older_successful_command_output_is_shortened_in_cloud_prompts() {
+        let middle = "middle payload ".repeat(300);
+        let output = format!("HEAD{}TAIL", middle);
+        let report = |status: &str, id: &str| {
+            ev("human", &format!(
+                "Ran command from Claude's message ({status}, 1.0 s):\n```text\n{output}\n```\n(command ref {id}#0)"
+            ))
+        };
+        let recent = report("exit 0, succeeded", "recent");
+        let failed = report("exit 1, failed", "failed");
+        let events = [
+            report("exit 0, succeeded", "older"),
+            failed.clone(),
+            recent.clone(),
+            recent.clone(),
+            recent.clone(),
+        ];
+        let prompt = transcript(&events, "gpt");
+        assert_eq!(prompt.matches("output shortened in this prompt").count(), 1);
+        assert!(prompt.contains("(command ref older#0)"));
+        assert!(prompt.contains(&failed.text));
+        assert_eq!(prompt.matches(&recent.text).count(), 3);
+        assert_eq!(events[0].text.matches(&middle).count(), 1);
+    }
+
+    #[test]
     fn transcript_condenses_oldest_messages_and_keeps_recent_messages_verbatim() {
         let big = "x".repeat(MAX_TRANSCRIPT_CHARS / 2);
         let mut old = ev("human", &big);
@@ -1118,7 +1189,7 @@ mod tests {
         assert!(t.contains("latest"));
         assert!(t.contains("EARLIER CONVERSATION DIGEST"));
         assert!(t.contains("Approved: keep the safe design"));
-        assert!(t.contains("RECENT MESSAGES (verbatim)"));
+        assert!(t.contains("RECENT MESSAGES"));
         assert!(t.len() <= MAX_TRANSCRIPT_CHARS + 500);
         assert_eq!(visible_message_ids(&events, "gpt"), vec!["latest"]);
     }
