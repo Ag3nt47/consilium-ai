@@ -3925,7 +3925,7 @@ export default function App() {
             </label>
             <div className="row">
               <button title="Check GitHub for a newer Consilium release now" className="btn ghost" onClick={checkNow}>
-                Check now
+                Check GitHub now
               </button>
               <button
                 className="btn primary"
