@@ -279,8 +279,15 @@ impl Board {
             Op::Take { task } => {
                 let (i, new) = self.find_or_add(task, Status::Doing, who, now)?;
                 let t = &mut self.tasks[i];
-                if !new && t.status == Status::Doing && t.owner.as_deref() == Some(who) {
-                    return None;
+                if !new {
+                    let owner = t.owner.as_deref();
+                    let already_doing = t.status == Status::Doing && owner == Some(who);
+                    let assigned_elsewhere = who != "human"
+                        && matches!(t.status, Status::Doing | Status::Blocked)
+                        && owner.is_some_and(|owner| owner != who);
+                    if already_doing || assigned_elsewhere {
+                        return None;
+                    }
                 }
                 t.owner = Some(who.to_string());
                 t.status = Status::Doing;
@@ -599,6 +606,20 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_second_agent_cannot_take_an_owned_task_without_a_handoff() {
+        let mut board = Board::default();
+        let take = Op::Take { task: "Review map".into() };
+        assert!(board.apply("claude", &take, 1).is_some());
+        assert!(board.apply("gemini", &take, 2).is_none());
+        assert!(board.apply("claude", &Op::Block { task: "#1".into(), note: Some("Waiting for data".into()) }, 3).is_some());
+        assert!(board.apply("gemini", &take, 4).is_none());
+        assert_eq!(board.tasks[0].owner.as_deref(), Some("claude"));
+        assert!(board.apply("human", &Op::Hand { task: "#1".into(), to: "gemini".into() }, 5).is_some());
+        assert_eq!(board.tasks[0].owner.as_deref(), Some("gemini"));
+        assert_eq!(board.tasks[0].status, Status::Doing);
     }
 
     #[test]
