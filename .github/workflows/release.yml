@@ -248,6 +248,35 @@ jobs:
           fi
           echo "Verified Linux DEB preview installation of Consilium $expected."
 
+      - name: Verify Linux AppImage and RPM preview executables
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="consilium $(node -p 'require("./package.json").version')"
+          appimage="$PWD/oneclick/Consilium-Linux-x86_64.AppImage"
+          rpm="$PWD/oneclick/Consilium-Linux-x86_64.rpm"
+          scratch="$(mktemp -d)"
+          trap 'rm -rf -- "$scratch"' EXIT
+          cd "$scratch"
+          chmod +x "$appimage"
+          "$appimage" --appimage-extract > /dev/null
+          actual="$(./squashfs-root/AppRun --version)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::AppImage expected $expected, found $actual."
+            exit 1
+          fi
+          sudo apt-get install -y rpm2cpio cpio
+          mkdir rpm-root
+          cd rpm-root
+          rpm2cpio "$rpm" | cpio -idm --quiet
+          actual="$(./usr/bin/consilium --version)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::RPM expected $expected, found $actual."
+            exit 1
+          fi
+          echo "Verified AppImage entry point and RPM executable report $expected."
+
       - uses: actions/upload-artifact@v7
         if: needs.prepare.outputs.preview == 'true'
         with:
