@@ -906,6 +906,20 @@ impl Link {
             .collect()
     }
 
+    /// Keeps only the inbox packets `keep` accepts, so filed ones aren't re-read at every start.
+    /// Runs under the inbox writer's lock, so a packet stored meanwhile isn't lost.
+    pub fn retain_inbox(&self, keep: impl Fn(&PeerPacket) -> bool) -> Result<usize, String> {
+        let _writing = self.0.inbox_write.lock().unwrap();
+        let mut kept = Vec::new();
+        let mut n = 0;
+        for p in self.inbox().into_iter().filter(|p| keep(p)) {
+            kept.extend(serde_json::to_vec(&p).map_err(|e| e.to_string())?);
+            kept.push(b'\n');
+            n += 1;
+        }
+        write_private(&self.0.inbox_path, &kept)?;
+        Ok(n)
+    }
     fn persist_outbox(&self, states: &HashMap<String, PeerState>) -> Result<(), String> {
         let q: HashMap<&String, Vec<&PeerPacket>> =
             states.iter().filter(|(_, s)| !s.outbox.is_empty()).map(|(id, s)| (id, s.outbox.iter().collect())).collect();
@@ -1867,6 +1881,30 @@ mod tests {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retain_inbox_drops_filed_packets() {
+        let dir = std::env::temp_dir().join(format!("link-retain-{}", uuid::Uuid::new_v4()));
+        let (link, _) = node(&dir, "retain");
+        let make = |id: &str| PeerPacket {
+            version: 1,
+            id: id.into(),
+            node_id: "node-x".into(),
+            timestamp_ms: 0,
+            kind: PacketKind::Chat,
+            seq: 0,
+            payload: json!({}),
+            payload_sha256: String::new(),
+            mac: String::new(),
+        };
+        let (first, second) = (make(&uuid::Uuid::new_v4().to_string()), make(&uuid::Uuid::new_v4().to_string()));
+        link.append_inbox(&first).unwrap();
+        link.append_inbox(&second).unwrap();
+        assert_eq!(link.retain_inbox(|p| p.id == second.id).unwrap(), 1);
+        assert_eq!(link.inbox(), vec![second.clone()]);
+        link.append_inbox(&first).unwrap();
+        assert_eq!(link.inbox(), vec![second, first], "appending still works after a trim");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     fn node(dir: &Path, name: &str) -> (Link, Arc<Mutex<Vec<PeerPacket>>>) {
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink = got.clone();
