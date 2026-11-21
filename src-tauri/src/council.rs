@@ -675,7 +675,7 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
             if failed && st.live.is_empty() && !st.paused && !s.cancel.is_cancelled() {
                 let now = now_ms();
                 // An AI switched off in this chat never stands in for one that couldn't answer.
-                let available = |a: &agents::Agent| {
+                let available = |a: &'static agents::Agent| {
                     s.bench.until(a.id, now).is_none()
                         && s.host.installed(a)
                         && !crate::switched::is_off(s.store.dir(), &s.turn.conversation, a.id)
