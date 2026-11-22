@@ -220,6 +220,7 @@ fn ps_quote(p: &Path) -> String {
 pub fn helper_script(pid: u32, staged: &Path, target: &Path, log: &Path) -> String {
     let (s, t, g) = (quote(staged), quote(target), quote(log));
     let old = quote(&target.with_extension("app.old"));
+    let failed = quote(&staged.with_extension("app.failed"));
     format!(
         "if ( : > {g} ); then exec > {g} 2>&1; fi\n\
          log() {{ printf '%s %s\\n' \"$(date '+%Y-%m-%dT%H:%M:%S%z')\" \"$1\"; }}\n\
@@ -228,11 +229,17 @@ pub fn helper_script(pid: u32, staged: &Path, target: &Path, log: &Path) -> Stri
          kill -9 {pid} 2>/dev/null; sleep 0.3\n\
          rm -rf {old}\n\
          if mv {t} {old} && mv {s} {t}; then\n\
-             log 'application bundle replaced'; rm -rf {old}\n\
+             log 'application bundle replaced'\n\
+             if open {t}; then\n\
+                 log 'Launch Services accepted relaunch'; rm -rf {old}; exit 0\n\
+             fi\n\
+             log 'relaunch failed; restoring previous bundle'\n\
+             if ! mv {t} {failed} || ! mv {old} {t}; then log 'could not restore previous bundle'; exit 1; fi\n\
          else\n\
-             log 'application bundle replacement failed'; [ -e {t} ] || mv {old} {t}\n\
+             log 'application bundle replacement failed'\n\
+             if [ ! -e {t} ] && ! mv {old} {t}; then log 'could not restore previous bundle'; exit 1; fi\n\
          fi\n\
-         if open {t}; then log 'Launch Services accepted relaunch'; else log 'relaunch failed'; fi\n"
+         if open {t}; then log 'Launch Services accepted relaunch'; else log 'relaunch failed'; exit 1; fi\n"
     )
 }
 
@@ -980,6 +987,32 @@ mod tests {
         assert_eq!(launched, "old");
         assert!(log.contains("application bundle replacement failed"));
         assert!(log.contains("Launch Services accepted relaunch"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mac_helper_restores_the_previous_bundle_if_launch_is_rejected() {
+        let data = std::env::temp_dir().join(format!("consilium mac relaunch {}", uuid::Uuid::new_v4()));
+        let target = data.join("Consilium.app");
+        let stage = data.join("update.app");
+        let log = data.join("install.log");
+        let reopened = data.join("reopened");
+        for (bundle, version) in [(&target, "old"), (&stage, "new")] {
+            std::fs::create_dir_all(bundle).unwrap();
+            std::fs::write(bundle.join("version"), version).unwrap();
+        }
+        let script = format!(
+            "kill() {{ return 1; }}\nsleep() {{ :; }}\nopen() {{ [ \"$(cat \"$1/version\")\" = old ] && cat \"$1/version\" > {}; }}\n{}",
+            quote(&reopened),
+            helper_script(42, &stage, &target, &log)
+        );
+        let result = std::process::Command::new("/bin/sh").arg("-c").arg(script).status().unwrap();
+        assert!(result.success());
+        assert_eq!(std::fs::read_to_string(target.join("version")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(reopened).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(stage.with_extension("app.failed").join("version")).unwrap(), "new");
+        assert!(std::fs::read_to_string(log).unwrap().contains("relaunch failed; restoring previous bundle"));
+        std::fs::remove_dir_all(&data).unwrap();
     }
 
     #[test]
