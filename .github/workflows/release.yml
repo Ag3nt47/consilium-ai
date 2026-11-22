@@ -231,6 +231,38 @@ jobs:
             exit 1
           fi
           echo "Verified macOS preview bundle installation of Consilium $expected."
+          export CONSILIUM_DATA="$staging/profile"
+          mkdir -p "$CONSILIUM_DATA"
+          printf '%s\n' '{"auto_install_updates":false,"members":[]}' > "$CONSILIUM_DATA/council.json"
+          cat > "$staging/window.swift" <<'SWIFT'
+          import CoreGraphics
+          import Darwin
+          import Foundation
+
+          guard CommandLine.arguments.count == 2,
+                let pid = Int(CommandLine.arguments[1]) else { exit(2) }
+          for _ in 0..<60 {
+              guard kill(pid_t(pid), 0) == 0 else { exit(1) }
+              let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
+                  as? [[String: Any]] ?? []
+              if windows.contains(where: {
+                  ($0[kCGWindowOwnerPID as String] as? Int) == pid &&
+                  ($0[kCGWindowLayer as String] as? Int) == 0
+              }) { exit(0) }
+              Thread.sleep(forTimeInterval: 0.5)
+          }
+          exit(1)
+          SWIFT
+          swiftc "$staging/window.swift" -o "$staging/check-window"
+          "$binary" > "$staging/desktop.log" 2>&1 &
+          app=$!
+          trap 'kill "$app" 2>/dev/null || true; wait "$app" 2>/dev/null || true; hdiutil detach "$mount"' EXIT
+          if ! "$staging/check-window" "$app"; then
+            cat "$staging/desktop.log"
+            echo "::error::The staged Consilium bundle did not open an onscreen window within 30 seconds."
+            exit 1
+          fi
+          echo "Verified the staged Consilium bundle opened an onscreen macOS window."
       - name: Verify Linux DEB preview installation
         if: needs.prepare.outputs.preview == 'true' && runner.os == 'Linux'
         shell: bash
