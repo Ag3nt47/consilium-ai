@@ -88,3 +88,15 @@ test("the CLI reports per-device and combined weight capacity after runtime rese
   assert.match(result.stdout, /Combined weight capacity: 12\.0 GiB/);
   assert.match(result.stdout, /Custom model: 11\.0 GiB weights.*Split estimate: This computer \+ Mac/);
 });
+
+test("the CLI exports a numeric per-device split plan", () => {
+  const result = spawnSync(process.execPath, [
+    "scripts/model-fit.mjs", "--host", "10", "--device", "Mac=6", "--weights", "10", "--json",
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(result.stdout);
+  assert.equal(plan.runtimeReserveGiB, 2);
+  assert.deepEqual(plan.models.find(({ name }) => name === "Custom model").allocation, [
+    { name: "This computer", allocated: 6 }, { name: "Mac", allocated: 4 },
+  ]);
+});

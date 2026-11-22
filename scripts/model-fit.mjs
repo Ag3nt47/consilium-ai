@@ -14,6 +14,7 @@ try {
   const { values } = parseArgs({
     options: {
       help: { type: "boolean" },
+      json: { type: "boolean" },
       host: { type: "string" },
       device: { type: "string", multiple: true, default: [] },
       bits: { type: "string", default: "4" },
@@ -23,7 +24,7 @@ try {
     },
   });
   if (values.help) {
-    console.log('Usage: node scripts/model-fit.mjs [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--weights GiB | --gguf PATH ...]');
+    console.log('Usage: node scripts/model-fit.mjs [--json] [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--weights GiB | --gguf PATH ...]');
     console.log("Device memory is usable RAM before inference overhead. Repeat --device for additional computers.");
   } else {
     const bits = Number(values.bits);
@@ -52,15 +53,20 @@ try {
     const shardError = ggufShardError([...files].map((file) => basename(file)));
     if (shardError) throw new Error(shardError);
     const custom = values.weights === undefined ? modelBytes / 2 ** 30 : memory(values.weights, "--weights");
-    if (files.size) console.log(`GGUF on-disk size: ${gib(custom)} across ${files.size} file(s)`);
-    console.log(`${bits}-bit weights; ${gib(overhead)} runtime allowance per device`);
     const capacities = weightBudgets(devices, overhead);
-    for (const [index, { name, memory: available }] of devices.entries()) {
-      console.log(`${name}: ${gib(available)} usable, ${gib(capacities[index].capacity)} for weights`);
+    const models = modelFit(devices, bits, overhead, custom);
+    if (values.json) {
+      console.log(JSON.stringify({ bits, runtimeReserveGiB: overhead, ggufFileCount: files.size, ggufBytes: modelBytes, capacities, models }));
+    } else {
+      if (files.size) console.log(`GGUF on-disk size: ${gib(custom)} across ${files.size} file(s)`);
+      console.log(`${bits}-bit weights; ${gib(overhead)} runtime allowance per device`);
+      for (const [index, { name, memory: available }] of devices.entries()) {
+        console.log(`${name}: ${gib(available)} usable, ${gib(capacities[index].capacity)} for weights`);
+      }
+      console.log(`Combined weight capacity: ${gib(capacities.reduce((sum, device) => sum + device.capacity, 0))}`);
+      for (const { name, weights, fit } of models) console.log(`${name}: ${gib(weights)} weights — ${fit}`);
+      console.log("Memory estimates only. Confirm model and split-runner compatibility before testing.");
     }
-    console.log(`Combined weight capacity: ${gib(capacities.reduce((sum, device) => sum + device.capacity, 0))}`);
-    for (const { name, weights, fit } of modelFit(devices, bits, overhead, custom)) console.log(`${name}: ${gib(weights)} weights — ${fit}`);
-    console.log("Memory estimates only. Confirm model and split-runner compatibility before testing.");
   }
 } catch (error) {
   console.error(error.message);

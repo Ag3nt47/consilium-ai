@@ -45,7 +45,7 @@ export function modelFit(devices, bits, overhead, customWeights) {
     const allocation = selected.map(({ name, allocated }) =>
       `${name} ${allocated < 0.05 ? "<0.1 GiB" : gib(allocated)}`
     ).join(", ");
-    return { name, weights, fit: `Split estimate: ${names} (${allocation})` };
+    return { name, weights, fit: `Split estimate: ${names} (${allocation})`, allocation: selected };
   });
 }
 
