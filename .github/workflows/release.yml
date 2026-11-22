@@ -278,6 +278,28 @@ jobs:
           fi
           echo "Verified AppImage entry point and RPM executable report $expected."
 
+      - name: Verify Fedora RPM preview installation
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(node -p 'require("./package.json").version')"
+          docker run --rm --mount "type=bind,src=$PWD/oneclick,dst=/preview,readonly" \
+            registry.fedoraproject.org/fedora:43@sha256:08bba635be5e58af81ae39d88fda4a311bcfe0d8b4b7e98e28c109f16c391d9b \
+            bash -euo pipefail -c '
+              package=/preview/Consilium-Linux-x86_64.rpm
+              name="$(rpm -qp --queryformat "%{NAME}" "$package")"
+              dnf install -y "$package"
+              rpm -q "$name"
+              rpm -ql "$name" | grep -Fx /usr/bin/consilium
+              actual="$(/usr/bin/consilium --version)"
+              if [[ "$actual" != "consilium $1" ]]; then
+                printf "Expected Consilium %s, found %s.\n" "$1" "$actual" >&2
+                exit 1
+              fi
+              printf "Verified Fedora RPM package installation of Consilium %s.\n" "$1"
+            ' _ "$expected"
+
       - uses: actions/upload-artifact@v7
         if: needs.prepare.outputs.preview == 'true'
         with:
