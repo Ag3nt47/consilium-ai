@@ -929,8 +929,8 @@ const COMMAND_BOXES_LISTED: usize = 8;
 /// AIs kept writing "still waiting on the output" after the output had already arrived.
 fn command_boxes_note(events: &[Event], me: &str, running: impl Fn(&str, usize) -> bool) -> String {
     let mut lines: Vec<String> = Vec::new();
-    for e in events.iter().filter(|e| e.sender == me && e.kind == "message" && e.via.is_none()) {
-        for (i, b) in crate::runcmd::fenced_blocks(&e.text).iter().enumerate() {
+    'messages: for e in events.iter().rev().filter(|e| e.sender == me && e.kind == "message" && e.via.is_none()) {
+        for (i, b) in crate::runcmd::fenced_blocks(&e.text).iter().enumerate().rev() {
             if crate::runcmd::shell_for(&b.lang).is_none() || crate::runcmd::check(b).is_err() {
                 continue;
             }
@@ -952,16 +952,19 @@ fn command_boxes_note(events: &[Event], me: &str, running: impl Fn(&str, usize) 
             let first_line = b.code.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
             let preview: String = first_line.chars().take(60).collect();
             lines.push(format!("- ref {}#{i} ({}, starts `{preview}`): {state}", &e.id[..e.id.len().min(8)], b.lang));
+            if lines.len() == COMMAND_BOXES_LISTED {
+                break 'messages;
+            }
         }
     }
     if lines.is_empty() {
         return String::new();
     }
-    let skip = lines.len().saturating_sub(COMMAND_BOXES_LISTED);
+    lines.reverse();
     format!(
         "\n\nYOUR COMMAND BOXES ON THIS COMPUTER (newest last)\n{}\nTrust this list over your memory: don't say you're \
          waiting on a box marked FINISHED, and don't repost a box that is RUNNING or NOT RUN.",
-        lines[skip..].join("\n")
+        lines.join("\n")
     )
 }
 
@@ -1140,6 +1143,23 @@ mod tests {
         assert!(note.contains(&format!("#3 ({shell}, starts `date`): RUNNING")), "{note}");
         assert!(!note.contains("whoami"), "other AIs' boxes are theirs");
         assert!(command_boxes_note(&events, "gpt", |_, _| false).is_empty());
+    }
+
+    #[test]
+    fn command_boxes_note_checks_only_the_newest_boxes() {
+        let shell = if cfg!(windows) { "powershell" } else { "bash" };
+        let events: Vec<_> = (0..12).map(|i| Event {
+            id: format!("event-{i:02}"),
+            ..ev("claude", &format!("```{shell}\necho command-{i:02}\n```"))
+        }).collect();
+        let checked = std::cell::Cell::new(0);
+        let note = command_boxes_note(&events, "claude", |_, _| {
+            checked.set(checked.get() + 1);
+            false
+        });
+        assert_eq!(checked.get(), COMMAND_BOXES_LISTED);
+        assert!(!note.contains("command-03"));
+        assert!(note.find("command-04").unwrap() < note.find("command-11").unwrap());
     }
 
     #[test]
