@@ -503,7 +503,7 @@ fn split_reason(arg: &str) -> (String, Option<String>) {
 pub fn for_prompt(board: &Board) -> String {
     let mut s = String::from(
         "\n\nTASK BOARD (shared across computers; editable by the human). \
-Check ownership before work, claim once, wait for handoff on owned tasks, and mark done after commit and checks. \
+Before claiming a large task, divide it into independent tasks with affected files and a verification step. Check ownership, claim once, coordinate shared edits through a handoff, and mark done after commit and checks. \
 Put each action on its own line: `TASK: take <title or #n>` (adds a new title), `TASK: done <title or #n>`, \
 `TASK: blocked <#n> - <why>`, `TASK: hand <#n> to @name`, `TASK: add <title>`, `TASK: drop <#n>`. \
 Task numbers are shared. An owner shown as \"<AI> (<computer>)\" is remote. \
