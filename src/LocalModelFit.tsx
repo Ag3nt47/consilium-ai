@@ -34,9 +34,19 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
   const totalCapacity = capacities.reduce((total, device) => total + device.capacity, 0);
 
   const showEqualTarget = preferSplit && budgets.length > 1;
-  const equalTarget = (weights: number) => gib(
-    Math.ceil(equalSplitMemoryGiB(weights, budgets.length, overhead) * 10) / 10
-  );
+  const equalTarget = (weights: number) => {
+    const target = equalSplitMemoryGiB(weights, budgets.length, overhead);
+    const shortfalls = budgets.flatMap(({ name, memory }) => {
+      const available = Number(memory);
+      if (memory === "" || !Number.isFinite(available) || available < 0) {
+        return [`${name || "Unnamed device"}: enter usable memory`];
+      }
+      return available < target
+        ? [`${name || "Unnamed device"} needs ${gib(Math.ceil((target - available) * 10) / 10)} more`]
+        : [];
+    });
+    return [gib(Math.ceil(target * 10) / 10), ...shortfalls].join(" · ");
+  };
 
   async function copyEstimate() {
     const report = [
@@ -46,7 +56,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
       ...budgets.map(({ name, memory }, index) => `${name || "Unnamed device"}: ${memory ? gib(Number(memory)) : "memory not entered"} usable, ${gib(capacities[index].capacity)} for weights.`),
       "",
       ...models.map(({ name, weights, fit }) => {
-        const target = showEqualTarget ? ` Equal split across ${budgets.length} devices: ${equalTarget(weights)} usable per device.` : "";
+        const target = showEqualTarget ? ` Equal split across ${budgets.length} devices: ${equalTarget(weights)}.` : "";
         return `${name}: ${gib(weights)} weights. ${fit}.${target}`;
       }),
       "",

@@ -118,6 +118,7 @@ test("the CLI exports an explicitly requested split for a model that fits locall
   assert.equal(result.status, 0, result.stderr);
   const model = JSON.parse(result.stdout).models.find(({ name }) => name === "Custom model");
   assert.equal(model.equalSplitMemoryGiB, 6);
+  assert.deepEqual(model.equalSplitShortfalls, [{ name: "Mac", missingGiB: 1 }]);
   assert.deepEqual(model.allocation, [
     { name: "This computer", allocated: 5 },
     { name: "Mac", allocated: 3 },
