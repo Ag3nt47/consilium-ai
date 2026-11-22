@@ -411,6 +411,7 @@ export const demoApi = {
           data_url: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%' stop-color='%230f172a'/><stop offset='50%' stop-color='%231e1b4b'/><stop offset='100%' stop-color='%23020617'/></linearGradient></defs><rect width='100%' height='100%' fill='url(%23g)'/><circle cx='60%' cy='40%' r='300' fill='%23312e81' opacity='0.4'/></svg>",
         }
       : null,
+  linkDiscoverLan: async () => [],
   linkStatus: async () => ({
     enabled: true,
     node_id: "demo-node-mac",
