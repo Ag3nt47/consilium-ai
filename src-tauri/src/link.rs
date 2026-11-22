@@ -2482,9 +2482,19 @@ mod tests {
         joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
 
         let joiner_id = joiner.0.cfg.lock().unwrap().node_id.clone();
+        assert!(wait_for(|| host.status().peers[0].connected).await);
+        let unavailable = tokio::net::TcpSocket::new_v4().unwrap();
+        unavailable.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let unreachable = unavailable.local_addr().unwrap().to_string();
+        let reachable = format!("127.0.0.1:{}", joiner.0.port);
+        host.0.cfg.lock().unwrap().peers[0].addrs = vec![unreachable.clone(), reachable.clone()];
         let report = host.test_peer(&joiner_id).await.unwrap();
         assert_eq!(report.name, joiner.0.cfg.lock().unwrap().name);
-        assert!(!report.routes.is_empty());
+        assert!(report.handshake_ok);
+        assert_eq!(
+            report.routes.iter().map(|route| (route.addr.as_str(), route.reachable)).collect::<Vec<_>>(),
+            [(unreachable.as_str(), false), (reachable.as_str(), true)]
+        );
 
         host.stop();
         joiner.stop();
