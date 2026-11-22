@@ -1019,10 +1019,7 @@ fn request_peer_resources() -> Result<(), String> {
     let Some(link) = link_handle().filter(|link| link.enabled() && link.has_peers()) else {
         return Err("No paired computers are available.".into());
     };
-    if !link.status().peers.iter().any(|peer| peer.connected) {
-        return Err("No paired computers are connected.".into());
-    }
-    link.send(peer_protocol::PacketKind::Chat, serde_json::json!({
+    link.send_connected(peer_protocol::PacketKind::Chat, serde_json::json!({
         "conversation": "",
         "title": "",
         "id": uuid::Uuid::new_v4().to_string(),

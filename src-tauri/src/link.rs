@@ -850,15 +850,20 @@ impl Link {
     /// Queues a packet for every paired computer; it is delivered now if connected, otherwise
     /// as soon as a route comes back. Returns the packet id.
     pub fn send(&self, kind: PacketKind, payload: Value) -> Result<String, String> {
-        self.send_packet(None, kind, payload)
+        self.send_packet(None, false, kind, payload)
     }
 
     /// Queues a packet for one paired computer using the same reliable delivery as a broadcast.
     pub fn send_to(&self, node_id: &str, kind: PacketKind, payload: Value) -> Result<String, String> {
-        self.send_packet(Some(node_id), kind, payload)
+        self.send_packet(Some(node_id), false, kind, payload)
     }
 
-    fn send_packet(&self, recipient: Option<&str>, kind: PacketKind, payload: Value) -> Result<String, String> {
+    /// Queues an on-demand request only for peers connected at admission.
+    pub fn send_connected(&self, kind: PacketKind, payload: Value) -> Result<String, String> {
+        self.send_packet(None, true, kind, payload)
+    }
+
+    fn send_packet(&self, recipient: Option<&str>, connected_only: bool, kind: PacketKind, payload: Value) -> Result<String, String> {
         let (me, peers) = {
             let cfg = self.0.cfg.lock().unwrap();
             let peers = cfg.peers.iter()
@@ -878,8 +883,11 @@ impl Link {
             let line = seal(&me, &key, &packet)?;
             prepared.push((peer.node_id.clone(), packet, line));
         }
-        let first_id = prepared.first().map(|(_, packet, _)| packet.id.clone()).unwrap_or_default();
         let mut states = self.0.peers.lock().unwrap();
+        if connected_only {
+            prepared.retain(|(id, _, _)| states.get(id).is_some_and(|state| state.tx.is_some()));
+        }
+        let first_id = prepared.first().ok_or("No paired computers are connected.")?.1.id.clone();
         if let Some((id, _)) = prepared.iter().find_map(|(id, _, _)| {
             let queued = states.get(id).map_or(0, |state| state.outbox.len());
             (queued >= OUTBOX_LIMIT).then_some((id, queued))
@@ -2419,6 +2427,15 @@ mod tests {
         host.send_to(requester, PacketKind::Chat, json!({ "kind": "resources" })).unwrap();
         let status = host.status();
         assert_eq!(status.peers.iter().find(|peer| peer.node_id == requester).unwrap().queued, 1);
+        assert_eq!(status.peers.iter().find(|peer| peer.node_id == bystander).unwrap().queued, 0);
+        let scan = json!({ "kind": "resources_request" });
+        assert!(host.send_connected(PacketKind::Chat, scan.clone()).is_err());
+        let (tx, mut receiver) = mpsc::unbounded_channel();
+        host.0.peers.lock().unwrap().get_mut(requester).unwrap().tx = Some(tx);
+        host.send_connected(PacketKind::Chat, scan).unwrap();
+        assert!(receiver.try_recv().is_ok(), "connected peer received the request");
+        let status = host.status();
+        assert_eq!(status.peers.iter().find(|peer| peer.node_id == requester).unwrap().queued, 2);
         assert_eq!(status.peers.iter().find(|peer| peer.node_id == bystander).unwrap().queued, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
