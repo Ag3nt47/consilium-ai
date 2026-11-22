@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "./api";
+import { api, type OllamaModel } from "./api";
 
 import { gib, ggufShardError, modelFit, weightBudgets } from "./model-fit.mjs";
 
@@ -8,7 +8,10 @@ const memoryInput = (gib: number) => (Math.floor(Math.max(0, gib) * 10) / 10).to
 const runnerNames = new Set(["ollama", "llama-cli", "llama-server", "ggml-rpc-server", "rpc-server"]);
 const deviceName = (name: string) => name.trim().toLowerCase();
 
-export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
+export function LocalModelFit({ availableGiB, ollamaModels }: {
+  availableGiB?: number;
+  ollamaModels: OllamaModel[];
+}) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [nextId, setNextId] = useState(1);
   const [hostRunners, setHostRunners] = useState<string[] | null>(null);
@@ -145,6 +148,22 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
           Runtime and context allowance per device (GiB)
           <input type="number" min="0" step="0.1" value={overhead} onChange={(e) => setOverhead(e.target.value)} />
         </label>
+        {ollamaModels.some(({ size }) => Number.isFinite(size) && size > 0) && (
+          <label>
+            Use an installed Ollama model size
+            <select value="" onChange={(event) => {
+              const model = ollamaModels.find(({ name }) => name === event.target.value);
+              if (!model) return;
+              setCustomWeights(String(model.size / 2 ** 30));
+              setFileMessage(`Estimated from the installed size of ${model.name}.`);
+            }}>
+              <option value="">Choose a model</option>
+              {ollamaModels.filter(({ size }) => Number.isFinite(size) && size > 0).map(({ name, size }) => (
+                <option key={name} value={name}>{name} ({gib(size / 2 ** 30)})</option>
+              ))}
+            </select>
+          </label>
+        )}
         <label>
           Custom model weight file size (GiB)
           <input type="number" min="0" step="any" value={customWeights} onChange={(e) => {

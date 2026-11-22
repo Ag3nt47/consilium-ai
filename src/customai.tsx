@@ -101,7 +101,7 @@ export function CustomAiForm({ onAdded, onError, availableGiB }: { onAdded: (id:
         ))}
       </div>
       {preset >= 0 && <p className="muted small">{PRESETS[preset].hint}</p>}
-      <LocalModelFit availableGiB={availableGiB} />
+      <LocalModelFit availableGiB={availableGiB} ollamaModels={ollamaModels} />
       <div className="custom-ai-fields">
         <label>
           Name <span className="muted small">(you'll @mention it by this)</span>
