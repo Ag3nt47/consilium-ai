@@ -163,9 +163,13 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
   };
 
   useEffect(() => {
-    if (!initialStatus) {
-      loadStatus();
+    if (initialStatus) {
+      setStatus(initialStatus);
+      return;
     }
+    void loadStatus();
+    const timer = window.setInterval(loadStatus, 5000);
+    return () => window.clearInterval(timer);
   }, [initialStatus]);
 
   // Expiration countdown
@@ -313,6 +317,12 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
   return (
     <div className="link-settings">
       {error && <div className="link-error small">{error}</div>}
+      {status.enabled && status.error && (
+        <div className="link-error small" role="status">
+          <strong>Incoming connections unavailable.</strong> {status.error}
+          {" "}This computer may still connect out. Check whether another app owns the port, then turn the direct link off and on.
+        </div>
+      )}
 
       <div className="link-card">
         <div className="row between align-center">
