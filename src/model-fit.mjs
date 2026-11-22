@@ -1,5 +1,8 @@
 const MODELS = [
   ["Qwen3 0.6B", 0.6],
+  ["Qwen3 1.7B", 1.7],
+  ["Qwen3 4B", 4],
+  ["Qwen2.5-Coder 7B", 7.61],
   ["Qwen3 8B", 8],
   ["Llama 3.1 8B", 8],
   ["14B class", 14],
