@@ -53,16 +53,27 @@ export function LocalModelFit({ availableGiB }: { availableGiB?: number }) {
     setHostRunners(null);
     const localInventory = api.localToolInventory().catch(() => null);
     try {
-      const before = await api.peerResources();
+      const [before, link] = await Promise.all([api.peerResources(), api.linkStatus()]);
+      const expected = link.peers.filter((peer) => peer.connected).length;
       await api.requestPeerResources();
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      const reports = await api.peerResources();
-      const found = Object.entries(reports).flatMap(([name, report]) => {
-        if (report.updated_at <= (before[name]?.updated_at ?? 0) || !report.total_memory_mb) return [];
-        const availableMiB = report.available_memory_mb ?? report.total_memory_mb * (1 - report.memory_percent / 100);
-        const memory = Math.max(0, Math.min(report.total_memory_mb, availableMiB)) / 1024;
+      const deadline = performance.now() + 6000;
+      let fresh: [string, Awaited<ReturnType<typeof api.peerResources>>[string]][] = [];
+      do {
+        const reports = await api.peerResources();
+        fresh = Object.entries(reports).filter(([name, report]) =>
+          report.updated_at > (before[name]?.updated_at ?? 0) && (report.total_memory_mb ?? 0) > 0
+        );
+        if (fresh.length >= expected && expected > 0) break;
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) break;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(500, remaining)));
+      } while (true);
+      const found = fresh.map(([name, report]) => {
+        const totalMiB = report.total_memory_mb ?? 0;
+        const availableMiB = report.available_memory_mb ?? totalMiB * (1 - report.memory_percent / 100);
+        const memory = Math.max(0, Math.min(totalMiB, availableMiB)) / 1024;
         const runners = report.tools?.filter((tool) => runnerNames.has(tool)) ?? [];
-        return [{ id: name, name, memory: memoryInput(memory), runners }];
+        return { id: name, name, memory: memoryInput(memory), runners };
       });
       setDevices((previous) => [
         ...previous.filter((device) => typeof device.id === "number"),
