@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, type OllamaModel } from "./api";
 
-import { gib, ggufShardError, modelFit, weightBudgets } from "./model-fit.mjs";
+import { equalSplitMemoryGiB, gib, ggufShardError, modelFit, weightBudgets } from "./model-fit.mjs";
 
 type Device = { id: number | string; name: string; memory: string; runners?: string[]; platform?: string };
 const memoryInput = (gib: number) => (Math.floor(Math.max(0, gib) * 10) / 10).toFixed(1);
@@ -33,9 +33,8 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
   const totalCapacity = capacities.reduce((total, device) => total + device.capacity, 0);
 
   const showEqualTarget = preferSplit && budgets.length > 1;
-  const runtimeGiB = Number(overhead);
   const equalTarget = (weights: number) => gib(
-    Math.ceil((weights / budgets.length + (Number.isFinite(runtimeGiB) ? Math.max(0, runtimeGiB) : 0)) * 10) / 10
+    Math.ceil(equalSplitMemoryGiB(weights, budgets.length, overhead) * 10) / 10
   );
 
   async function copyEstimate() {
