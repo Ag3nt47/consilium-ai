@@ -1752,7 +1752,7 @@ pub async fn discover_lan(port: u16) -> Result<Vec<String>, String> {
                 continue;
             }
             let candidate = Ipv4Addr::from(candidate);
-            if (candidate.is_private() || candidate.is_link_local()) && !own.contains(&candidate.into()) {
+            if (candidate.is_private() || candidate.is_link_local()) && route_ip_allowed(candidate.into()) && !own.contains(&candidate.into()) {
                 candidates.push((address.ip, SocketAddrV4::new(candidate, port)));
             }
         }
@@ -1932,6 +1932,21 @@ fn route_ip_allowed(ip: std::net::IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn discovery_distinguishes_peerlink_greetings_from_other_services() {
+        for (greeting, expected) in [
+            (serde_json::to_string(&Wire::Challenge { nonce: "a".repeat(32) }).unwrap(), true),
+            (serde_json::to_string(&Wire::Challenge { nonce: "b".repeat(300) }).unwrap(), false),
+            ("HTTP/1.1 200 OK".to_string(), false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let (mut server, _) = listener.accept().await.unwrap();
+            server.write_all(format!("{greeting}\n").as_bytes()).await.unwrap();
+            assert_eq!(peerlink_greeting(client).await, expected);
+        }
+    }
 
     #[test]
     fn computer_nicknames_are_unique_and_clean() {
