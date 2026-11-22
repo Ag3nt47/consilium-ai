@@ -421,10 +421,21 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
       {status.enabled && (
         <>
           <div className="section-label" style={{ marginTop: "16px" }}>
-            Pair Another Computer (Mac or Windows)
+            Pair Another Computer
           </div>
 
           <div className="link-card">
+            <details className="small">
+              <summary>Walk me through setup and failover testing</summary>
+              <ol>
+                <li>Open Consilium on both computers and enable the direct link. Connect them to the same trusted network using Ethernet or Wi-Fi.</li>
+                <li>On the first computer, choose <strong>Show Pairing Code</strong>. Generate a code and copy one of its local addresses above.</li>
+                <li>On the second computer, choose <strong>Join Another Computer</strong>. Enter the address and code from the first computer, then pair. Auto-Find on LAN can suggest addresses.</li>
+                <li>On the linked computer card, choose <strong>Test Connection</strong> and confirm there is an authenticated session. If it fails, check the address, generate a fresh code if needed, and allow Consilium through the firewall on the trusted network.</li>
+                <li>For a backup path, connect another interface on both computers. Keep Ethernet connected while joining Wi-Fi. For Bluetooth, first establish a Bluetooth network connection in the operating system. Add the other computer’s address on the backup path if it is missing.</li>
+                <li>Run <strong>Communication stress test</strong> above and check that authenticated traffic used two distinct local interfaces. With access to both computers, disconnect the active path, check that the alternate interface becomes active, then restore the first path.</li>
+              </ol>
+            </details>
             <div className="pairing-tabs">
               <button
                 className={`tab-btn ${mode === "host" ? "active" : ""}`}
@@ -479,14 +490,6 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
               </div>
             ) : (
               <div className="tab-pane">
-                <div className="failover-intro-callout small">
-                  <strong>⚡ Automatic Wired & Wireless Failover</strong>
-                  <p className="muted" style={{ margin: "4px 0 0 0" }}>
-                    Consilium automatically discovers and syncs both wired (Gigabit Ethernet) and wireless (Wi-Fi) network routes.
-                    If a cable is disconnected or Wi-Fi drops, connections automatically switch to the next fastest route in under 2 seconds without dropping messages.
-                  </p>
-                </div>
-
                 <p className="muted small" style={{ marginTop: "12px" }}>
                   Enter the local network address and 6-digit pairing code shown on the other computer.
                 </p>
