@@ -707,15 +707,19 @@ impl Link {
         let label = addrs.first().cloned().unwrap_or_default();
         let generation = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| s.generation);
         let started = std::time::Instant::now();
+        let attempt = token.child_token();
         let spawn_dial = || {
-            let (me, p, a, t) = (self.clone(), peer.clone(), addrs.to_vec(), token.clone());
+            let (me, p, a, t) = (self.clone(), peer.clone(), addrs.to_vec(), attempt.clone());
             tokio::spawn(async move { me.dial_on(p, &a, t).await })
         };
         let mut dial = spawn_dial();
         let mut switched_at: Option<(String, u64, u64, u64)> = None;
         let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, local_interface: None, detail };
         while started.elapsed() < STRESS_SWITCH_TIMEOUT {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::select! {
+                _ = attempt.cancelled() => return fail(label, "the direct link was turned off".into()),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
             let (route, packets, session_generation, interface) = {
                 let states = self.0.peers.lock().unwrap();
                 let Some(s) = states.get(&peer.node_id) else { continue };
@@ -756,6 +760,8 @@ impl Link {
                 }
             }
         }
+        // A late test dial must not replace the route selected by the next attempt.
+        attempt.cancel();
         match switched_at {
             Some((r, _, _, _)) => fail(r, "connected, but nothing came back over it".into()),
             None => fail(label, "timed out".into()),
