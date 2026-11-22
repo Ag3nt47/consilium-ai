@@ -492,6 +492,16 @@ impl Link {
         answers_signal((cfg.node_id.as_str(), LOCAL_ACTIVE_MS.load(Ordering::SeqCst)), &others)
     }
 
+    pub(crate) fn connected_peer_ids(&self) -> Vec<String> {
+        let cfg = self.0.cfg.lock().unwrap();
+        let states = self.0.peers.lock().unwrap();
+        cfg.peers
+            .iter()
+            .filter(|peer| states.get(&peer.node_id).is_some_and(|state| state.tx.is_some()))
+            .map(|peer| peer.node_id.clone())
+            .collect()
+    }
+
     pub fn status(&self) -> LinkStatus {
         let cfg = self.0.cfg.lock().unwrap().clone();
         let peers = self.0.peers.lock().unwrap();
