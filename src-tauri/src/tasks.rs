@@ -19,8 +19,9 @@ use std::sync::Mutex;
 const MAX_TITLE: usize = 140;
 /// Most tasks a board holds; the oldest finished ones go first.
 const MAX_TASKS: usize = 200;
-/// Finished tasks shown to the AIs (the newest ones); open tasks are always shown.
+/// Finished tasks shown to the AIs (the newest ones).
 const DONE_IN_PROMPT: usize = 5;
+const LOCAL_OPEN_IN_PROMPT: usize = 24;
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -500,7 +501,7 @@ fn split_reason(arg: &str) -> (String, Option<String>) {
 }
 
 /// The board and how to change it, for an AI's instructions.
-pub fn for_prompt(board: &Board) -> String {
+pub fn for_prompt(board: &Board, local_agent: Option<&str>) -> String {
     let mut s = String::from(
         "\n\nTASK BOARD (shared across computers; editable by the human). \
 Before claiming a large task, divide it into independent tasks with affected files and a verification step. Check ownership, claim once, coordinate shared edits through a handoff, and mark done after commit and checks. \
@@ -513,11 +514,23 @@ Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
         s.push_str("\nThe board is empty.");
         return s;
     }
-    let open: Vec<&Task> = board
+    let mut open: Vec<&Task> = board
         .tasks
         .iter()
         .filter(|t| t.status != Status::Done)
         .collect();
+    let omitted_open = if let Some(agent) = local_agent {
+        open.sort_by_key(|task| match task.owner.as_deref() {
+            Some(owner) if owner == agent => 0,
+            None => 1,
+            Some(_) => 2,
+        });
+        let omitted = open.len().saturating_sub(LOCAL_OPEN_IN_PROMPT);
+        open.truncate(LOCAL_OPEN_IN_PROMPT);
+        omitted
+    } else {
+        0
+    };
     let mut done: Vec<&Task> = board
         .tasks
         .iter()
@@ -547,6 +560,9 @@ Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
             .unwrap_or_default();
         s.push_str(&format!("\n#{} [{state}] {}{note}", t.id, t.title));
     }
+    if omitted_open > 0 {
+        s.push_str(&format!("\n({omitted_open} open tasks omitted. The task board in the app shows every task.)"));
+    }
     if done.len() > DONE_IN_PROMPT {
         s.push_str(&format!(
             "\n({} older finished tasks not shown)",
@@ -570,6 +586,29 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn local_task_prompt_keeps_owned_work_and_limits_open_rows() {
+        let mut board = Board::default();
+        for id in 1..=30 {
+            board.tasks.push(Task {
+                id,
+                title: format!("Assigned task {id}"),
+                owner: Some(if id == 30 { "local" } else { "other" }.to_string()),
+                status: Status::Doing,
+                note: None,
+                by: "human".into(),
+                updated: 0,
+            });
+        }
+        let local = for_prompt(&board, Some("local"));
+        assert_eq!(local.lines().filter(|line| line.starts_with('#')).count(), LOCAL_OPEN_IN_PROMPT);
+        assert!(local.contains("#30 [doing"));
+        assert!(!local.contains("#29 [doing"));
+        assert!(local.contains("6 open tasks omitted"));
+        let hosted = for_prompt(&board, None);
+        assert_eq!(hosted.lines().filter(|line| line.starts_with('#')).count(), 30);
     }
 
     #[test]
@@ -675,7 +714,7 @@ mod tests {
 
         let board = load(&d, "c1");
         assert_eq!(board.tasks[1].owner.as_deref(), Some("claude"));
-        let p = for_prompt(&board);
+        let p = for_prompt(&board, None);
         assert!(p.contains("#2 [doing · Claude] Review link fixes"), "{p}");
         assert!(p.contains("#1 [done · Claude] Task board"), "{p}");
 
