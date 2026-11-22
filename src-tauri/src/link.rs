@@ -342,6 +342,7 @@ struct PeerState {
     read_ours: std::collections::BTreeMap<String, Vec<String>>,
     /// Packets received from it, so a route switched to in a stress test is proven by traffic.
     packets_in: u64,
+    route_updates: u64,
 }
 
 struct Inner {
@@ -671,6 +672,21 @@ impl Link {
                 out.push(StressReport { computer: self.peer_name(&peer.node_id), routes: vec![], restored: None });
                 continue;
             }
+            let updates = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| s.route_updates);
+            // Wait briefly for the peer's next authenticated interface advertisement.
+            let deadline = tokio::time::Instant::now() + HEARTBEAT + Duration::from_millis(500);
+            while tokio::time::Instant::now() < deadline {
+                if self.0.peers.lock().unwrap().get(&peer.node_id)
+                    .is_none_or(|s| s.tx.is_none() || s.route_updates != updates)
+                {
+                    break;
+                }
+                tokio::select! {
+                    _ = token.cancelled() => return Err("The direct link was turned off".into()),
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+            }
+            let Some(peer) = self.peer(&peer.node_id) else { continue };
             let mut routes = Vec::new();
             for addr in peer.addrs.iter().take(12) {
                 routes.push(self.switch_to(&peer, std::slice::from_ref(addr), &token).await);
@@ -1456,6 +1472,9 @@ impl Link {
                     }
                     if packet.payload.get("addrs").is_some() {
                         self.learn_addrs(from, &packet.payload, None);
+                        if let Some(state) = self.0.peers.lock().unwrap().get_mut(from) {
+                            state.route_updates = state.route_updates.wrapping_add(1);
+                        }
                     }
                 }
             }
