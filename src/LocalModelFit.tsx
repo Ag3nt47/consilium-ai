@@ -3,7 +3,7 @@ import { api, type OllamaModel } from "./api";
 
 import { gib, ggufShardError, modelFit, weightBudgets } from "./model-fit.mjs";
 
-type Device = { id: number | string; name: string; memory: string; runners?: string[] };
+type Device = { id: number | string; name: string; memory: string; runners?: string[]; platform?: string };
 const memoryInput = (gib: number) => (Math.floor(Math.max(0, gib) * 10) / 10).toFixed(1);
 const runnerNames = new Set(["ollama", "llama-cli", "llama-server", "ggml-rpc-server", "rpc-server"]);
 const deviceName = (name: string) => name.trim().toLowerCase();
@@ -76,7 +76,8 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
         const availableMiB = report.available_memory_mb ?? totalMiB * (1 - report.memory_percent / 100);
         const memory = Math.max(0, Math.min(totalMiB, availableMiB)) / 1024;
         const runners = report.tools?.filter((tool) => runnerNames.has(tool)) ?? [];
-        return { id: name, name, memory: memoryInput(memory), runners };
+        const platform = [report.os, report.build_arch].filter(Boolean).join(" ");
+        return { id: name, name, memory: memoryInput(memory), runners, platform };
       });
       setDevices((previous) => [
         ...previous.filter((device) => typeof device.id === "number"),
@@ -113,6 +114,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
         )}
         {devices.map((device) => (
           <div className="row wrap" key={device.id}>
+            {device.platform && <span className="muted">Consilium build: {device.platform}</span>}
             <label>
               Device {device.id} name
               <input value={device.name} onChange={(e) => {
