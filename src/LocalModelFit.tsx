@@ -15,6 +15,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
   const [devices, setDevices] = useState<Device[]>([]);
   const [nextId, setNextId] = useState(1);
   const [hostRunners, setHostRunners] = useState<string[] | null>(null);
+  const [scannedHostMemory, setScannedHostMemory] = useState<string | null>(null);
   const [hostMemory, setHostMemory] = useState<string | null>(null);
   const [bits, setBits] = useState(4);
   const [overhead, setOverhead] = useState("2");
@@ -24,7 +25,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
-  const host = hostMemory ?? (availableGiB && availableGiB > 0 ? memoryInput(availableGiB) : "");
+  const host = hostMemory ?? scannedHostMemory ?? (availableGiB && availableGiB > 0 ? memoryInput(availableGiB) : "");
   const reportedNames = new Set(devices.filter((device) => typeof device.id === "string").map((device) => deviceName(device.name)));
   const included = devices.filter((device) => typeof device.id === "string" || !reportedNames.has(deviceName(device.name)));
   const budgets = [{ name: "This computer", memory: host }, ...included];
@@ -63,6 +64,10 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
     setScanning(true);
     setScanStatus("");
     setHostRunners(null);
+    const localPressure = api.systemPressure().then((pressure) => {
+      const availableMiB = pressure.available_memory_mb ?? pressure.total_memory_mb * (1 - pressure.memory_percent / 100);
+      setScannedHostMemory(memoryInput(Math.min(pressure.total_memory_mb, availableMiB) / 1024));
+    }).catch(() => setScannedHostMemory(null));
     const localInventory = api.localToolInventory().catch(() => null);
     try {
       const [before, link] = await Promise.all([api.peerResources(), api.linkStatus()]);
@@ -106,7 +111,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
       setDevices((previous) => previous.filter((device) => typeof device.id === "number"));
       setScanStatus("Peer capability scan unavailable. Previous paired estimates were cleared. Enter device memory manually.");
     } finally {
-      const localTools = await localInventory;
+      const [localTools] = await Promise.all([localInventory, localPressure]);
       setHostRunners(localTools?.filter((tool) => runnerNames.has(tool)) ?? null);
       setScanning(false);
     }
