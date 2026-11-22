@@ -2187,10 +2187,12 @@ mod tests {
         assert!(wait_for(|| joiner.status().peers[0].queued == 0).await, "acknowledged");
 
         // Drop the session; a re-sent duplicate is acknowledged but not delivered twice.
+        assert_eq!(host.connected_peer_ids(), vec![host.status().peers[0].node_id.clone()]);
         let dup = host_got.lock().unwrap()[0].clone();
         joiner.0.peers.lock().unwrap().get_mut(&view.node_id).unwrap().outbox.push_back(dup);
         joiner.stop();
         assert!(wait_for(|| !host.status().peers[0].connected).await, "host notices the drop");
+        assert!(host.connected_peer_ids().is_empty());
         let disconnected = &host.status().peers[0];
         assert_eq!(disconnected.local_interface, None);
         assert_eq!(disconnected.rtt_ms, None);
