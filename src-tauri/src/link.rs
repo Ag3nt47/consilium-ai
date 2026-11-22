@@ -834,9 +834,22 @@ impl Link {
     /// Queues a packet for every paired computer; it is delivered now if connected, otherwise
     /// as soon as a route comes back. Returns the packet id.
     pub fn send(&self, kind: PacketKind, payload: Value) -> Result<String, String> {
+        self.send_packet(None, kind, payload)
+    }
+
+    /// Queues a packet for one paired computer using the same reliable delivery as a broadcast.
+    pub fn send_to(&self, node_id: &str, kind: PacketKind, payload: Value) -> Result<String, String> {
+        self.send_packet(Some(node_id), kind, payload)
+    }
+
+    fn send_packet(&self, recipient: Option<&str>, kind: PacketKind, payload: Value) -> Result<String, String> {
         let (me, peers) = {
             let cfg = self.0.cfg.lock().unwrap();
-            (cfg.node_id.clone(), cfg.peers.clone())
+            let peers = cfg.peers.iter()
+                .filter(|peer| recipient.is_none_or(|id| peer.node_id == id))
+                .cloned()
+                .collect::<Vec<_>>();
+            (cfg.node_id.clone(), peers)
         };
         if peers.is_empty() {
             return Err("no paired computers".into());
@@ -2265,6 +2278,27 @@ mod tests {
         std::fs::OpenOptions::new().append(true).open(&link.0.inbox_path).unwrap().write_all(b"{\"cut_off\"").unwrap();
         link.append_inbox(&second).unwrap();
         assert_eq!(link.inbox(), vec![first, second]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn targeted_packet_queues_only_for_its_recipient() {
+        let dir = std::env::temp_dir().join(format!("link-target-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let requester = "node-requester000000";
+        let bystander = "node-bystander000000";
+        for id in [requester, bystander] {
+            host.remember(Peer {
+                node_id: id.into(),
+                name: id.into(),
+                key: hex(&[42; 32]),
+                addrs: vec![],
+            }).unwrap();
+        }
+        host.send_to(requester, PacketKind::Chat, json!({ "kind": "resources" })).unwrap();
+        let status = host.status();
+        assert_eq!(status.peers.iter().find(|peer| peer.node_id == requester).unwrap().queued, 1);
+        assert_eq!(status.peers.iter().find(|peer| peer.node_id == bystander).unwrap().queued, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
