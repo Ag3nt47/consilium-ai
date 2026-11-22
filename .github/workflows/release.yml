@@ -346,15 +346,15 @@ jobs:
           fi
           echo "Verified AppImage entry point and RPM executable report $expected."
 
-      - name: Verify Fedora RPM preview installation
+      - name: Verify Fedora RPM preview installation and desktop launch
         if: needs.prepare.outputs.preview == 'true' && runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           expected="$(node -p 'require("./package.json").version')"
-          docker run --rm --mount "type=bind,src=$PWD/oneclick,dst=/preview,readonly" \
+          docker run --rm -i --mount "type=bind,src=$PWD/oneclick,dst=/preview,readonly" \
             registry.fedoraproject.org/fedora:43@sha256:08bba635be5e58af81ae39d88fda4a311bcfe0d8b4b7e98e28c109f16c391d9b \
-            bash -euo pipefail -c '
+            bash -euo pipefail -s -- "$expected" <<'FEDORA'
               package=/preview/Consilium-Linux-x86_64.rpm
               name="$(rpm -qp --queryformat "%{NAME}" "$package")"
               dnf install -y "$package"
@@ -366,7 +366,35 @@ jobs:
                 exit 1
               fi
               printf "Verified Fedora RPM package installation of Consilium %s.\n" "$1"
-            ' _ "$expected"
+          dnf install -y /usr/bin/Xvfb /usr/bin/xwininfo /usr/bin/dbus-run-session
+          export CONSILIUM_DATA="$(mktemp -d)"
+          printf '%s\n' '{"auto_install_updates":false,"members":[]}' > "$CONSILIUM_DATA/council.json"
+          export DISPLAY=:99
+          Xvfb "$DISPLAY" -screen 0 1280x1024x24 -nolisten tcp -ac > "$CONSILIUM_DATA/xvfb.log" 2>&1 &
+          xvfb=$!
+          trap 'kill "$xvfb" 2>/dev/null || true; wait "$xvfb" 2>/dev/null || true' EXIT
+          for ((attempt = 0; attempt < 20; attempt++)); do
+            if xwininfo -root >/dev/null 2>&1; then break; fi
+            sleep 0.25
+          done
+          if ! xwininfo -root >/dev/null 2>&1; then cat "$CONSILIUM_DATA/xvfb.log"; exit 1; fi
+          dbus-run-session -- bash -euo pipefail <<'DESKTOP'
+          /usr/bin/consilium > "$CONSILIUM_DATA/desktop.log" 2>&1 &
+          app=$!
+          trap 'kill "$app" 2>/dev/null || true; wait "$app" 2>/dev/null || true' EXIT
+          for ((attempt = 0; attempt < 60; attempt++)); do
+            if ! kill -0 "$app" 2>/dev/null; then break; fi
+            if xwininfo -name Consilium 2>/dev/null | grep -Fq 'Map State: IsViewable'; then
+              echo 'Verified the installed Fedora RPM opened a visible Consilium window.'
+              exit 0
+            fi
+            sleep 0.5
+          done
+          xwininfo -root -tree || true
+          cat "$CONSILIUM_DATA/desktop.log"
+          exit 1
+          DESKTOP
+          FEDORA
 
       - uses: actions/upload-artifact@v7
         if: needs.prepare.outputs.preview == 'true'
