@@ -227,6 +227,10 @@ pub fn helper_script(pid: u32, staged: &Path, target: &Path, log: &Path) -> Stri
          log 'update helper started for pid {pid}'\n\
          for i in $(seq 1 60); do kill -0 {pid} 2>/dev/null || break; sleep 0.5; done\n\
          kill -9 {pid} 2>/dev/null; sleep 0.3\n\
+         if [ ! -e {t} ] && [ -e {old} ]; then\n\
+             log 'recovering previous bundle from interrupted update'\n\
+             if ! mv {old} {t}; then log 'could not restore previous bundle'; exit 1; fi\n\
+         fi\n\
          rm -rf {old}\n\
          if mv {t} {old} && mv {s} {t}; then\n\
              log 'application bundle replaced'\n\
@@ -1012,6 +1016,28 @@ mod tests {
         assert_eq!(std::fs::read_to_string(reopened).unwrap(), "old");
         assert_eq!(std::fs::read_to_string(stage.with_extension("app.failed").join("version")).unwrap(), "new");
         assert!(std::fs::read_to_string(log).unwrap().contains("relaunch failed; restoring previous bundle"));
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mac_helper_recovers_an_interrupted_swap_without_a_new_stage() {
+        let data = std::env::temp_dir().join(format!("consilium mac interrupted {}", uuid::Uuid::new_v4()));
+        let target = data.join("Consilium.app");
+        let backup = target.with_extension("app.old");
+        let missing_stage = data.join("missing.app");
+        let log = data.join("install.log");
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("version"), "old").unwrap();
+        let script = format!(
+            "kill() {{ return 1; }}\nsleep() {{ :; }}\nopen() {{ [ \"$(cat \"$1/version\")\" = old ]; }}\n{}",
+            helper_script(42, &missing_stage, &target, &log)
+        );
+        let result = std::process::Command::new("/bin/sh").arg("-c").arg(script).status().unwrap();
+        assert!(result.success());
+        assert_eq!(std::fs::read_to_string(target.join("version")).unwrap(), "old");
+        assert!(!backup.exists());
+        assert!(std::fs::read_to_string(log).unwrap().contains("recovering previous bundle from interrupted update"));
         std::fs::remove_dir_all(&data).unwrap();
     }
 
