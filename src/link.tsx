@@ -442,6 +442,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                     <div className="muted small">
                       {r.restored.ok ? `Reconnected through ${r.restored.addr}` : "Reconnection unconfirmed"}
                       {r.restored.local_interface && ` via ${r.restored.local_interface}`}
+                      {r.restored.local_addr && `, source ${r.restored.local_addr}`}
                       {" · "}{r.restored.detail}
                     </div>
                   )}
