@@ -556,7 +556,16 @@ Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
         let note = t
             .note
             .as_deref()
-            .map(|n| format!(" ({n})"))
+            .map(|note| {
+                if local_agent.is_none() {
+                    return format!(" ({note})");
+                }
+                const LOCAL_NOTE_CHARS: usize = 160;
+                let mut chars = note.chars();
+                let excerpt: String = chars.by_ref().take(LOCAL_NOTE_CHARS).collect();
+                let suffix = if chars.next().is_some() { "..." } else { "" };
+                format!(" ({excerpt}{suffix})")
+            })
             .unwrap_or_default();
         s.push_str(&format!("\n#{} [{state}] {}{note}", t.id, t.title));
     }
@@ -602,12 +611,17 @@ mod tests {
                 updated: 0,
             });
         }
+        let prefix = "\u{00e9}".repeat(160);
+        board.tasks[29].note = Some(format!("{prefix}remaining details"));
         let local = for_prompt(&board, Some("local"));
         assert_eq!(local.lines().filter(|line| line.starts_with('#')).count(), LOCAL_OPEN_IN_PROMPT);
         assert!(local.contains("#30 [doing"));
         assert!(!local.contains("#29 [doing"));
         assert!(local.contains("6 open tasks omitted"));
+        assert!(local.contains(&format!("{prefix}...")));
+        assert!(!local.contains("remaining details"));
         let hosted = for_prompt(&board, None);
+        assert!(hosted.contains("remaining details"));
         assert_eq!(hosted.lines().filter(|line| line.starts_with('#')).count(), 30);
     }
 
