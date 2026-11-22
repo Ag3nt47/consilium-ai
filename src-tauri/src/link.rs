@@ -1749,12 +1749,12 @@ fn with_port(addr: &str, port: u16) -> String {
     }
 }
 
-/// This computer's reachable IPv4 addresses (cable, Wi-Fi, Tailscale), loopback excluded.
+/// Reachable IPv4 addresses. Tests advertise only loopback, matching their listeners.
 fn local_addrs(port: u16) -> Vec<String> {
     let mut out: Vec<String> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
-        .filter(|i| !i.is_loopback())
+        .filter(|i| i.is_loopback() == cfg!(test))
         .filter_map(|i| match i.ip() {
             std::net::IpAddr::V4(v4) => Some(format!("{v4}:{port}")),
             _ => None,
