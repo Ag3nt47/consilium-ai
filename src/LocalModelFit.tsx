@@ -18,6 +18,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
   const [hostMemory, setHostMemory] = useState<string | null>(null);
   const [bits, setBits] = useState(4);
   const [overhead, setOverhead] = useState("2");
+  const [preferSplit, setPreferSplit] = useState(false);
   const [customWeights, setCustomWeights] = useState("");
   const [fileMessage, setFileMessage] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -27,7 +28,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
   const reportedNames = new Set(devices.filter((device) => typeof device.id === "string").map((device) => deviceName(device.name)));
   const included = devices.filter((device) => typeof device.id === "string" || !reportedNames.has(deviceName(device.name)));
   const budgets = [{ name: "This computer", memory: host }, ...included];
-  const models = modelFit(budgets, bits, overhead, customWeights);
+  const models = modelFit(budgets, bits, overhead, customWeights, preferSplit);
   const capacities = weightBudgets(budgets, overhead);
   const totalCapacity = capacities.reduce((total, device) => total + device.capacity, 0);
 
@@ -147,6 +148,10 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
         <label>
           Runtime and context allowance per device (GiB)
           <input type="number" min="0" step="0.1" value={overhead} onChange={(e) => setOverhead(e.target.value)} />
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={preferSplit} onChange={(e) => setPreferSplit(e.target.checked)} />
+          Estimate a split even when one device can hold the model
         </label>
         {ollamaModels.some(({ size }) => Number.isFinite(size) && size > 0) && (
           <label>
