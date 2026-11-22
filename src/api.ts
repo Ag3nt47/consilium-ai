@@ -566,6 +566,8 @@ const appApi = {
   systemPressure: () => invoke<SystemPressure>("system_pressure"),
   requestPeerResources: () => invoke<void>("request_peer_resources"),
   peerResources: () => invoke<Record<string, {
+    os?: string;
+    build_arch?: string;
     total_memory_mb?: number;
     available_memory_mb?: number;
     memory_percent: number;

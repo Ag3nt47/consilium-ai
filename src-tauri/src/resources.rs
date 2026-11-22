@@ -11,6 +11,8 @@ use sysinfo::Disks;
 pub struct HostResources {
     pub computer: String,
     pub os: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_arch: Option<String>,
     pub free_disk_bytes: u64,
     pub total_disk_bytes: u64,
     pub cpu_percent: u8,
@@ -45,6 +47,7 @@ impl HostResources {
         Self {
             computer: computer.to_string(),
             os,
+            build_arch: Some(std::env::consts::ARCH.into()),
             free_disk_bytes,
             total_disk_bytes,
             cpu_percent: pressure.cpu_percent,
@@ -132,6 +135,7 @@ mod tests {
         let r = HostResources {
             computer: "msi-agent47".into(),
             os: "windows".into(),
+            build_arch: None,
             free_disk_bytes: 12 * 1024 * 1024 * 1024,
             total_disk_bytes: 512 * 1024 * 1024 * 1024,
             cpu_percent: 25,

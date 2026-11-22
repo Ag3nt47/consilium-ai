@@ -1718,6 +1718,7 @@ mod tests {
         let sample = crate::resources::HostResources {
             computer: "MSI-AGENT47".into(),
             os: "windows".into(),
+            build_arch: Some("aarch64".into()),
             free_disk_bytes: 15 * 1024 * 1024 * 1024,
             total_disk_bytes: 1024 * 1024 * 1024 * 1024,
             cpu_percent: 18,
