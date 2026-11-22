@@ -1858,7 +1858,7 @@ fn local_addrs(port: u16) -> Vec<String> {
         .into_iter()
         .filter(|i| i.is_loopback() == cfg!(test))
         .filter_map(|i| match i.ip() {
-            std::net::IpAddr::V4(v4) => Some(format!("{v4}:{port}")),
+            ip @ std::net::IpAddr::V4(_) if route_ip_allowed(ip) => Some(SocketAddr::new(ip, port).to_string()),
             _ => None,
         })
         .collect();
@@ -1973,7 +1973,7 @@ fn repair_partial_line(file: &mut std::fs::File) -> Result<(), String> {
 }
 
 /// Private LAN (10/8, 172.16/12, 192.168/16), Tailscale/CGNAT (100.64/10), IPv6 unique-local,
-/// or loopback. Public, link-local, multicast and unspecified addresses are refused.
+/// or loopback. Public, multicast and unspecified addresses are refused.
 fn route_ip_allowed(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
