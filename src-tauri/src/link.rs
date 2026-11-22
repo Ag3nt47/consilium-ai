@@ -2262,7 +2262,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_lost_active_route_redials_without_restarting_peerlink() {
+    async fn two_active_route_losses_redial_without_restarting_peerlink() {
         let dir = std::env::temp_dir().join(format!("link-live-failover-{}", uuid::Uuid::new_v4()));
         let (host, received) = node(&dir, "host");
         let (joiner, _) = node(&dir, "joiner");
@@ -2277,10 +2277,10 @@ mod tests {
         let direct = format!("127.0.0.1:{}", host.0.port);
         let code = host.begin_pairing().unwrap();
 
-        // Two proxies give one peer two independent TCP endpoints inside loopback.
+        // Three proxies give one peer independent TCP endpoints inside loopback.
         let mut routes = Vec::new();
         let mut proxies = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             routes.push(listener.local_addr().unwrap().to_string());
             let direct = direct.clone();
@@ -2295,23 +2295,32 @@ mod tests {
         joiner.join(&routes[0], &code.code).await.unwrap();
         assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(routes[0].as_str())).await);
         host.0.cfg.lock().unwrap().peers[0].addrs.clear();
-        proxies[0].abort();
-        assert!(wait_for(|| !joiner.status().peers[0].connected).await);
+        let mut expected = Vec::new();
+        for (failed, backup) in routes.windows(2).enumerate() {
+            proxies[failed].abort();
+            assert!(wait_for(|| !joiner.status().peers[0].connected).await);
 
-        let id = joiner.send(PacketKind::Chat, json!({ "text": "during automatic failover" })).unwrap();
-        assert_eq!(joiner.status().peers[0].queued, 1);
-        assert!(received.lock().unwrap().is_empty());
+            let id = joiner.send(PacketKind::Chat, json!({ "text": format!("during route loss {failed}") })).unwrap();
+            assert_eq!(joiner.status().peers[0].queued, 1);
+            expected.push(id);
 
-        // Make the second path available after the message is durably queued.
-        let backup = routes[1].clone();
-        joiner.0.cfg.lock().unwrap().peers[0].addrs = routes;
-        joiner.0.wake_dial.notify_one();
-        assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(backup.as_str())).await);
-        assert!(wait_for(|| joiner.status().peers[0].queued == 0).await);
-        assert_eq!(received.lock().unwrap().iter().map(|packet| packet.id.as_str()).collect::<Vec<_>>(), [id.as_str()]);
+            // Introduce the next route with the test message already queued.
+            joiner.0.cfg.lock().unwrap().peers[0].addrs = routes[..=failed + 1].to_vec();
+            joiner.0.wake_dial.notify_one();
+            assert!(wait_for(|| {
+                let status = joiner.status();
+                let peer = &status.peers[0];
+                peer.route.as_deref() == Some(backup[1].as_str()) && peer.queued == 0
+            }).await, "route {} carries traffic after loss {failed}", backup[1]);
+            assert_eq!(
+                received.lock().unwrap().iter().map(|packet| packet.id.clone()).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(host.inbox().len(), expected.len());
+        }
         joiner.stop();
         host.stop();
-        proxies[1].abort();
+        proxies[2].abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
