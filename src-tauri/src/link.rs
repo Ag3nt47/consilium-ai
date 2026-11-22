@@ -2079,6 +2079,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("link-alternate-{}", uuid::Uuid::new_v4()));
         let (host, received) = node(&dir, "host");
         let (joiner, _) = node(&dir, "joiner");
+        // Give the joiner the first dial so the host cannot bypass the test proxy.
+        {
+            let mut host_cfg = host.0.cfg.lock().unwrap();
+            let mut joiner_cfg = joiner.0.cfg.lock().unwrap();
+            if host_cfg.node_id < joiner_cfg.node_id {
+                std::mem::swap(&mut host_cfg.node_id, &mut joiner_cfg.node_id);
+            }
+        }
         let direct = format!("127.0.0.1:{}", host.0.port);
         let code = host.begin_pairing().unwrap();
         joiner.join(&direct, &code.code).await.unwrap();
@@ -2095,12 +2103,15 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let alternate = listener.local_addr().unwrap().to_string();
         let proxy = tokio::spawn(async move {
-            let (mut inbound, _) = listener.accept().await.unwrap();
-            let mut outbound = TcpStream::connect(direct).await.unwrap();
-            tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                let Ok(mut outbound) = TcpStream::connect(&direct).await else { continue };
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+            }
         });
-        let unavailable = format!("127.0.0.1:{}", free_port());
-        joiner.0.cfg.lock().unwrap().peers[0].addrs = vec![unavailable, alternate.clone()];
+        let unavailable = tokio::net::TcpSocket::new_v4().unwrap();
+        unavailable.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        joiner.0.cfg.lock().unwrap().peers[0].addrs =
+            vec![unavailable.local_addr().unwrap().to_string(), alternate.clone()];
         joiner.start();
         assert!(wait_for(|| {
             let status = joiner.status();
@@ -2121,6 +2132,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("link-live-failover-{}", uuid::Uuid::new_v4()));
         let (host, received) = node(&dir, "host");
         let (joiner, _) = node(&dir, "joiner");
+        // Give the joiner the first dial so the host cannot bypass the test proxy.
+        {
+            let mut host_cfg = host.0.cfg.lock().unwrap();
+            let mut joiner_cfg = joiner.0.cfg.lock().unwrap();
+            if host_cfg.node_id < joiner_cfg.node_id {
+                std::mem::swap(&mut host_cfg.node_id, &mut joiner_cfg.node_id);
+            }
+        }
         let direct = format!("127.0.0.1:{}", host.0.port);
         let code = host.begin_pairing().unwrap();
 
@@ -2140,11 +2159,6 @@ mod tests {
         }
 
         joiner.join(&routes[0], &code.code).await.unwrap();
-        host.0.cfg.lock().unwrap().peers[0].addrs.clear();
-        joiner.stop();
-        assert!(wait_for(|| !host.status().peers[0].connected).await);
-        joiner.0.cfg.lock().unwrap().peers[0].addrs = vec![routes[0].clone()];
-        joiner.start();
         assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(routes[0].as_str())).await);
         host.0.cfg.lock().unwrap().peers[0].addrs.clear();
         proxies[0].abort();
