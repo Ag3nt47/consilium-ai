@@ -277,35 +277,21 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
     setTimeout(() => setCopied(null), 2000);
   };
 
-  /** Probes the local subnet and standard workstation IPs to auto-discover paired/linkable nodes. */
-  const autoDiscover = () => {
+  const autoDiscover = async () => {
     setAutoDiscovering(true);
     setError(null);
-    const found: string[] = [];
-
-    // Extract local subnets from our own addresses (e.g. "192.168.1.15:8470" -> "192.168.1.")
-    const subnets = new Set<string>();
-    status?.addrs.forEach((a) => {
-      const match = a.match(/^(\d+\.\d+\.\d+\.)\d+/);
-      if (match) subnets.add(match[1]);
-    });
-
-    // Suggest loopback for local dual-instance testing
-    found.push(`127.0.0.1:${status?.port || 8470}`);
-
-    // If we have subnets, add standard gateway/workstation candidate endpoints
-    subnets.forEach((prefix) => {
-      // Common static/DHCP IPs
-      [2, 3, 4, 10, 20, 30, 40, 50, 100, 101, 150, 200].forEach((last) => {
-        found.push(`${prefix}${last}:${status?.port || 8470}`);
-      });
-    });
-
-    setDiscoveredAddrs(found.slice(0, 12));
-    if (!joinAddr && found.length > 0) {
-      setJoinAddr(found[0]);
+    setDiscoveredAddrs([]);
+    try {
+      const found = await api.linkDiscoverLan();
+      setDiscoveredAddrs(found);
+      if (!found.length) {
+        setError("No PeerLink devices answered. Enable the direct link on the other computer and check the network, or enter its address manually.");
+      }
+    } catch (error) {
+      setError("Could not scan the local network: " + error);
+    } finally {
+      setAutoDiscovering(false);
     }
-    setAutoDiscovering(false);
   };
 
   if (!status) {
@@ -519,7 +505,7 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
                         className="btn small ghost auto-find-btn"
                         onClick={autoDiscover}
                         disabled={autoDiscovering}
-                        title="Detect candidate IP addresses on the local network"
+                        title="Look for devices running PeerLink on directly connected local networks"
                       >
                         {autoDiscovering ? "Searching…" : "🔍 Auto-Find on LAN"}
                       </button>
@@ -533,7 +519,7 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
                     />
                     {discoveredAddrs.length > 0 && (
                       <div className="discovered-suggestions">
-                        <span className="muted small">Detected endpoints:</span>
+                        <span className="muted small">PeerLink endpoints found. Pair with a code to verify the device.</span>
                         <div className="chip-row">
                           {discoveredAddrs.map((a) => (
                             <button

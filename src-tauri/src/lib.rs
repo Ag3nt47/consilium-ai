@@ -1347,6 +1347,11 @@ async fn link_status() -> Result<link::LinkStatus, String> {
 }
 
 #[tauri::command]
+async fn link_discover_lan() -> Result<Vec<String>, String> {
+    link::discover_lan(link::PORT).await
+}
+
+#[tauri::command]
 async fn link_set_enabled(on: bool) -> Result<link::LinkStatus, String> {
     let l = the_link()?;
     l.set_enabled(on)?;
@@ -1671,6 +1676,7 @@ pub fn run() {
             open_app,
             get_daily_wallpaper,
             link_status,
+            link_discover_lan,
             link_set_enabled,
             link_pair_host,
             link_pair_cancel,

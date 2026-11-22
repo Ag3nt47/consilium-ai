@@ -1768,6 +1768,70 @@ fn with_port(addr: &str, port: u16) -> String {
     }
 }
 
+/// Looks for the PeerLink greeting on directly attached private IPv4 networks.
+pub async fn discover_lan(port: u16) -> Result<Vec<String>, String> {
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use tokio::net::TcpSocket;
+
+    let interfaces = if_addrs::get_if_addrs().map_err(|error| error.to_string())?;
+    let own: std::collections::HashSet<_> = interfaces.iter().map(|interface| interface.ip()).collect();
+    let mut candidates = Vec::new();
+    for interface in interfaces {
+        let if_addrs::IfAddr::V4(address) = interface.addr else { continue };
+        if !(address.ip.is_private() || address.ip.is_link_local()) {
+            continue;
+        }
+        let ip = u32::from(address.ip);
+        let mask = u32::from(address.netmask);
+        // Bound each interface to the surrounding 256 addresses, even on a larger LAN.
+        let search_mask = mask | 0xffffff00;
+        for candidate in (ip & search_mask)..=(ip | !search_mask) {
+            if candidate == ip & mask || candidate == ip | !mask {
+                continue;
+            }
+            let candidate = Ipv4Addr::from(candidate);
+            if (candidate.is_private() || candidate.is_link_local()) && route_ip_allowed(candidate.into()) && !own.contains(&candidate.into()) {
+                candidates.push((address.ip, SocketAddrV4::new(candidate, port)));
+            }
+        }
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let mut found = std::collections::BTreeSet::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut candidates = candidates.into_iter();
+    loop {
+        while tasks.len() < 48 {
+            let Some((source, target)) = candidates.next() else { break };
+            tasks.spawn(async move {
+                tokio::time::timeout(Duration::from_millis(350), async move {
+                    let socket = TcpSocket::new_v4().ok()?;
+                    socket.bind(SocketAddrV4::new(source, 0).into()).ok()?;
+                    let stream = socket.connect(target.into()).await.ok()?;
+                    peerlink_greeting(stream).await.then_some(target)
+                }).await.ok().flatten()
+            });
+        }
+        let Some(result) = tasks.join_next().await else { break };
+        if let Ok(Some(target)) = result {
+            found.insert(target);
+        }
+    }
+    Ok(found.into_iter().map(|address| address.to_string()).collect())
+}
+
+async fn peerlink_greeting(stream: TcpStream) -> bool {
+    use tokio::io::AsyncReadExt;
+    let mut reader = BufReader::new(stream.take(256));
+    let mut line = String::new();
+    if reader.read_line(&mut line).await.is_err() || !line.ends_with('\n') {
+        return false;
+    }
+    matches!(serde_json::from_str::<Wire>(&line), Ok(Wire::Challenge { nonce })
+        if nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 /// Reachable IPv4 addresses. Tests advertise only loopback, matching their listeners.
 fn local_addrs(port: u16) -> Vec<String> {
     let mut out: Vec<String> = if_addrs::get_if_addrs()
@@ -1906,6 +1970,21 @@ fn route_ip_allowed(ip: std::net::IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn discovery_distinguishes_peerlink_greetings_from_other_services() {
+        for (greeting, expected) in [
+            (serde_json::to_string(&Wire::Challenge { nonce: "a".repeat(32) }).unwrap(), true),
+            (serde_json::to_string(&Wire::Challenge { nonce: "b".repeat(300) }).unwrap(), false),
+            ("HTTP/1.1 200 OK".to_string(), false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let (mut server, _) = listener.accept().await.unwrap();
+            server.write_all(format!("{greeting}\n").as_bytes()).await.unwrap();
+            assert_eq!(peerlink_greeting(client).await, expected);
+        }
+    }
 
     #[test]
     fn computer_nicknames_are_unique_and_clean() {

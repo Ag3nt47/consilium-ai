@@ -471,6 +471,7 @@ const appApi = {
   /** Opens an installed app by name, after the human confirms a spoken "open <app>". */
   openApp: (name: string) => invoke<void>("open_app", { name }),
   /** Runs command box `index` of AI message `eventId` once; its output goes to that AI as your message. */
+  linkDiscoverLan: () => invoke<string[]>("link_discover_lan"),
   linkStatus: () => invoke<LinkStatus>("link_status"),
   linkSetEnabled: (on: boolean) => invoke<LinkStatus>("link_set_enabled", { on }),
   /** Shows a one-time 6-digit code (valid 5 minutes, 3 tries) and turns the link on. */
