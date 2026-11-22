@@ -32,6 +32,12 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
   const capacities = weightBudgets(budgets, overhead);
   const totalCapacity = capacities.reduce((total, device) => total + device.capacity, 0);
 
+  const showEqualTarget = preferSplit && budgets.length > 1;
+  const runtimeGiB = Number(overhead);
+  const equalTarget = (weights: number) => gib(
+    Math.ceil((weights / budgets.length + (Number.isFinite(runtimeGiB) ? Math.max(0, runtimeGiB) : 0)) * 10) / 10
+  );
+
   async function copyEstimate() {
     const report = [
       "Consilium local model memory estimate",
@@ -39,7 +45,10 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
       `Combined weight capacity: ${gib(totalCapacity)}.`,
       ...budgets.map(({ name, memory }, index) => `${name || "Unnamed device"}: ${memory ? gib(Number(memory)) : "memory not entered"} usable, ${gib(capacities[index].capacity)} for weights.`),
       "",
-      ...models.map(({ name, weights, fit }) => `${name}: ${gib(weights)} weights. ${fit}.`),
+      ...models.map(({ name, weights, fit }) => {
+        const target = showEqualTarget ? ` Equal split across ${budgets.length} devices: ${equalTarget(weights)} usable per device.` : "";
+        return `${name}: ${gib(weights)} weights. ${fit}.${target}`;
+      }),
       "",
       "Memory estimate only. Verify runner compatibility and inference performance separately.",
     ].join("\n");
@@ -211,10 +220,16 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
         ))}
       </ul>
       <table className="usage-table">
-        <thead><tr><th scope="col">Model</th><th scope="col">Weights</th><th scope="col">Memory estimate</th></tr></thead>
+        <thead><tr>
+          <th scope="col">Model</th><th scope="col">Weights</th><th scope="col">Memory estimate</th>
+          {showEqualTarget && <th scope="col">Usable memory per device for an equal split</th>}
+        </tr></thead>
         <tbody>
           {models.map(({ name, weights, fit }) => (
-            <tr key={name}><th scope="row">{name}</th><td>{gib(weights)}</td><td>{fit}</td></tr>
+            <tr key={name}>
+              <th scope="row">{name}</th><td>{gib(weights)}</td><td>{fit}</td>
+              {showEqualTarget && <td>{equalTarget(weights)}</td>}
+            </tr>
           ))}
         </tbody>
       </table>
