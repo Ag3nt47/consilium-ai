@@ -8,6 +8,35 @@ export function LinkIndicator() {
   const [status, setStatus] = useState<LinkStatus | null>(null);
   const [open, setOpen] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [showDiscoverySettings, setShowDiscoverySettings] = useState(false);
+  const [pairAddress, setPairAddress] = useState("");
+  const [discoveryAlerts, setDiscoveryAlerts] = useState(() =>
+    localStorage.getItem("consilium.peerlink.discovery-alerts") !== "off"
+  );
+  const [candidates, setCandidates] = useState<string[]>([]);
+  const [dismissed, setDismissed] = useState<string[]>([]);
+  const linkEnabled = status?.enabled === true;
+
+  useEffect(() => {
+    if (!linkEnabled || !discoveryAlerts) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    async function scan() {
+      try {
+        const found = await api.linkDiscoverLan();
+        if (active) setCandidates(found);
+      } catch {
+        if (active) setCandidates([]);
+      } finally {
+        if (active) timer = setTimeout(scan, 120_000);
+      }
+    }
+    void scan();
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [linkEnabled, discoveryAlerts]);
 
   const refresh = async () => {
     setChecking(true);
@@ -35,6 +64,10 @@ export function LinkIndicator() {
   const enabled = status.enabled;
   const peers = status.peers || [];
   const connectedPeers = peers.filter((p) => p.connected);
+  const knownEndpoints = new Set(peers.flatMap((peer) => peer.addrs ?? []));
+  const candidate = enabled && discoveryAlerts
+    ? candidates.find((address) => !knownEndpoints.has(address) && !dismissed.includes(address))
+    : undefined;
 
   let state: "off" | "ok" | "down" | "idle" = "off";
   let label = "Sync off";
@@ -81,6 +114,8 @@ export function LinkIndicator() {
         title={tip}
         aria-label={`Multi-computer sync: ${label}. Open sync settings`}
         onClick={() => {
+          setPairAddress("");
+          setShowDiscoverySettings(false);
           setOpen(true);
           refresh();
         }}
@@ -88,6 +123,25 @@ export function LinkIndicator() {
         <span className="link-mark">{mark}</span>
         <span className="link-label">{label}</span>
       </button>
+
+      {candidate && !open && (
+        <div className="row wrap gap-sm" role="status">
+          <span>Connection found. Would you like to connect?</span>
+          <button className="btn small" onClick={() => {
+            setPairAddress(candidate);
+            setShowDiscoverySettings(false);
+            setOpen(true);
+          }}>Connect</button>
+          <button className="btn small ghost" onClick={() =>
+            setDismissed((previous) => [...previous, candidate])
+          }>Dismiss</button>
+          <button className="btn small ghost" onClick={() => {
+            setPairAddress("");
+            setShowDiscoverySettings(true);
+            setOpen(true);
+          }}>Discovery settings</button>
+        </div>
+      )}
 
       {open &&
         createPortal(
@@ -103,7 +157,19 @@ export function LinkIndicator() {
                 Direct peer-to-peer synchronization over Gigabit Ethernet, Wi-Fi LAN, or Tailscale between your Mac
                 and Windows PC on port {status.port}.
               </p>
-              <LinkSettings status={status} onRefresh={refresh} />
+              <details open={showDiscoverySettings || undefined}>
+                <summary>Discovery settings</summary>
+                <label className="row gap-sm small">
+                  <input type="checkbox" checked={discoveryAlerts} onChange={(event) => {
+                    const enabled = event.target.checked;
+                    localStorage.setItem("consilium.peerlink.discovery-alerts", enabled ? "on" : "off");
+                    setDiscoveryAlerts(enabled);
+                    if (!enabled) setCandidates([]);
+                  }} />
+                  Look for new PeerLink devices while the direct link is enabled
+                </label>
+              </details>
+              <LinkSettings status={status} onRefresh={refresh} pairAddress={pairAddress} />
               <div className="row end" style={{ marginTop: "16px" }}>
                 <button className="btn primary" onClick={() => setOpen(false)} title="Close sync settings">
                   Done
@@ -118,11 +184,11 @@ export function LinkIndicator() {
 }
 
 /** Full multi-computer sync management: pairing codes, network addresses, connected peers, and failover status. */
-export function LinkSettings({ status: initialStatus, onRefresh }: { status?: LinkStatus | null; onRefresh?: () => void }) {
+export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "" }: { status?: LinkStatus | null; onRefresh?: () => void; pairAddress?: string }) {
   const [status, setStatus] = useState<LinkStatus | null>(initialStatus ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<"host" | "join">("host");
+  const [mode, setMode] = useState<"host" | "join">(pairAddress ? "join" : "host");
   // The communication stress test: running, and its last results (also posted in the chat).
   const [stressing, setStressing] = useState(false);
   const [stress, setStress] = useState<StressReport[] | null>(null);
@@ -145,7 +211,7 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
   const [copied, setCopied] = useState<string | null>(null);
 
   // Join mode (entering code)
-  const [joinAddr, setJoinAddr] = useState("");
+  const [joinAddr, setJoinAddr] = useState(pairAddress);
   const [joinCode, setJoinCode] = useState("");
   const [autoDiscovering, setAutoDiscovering] = useState(false);
   const [discoveredAddrs, setDiscoveredAddrs] = useState<string[]>([]);
