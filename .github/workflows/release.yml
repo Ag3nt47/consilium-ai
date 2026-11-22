@@ -280,17 +280,20 @@ jobs:
           fi
           echo "Verified Linux DEB preview installation of Consilium $expected."
 
-      - name: Verify Linux DEB preview desktop launch
+      - name: Verify Linux DEB and AppImage preview desktop launches
         if: needs.prepare.outputs.preview == 'true' && runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get install -y xvfb xauth x11-utils dbus
-          export CONSILIUM_DATA="$RUNNER_TEMP/consilium-preview-desktop"
-          mkdir -p "$CONSILIUM_DATA"
-          printf '%s\n' '{"auto_install_updates":false,"members":[]}' > "$CONSILIUM_DATA/council.json"
-          xvfb-run -a dbus-run-session -- bash -euo pipefail <<'DESKTOP'
-          /usr/bin/consilium > "$CONSILIUM_DATA/desktop.log" 2>&1 &
+          sudo apt-get install -y xvfb xauth x11-utils dbus libfuse2
+          check_desktop() {
+            local package="$1" executable="$2"
+            export CONSILIUM_DATA="$RUNNER_TEMP/consilium-preview-$package"
+            mkdir -p "$CONSILIUM_DATA"
+            printf '%s\n' '{"auto_install_updates":false,"members":[]}' > "$CONSILIUM_DATA/council.json"
+            xvfb-run -a dbus-run-session -- bash -euo pipefail -s -- "$package" "$executable" <<'DESKTOP'
+          package="$1"
+          "$2" > "$CONSILIUM_DATA/desktop.log" 2>&1 &
           app=$!
           trap 'kill "$app" 2>/dev/null || true; wait "$app" 2>/dev/null || true' EXIT
           for ((attempt = 0; attempt < 60; attempt++)); do
@@ -298,16 +301,20 @@ jobs:
               break
             fi
             if xwininfo -name Consilium 2>/dev/null | grep -Fq "Map State: IsViewable"; then
-              echo "Verified the installed Consilium opened a visible Linux desktop window."
+              echo "Verified the Consilium $package opened a visible Linux desktop window."
               exit 0
             fi
             sleep 0.5
           done
           xwininfo -root -tree || true
           cat "$CONSILIUM_DATA/desktop.log"
-          echo "::error::The installed Consilium did not open a visible window within 30 seconds."
+          echo "::error::The Consilium $package did not open a visible window within 30 seconds."
           exit 1
           DESKTOP
+          }
+          check_desktop DEB /usr/bin/consilium
+          unset APPIMAGE_EXTRACT_AND_RUN
+          check_desktop AppImage "$PWD/oneclick/Consilium-Linux-x86_64.AppImage"
 
       - name: Verify Linux AppImage and RPM preview executables
         if: needs.prepare.outputs.preview == 'true' && runner.os == 'Linux'
