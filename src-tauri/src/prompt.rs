@@ -299,22 +299,18 @@ pub struct Context<'a> {
 /// For AIs reached over a chat API (local models through Ollama, Grok, DeepSeek): no tools of their
 /// own, so they code through command boxes, which run by themselves in an Auto-run chat.
 pub fn command_box_coding(workspace: &str, os: &str, auto_run: bool) -> String {
-    let (shell, read, write) = if os == "windows" {
-        (
-            "powershell",
-            "Get-Content -Raw path\\to\\file",
-            "Set-Content -Encoding utf8 -Path path\\to\\file -Value @'<newline><whole file><newline>'@",
-        )
+    let (shell, read) = if os == "windows" {
+        ("powershell", "Get-Content path\\to\\file | Select-Object -Skip 40 -First 30")
     } else {
-        ("bash", "cat path/to/file", "cat > path/to/file <<'EOF'<newline><whole file><newline>EOF")
+        ("bash", "sed -n '41,70p' path/to/file")
     };
     let runs = if auto_run { " by itself, because Auto-run is on in this chat," } else { " when the human clicks Run" };
     format!(
         "\n\nCODING THROUGH COMMAND BOXES\nYou can still work on the project in {workspace}: every command box you post \
 runs there{runs} and its output comes back to you as the next message. Work in small steps, one command per \
 ```{shell} box:\n\
-- Look first: check `git status --short` and read what you'll change ({read}). If you need to find tracked source, scope `git ls-files -- . ':(exclude,attr:linguist-generated)'` to the relevant directory.\n\
-- Change a file by writing it whole ({write}). Never write a file you haven't read this turn.\n\
+- Look first: check `git status --short` and locate the symbol you need. Read only its relevant lines ({read}). If you need to find tracked source, scope `git ls-files -- . ':(exclude,attr:linguist-generated)'` to the relevant directory.\n\
+- Make a targeted edit using the source you just read. Review the file diff and run `git diff --check` after editing.\n\
 - Then build or run the tests, and fix what fails before saying it's done.\n\
 - Work on a branch of your own (`git switch -c ai/<you>/<task>`) and commit with a clear message; leave pushing \
 and merging to an AI with tools or the human.\n\
@@ -1089,9 +1085,9 @@ mod tests {
     #[test]
     fn local_ais_are_told_how_to_code_through_command_boxes() {
         let win = command_box_coding(r"C:\proj", "windows", true);
-        assert!(win.contains("```powershell") && win.contains("Set-Content") && win.contains("by itself"));
+        assert!(win.contains("```powershell") && win.contains("Select-Object -Skip") && win.contains("by itself"));
         let mac = command_box_coding("/proj", "macos", false);
-        assert!(mac.contains("```bash") && mac.contains("cat > path/to/file") && mac.contains("clicks Run"));
+        assert!(mac.contains("```bash") && mac.contains("sed -n") && mac.contains("clicks Run"));
         assert!(mac.contains("/proj"));
     }
 
