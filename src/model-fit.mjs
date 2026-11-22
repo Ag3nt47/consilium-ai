@@ -34,14 +34,13 @@ export function modelFit(devices, bits, overhead, customWeights) {
     if (combined < weights) return {
       name, weights, fit: hasMemory ? `Needs at least ${gib(weights - combined)} more for weights` : "Enter usable memory",
     };
-    const selected = [];
+    // Cap smaller budgets first, then divide the remaining weights evenly.
     let remaining = weights;
-    for (const device of budgets) {
-      const allocated = Math.min(device.capacity, remaining);
-      selected.push({ name: device.name, allocated });
+    const selected = [...budgets].reverse().map(({ name, capacity }, index) => {
+      const allocated = Math.min(capacity, remaining / (budgets.length - index));
       remaining -= allocated;
-      if (remaining <= 0) break;
-    }
+      return { name, allocated };
+    }).reverse();
     const names = selected.map((device) => device.name).join(" + ");
     const allocation = selected.map(({ name, allocated }) =>
       `${name} ${allocated < 0.05 ? "<0.1 GiB" : gib(allocated)}`
