@@ -326,6 +326,7 @@ struct PeerState {
     generation: u64,
     route: Option<String>,
     local_interface: Option<String>,
+    local_addr: Option<SocketAddr>,
     rtt_ms: Option<u64>,
     last_seen_ms: u64,
     down_since_ms: u64,
@@ -714,22 +715,22 @@ impl Link {
         };
         let mut dial = spawn_dial();
         let mut switched_at: Option<(String, u64, u64, u64)> = None;
-        let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, local_interface: None, detail };
+        let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, local_interface: None, local_addr: None, detail };
         while started.elapsed() < STRESS_SWITCH_TIMEOUT {
             tokio::select! {
                 _ = attempt.cancelled() => return fail(label, "the direct link was turned off".into()),
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {}
             }
-            let (route, packets, session_generation, interface) = {
+            let (route, packets, session_generation, interface, local_addr) = {
                 let states = self.0.peers.lock().unwrap();
                 let Some(s) = states.get(&peer.node_id) else { continue };
                 // Only a session over one of the routes under test counts. The other computer may
                 // dial in meanwhile, and that session's route is its own outgoing port: crediting
                 // it passed a dead route, or reported the working one under the wrong address.
                 if s.generation <= generation || s.tx.is_none() {
-                    (None, 0, s.generation, None)
+                    (None, 0, s.generation, None, None)
                 } else {
-                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in, s.generation, s.local_interface.clone())
+                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in, s.generation, s.local_interface.clone(), s.local_addr)
                 }
             };
             if let Some(route) = route {
@@ -741,6 +742,7 @@ impl Link {
                             ok: true,
                             ms: Some(*ms),
                             local_interface: interface,
+                            local_addr,
                             detail: format!("switched in {ms} ms, traffic confirmed after {} ms", started.elapsed().as_millis()),
                         };
                     }
@@ -1371,7 +1373,8 @@ impl Link {
         token: CancellationToken,
     ) {
         let (me, _) = self.me();
-        let local_interface = r.get_ref().local_addr().ok().and_then(|socket| {
+        let local_addr = r.get_ref().local_addr().ok();
+        let local_interface = local_addr.and_then(|socket| {
             let interfaces = if_addrs::get_if_addrs().ok()?;
             let mut names: Vec<_> = interfaces
                 .into_iter()
@@ -1390,6 +1393,7 @@ impl Link {
             s.tx = Some(tx.clone());
             s.route = Some(route);
             s.local_interface = local_interface;
+            s.local_addr = local_addr;
             s.rtt_ms = rtt_ms;
             s.last_seen_ms = now_ms();
             s.down_since_ms = 0;
@@ -1570,6 +1574,7 @@ pub struct RouteSwitch {
     /// How long the switch took.
     pub ms: Option<u64>,
     pub local_interface: Option<String>,
+    pub local_addr: Option<SocketAddr>,
     pub detail: String,
 }
 
@@ -2142,6 +2147,8 @@ mod tests {
         assert_eq!(r.routes.len(), 2);
         assert!(r.routes[0].ok && r.routes[0].addr == good, "{:?}", r.routes[0]);
         assert!(r.routes[0].detail.contains("traffic confirmed"));
+        assert!(r.routes[0].local_addr.unwrap().ip().is_loopback());
+        assert_eq!(r.routes[1].local_addr, None);
         assert_eq!(r.routes[1].local_interface, None);
         assert!(!r.routes[1].ok && r.routes[1].addr == dead, "{:?}", r.routes[1]);
         let restored = r.restored.as_ref().expect("reconnect attempted");

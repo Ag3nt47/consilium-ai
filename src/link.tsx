@@ -455,7 +455,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                     <div key={x.addr} className={`handshake-item ${x.ok ? "acknowledged" : "pending"}`}>
                       <span className="handshake-mark">{x.ok ? "✓" : "✗"}</span> {x.kind} <code>{x.addr}</code>{" "}
                       <span className="muted small">
-                        {x.detail}{x.ok && `, local interface ${x.local_interface ?? "unavailable"}`}
+                        {x.detail}{x.ok && `, local interface ${x.local_interface ?? "unavailable"}${x.local_addr ? `, source ${x.local_addr}` : ""}`}
                       </span>
                     </div>
                   ))}
