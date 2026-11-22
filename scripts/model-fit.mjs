@@ -56,11 +56,14 @@ try {
     if (shardError) throw new Error(shardError);
     const custom = values.weights === undefined ? modelBytes / 2 ** 30 : memory(values.weights, "--weights");
     const capacities = weightBudgets(devices, overhead);
-    const models = modelFit(devices, bits, overhead, custom, values.split).map((row) =>
-      values.split && devices.length > 1
-        ? { ...row, equalSplitMemoryGiB: equalSplitMemoryGiB(row.weights, devices.length, overhead) }
-        : row
-    );
+    const models = modelFit(devices, bits, overhead, custom, values.split).map((row) => {
+      if (!values.split || devices.length < 2) return row;
+      const target = equalSplitMemoryGiB(row.weights, devices.length, overhead);
+      const equalSplitShortfalls = devices
+        .filter(({ memory }) => memory < target)
+        .map(({ name, memory }) => ({ name, missingGiB: target - memory }));
+      return { ...row, equalSplitMemoryGiB: target, equalSplitShortfalls };
+    });
     if (values.json) {
       console.log(JSON.stringify({ bits, runtimeReserveGiB: overhead, ggufFileCount: files.size, ggufBytes: modelBytes, capacities, models }));
     } else {
@@ -70,9 +73,15 @@ try {
         console.log(`${name}: ${gib(available)} usable, ${gib(capacities[index].capacity)} for weights`);
       }
       console.log(`Combined weight capacity: ${gib(capacities.reduce((sum, device) => sum + device.capacity, 0))}`);
-      for (const { name, weights, fit, equalSplitMemoryGiB: target } of models) {
+      for (const { name, weights, fit, equalSplitMemoryGiB: target, equalSplitShortfalls = [] } of models) {
         const equal = target === undefined ? "" : ` · Equal split target: ${gib(Math.ceil(target * 10) / 10)} usable per device`;
         console.log(`${name}: ${gib(weights)} weights — ${fit}${equal}`);
+        if (equalSplitShortfalls.length) {
+          const shortfalls = equalSplitShortfalls.map(({ name, missingGiB }) =>
+            `${name} needs ${gib(Math.ceil(missingGiB * 10) / 10)} more`
+          );
+          console.log(`  Equal split memory shortfall: ${shortfalls.join(", ")}`);
+        }
       }
       console.log("Memory estimates only. Confirm model and split-runner compatibility before testing.");
     }
