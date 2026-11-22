@@ -163,9 +163,13 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
   };
 
   useEffect(() => {
-    if (!initialStatus) {
-      loadStatus();
+    if (initialStatus) {
+      setStatus(initialStatus);
+      return;
     }
+    void loadStatus();
+    const timer = window.setInterval(loadStatus, 5000);
+    return () => window.clearInterval(timer);
   }, [initialStatus]);
 
   // Expiration countdown
