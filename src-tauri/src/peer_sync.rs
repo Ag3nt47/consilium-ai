@@ -487,7 +487,7 @@ impl Sync {
     }
 
     /// Receives host resources reported by a linked peer computer.
-    fn take_resources(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
+    fn take_resources(&self, packet: &PeerPacket, shared: Shared) -> Result<Option<Event>, String> {
         let mut m = self.mirrors.lock().unwrap();
         if m.filed.contains(&packet.id) {
             return Ok(None);
@@ -498,7 +498,7 @@ impl Sync {
 
         if let Ok(res) = serde_json::from_str::<crate::resources::HostResources>(&shared.text) {
             let mut r = self.resources.lock().unwrap();
-            r.insert(computer.to_string(), res);
+            r.insert(packet.node_id.clone(), res);
         }
         Ok(None)
     }
@@ -797,7 +797,7 @@ impl Sync {
             return self.take_board(packet, shared, computer);
         }
         if shared.kind == "resources" {
-            return self.take_resources(packet, shared, computer);
+            return self.take_resources(packet, shared);
         }
         if shared.kind == "resources_request" {
             if crate::store::now_ms().abs_diff(packet.timestamp_ms) <= 120_000 {
@@ -1743,8 +1743,14 @@ mod tests {
         );
         let res = b.file(&packet, "MSI-AGENT47").unwrap();
         assert!(res.is_none());
+        let mut second = packet.clone();
+        second.id = "res2".into();
+        second.node_id = "node-second".into();
+        b.file(&second, "MSI-AGENT47").unwrap();
         let recorded = b.peer_resources();
-        assert_eq!(recorded.get("MSI-AGENT47"), Some(&sample));
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded.get("node-windows"), Some(&sample));
+        assert_eq!(recorded.get("node-second"), Some(&sample));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

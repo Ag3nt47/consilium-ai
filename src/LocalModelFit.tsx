@@ -66,7 +66,8 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
     const localInventory = api.localToolInventory().catch(() => null);
     try {
       const [before, link] = await Promise.all([api.peerResources(), api.linkStatus()]);
-      const expected = link.peers.filter((peer) => peer.connected).length;
+      const connected = new Map(link.peers.filter((peer) => peer.connected).map((peer) => [peer.node_id, peer.name]));
+      const expected = connected.size;
       if (!expected) {
         setDevices((previous) => previous.filter((device) => typeof device.id === "number"));
         setScanStatus("No paired computers are connected. Connect a computer or enter memory manually.");
@@ -77,21 +78,22 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
       let fresh: [string, Awaited<ReturnType<typeof api.peerResources>>[string]][] = [];
       do {
         const reports = await api.peerResources();
-        fresh = Object.entries(reports).filter(([name, report]) =>
-          report.updated_at > (before[name]?.updated_at ?? 0) && (report.total_memory_mb ?? 0) > 0
+        fresh = Object.entries(reports).filter(([id, report]) =>
+          connected.has(id) && report.updated_at > (before[id]?.updated_at ?? 0) && (report.total_memory_mb ?? 0) > 0
         );
         if (fresh.length >= expected) break;
         const remaining = deadline - performance.now();
         if (remaining <= 0) break;
         await new Promise((resolve) => setTimeout(resolve, Math.min(500, remaining)));
       } while (true);
-      const found = fresh.map(([name, report]) => {
+      const found = fresh.map(([id, report]) => {
+        const name = connected.get(id) ?? id;
         const totalMiB = report.total_memory_mb ?? 0;
         const availableMiB = report.available_memory_mb ?? totalMiB * (1 - report.memory_percent / 100);
         const memory = Math.max(0, Math.min(totalMiB, availableMiB)) / 1024;
         const runners = report.tools?.filter((tool) => runnerNames.has(tool)) ?? [];
         const platform = [report.os, report.build_arch].filter(Boolean).join(" ");
-        return { id: name, name, memory: memoryInput(memory), runners, platform };
+        return { id, name, memory: memoryInput(memory), runners, platform };
       });
       setDevices((previous) => [
         ...previous.filter((device) => typeof device.id === "number"),
@@ -130,20 +132,20 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
           <div className="row wrap" key={device.id}>
             {device.platform && <span className="muted">Consilium build: {device.platform}</span>}
             <label>
-              Device {device.id} name
+              Device {typeof device.id === "number" ? device.id : device.name} name
               <input value={device.name} onChange={(e) => {
                 const name = e.target.value;
                 setDevices((previous) => previous.map((item) => item.id === device.id ? { ...item, name } : item));
               }} />
             </label>
             <label>
-              Device {device.id} usable memory (GiB)
+              Device {typeof device.id === "number" ? device.id : device.name} usable memory (GiB)
               <input type="number" min="0" step="0.1" value={device.memory} onChange={(e) => {
                 const memory = e.target.value;
                 setDevices((previous) => previous.map((item) => item.id === device.id ? { ...item, memory } : item));
               }} />
             </label>
-            <button type="button" className="btn ghost small-btn" onClick={() => setDevices((previous) => previous.filter((item) => item.id !== device.id))}>Remove device {device.id}</button>
+            <button type="button" className="btn ghost small-btn" onClick={() => setDevices((previous) => previous.filter((item) => item.id !== device.id))}>Remove device {typeof device.id === "number" ? device.id : device.name}</button>
             {device.runners && <span className="muted">Model tools detected: {device.runners.join(", ") || "none reported"}.</span>}
             {!included.includes(device) && <span className="muted">Excluded because a paired report uses the same name.</span>}
           </div>
