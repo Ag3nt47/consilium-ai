@@ -13,6 +13,10 @@ const MODELS = [
 const positive = (value) => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
 export const gib = (value) => `${value.toFixed(1)} GiB`;
 
+export function equalSplitMemoryGiB(weights, count, overhead) {
+  return positive(weights) / count + positive(overhead);
+}
+
 export function weightBudgets(devices, overhead) {
   const runtime = positive(overhead);
   return devices.map(({ name, memory }) => ({
