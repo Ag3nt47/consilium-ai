@@ -43,7 +43,8 @@ test("a requested split balances weights even if a single device can fit them", 
   const fit = (nodes) => modelFit(nodes, 4, 2, 8, true)
     .find(({ name }) => name === "Custom model").fit;
   assert.equal(fit(devices), "Split estimate: Windows + Mac (Windows 5.0 GiB, Mac 3.0 GiB)");
-  assert.equal(fit(devices.slice(0, 1)), "One device: Windows");
+  assert.equal(fit([devices[0], { name: "Mac", memory: 2 }]),
+    "Split needs two devices with weight capacity. One device: Windows");
 });
 
 test("devices whose free memory is consumed by runtime add no weight capacity", () => {
