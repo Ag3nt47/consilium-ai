@@ -32,6 +32,10 @@ pub type Reply = Pin<Box<dyn Future<Output = Result<AgentReply, String>> + Send>
 
 /// What a turn needs from the app; tests supply fake AIs.
 pub trait Host: Send + Sync + 'static {
+    fn resolve_agent(&self, id: &str) -> Option<&'static Agent> {
+        agents::by_id(id)
+    }
+
     /// Asks `agent` for its `answer`-th message of `rounds` in this turn, given the conversation.
     fn ask(&self, agent: &'static Agent, answer: u32, rounds: u32, events: Vec<Event>, cancel: CancellationToken) -> Reply;
     /// A new event was recorded.
@@ -433,7 +437,7 @@ fn worker(s: Arc<Shared>, id: String, last_seen: Option<u64>) -> Pin<Box<dyn Fut
 /// Answers until there is nothing new to react to; returns whether it couldn't answer (an error or
 /// out of usage), and the newest message it has read.
 async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool, Option<u64>) {
-    let agent = agents::by_id(&id).expect("known agent");
+    let agent = s.host.resolve_agent(&id).expect("known agent");
     if crate::switched::is_off(s.store.dir(), &s.turn.conversation, &id) {
         return (false, last_seen);
     }
@@ -658,7 +662,7 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
 }
 
 async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
-    let agent = agents::by_id(&id).expect("known agent");
+    let agent = s.host.resolve_agent(&id).expect("known agent");
     let mut generation = s.state.lock().unwrap().generation;
     loop {
         let (failed, seen) = answer(s.clone(), id.clone(), last_seen).await;
@@ -685,7 +689,7 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
                     .members
                     .iter()
                     .filter(|m| !st.joined.contains(*m))
-                    .filter_map(|m| agents::by_id(m))
+                    .filter_map(|m| s.host.resolve_agent(m))
                     .collect();
                 let pick = pick_stand_in(&unjoined, available);
                 if let Some(a) = pick {
@@ -697,7 +701,7 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
                     .members
                     .iter()
                     .filter(|m| **m != id)
-                    .filter_map(|m| agents::by_id(m))
+                    .filter_map(|m| s.host.resolve_agent(m))
                     .any(available)
                 {
                     // Others could answer; they have already taken part in this turn.
@@ -751,9 +755,14 @@ mod tests {
         wait_for_gpt: Option<Arc<tokio::sync::Notify>>,
         asked: Mutex<Vec<(String, u32)>>,
         installed: HashSet<&'static str>,
+        local: Option<&'static Agent>,
     }
 
     impl Host for Fake {
+        fn resolve_agent(&self, id: &str) -> Option<&'static Agent> {
+            self.local.filter(|agent| agent.id == id).or_else(|| agents::by_id(id))
+        }
+
         fn ask(&self, agent: &'static Agent, answer: u32, _rounds: u32, events: Vec<Event>, cancel: CancellationToken) -> Reply {
             self.asked.lock().unwrap().push((agent.id.to_string(), answer));
             let r = (self.script)(agent.id, answer, &events).map(|text| AgentReply { text, usage: None, model: None });
@@ -795,6 +804,7 @@ mod tests {
             wait_for_gpt: None,
             asked: Mutex::new(vec![]),
             installed: ["gpt", "claude", "gemini"].into_iter().collect(),
+            local: None,
         }
     }
 
@@ -1047,6 +1057,36 @@ mod tests {
         let third = pick_stand_in(&candidates, |a| !exhausted.contains(a.id)).unwrap();
         assert_eq!(third.id, "localstandin", "each cloud is tried once before the custom local provider");
         assert!(agents::is_local(third));
+    }
+
+    #[tokio::test]
+    async fn local_stand_in_continues_the_same_turn_with_chat_context() {
+        let (store, conversation) = setup();
+        let local = crate::customai::test_agent(crate::customai::CustomAi {
+            id: "localcontext".into(),
+            name: "Local Context".into(),
+            base_url: "http://127.0.0.1:18080/v1".into(),
+            model: "test-local".into(),
+            local: true,
+        });
+        let mut host = fake(|id, _, events| match id {
+            "claude" | "gpt" => Err("quota exceeded".into()),
+            "localcontext" => {
+                assert!(events.iter().any(|e| e.sender == "human" && e.text == "hello"));
+                Ok("Continued locally".into())
+            }
+            _ => panic!("unexpected stand-in: {id}"),
+        });
+        host.installed.insert(local.id);
+        host.local = Some(local);
+        let host = Arc::new(host);
+        let events = go_with_members(
+            &store, &conversation, host.clone(), &["claude"], &["claude", "gpt", local.id],
+            1, Arc::new(Bench::new()),
+        ).await;
+        assert_eq!(said(&events), vec![(local.id.into(), "Continued locally".into())]);
+        let asked = host.asked.lock().unwrap();
+        assert_eq!(asked.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["claude", "gpt", local.id]);
     }
 
     #[tokio::test]
