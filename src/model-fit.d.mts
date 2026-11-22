@@ -4,6 +4,7 @@ export function modelFit(
   bits: number,
   overhead: string | number,
   customWeights?: string | number,
+  preferSplit?: boolean,
 ): { name: string; weights: number; fit: string }[];
 
 export function weightBudgets(

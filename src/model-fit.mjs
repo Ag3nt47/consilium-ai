@@ -21,7 +21,7 @@ export function weightBudgets(devices, overhead) {
   }));
 }
 
-export function modelFit(devices, bits, overhead, customWeights) {
+export function modelFit(devices, bits, overhead, customWeights, preferSplit = false) {
   const hasMemory = devices.some(({ memory }) => positive(memory) > 0);
   const budgets = weightBudgets(devices, overhead).filter(({ capacity }) => capacity > 0).sort((a, b) => b.capacity - a.capacity);
   const combined = budgets.reduce((sum, { capacity }) => sum + capacity, 0);
@@ -33,7 +33,13 @@ export function modelFit(devices, bits, overhead, customWeights) {
 
   return models.map(({ name, weights }) => {
     const single = budgets.filter(({ capacity }) => capacity >= weights);
-    if (single.length) return { name, weights, fit: `One device: ${single.map((device) => device.name).join(", ")}` };
+    if (single.length && (!preferSplit || budgets.length < 2)) {
+      const eligible = single.map((device) => device.name).join(", ");
+      const fit = preferSplit
+        ? `Split needs two devices with weight capacity. One device: ${eligible}`
+        : `One device: ${eligible}`;
+      return { name, weights, fit };
+    }
     if (combined < weights) return {
       name, weights, fit: hasMemory ? `Needs at least ${gib(weights - combined)} more for weights` : "Enter usable memory",
     };

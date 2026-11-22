@@ -38,6 +38,15 @@ test("single-device fit takes precedence when one computer has enough memory", (
   ], 10), "One device: Windows");
 });
 
+test("a requested split balances weights even if a single device can fit them", () => {
+  const devices = [{ name: "Windows", memory: 10 }, { name: "Mac", memory: 5 }];
+  const fit = (nodes) => modelFit(nodes, 4, 2, 8, true)
+    .find(({ name }) => name === "Custom model").fit;
+  assert.equal(fit(devices), "Split estimate: Windows + Mac (Windows 5.0 GiB, Mac 3.0 GiB)");
+  assert.equal(fit([devices[0], { name: "Mac", memory: 2 }]),
+    "Split needs two devices with weight capacity. One device: Windows");
+});
+
 test("devices whose free memory is consumed by runtime add no weight capacity", () => {
   assert.equal(customFit([
     { name: "Windows", memory: 10 },
@@ -98,5 +107,18 @@ test("the CLI exports a numeric per-device split plan", () => {
   assert.equal(plan.runtimeReserveGiB, 2);
   assert.deepEqual(plan.models.find(({ name }) => name === "Custom model").allocation, [
     { name: "This computer", allocated: 6 }, { name: "Mac", allocated: 4 },
+  ]);
+});
+
+test("the CLI exports an explicitly requested split for a model that fits locally", () => {
+  const result = spawnSync(process.execPath, [
+    "scripts/model-fit.mjs", "--json", "--split", "--host", "10",
+    "--device", "Mac=5", "--overhead", "2", "--weights", "8",
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const model = JSON.parse(result.stdout).models.find(({ name }) => name === "Custom model");
+  assert.deepEqual(model.allocation, [
+    { name: "This computer", allocated: 5 },
+    { name: "Mac", allocated: 3 },
   ]);
 });
