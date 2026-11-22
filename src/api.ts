@@ -396,7 +396,7 @@ export type LinkStatus = {
 /** The communication stress test with one linked computer (src-tauri/src/link.rs). */
 export type StressReport = {
   computer: string;
-  routes: { addr: string; kind: string; ok: boolean; ms: number | null; local_interface?: string | null; detail: string }[];
+  routes: { addr: string; kind: string; ok: boolean; ms: number | null; local_interface?: string | null; local_addr?: string | null; detail: string }[];
   restored: StressReport["routes"][number] | null;
 };
 
