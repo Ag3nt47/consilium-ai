@@ -772,61 +772,43 @@ impl Link {
 
     /// Tests connectivity, route latency, and sync alignment for a paired computer.
     pub async fn test_peer(&self, node_id: &str) -> Result<PeerTestReport, String> {
-        let (peer, connected, active_route, rtt_ms, queued_outgoing) = {
-            let cfg = self.0.cfg.lock().unwrap();
-            let peer = cfg
-                .peers
-                .iter()
-                .find(|p| p.node_id == node_id)
-                .cloned()
-                .ok_or_else(|| format!("computer {node_id} not found"))?;
-            let states = self.0.peers.lock().unwrap();
-            let s = states.get(node_id);
-            let connected = s.is_some_and(|s| s.tx.is_some());
-            let session = s.filter(|s| s.tx.is_some());
-            let active_route = session.and_then(|s| s.route.clone());
-            let rtt = session.and_then(|s| s.rtt_ms);
-            let queued = s.map_or(0, |s| s.outbox.len());
-            (peer, connected, active_route, rtt, queued)
-        };
-
-        let mut routes = Vec::new();
-        for addr in &peer.addrs {
-            let kind = route_kind(addr).to_string();
-
-            let started = std::time::Instant::now();
-            let timeout = Duration::from_millis(1000);
-            match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
-                Ok(Ok(_stream)) => {
-                    let elapsed = started.elapsed().as_millis() as u64;
-                    routes.push(RouteTest {
-                        addr: addr.clone(),
-                        kind,
-                        reachable: true,
-                        rtt_ms: Some(elapsed),
-                        status: format!("TCP connected in {elapsed} ms"),
-                    });
-                }
-                Ok(Err(_)) => {
-                    routes.push(RouteTest {
-                        addr: addr.clone(),
-                        kind,
-                        reachable: false,
-                        rtt_ms: None,
-                        status: "Refused or unreachable".to_string(),
-                    });
-                }
-                Err(_) => {
-                    routes.push(RouteTest {
-                        addr: addr.clone(),
-                        kind,
-                        reachable: false,
-                        rtt_ms: None,
-                        status: "Timed out".to_string(),
-                    });
-                }
-            }
+        let peer = self.peer(node_id).ok_or_else(|| format!("computer {node_id} not found"))?;
+        let mut probes = tokio::task::JoinSet::new();
+        for (index, addr) in peer.addrs.iter().take(12).cloned().enumerate() {
+            probes.spawn(async move {
+                let kind = route_kind(&addr).to_string();
+                let started = std::time::Instant::now();
+                let timeout = Duration::from_secs(1);
+                let (rtt_ms, status) = match tokio::time::timeout(timeout, TcpStream::connect(&addr)).await {
+                    Ok(Ok(_stream)) => {
+                        let elapsed = started.elapsed().as_millis() as u64;
+                        (Some(elapsed), format!("TCP connected in {elapsed} ms"))
+                    }
+                    Ok(Err(_)) => (None, "Refused or unreachable".to_string()),
+                    Err(_) => (None, "Timed out".to_string()),
+                };
+                (index, RouteTest { addr, kind, reachable: rtt_ms.is_some(), rtt_ms, status })
+            });
         }
+        let mut completed = Vec::new();
+        while let Some(result) = probes.join_next().await {
+            completed.push(result.map_err(|e| format!("Route check failed: {e}"))?);
+        }
+        completed.sort_by_key(|(index, _)| *index);
+        let routes: Vec<_> = completed.into_iter().map(|(_, route)| route).collect();
+
+        // Use the current session after the probes, since failover might have occurred.
+        let (connected, active_route, rtt_ms, queued_outgoing) = {
+            let states = self.0.peers.lock().unwrap();
+            let state = states.get(node_id);
+            let session = state.filter(|state| state.tx.is_some());
+            (
+                session.is_some(),
+                session.and_then(|state| state.route.clone()),
+                session.and_then(|state| state.rtt_ms),
+                state.map_or(0, |state| state.outbox.len()),
+            )
+        };
 
         let handshake_ok = connected;
         let summary = if connected {
@@ -2500,9 +2482,19 @@ mod tests {
         joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
 
         let joiner_id = joiner.0.cfg.lock().unwrap().node_id.clone();
+        assert!(wait_for(|| host.status().peers[0].connected).await);
+        let unavailable = tokio::net::TcpSocket::new_v4().unwrap();
+        unavailable.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let unreachable = unavailable.local_addr().unwrap().to_string();
+        let reachable = format!("127.0.0.1:{}", joiner.0.port);
+        host.0.cfg.lock().unwrap().peers[0].addrs = vec![unreachable.clone(), reachable.clone()];
         let report = host.test_peer(&joiner_id).await.unwrap();
         assert_eq!(report.name, joiner.0.cfg.lock().unwrap().name);
-        assert!(!report.routes.is_empty());
+        assert!(report.handshake_ok);
+        assert_eq!(
+            report.routes.iter().map(|route| (route.addr.as_str(), route.reachable)).collect::<Vec<_>>(),
+            [(unreachable.as_str(), false), (reachable.as_str(), true)]
+        );
 
         host.stop();
         joiner.stop();
