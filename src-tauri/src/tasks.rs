@@ -520,10 +520,13 @@ Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
         .filter(|t| t.status != Status::Done)
         .collect();
     let omitted_open = if let Some(agent) = local_agent {
-        open.sort_by_key(|task| match task.owner.as_deref() {
-            Some(owner) if owner == agent => 0,
-            None => 1,
-            Some(_) => 2,
+        open.sort_by_key(|task| {
+            let ownership = match task.owner.as_deref() {
+                Some(owner) if owner == agent => 0,
+                None => 1,
+                Some(_) => 2,
+            };
+            (ownership, task.status == Status::Blocked)
         });
         let omitted = open.len().saturating_sub(LOCAL_OPEN_IN_PROMPT);
         open.truncate(LOCAL_OPEN_IN_PROMPT);
@@ -611,11 +614,13 @@ mod tests {
                 updated: 0,
             });
         }
+        board.tasks[0].status = Status::Blocked;
         let prefix = "\u{00e9}".repeat(160);
         board.tasks[29].note = Some(format!("{prefix}remaining details"));
         let local = for_prompt(&board, Some("local"));
         assert_eq!(local.lines().filter(|line| line.starts_with('#')).count(), LOCAL_OPEN_IN_PROMPT);
         assert!(local.contains("#30 [doing"));
+        assert!(!local.contains("#1 [blocked"));
         assert!(!local.contains("#29 [doing"));
         assert!(local.contains("6 open tasks omitted"));
         assert!(local.contains(&format!("{prefix}...")));
