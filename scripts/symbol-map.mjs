@@ -64,10 +64,12 @@ function outline(source, statements, filter) {
 }
 
 try {
-  const [file, functionName, filter, ...extra] = process.argv.slice(2);
-  if (!file || extra.length || !supported.has(extname(file).toLowerCase())) {
-    throw new Error("Usage: node scripts/symbol-map.mjs <JS or TS file> [top-level function] [symbol filter]");
+  const [file, scopeArg, filter, ...extra] = process.argv.slice(2);
+  const filterOnly = scopeArg === "--filter";
+  if (!file || extra.length || (filterOnly && !filter?.trim()) || !supported.has(extname(file).toLowerCase())) {
+    throw new Error("Usage: node scripts/symbol-map.mjs <JS or TS file> [top-level function | --filter] [symbol filter]");
   }
+  const functionName = filterOnly ? undefined : scopeArg;
   const text = readSource(file);
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
   const diagnostic = source.parseDiagnostics[0];
