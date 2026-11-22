@@ -58,6 +58,11 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
     try {
       const [before, link] = await Promise.all([api.peerResources(), api.linkStatus()]);
       const expected = link.peers.filter((peer) => peer.connected).length;
+      if (!expected) {
+        setDevices((previous) => previous.filter((device) => typeof device.id === "number"));
+        setScanStatus("No paired computers are connected. Connect a computer or enter memory manually.");
+        return;
+      }
       await api.requestPeerResources();
       const deadline = performance.now() + 6000;
       let fresh: [string, Awaited<ReturnType<typeof api.peerResources>>[string]][] = [];
@@ -66,7 +71,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
         fresh = Object.entries(reports).filter(([name, report]) =>
           report.updated_at > (before[name]?.updated_at ?? 0) && (report.total_memory_mb ?? 0) > 0
         );
-        if (fresh.length >= expected && expected > 0) break;
+        if (fresh.length >= expected) break;
         const remaining = deadline - performance.now();
         if (remaining <= 0) break;
         await new Promise((resolve) => setTimeout(resolve, Math.min(500, remaining)));
@@ -84,7 +89,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
         ...found,
       ]);
       setScanStatus(found.length
-        ? `Imported ${found.length} fresh paired-computer report(s).`
+        ? `Imported ${found.length} of ${expected} requested paired-computer memory reports.`
         : "No new memory reports arrived. Previous paired estimates were cleared. Check that the computers are online and updated, or enter memory manually.");
     } catch {
       setDevices((previous) => previous.filter((device) => typeof device.id === "number"));
