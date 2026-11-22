@@ -108,3 +108,16 @@ test("the CLI exports a numeric per-device split plan", () => {
     { name: "This computer", allocated: 6 }, { name: "Mac", allocated: 4 },
   ]);
 });
+
+test("the CLI exports an explicitly requested split for a model that fits locally", () => {
+  const result = spawnSync(process.execPath, [
+    "scripts/model-fit.mjs", "--json", "--split", "--host", "10",
+    "--device", "Mac=5", "--overhead", "2", "--weights", "8",
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const model = JSON.parse(result.stdout).models.find(({ name }) => name === "Custom model");
+  assert.deepEqual(model.allocation, [
+    { name: "This computer", allocated: 5 },
+    { name: "Mac", allocated: 3 },
+  ]);
+});

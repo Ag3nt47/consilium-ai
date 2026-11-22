@@ -15,6 +15,7 @@ try {
     options: {
       help: { type: "boolean" },
       json: { type: "boolean" },
+      split: { type: "boolean" },
       host: { type: "string" },
       device: { type: "string", multiple: true, default: [] },
       bits: { type: "string", default: "4" },
@@ -24,7 +25,8 @@ try {
     },
   });
   if (values.help) {
-    console.log('Usage: node scripts/model-fit.mjs [--json] [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--weights GiB | --gguf PATH ...]');
+    console.log('Usage: node scripts/model-fit.mjs [--json] [--split] [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--weights GiB | --gguf PATH ...]');
+    console.log("--split estimates a balanced allocation even when one device can hold the model.");
     console.log("Device memory is usable RAM before inference overhead. Repeat --device for additional computers.");
   } else {
     const bits = Number(values.bits);
@@ -54,7 +56,7 @@ try {
     if (shardError) throw new Error(shardError);
     const custom = values.weights === undefined ? modelBytes / 2 ** 30 : memory(values.weights, "--weights");
     const capacities = weightBudgets(devices, overhead);
-    const models = modelFit(devices, bits, overhead, custom);
+    const models = modelFit(devices, bits, overhead, custom, values.split);
     if (values.json) {
       console.log(JSON.stringify({ bits, runtimeReserveGiB: overhead, ggufFileCount: files.size, ggufBytes: modelBytes, capacities, models }));
     } else {
