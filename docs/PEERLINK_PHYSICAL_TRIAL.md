@@ -40,4 +40,12 @@ Compare the three-path run against each single-path baseline with the same paylo
 
 With permission to start the runners, use the same compatible GGUF and runner build for each comparison. Record usable memory after runtime reserves, planned weight allocation, and actual weight and KV-cache allocation reported by every worker. Verify that each worker participating in the split actually loaded weights and contributed to processing the request.
 
+### Memory preflight
+
+Use fresh paired-computer reports before allocating weights. In the latest Windows–Mac preflight, the Mac returned 951 MiB out of 8192 MiB over PeerLink. The default 2 GiB runtime allowance left it with zero weight capacity. Windows had about 7.33 GiB available in a separate reading.
+
+With that allowance and the installed file sizes, the per-device free memory targets for a 50/50 weight split are approximately 2.64 GiB for Qwen3 1.7B, 3.17 GiB for Qwen3 4B, and 4.17 GiB for Llama 3. Start with Qwen3 1.7B once both devices have sufficient headroom. These are planning thresholds. Confirm actual model and context allocations from the runner logs during an authorized trial.
+
+### Inference measurements
+
 Use a fixed prompt and record load time, time to first token, tokens per second, and peak memory per device. Run the same prompt with internet access disabled and the local paths still connected. During a separate request, interrupt the active path and record whether inference resumes, restarts from saved context, or fails. Confirm that the user sees one terminal result and that all worker allocations are released on cancellation. Report transport recovery and inference recovery separately.
