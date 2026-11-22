@@ -285,11 +285,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get install -y xvfb xauth xdotool
+          sudo apt-get install -y xvfb xauth x11-utils dbus
           export CONSILIUM_DATA="$RUNNER_TEMP/consilium-preview-desktop"
           mkdir -p "$CONSILIUM_DATA"
           printf '%s\n' '{"auto_install_updates":false,"members":[]}' > "$CONSILIUM_DATA/council.json"
-          xvfb-run -a bash -euo pipefail <<'DESKTOP'
+          xvfb-run -a dbus-run-session -- bash -euo pipefail <<'DESKTOP'
           /usr/bin/consilium > "$CONSILIUM_DATA/desktop.log" 2>&1 &
           app=$!
           trap 'kill "$app" 2>/dev/null || true; wait "$app" 2>/dev/null || true' EXIT
@@ -297,12 +297,13 @@ jobs:
             if ! kill -0 "$app" 2>/dev/null; then
               break
             fi
-            if xdotool search --onlyvisible --all --pid "$app" --name '^Consilium$' >/dev/null; then
+            if xwininfo -name Consilium 2>/dev/null | grep -Fq "Map State: IsViewable"; then
               echo "Verified the installed Consilium opened a visible Linux desktop window."
               exit 0
             fi
             sleep 0.5
           done
+          xwininfo -root -tree || true
           cat "$CONSILIUM_DATA/desktop.log"
           echo "::error::The installed Consilium did not open a visible window within 30 seconds."
           exit 1
