@@ -430,38 +430,44 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
               >
                 {stressing ? "Stress testing routes…" : "Communication stress test"}
               </button>
-              {stress?.map((r) => (
-                <div key={r.computer} className="stress-report">
-                  <div className="muted small">
-                    {r.computer}:{" "}
-                    {r.routes.length === 0
-                      ? "not connected, nothing tested"
-                      : `${r.routes.filter((x) => x.ok).length} of ${r.routes.length} endpoints carried traffic`}
+              {stress?.map((r) => {
+                const passed = r.routes.filter((route) => route.ok);
+                const interfaces = [...new Set(passed.flatMap(({ local_interface }) => local_interface ? [local_interface] : []))];
+                return (
+                  <div key={r.computer} className="stress-report">
+                    <div className="muted small">
+                      {r.computer}:{" "}
+                      {r.routes.length === 0
+                        ? "not connected, nothing tested"
+                        : `${r.routes.filter((x) => x.ok).length} of ${r.routes.length} endpoints carried traffic`}
+                    </div>
+                    {r.restored && (
+                      <div className="muted small">
+                        {r.restored.ok ? `Reconnected through ${r.restored.addr}` : "Reconnection unconfirmed"}
+                        {r.restored.local_interface && ` via ${r.restored.local_interface}`}
+                        {r.restored.local_addr && `, source ${r.restored.local_addr}`}
+                        {" · "}{r.restored.detail}
+                      </div>
+                    )}
+                    {passed.length > 0 && (
+                      <div className="muted small">
+                        {interfaces.length > 0
+                          ? `Local interfaces that carried authenticated traffic: ${interfaces.join(", ")}.`
+                          : "The local interface could not be identified for any successful endpoint."}
+                        {interfaces.length < 2 && " Connect another interface and rerun the test to check a second physical path."}
+                      </div>
+                    )}
+                    {r.routes.map((x) => (
+                      <div key={x.addr} className={`handshake-item ${x.ok ? "acknowledged" : "pending"}`}>
+                        <span className="handshake-mark">{x.ok ? "✓" : "✗"}</span> {x.kind} <code>{x.addr}</code>{" "}
+                        <span className="muted small">
+                          {x.detail}{x.ok && `, local interface ${x.local_interface ?? "unavailable"}${x.local_addr ? `, source ${x.local_addr}` : ""}`}
+                        </span>
+                      </div>
+                    ))}
                   </div>
-                  {r.restored && (
-                    <div className="muted small">
-                      {r.restored.ok ? `Reconnected through ${r.restored.addr}` : "Reconnection unconfirmed"}
-                      {r.restored.local_interface && ` via ${r.restored.local_interface}`}
-                      {r.restored.local_addr && `, source ${r.restored.local_addr}`}
-                      {" · "}{r.restored.detail}
-                    </div>
-                  )}
-                  {r.routes.some((x) => x.ok) && (
-                    <div className="muted small">
-                      Local interfaces observed carrying traffic{" "}
-                      {[...new Set(r.routes.flatMap((x) => x.local_interface ? [x.local_interface] : []))].length}
-                    </div>
-                  )}
-                  {r.routes.map((x) => (
-                    <div key={x.addr} className={`handshake-item ${x.ok ? "acknowledged" : "pending"}`}>
-                      <span className="handshake-mark">{x.ok ? "✓" : "✗"}</span> {x.kind} <code>{x.addr}</code>{" "}
-                      <span className="muted small">
-                        {x.detail}{x.ok && `, local interface ${x.local_interface ?? "unavailable"}${x.local_addr ? `, source ${x.local_addr}` : ""}`}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             <div style={{ marginTop: "8px" }}>
