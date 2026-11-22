@@ -15,8 +15,20 @@ test("split estimate reserves runtime memory on each device", () => {
   const mac = { name: "Mac", memory: 6 };
   assert.equal(customFit([windows], 10), "Needs at least 2.0 GiB more for weights");
   assert.equal(customFit([mac], 10), "Needs at least 6.0 GiB more for weights");
-  assert.equal(customFit([mac, windows], 10), "Split estimate: Windows + Mac (Windows 8.0 GiB, Mac 2.0 GiB)");
+  assert.equal(customFit([mac, windows], 10), "Split estimate: Windows + Mac (Windows 6.0 GiB, Mac 4.0 GiB)");
+  assert.equal(customFit([windows, { name: "Linux", memory: 10 }], 10),
+    "Split estimate: Windows + Linux (Windows 5.0 GiB, Linux 5.0 GiB)");
   assert.equal(customFit([mac, windows], 13), "Needs at least 1.0 GiB more for weights");
+});
+
+test("split weights balance across three devices after capping a small peer", () => {
+  const phone = { name: "Phone", memory: 3 };
+  const mac = { name: "Mac", memory: 6 };
+  const windows = { name: "Windows", memory: 10 };
+  assert.equal(customFit([phone, mac, windows], 10),
+    "Split estimate: Windows + Mac + Phone (Windows 5.0 GiB, Mac 4.0 GiB, Phone 1.0 GiB)");
+  assert.equal(customFit([phone, mac, windows], 13),
+    "Split estimate: Windows + Mac + Phone (Windows 8.0 GiB, Mac 4.0 GiB, Phone 1.0 GiB)");
 });
 
 test("single-device fit takes precedence when one computer has enough memory", () => {

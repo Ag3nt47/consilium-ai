@@ -397,7 +397,7 @@ export type LinkStatus = {
 export type StressReport = {
   computer: string;
   routes: { addr: string; kind: string; ok: boolean; ms: number | null; local_interface?: string | null; detail: string }[];
-  restored: string | null;
+  restored: StressReport["routes"][number] | null;
 };
 
 /** One AI's side of the handshake with a linked computer (src-tauri/src/link.rs). */

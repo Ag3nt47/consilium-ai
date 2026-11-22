@@ -229,9 +229,13 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
   };
 
   useEffect(() => {
-    if (!initialStatus) {
-      loadStatus();
+    if (initialStatus) {
+      setStatus(initialStatus);
+      return;
     }
+    void loadStatus();
+    const timer = window.setInterval(loadStatus, 5000);
+    return () => window.clearInterval(timer);
   }, [initialStatus]);
 
   // Expiration countdown
@@ -365,6 +369,12 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
   return (
     <div className="link-settings">
       {error && <div className="link-error small">{error}</div>}
+      {status.enabled && status.error && (
+        <div className="link-error small" role="status">
+          <strong>Incoming connections unavailable.</strong> {status.error}
+          {" "}This computer may still connect out. Check whether another app owns the port, then turn the direct link off and on.
+        </div>
+      )}
 
       <div className="link-card">
         <div className="row between align-center">
@@ -426,8 +436,15 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                     {r.computer}:{" "}
                     {r.routes.length === 0
                       ? "not connected, nothing tested"
-                      : `${r.routes.filter((x) => x.ok).length} of ${r.routes.length} endpoints carried traffic${r.restored ? `, reconnected through ${r.restored}` : ", reconnection unconfirmed"}`}
+                      : `${r.routes.filter((x) => x.ok).length} of ${r.routes.length} endpoints carried traffic`}
                   </div>
+                  {r.restored && (
+                    <div className="muted small">
+                      {r.restored.ok ? `Reconnected through ${r.restored.addr}` : "Reconnection unconfirmed"}
+                      {r.restored.local_interface && ` via ${r.restored.local_interface}`}
+                      {" · "}{r.restored.detail}
+                    </div>
+                  )}
                   {r.routes.some((x) => x.ok) && (
                     <div className="muted small">
                       Local interfaces observed carrying traffic{" "}
@@ -473,10 +490,21 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
       {status.enabled && (
         <>
           <div className="section-label" style={{ marginTop: "16px" }}>
-            Pair Another Computer (Mac or Windows)
+            Pair Another Computer
           </div>
 
           <div className="link-card">
+            <details className="small">
+              <summary>Walk me through setup and failover testing</summary>
+              <ol>
+                <li>Open Consilium on both computers and enable the direct link. Connect them to the same trusted network using Ethernet or Wi-Fi.</li>
+                <li>On the first computer, choose <strong>Show Pairing Code</strong>. Generate a code and copy one of its local addresses above.</li>
+                <li>On the second computer, choose <strong>Join Another Computer</strong>. Enter the address and code from the first computer, then pair. Auto-Find on LAN can suggest addresses.</li>
+                <li>On the linked computer card, choose <strong>Test Connection</strong> and confirm there is an authenticated session. If it fails, check the address, generate a fresh code if needed, and allow Consilium through the firewall on the trusted network.</li>
+                <li>For a backup path, connect another interface on both computers. Keep Ethernet connected while joining Wi-Fi. For Bluetooth, first establish a Bluetooth network connection in the operating system. Add the other computer’s address on the backup path if it is missing.</li>
+                <li>Run <strong>Communication stress test</strong> above and check that authenticated traffic used two distinct local interfaces. With access to both computers, disconnect the active path, check that the alternate interface becomes active, then restore the first path.</li>
+              </ol>
+            </details>
             <div className="pairing-tabs">
               <button
                 className={`tab-btn ${mode === "host" ? "active" : ""}`}
@@ -531,14 +559,6 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
               </div>
             ) : (
               <div className="tab-pane">
-                <div className="failover-intro-callout small">
-                  <strong>⚡ Automatic Wired & Wireless Failover</strong>
-                  <p className="muted" style={{ margin: "4px 0 0 0" }}>
-                    Consilium automatically discovers and syncs both wired (Gigabit Ethernet) and wireless (Wi-Fi) network routes.
-                    If a cable is disconnected or Wi-Fi drops, connections automatically switch to the next fastest route in under 2 seconds without dropping messages.
-                  </p>
-                </div>
-
                 <p className="muted small" style={{ marginTop: "12px" }}>
                   Enter the local network address and 6-digit pairing code shown on the other computer.
                 </p>

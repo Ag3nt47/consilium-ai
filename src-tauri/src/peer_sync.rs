@@ -590,6 +590,10 @@ impl Sync {
 
     /// Shares this computer's host resources with linked peers.
     pub fn share_resources(&self, target_path: Option<&Path>) -> Result<(), String> {
+        self.send_resources(target_path, None)
+    }
+
+    fn send_resources(&self, target_path: Option<&Path>, recipient: Option<&str>) -> Result<(), String> {
         let Some(link) = crate::link_handle().filter(|l| l.enabled() && l.has_peers()) else { return Ok(()) };
         let host_res = crate::resources::HostResources::sample(&crate::prompt::here_slug(), target_path);
         let serialized = serde_json::to_string(&host_res).map_err(|e| e.to_string())?;
@@ -602,7 +606,11 @@ impl Sync {
             "to": [],
             "text": serialized,
         });
-        link.send(PacketKind::Chat, payload)?;
+        if let Some(node_id) = recipient {
+            link.send_to(node_id, PacketKind::Chat, payload)?;
+        } else {
+            link.send(PacketKind::Chat, payload)?;
+        }
         Ok(())
     }
 
@@ -794,7 +802,7 @@ impl Sync {
         if shared.kind == "resources_request" {
             if crate::store::now_ms().abs_diff(packet.timestamp_ms) <= 120_000 {
                 let data = crate::data_dir();
-                self.share_resources(data.as_deref())?;
+                self.send_resources(data.as_deref(), Some(&packet.node_id))?;
             }
             return Ok(None);
         }
