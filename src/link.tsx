@@ -374,8 +374,15 @@ export function LinkSettings({ status: initialStatus, onRefresh }: { status?: Li
                     {r.computer}:{" "}
                     {r.routes.length === 0
                       ? "not connected, nothing tested"
-                      : `${r.routes.filter((x) => x.ok).length} of ${r.routes.length} endpoints carried traffic${r.restored ? `, reconnected through ${r.restored}` : ", reconnection unconfirmed"}`}
+                      : `${r.routes.filter((x) => x.ok).length} of ${r.routes.length} endpoints carried traffic`}
                   </div>
+                  {r.restored && (
+                    <div className="muted small">
+                      {r.restored.ok ? `Reconnected through ${r.restored.addr}` : "Reconnection unconfirmed"}
+                      {r.restored.local_interface && ` via ${r.restored.local_interface}`}
+                      {" · "}{r.restored.detail}
+                    </div>
+                  )}
                   {r.routes.some((x) => x.ok) && (
                     <div className="muted small">
                       Local interfaces observed carrying traffic{" "}

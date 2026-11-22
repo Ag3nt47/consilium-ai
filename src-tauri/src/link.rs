@@ -680,7 +680,7 @@ impl Link {
             out.push(StressReport {
                 computer: self.peer_name(&peer.node_id),
                 routes,
-                restored: restored.ok.then_some(restored.addr),
+                restored: Some(restored),
             });
         }
         Ok(out)
@@ -1545,8 +1545,8 @@ pub struct RouteSwitch {
 pub struct StressReport {
     pub computer: String,
     pub routes: Vec<RouteSwitch>,
-    /// The route the link returned to afterwards; None if it isn't connected.
-    pub restored: Option<String>,
+    /// The final reconnect attempt, absent when no routes were tested.
+    pub restored: Option<RouteSwitch>,
 }
 
 impl StressReport {
@@ -1568,7 +1568,13 @@ impl StressReport {
             }
         }
         match &self.restored {
-            Some(r) => s.push_str(&format!("\nThe reconnect attempt confirmed traffic through {r}.")),
+            Some(r) if r.ok => {
+                s.push_str(&format!("\nReconnected through {}: {}", r.addr, r.detail));
+                if let Some(interface) = &r.local_interface {
+                    s.push_str(&format!(", local interface {interface}"));
+                }
+            }
+            Some(r) => s.push_str(&format!("\nReconnection unconfirmed: {}", r.detail)),
             None => s.push_str("\nThe test did not confirm traffic after attempting to reconnect."),
         }
         s
@@ -2026,7 +2032,10 @@ mod tests {
         assert!(r.routes[0].detail.contains("traffic confirmed"));
         assert_eq!(r.routes[1].local_interface, None);
         assert!(!r.routes[1].ok && r.routes[1].addr == dead, "{:?}", r.routes[1]);
-        assert_eq!(r.restored.as_deref(), Some(good.as_str()), "back on the working route");
+        let restored = r.restored.as_ref().expect("reconnect attempted");
+        assert!(restored.ok, "{}", restored.detail);
+        assert_eq!(restored.addr, good, "back on the working route");
+        assert!(restored.ms.is_some(), "reconnect timing captured");
         assert!(wait_for(|| joiner.status().peers[0].connected).await);
         let note = r.summary("requested");
         assert!(note.contains("1 of 2 configured endpoints carried authenticated traffic") && note.contains("✓ Loopback") && note.contains("✗ Loopback"), "{note}");
