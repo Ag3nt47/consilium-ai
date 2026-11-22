@@ -457,30 +457,7 @@ impl Engine {
     /// Tiered candidate selection: flagship paid models take work first; local offline models act
     /// as silent standby fallback when all active flagship models exhaust their quota or rate limits.
     pub fn tier_targets(&self, candidates: &[String]) -> Vec<String> {
-        let (flagship, local): (Vec<String>, Vec<String>) = candidates
-            .iter()
-            .cloned()
-            .partition(|id| !crate::agents::is_local_id(id));
-
-        let available_flagship: Vec<String> = flagship
-            .into_iter()
-            .filter(|id| self.is_available(id))
-            .collect();
-
-        if !available_flagship.is_empty() {
-            return available_flagship;
-        }
-
-        let available_local: Vec<String> = local
-            .into_iter()
-            .filter(|id| self.is_available(id))
-            .collect();
-
-        if !available_local.is_empty() {
-            available_local
-        } else {
-            candidates.to_vec()
-        }
+        select_tier_targets(candidates, crate::agents::is_local_id, |id| self.is_available(id))
     }
 
     /// Sets up the turn `pending` and runs it in the background. `cursor` is the newest event it
@@ -1534,23 +1511,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn tier_targets_prefers_flagship_and_falls_back_to_local_when_exhausted() {
-        let (app, _term, dir) = pair(0);
-        let candidates = vec!["gpt".to_string(), "claude".to_string()];
-        let selected = app.tier_targets(&candidates);
-        assert!(!selected.is_empty());
-        assert!(selected.iter().all(|id| !crate::agents::is_local_id(id)));
-
-        // Bench all flagship models
-        let now = crate::store::now_ms();
-        app.bench.bench("gpt", now + 100_000, true);
-        app.bench.bench("claude", now + 100_000, true);
-
-        let exhausted = app.tier_targets(&candidates);
-        assert_eq!(exhausted, candidates, "falls back cleanly when all candidates are benched");
-        let _ = std::fs::remove_dir_all(dir);
+    #[test]
+    fn tier_targets_prefers_flagship_and_falls_back_to_local_when_exhausted() {
+        let candidates = ["gpt", "claude", "qwen"].map(str::to_string);
+        let is_local = |id: &str| id == "qwen";
+        assert_eq!(select_tier_targets(&candidates, is_local, |_| true), ["gpt", "claude"]);
+        assert_eq!(select_tier_targets(&candidates, is_local, |id| id != "gpt"), ["claude"]);
+        assert_eq!(select_tier_targets(&candidates, is_local, |id| id == "qwen"), ["qwen"]);
+        assert_eq!(select_tier_targets(&candidates, is_local, |_| false), candidates);
     }
+}
+
+fn select_tier_targets(
+    candidates: &[String],
+    is_local: impl Fn(&str) -> bool,
+    available: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let (local, flagship): (Vec<_>, Vec<_>) = candidates.iter().partition(|id| is_local(id));
+    for tier in [flagship, local] {
+        let ready: Vec<_> = tier.into_iter().filter(|id| available(id)).cloned().collect();
+        if !ready.is_empty() {
+            return ready;
+        }
+    }
+    candidates.to_vec()
 }
 
 /// Who a message goes to: the council members it @mentions if it names any, else the ticked ones.
