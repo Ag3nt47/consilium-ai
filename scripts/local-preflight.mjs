@@ -43,7 +43,7 @@ function recordPatchFailure(result) {
   const lines = (result.stdout ?? "").split(/\r?\n/).filter((line) => !line.startsWith("+") && line.trim());
   patchDiagnostics.push(...(lines.length ? lines.slice(0, 6) : ["Git could not complete the patch check."]));
 }
-const diff = run("git", ["--literal-pathspecs", "-C", root, "diff", "--no-ext-diff", "--check", "HEAD", "--", ...scope]);
+const diff = run("git", ["--literal-pathspecs", "-C", root, "-c", "core.whitespace=cr-at-eol", "diff", "--no-ext-diff", "--check", "HEAD", "--", ...scope]);
 if (diff.status !== 0) recordPatchFailure(diff);
 const untracked = run("git", ["--literal-pathspecs", "-C", root, "ls-files", "--others", "-z", "--", ...scope]);
 if (untracked.status !== 0) recordPatchFailure(untracked);
