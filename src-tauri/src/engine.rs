@@ -943,9 +943,9 @@ impl council::Host for RealHost {
         );
         // The model chosen in this AI's council box (#29), read fresh like the folder.
         let chosen_model = self.config.model(agent.id);
-        let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w)));
-        // A local model's window is small (often 4k–8k tokens): it gets only the newest notes.
+        // Keep project notes and shared memory compact for local models' smaller context windows.
         let local = agents::is_local(agent);
+        let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w), local));
         let shared = if local { self.memory.for_prompt_within(LOCAL_MEMORY_CHARS) } else { self.memory.for_prompt() };
         let members = self.config.get().members;
         let ctx = prompt::Context {
