@@ -265,6 +265,10 @@ impl Board {
             .map(|i| (i, true))
     }
 
+    fn can_update(&self, index: usize, who: &str) -> bool {
+        who == "human" || self.tasks[index].owner.as_deref().is_none_or(|owner| owner == who)
+    }
+
     /// Applies one change; returns what happened, worded for the chat note.
     fn apply(&mut self, who: &str, op: &Op, now: u64) -> Option<String> {
         let (i, verb) = match op {
@@ -279,17 +283,13 @@ impl Board {
             }
             Op::Take { task } => {
                 let (i, new) = self.find_or_add(task, Status::Doing, who, now)?;
-                let t = &mut self.tasks[i];
-                if !new {
-                    let owner = t.owner.as_deref();
-                    let already_doing = t.status == Status::Doing && owner == Some(who);
-                    let assigned_elsewhere = who != "human"
-                        && matches!(t.status, Status::Doing | Status::Blocked)
-                        && owner.is_some_and(|owner| owner != who);
-                    if already_doing || assigned_elsewhere {
-                        return None;
-                    }
+                let task = &self.tasks[i];
+                let already_doing =
+                    !new && task.status == Status::Doing && task.owner.as_deref() == Some(who);
+                if !self.can_update(i, who) || already_doing {
+                    return None;
                 }
+                let t = &mut self.tasks[i];
                 t.owner = Some(who.to_string());
                 t.status = Status::Doing;
                 t.note = None;
@@ -297,10 +297,10 @@ impl Board {
             }
             Op::Done { task } => {
                 let (i, new) = self.find_or_add(task, Status::Done, who, now)?;
-                let t = &mut self.tasks[i];
-                if !new && t.status == Status::Done {
+                if !self.can_update(i, who) || (!new && self.tasks[i].status == Status::Done) {
                     return None;
                 }
+                let t = &mut self.tasks[i];
                 t.status = Status::Done;
                 t.note = None;
                 t.owner.get_or_insert_with(|| who.to_string());
@@ -308,6 +308,9 @@ impl Board {
             }
             Op::Block { task, note } => {
                 let (i, _) = self.find_or_add(task, Status::Blocked, who, now)?;
+                if !self.can_update(i, who) {
+                    return None;
+                }
                 let t = &mut self.tasks[i];
                 t.status = Status::Blocked;
                 t.note = note.as_deref().and_then(clean);
@@ -320,10 +323,10 @@ impl Board {
                 if to.is_empty() {
                     return None;
                 }
-                let t = &mut self.tasks[i];
-                if who != "human" && t.owner.as_deref().is_some_and(|owner| owner != who) {
+                if !self.can_update(i, who) {
                     return None;
                 }
+                let t = &mut self.tasks[i];
                 t.owner = Some(to.clone());
                 t.status = Status::Doing;
                 t.note = None;
@@ -333,6 +336,9 @@ impl Board {
             }
             Op::Reopen { task } => {
                 let i = self.find(task)?;
+                if !self.can_update(i, who) {
+                    return None;
+                }
                 let t = &mut self.tasks[i];
                 t.status = if t.owner.is_some() {
                     Status::Doing
@@ -344,6 +350,9 @@ impl Board {
             }
             Op::Drop { task } => {
                 let i = self.find(task)?;
+                if !self.can_update(i, who) {
+                    return None;
+                }
                 let t = self.tasks.remove(i);
                 return Some(format!("removed #{} {}", t.id, t.title));
             }
@@ -504,7 +513,7 @@ fn split_reason(arg: &str) -> (String, Option<String>) {
 pub fn for_prompt(board: &Board, local_agent: Option<&str>) -> String {
     let mut s = String::from(
         "\n\nTASK BOARD (shared across computers; editable by the human). \
-Before claiming a large task, divide it into independent tasks with affected files and a verification step. Check ownership, claim once, coordinate shared edits through a handoff, and mark done after commit and checks. \
+Before claiming a large task, divide it into independent tasks with affected files and a verification step. Only change your own or unassigned tasks. Claim once, coordinate shared edits through a handoff, and mark done after commit and checks. \
 Put each action on its own line: `TASK: take <title or #n>` (adds a new title), `TASK: done <title or #n>`, \
 `TASK: blocked <#n> - <why>`, `TASK: hand <#n> to @name`, `TASK: add <title>`, `TASK: drop <#n>`. \
 Task numbers are shared. An owner shown as \"<AI> (<computer>)\" is remote. \
@@ -683,6 +692,25 @@ mod tests {
         assert!(board.apply("claude", &handoff, 6).is_some());
         assert_eq!(board.tasks[0].owner.as_deref(), Some("gemini"));
         assert_eq!(board.tasks[0].status, Status::Doing);
+    }
+
+    #[test]
+    fn task_changes_require_the_owner_or_human() {
+        let mut board = Board::default();
+        assert!(board.apply("claude-win", &Op::Take { task: "Review map".into() }, 1).is_some());
+        let initial = board.clone();
+        let changes = task_lines(
+            "TASK: done #1\nTASK: blocked #1 - waiting\nTASK: reopen #1\nTASK: drop #1",
+        );
+        for op in &changes {
+            assert!(board.apply("claude-mac", op, 2).is_none());
+            assert_eq!(board, initial);
+        }
+        assert!(board.apply("claude-win", &changes[0], 3).is_some());
+        assert!(board.apply("claude-mac", &Op::Take { task: "#1".into() }, 4).is_none());
+        assert!(board.apply("human", &changes[2], 5).is_some());
+        assert!(board.apply("human", &changes[3], 6).is_some());
+        assert!(board.tasks.is_empty());
     }
 
     #[test]

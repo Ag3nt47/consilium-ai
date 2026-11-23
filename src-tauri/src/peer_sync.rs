@@ -1531,6 +1531,14 @@ mod tests {
         assert_eq!(copy.tasks.len(), 2);
         assert!(b.file(&packet("node-a", "t1b", snap), "PC").unwrap().is_none(), "an older or equal snapshot changes nothing");
         assert!(board_owner_of(&b, &mirror).is_some(), "now the owner keeps it");
+
+        let completion = b.store.append(
+            &mirror, "claude", "message", vec![], "TASK: done #1\nTASK: done #2",
+        ).unwrap();
+        a.file(&packet("node-b", "c2", b.outgoing(&completion).unwrap()), "MacBook").unwrap().unwrap();
+        let owned = crate::tasks::load(a.store.dir(), &conv.id);
+        assert_eq!(owned.tasks[0].status, crate::tasks::Status::Doing);
+        assert_eq!(owned.tasks[1].status, crate::tasks::Status::Done);
         let _ = std::fs::remove_dir_all(&root);
     }
 
