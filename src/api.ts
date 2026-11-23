@@ -134,6 +134,7 @@ export interface AgentInfo {
   member: boolean;
   access: Access;
   transport: string;
+  local_model?: boolean;
   /** An AI the person added themselves (it can be deleted). */
   custom?: boolean;
   tool: string;

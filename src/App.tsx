@@ -45,6 +45,7 @@ import { installHoverTips } from "./tooltip";
 import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
 import { MessagingIndicator, MessagingSettings } from "./messaging";
 import { LinkIndicator, LinkSettings } from "./link";
+import type { BackdropMode, BackdropPrefs } from "./TelemetryBackdrop";
 import { SecurityScanSettings } from "./security";
 import { ToolsSettings } from "./tools";
 import { CiBadge, ProjectVersions } from "./projects";
@@ -81,18 +82,24 @@ const PROVIDER_PORTALS: Record<string, { account: string; accountLabel: string; 
 };
 
 const knownTheme = (id: string | null | undefined) => THEMES.some((t) => t.id === id);
+const TelemetryBackdrop = lazy(() => import("./TelemetryBackdrop"));
+const BackdropSettings = lazy(() => import("./TelemetryBackdrop").then((module) => ({ default: module.BackdropSettings })));
+const backdropModes = { rain: "Telemetry rain", static: "Static glass", stealth: "Stealth solid" };
+const defaultBackdrop: BackdropPrefs = { enabled: false, mode: "rain", filter: "all", opacity: 22, speed: 100, fps: 30 };
+const nextBackdrop = (mode: BackdropMode): BackdropMode => mode === "rain" ? "static" : mode === "static" ? "stealth" : "rain";
 
-type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean; dailyTokenWarning: number };
+type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean; dailyTokenWarning: number; backdrop: BackdropPrefs };
 const PREFS_KEY = "consilium.prefs";
 const REQUEST_FLOOR_KEY = "consilium.request-floor.v2";
 
 function loadPrefs(): Prefs {
   // New installs start in Netrunner; anyone who has already picked a theme keeps it.
-  const defaults: Prefs = { theme: "netrunner", effects: true, autoUpdate: true, bingWallpaper: true, dailyTokenWarning: 0 };
+  const defaults: Prefs = { theme: "netrunner", effects: true, autoUpdate: true, bingWallpaper: true, dailyTokenWarning: 0, backdrop: defaultBackdrop };
   // Demo mode (README screenshots) uses Netrunner unless ?theme= says otherwise.
   if (!IN_APP) return { ...defaults, theme: knownTheme(demoTheme) ? demoTheme! : "netrunner", autoUpdate: false };
   try {
-    const saved: Prefs = { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
+    const stored = JSON.parse(localStorage.getItem(PREFS_KEY) || "{}");
+    const saved: Prefs = { ...defaults, ...stored, backdrop: { ...defaultBackdrop, ...stored.backdrop } };
     // Themes that were removed (Consilium, Cyber, Slate, CRT) fall back to Netrunner.
     return knownTheme(saved.theme) ? saved : { ...saved, theme: defaults.theme };
   } catch {
@@ -1205,6 +1212,23 @@ function saveCachedAgents(agents: AgentInfo[]) {
 
 export default function App() {
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
+  const [meshPeers, setMeshPeers] = useState(0);
+  const updateBackdrop = (change: Partial<BackdropPrefs>) =>
+    setPrefs((current) => ({ ...current, backdrop: { ...current.backdrop, ...change } }));
+  const cycleBackdrop = useCallback(() => setPrefs((current) => ({
+    ...current, backdrop: { ...current.backdrop, mode: nextBackdrop(current.backdrop.mode) },
+  })), []);
+  useEffect(() => {
+    if (!prefs.backdrop.enabled) return;
+    const hotkey = (event: KeyboardEvent) => {
+      if (!event.repeat && event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.code === "KeyM") {
+        event.preventDefault();
+        cycleBackdrop();
+      }
+    };
+    window.addEventListener("keydown", hotkey);
+    return () => window.removeEventListener("keydown", hotkey);
+  }, [prefs.backdrop.enabled, cycleBackdrop]);
   const [agents, setAgents] = useState<AgentInfo[]>(loadCachedAgents);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
@@ -2886,7 +2910,13 @@ export default function App() {
   }, [paletteCommands, paletteQuery]);
 
   return (
-    <div className="app">
+    <div className="app" data-backdrop={prefs.backdrop.enabled ? prefs.backdrop.mode : undefined}>
+      {prefs.backdrop.enabled && prefs.backdrop.mode !== "stealth" && (
+        <Suspense fallback={null}>
+          <TelemetryBackdrop prefs={prefs.backdrop} agents={agents} workers={thinkingIds} meshPeers={meshPeers}
+            memory={pressure?.memory_percent} paused={!prefs.effects || adaptiveMode === "eco"} />
+        </Suspense>
+      )}
       <div className="fx-scanlines" aria-hidden />
       <aside className="sidebar" ref={sidebarRef}>
         <div className="brand">
@@ -3162,6 +3192,10 @@ export default function App() {
         </div>
         <div className="sidebar-foot">
         <ResourcePressureGauge pressure={pressure} />
+        {prefs.backdrop.enabled && (
+          <button type="button" className="btn ghost small-btn" title="Cycle the performance backdrop (Ctrl+Shift+M)"
+            onClick={cycleBackdrop}>{backdropModes[prefs.backdrop.mode]}</button>
+        )}
         <div className="sidebar-actions">
           <button className="btn ghost" ref={addTrigger} onClick={() => setAddPanel("choose")} aria-haspopup="dialog" aria-label="Add an AI or device">
             Add <span aria-hidden="true">🤖 💻</span>
@@ -3185,7 +3219,7 @@ export default function App() {
       </aside>
 
       <main
-        className={`main ${wallpaper && prefs.bingWallpaper ? "has-wallpaper" : ""}`}
+        className={`main ${wallpaper && prefs.bingWallpaper && !prefs.backdrop.enabled ? "has-wallpaper" : ""}`}
         style={wallpaper && prefs.bingWallpaper ? ({ "--bing-wallpaper": `url(${wallpaper.data_url})` } as React.CSSProperties) : undefined}
       >
         {update && (
@@ -3250,7 +3284,7 @@ export default function App() {
           <div className="topbar-actions">
             <div className="topbar-status">
               <MessagingIndicator />
-              <LinkIndicator />
+              <LinkIndicator onConnectedCount={prefs.backdrop.enabled && prefs.backdrop.mode === "rain" ? setMeshPeers : undefined} />
               {wallpaper && prefs.bingWallpaper && wallpaper.title && (
                 <span
                   className="wallpaper-pill"
@@ -3742,6 +3776,9 @@ export default function App() {
               ))}
             </div>
             <p className="theme-hint">You can create your own theme by asking the AIs.</p>
+            <Suspense fallback={null}>
+              <BackdropSettings prefs={prefs.backdrop} modes={backdropModes} update={updateBackdrop} />
+            </Suspense>
             <label className="toggle">
               <input type="checkbox" checked={prefs.effects} onChange={(e) => setPrefs({ ...prefs, effects: e.target.checked })} />
               Visual effects (scanlines, glow and animation in neon themes)
