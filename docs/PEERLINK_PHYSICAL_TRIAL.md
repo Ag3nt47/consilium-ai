@@ -74,3 +74,16 @@ per allocated computer, using names reported by the authorized runner's `--list-
 The script prints the layer placement argument array and leaves inference idle. The tensor-split
 proportions follow the explicit device order. Check actual layer placement and memory from the logs.
 [llama.cpp b12621 split-mode reference](https://github.com/ggml-org/llama.cpp/blob/b12621/docs/multi-gpu.md).
+
+The following dry run uses an installed Qwen model and example free-memory readings. Replace
+the two memory readings with fresh samples before planning a live load. Replace the example
+runner device names with the actual names in the desired order.
+
+```powershell
+node scripts/model-fit.mjs --json --split --capacity-weighted --host 14 --device "Mac=6" --ollama qwen3:1.7b |
+  node scripts/llama-split-args.mjs --model "qwen3:1.7b" --device "This computer=CUDA0" --device "Mac=RPC0"
+```
+
+With the default 2 GiB runtime reserve, those sample inputs put 75% of the estimated weights
+on the host and 25% on the Mac. If a device has no post-reserve memory, the planner excludes it.
+The argument mapper requires a split across at least two participating devices.
