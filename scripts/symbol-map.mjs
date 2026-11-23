@@ -40,26 +40,36 @@ function outline(source, statements, filter) {
     const last = source.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
     rows.push(`${first === last ? first : `${first}-${last}`} ${kind} ${clip(name)}`);
   };
-  for (const node of statements) {
-    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-      add(node, ts.isImportDeclaration(node) ? "import" : "re-export", node.moduleSpecifier.getText(source));
+  function visit(node, prefix = "") {
+    const addSymbol = (kind, name, declaration = node) => add(declaration, kind, prefix + name);
+    if (ts.isModuleDeclaration(node)) {
+      const name = node.name.getText(source);
+      addSymbol(ts.isStringLiteral(node.name) ? "module" : "namespace", name);
+      if (node.body && ts.isModuleBlock(node.body)) {
+        for (const statement of node.body.statements) visit(statement, prefix + name + ".");
+      } else if (node.body && ts.isModuleDeclaration(node.body)) {
+        visit(node.body, prefix + name + ".");
+      }
+    } else if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      addSymbol(ts.isImportDeclaration(node) ? "import" : "re-export", node.moduleSpecifier.getText(source));
     } else if (ts.isFunctionDeclaration(node)) {
-      add(node, "function", node.name?.text ?? "(anonymous)");
+      addSymbol("function", node.name?.text ?? "(anonymous)");
     } else if (ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)) {
       const name = node.name?.text ?? "(anonymous)";
-      add(node, ts.isClassDeclaration(node) ? "class" : "interface", name);
+      addSymbol(ts.isClassDeclaration(node) ? "class" : "interface", name);
       for (const member of node.members) {
-        if (member.name) add(member, "member", `${name}.${member.name.getText(source)}`);
-        else if (ts.isConstructorDeclaration(member)) add(member, "constructor", name);
+        if (member.name) addSymbol("member", `${name}.${member.name.getText(source)}`, member);
+        else if (ts.isConstructorDeclaration(member)) addSymbol("constructor", name, member);
       }
     } else if (ts.isTypeAliasDeclaration(node) || ts.isEnumDeclaration(node)) {
-      add(node, ts.isTypeAliasDeclaration(node) ? "type" : "enum", node.name.text);
+      addSymbol(ts.isTypeAliasDeclaration(node) ? "type" : "enum", node.name.text);
     } else if (ts.isVariableStatement(node)) {
       for (const declaration of node.declarationList.declarations) {
-        add(declaration, "binding", declaration.name.getText(source));
+        addSymbol("binding", declaration.name.getText(source), declaration);
       }
     }
   }
+  for (const node of statements) visit(node);
   return { rows, omitted: total - rows.length };
 }
 
