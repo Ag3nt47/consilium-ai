@@ -1,10 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { extname, isAbsolute, relative, resolve } from "node:path";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
-const symbolMap = fileURLToPath(new URL("./symbol-map.mjs", import.meta.url));
-const supported = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"]);
+import { parseSource, supportedSourceExtensions } from "./parse-source.mjs";
 
 function run(program, args) {
   return spawnSync(program, args, { encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024 });
@@ -46,7 +43,7 @@ function recordPatchFailure(result) {
   const lines = (result.stdout ?? "").split(/\r?\n/).filter((line) => !line.startsWith("+") && line.trim());
   patchDiagnostics.push(...(lines.length ? lines.slice(0, 6) : ["Git could not complete the patch check."]));
 }
-const diff = run("git", ["--literal-pathspecs", "-C", root, "diff", "--no-ext-diff", "--check", "HEAD", "--", ...scope]);
+const diff = run("git", ["--literal-pathspecs", "-C", root, "-c", "core.whitespace=cr-at-eol", "diff", "--no-ext-diff", "--check", "HEAD", "--", ...scope]);
 if (diff.status !== 0) recordPatchFailure(diff);
 const untracked = run("git", ["--literal-pathspecs", "-C", root, "ls-files", "--others", "-z", "--", ...scope]);
 if (untracked.status !== 0) recordPatchFailure(untracked);
@@ -58,12 +55,13 @@ for (const path of (untracked.stdout ?? "").split("\0").filter(Boolean)) {
 const syntaxDiagnostics = [];
 let checked = 0;
 for (const { absolute, path } of paths) {
-  if (!supported.has(extname(path).toLowerCase()) || !existsSync(absolute)) continue;
+  if (!supportedSourceExtensions.has(extname(path).toLowerCase()) || !existsSync(absolute)) continue;
   checked++;
-  const result = run(process.execPath, [symbolMap, absolute]);
-  if (result.status !== 0) {
-    const diagnostic = result.stderr?.split(/\r?\n/).find((line) => line.trim());
-    syntaxDiagnostics.push({ path, message: (diagnostic ?? result.error?.message ?? "Syntax check failed.").slice(0, 240) });
+  try {
+    parseSource(absolute);
+  } catch (error) {
+    const diagnostic = error.message.split(/\r?\n/).find((line) => line.trim());
+    syntaxDiagnostics.push({ path, message: (diagnostic ?? "Syntax check failed.").slice(0, 240) });
   }
 }
 const failed = patchDiagnostics.length > 0 || syntaxDiagnostics.length > 0;

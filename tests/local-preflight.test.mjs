@@ -36,6 +36,16 @@ test("preflight checks unstaged new files and accepts clean CRLF", () => {
     assert.equal(report.patchErrors.length, 1);
     assert.match(report.patchErrors[0], /new file\.txt:1: trailing whitespace/);
     assert.deepEqual(report.syntaxErrors, []);
+    git("-c", "core.autocrlf=false", "add", "--", "new file.txt");
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", // consilium-allow-secret-scan (reserved fixture email)
+      "commit", "-qm", "Track CRLF fixture");
+    writeFileSync(join(cwd, "new file.txt"), "updated clean\r\n");
+    assert.equal(preflight().status, 0);
+    writeFileSync(join(cwd, "new file.txt"), "updated with trailing space \r\n");
+    const trackedDirty = preflight();
+    assert.equal(trackedDirty.status, 1);
+    assert.match(trackedDirty.stderr, /new file\.txt:1: trailing whitespace/);
+    assert.doesNotMatch(trackedDirty.stderr, /updated with trailing space/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
