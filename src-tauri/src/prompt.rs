@@ -29,6 +29,9 @@ const MAX_WORKSPACE_STATUS_BYTES: usize = 8_000;
 const LOCAL_WORKSPACE_DIFF_BYTES: usize = 2_000;
 const LOCAL_WORKSPACE_STATUS_BYTES: usize = 1_200;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_millis(1_500);
+const MAX_UNTRACKED_PREFLIGHT_FILES: usize = 4;
+const MAX_UNTRACKED_PREFLIGHT_BYTES: u64 = 256 * 1024;
+const MAX_PATCH_DIAGNOSTICS: usize = 4;
 
 type TranscriptPart<'a> = (&'a Event, String);
 
@@ -65,6 +68,18 @@ fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput>
 /// bounded prefix needed for the prompt. A reader thread keeps the pipe drained; the parent polls
 /// the child and kills it at the deadline so a stuck Git process cannot survive an async timeout.
 fn git_capture(workspace: &Path, args: &[&str], keep: usize) -> Option<(ExitStatus, GitOutput)> {
+    git_capture_until(workspace, args, keep, Instant::now() + GIT_COMMAND_TIMEOUT)
+}
+
+fn git_capture_until(
+    workspace: &Path,
+    args: &[&str],
+    keep: usize,
+    deadline: Instant,
+) -> Option<(ExitStatus, GitOutput)> {
+    if Instant::now() >= deadline {
+        return None;
+    }
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(workspace)
@@ -106,12 +121,11 @@ fn git_capture(workspace: &Path, args: &[&str], keep: usize) -> Option<(ExitStat
             truncated: total > shown.len(),
         })
     });
-    let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().ok()? {
             break status;
         }
-        if started.elapsed() >= GIT_COMMAND_TIMEOUT {
+        if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
             let _ = reader.join();
@@ -175,7 +189,12 @@ fn patch_preflight(workspace: &Path) -> Option<String> {
         return None;
     }
     let mut out = String::from("Tracked patch preflight found Git whitespace or conflict marker issues.");
-    let diagnostics = report.shown.lines().filter(|line| {
+    append_patch_diagnostics(&mut out, &report.shown, MAX_PATCH_DIAGNOSTICS);
+    Some(out)
+}
+
+fn append_patch_diagnostics(out: &mut String, report: &str, limit: usize) -> usize {
+    let diagnostics = report.lines().filter(|line| {
         if line.starts_with('+') {
             return false;
         }
@@ -191,11 +210,59 @@ fn patch_preflight(workspace: &Path) -> Option<String> {
                     | "leftover conflict marker"
             )
     });
-    for line in diagnostics.take(4) {
+    let mut appended = 0;
+    for line in diagnostics.take(limit) {
         out.push('\n');
         out.extend(crate::redact::scrub(line).chars().take(200));
+        appended += 1;
     }
-    Some(out)
+    appended
+}
+
+/// Check a small sample of new files without staging them or inserting their contents into prompts.
+fn untracked_preflight(workspace: &Path) -> Option<String> {
+    let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
+    let (status, files) = git_capture_until(
+        workspace,
+        &["ls-files", "--others", "--exclude-standard", "-z", "--", ".", ":(exclude,attr:linguist-generated)"],
+        4096,
+        deadline,
+    )?;
+    if !status.success() {
+        return None;
+    }
+    let mut out = String::from("Untracked file preflight found Git whitespace or conflict marker issues.");
+    let mut remaining = MAX_PATCH_DIAGNOSTICS;
+    for path in files.shown.split_inclusive('\0').filter_map(|part| part.strip_suffix('\0'))
+        .filter(|path| !path.contains('\u{fffd}'))
+        .take(MAX_UNTRACKED_PREFLIGHT_FILES)
+    {
+        let relative = Path::new(path);
+        if !relative.components().all(|part| matches!(part, std::path::Component::Normal(_))) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(workspace.join(relative)) else { continue };
+        if !metadata.is_file() || metadata.len() > MAX_UNTRACKED_PREFLIGHT_BYTES {
+            continue;
+        }
+        let path = format!("./{path}");
+        let Some((status, report)) = git_capture_until(
+            workspace,
+            &[
+                "-c", "core.whitespace=cr-at-eol", "diff", "--no-index", "--check",
+                "--no-ext-diff", "--no-textconv", "--", "/dev/null", &path,
+            ],
+            4096,
+            deadline,
+        ) else { break };
+        if matches!(status.code(), Some(2 | 3)) {
+            remaining -= append_patch_diagnostics(&mut out, &report.shown, remaining);
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+    (remaining < MAX_PATCH_DIAGNOSTICS).then_some(out)
 }
 
 pub fn workspace_state(workspace: &Path, detailed: bool) -> Option<String> {
@@ -226,13 +293,21 @@ pub fn workspace_state(workspace: &Path, detailed: bool) -> Option<String> {
             )
         })
     };
-    let (diff, preflight) = if detailed && status.shown.lines().skip(1).any(|line| !line.starts_with("?? ")) {
+    let mut changed = status.shown.lines().skip(1).peekable();
+    let (diff, tracked, untracked) = if detailed && changed.peek().is_some() {
+        let has_untracked = changed.clone().any(|line| line.starts_with("?? "));
+        let has_tracked = changed.any(|line| !line.starts_with("?? "));
         std::thread::scope(|scope| {
-            let check = scope.spawn(|| patch_preflight(workspace));
-            (read_diff(), check.join().ok().flatten())
+            let tracked = has_tracked.then(|| scope.spawn(|| patch_preflight(workspace)));
+            let untracked = has_untracked.then(|| scope.spawn(|| untracked_preflight(workspace)));
+            (
+                read_diff(),
+                tracked.and_then(|check| check.join().ok().flatten()),
+                untracked.and_then(|check| check.join().ok().flatten()),
+            )
         })
     } else {
-        (read_diff(), None)
+        (read_diff(), None, None)
     };
     let diff = diff?;
     let mut state = DefaultHasher::new();
@@ -251,7 +326,7 @@ pub fn workspace_state(workspace: &Path, detailed: bool) -> Option<String> {
             out.push_str("\n… status truncated");
         }
     }
-    if let Some(preflight) = preflight {
+    for preflight in [tracked, untracked].into_iter().flatten() {
         out.push_str("\n\n");
         out.push_str(&preflight);
     }
@@ -1468,6 +1543,23 @@ mod tests {
         assert!(local.len() < 2_700, "local snapshot was {} bytes", local.len());
         assert!(cloud.contains("FULL PATCH TAIL"));
 
+        git(&["restore", "note.txt", "bundle.txt"]);
+        std::fs::write(repo.join(".git/info/exclude"), "ignored.txt\n").unwrap();
+        std::fs::write(repo.join(".gitattributes"), "bundle.txt linguist-generated\nscratch*.txt linguist-generated\n").unwrap();
+        git(&["add", ".gitattributes"]);
+        git(&["commit", "-qm", "attributes", "--no-gpg-sign"]);
+        std::fs::write(repo.join("new notes.txt"), "fixture source to omit \n").unwrap();
+        std::fs::write(repo.join("ignored.txt"), "ignored issue \n").unwrap();
+        std::fs::write(repo.join("scratch-data.txt"), "generated issue \n").unwrap();
+        std::fs::write(repo.join("clean.txt"), "valid CRLF\r\n").unwrap();
+        std::fs::write(repo.join("large.txt"), "irrelevant data \n".repeat(20_000)).unwrap();
+        let checked = workspace_state(&repo, true).unwrap();
+        assert!(checked.contains("Untracked file preflight"));
+        assert!(checked.contains("new notes.txt:1: trailing whitespace."));
+        for excluded in ["Tracked patch preflight", "fixture source to omit", "ignored.txt", "scratch-data.txt:1", "clean.txt:1", "large.txt:1"] {
+            assert!(!checked.contains(excluded), "unexpected {excluded} in {checked}");
+        }
+        assert!(!workspace_state(&repo, false).unwrap().contains("Untracked file preflight"));
 
         std::fs::remove_dir_all(&repo).unwrap();
         let plain = std::env::temp_dir();
