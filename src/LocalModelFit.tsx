@@ -26,9 +26,20 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
   const [scanStatus, setScanStatus] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
   const host = hostMemory ?? scannedHostMemory ?? (availableGiB && availableGiB > 0 ? memoryInput(availableGiB) : "");
-  const reportedNames = new Set(devices.filter((device) => typeof device.id === "string").map((device) => deviceName(device.name)));
-  const included = devices.filter((device) => typeof device.id === "string" || !reportedNames.has(deviceName(device.name)));
-  const budgets = [{ name: "This computer", memory: host }, ...included];
+  const hostName = "This computer";
+  const usedNames = new Set([deviceName(hostName)]);
+  for (const device of devices) {
+    if (typeof device.id === "string") usedNames.add(deviceName(device.name));
+  }
+  const included = devices.filter((device) => {
+    if (typeof device.id === "string") return true;
+    const name = deviceName(device.name);
+    if (!name) return true;
+    if (usedNames.has(name)) return false;
+    usedNames.add(name);
+    return true;
+  });
+  const budgets = [{ name: hostName, memory: host }, ...included];
   const models = modelFit(budgets, bits, overhead, customWeights, preferSplit);
   const capacities = weightBudgets(budgets, overhead);
   const totalCapacity = capacities.reduce((total, device) => total + device.capacity, 0);
@@ -162,7 +173,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
             </label>
             <button type="button" className="btn ghost small-btn" onClick={() => setDevices((previous) => previous.filter((item) => item.id !== device.id))}>Remove device {typeof device.id === "number" ? device.id : device.name}</button>
             {device.runners && <span className="muted">Model tools detected: {device.runners.join(", ") || "none reported"}.</span>}
-            {!included.includes(device) && <span className="muted">Excluded because a paired report uses the same name.</span>}
+            {!included.includes(device) && <span className="muted">Excluded because another device uses this name. Use a unique name to include it.</span>}
           </div>
         ))}
         <button type="button" className="btn ghost small-btn" onClick={() => {
