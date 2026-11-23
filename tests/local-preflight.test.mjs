@@ -27,6 +27,15 @@ test("preflight checks unstaged new files and accepts clean CRLF", () => {
     assert.equal(dirty.status, 1, dirty.stderr);
     assert.match(dirty.stderr, /new file\.txt:1: trailing whitespace/);
     assert.doesNotMatch(dirty.stderr, /private fixture text/);
+    const machine = spawnSync(process.execPath, [script, "--json", "new file.txt"], { cwd, encoding: "utf8" });
+    assert.equal(machine.status, 1);
+    assert.equal(machine.stderr, "");
+    const report = JSON.parse(machine.stdout);
+    assert.equal(report.ok, false);
+    assert.equal(report.syntaxChecked, 0);
+    assert.equal(report.patchErrors.length, 1);
+    assert.match(report.patchErrors[0], /new file\.txt:1: trailing whitespace/);
+    assert.deepEqual(report.syntaxErrors, []);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

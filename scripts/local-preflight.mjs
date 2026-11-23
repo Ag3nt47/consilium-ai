@@ -10,9 +10,11 @@ function run(program, args) {
   return spawnSync(program, args, { encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024 });
 }
 
-const files = [...new Set(process.argv.slice(2))];
+const args = process.argv.slice(2);
+const json = args[0] === "--json";
+const files = [...new Set(json ? args.slice(1) : args)];
 if (files.length === 0 || files.length > 16) {
-  console.error("Usage: node scripts/local-preflight.mjs <file> [up to 16 files]");
+  console.error("Usage: node scripts/local-preflight.mjs [--json] <file> [up to 16 files]");
   process.exit(2);
 }
 
@@ -53,21 +55,27 @@ for (const path of (untracked.stdout ?? "").split("\0").filter(Boolean)) {
   // A no-index comparison returns 1 for a clean difference.
   if (result.status !== 0 && result.status !== 1) recordPatchFailure(result);
 }
-let failed = patchDiagnostics.length > 0;
-if (failed) {
-  console.error("Patch check failed.");
-  for (const line of patchDiagnostics.slice(0, 6)) console.error(line.slice(0, 240));
-}
+const syntaxDiagnostics = [];
 let checked = 0;
 for (const { absolute, path } of paths) {
   if (!supported.has(extname(path).toLowerCase()) || !existsSync(absolute)) continue;
   checked++;
   const result = run(process.execPath, [symbolMap, absolute]);
   if (result.status !== 0) {
-    failed = true;
     const diagnostic = result.stderr?.split(/\r?\n/).find((line) => line.trim());
-    console.error(`${JSON.stringify(path)}: ${(diagnostic ?? result.error?.message ?? "Syntax check failed.").slice(0, 240)}`);
+    syntaxDiagnostics.push({ path, message: (diagnostic ?? result.error?.message ?? "Syntax check failed.").slice(0, 240) });
   }
 }
-console.log(`Patch check and ${checked} JavaScript or TypeScript syntax checks complete.`);
+const failed = patchDiagnostics.length > 0 || syntaxDiagnostics.length > 0;
+const patchErrors = patchDiagnostics.slice(0, 6).map((line) => line.slice(0, 240));
+if (json) {
+  console.log(JSON.stringify({ ok: !failed, syntaxChecked: checked, patchErrors, syntaxErrors: syntaxDiagnostics }));
+} else {
+  if (patchErrors.length) {
+    console.error("Patch check failed.");
+    for (const line of patchErrors) console.error(line);
+  }
+  for (const { path, message } of syntaxDiagnostics) console.error(`${JSON.stringify(path)}: ${message}`);
+  console.log(`Patch check and ${checked} JavaScript or TypeScript syntax checks complete.`);
+}
 process.exitCode = failed ? 1 : 0;
