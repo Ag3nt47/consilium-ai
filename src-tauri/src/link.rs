@@ -800,8 +800,12 @@ impl Link {
     /// Tests connectivity, route latency, and sync alignment for a paired computer.
     pub async fn test_peer(&self, node_id: &str) -> Result<PeerTestReport, String> {
         let peer = self.peer(node_id).ok_or_else(|| format!("computer {node_id} not found"))?;
+        let key = peer_key(&peer)?;
         let mut probes = tokio::task::JoinSet::new();
         for (index, addr) in peer.addrs.iter().take(12).cloned().enumerate() {
+            let link = self.clone();
+            let peer = peer.clone();
+            let key = key.clone();
             probes.spawn(async move {
                 let kind = route_kind(&addr).to_string();
                 let started = std::time::Instant::now();
@@ -809,7 +813,13 @@ impl Link {
                 let (rtt_ms, local_ip, status) = match tokio::time::timeout(timeout, TcpStream::connect(&addr)).await {
                     Ok(Ok(stream)) => {
                         let elapsed = started.elapsed().as_millis() as u64;
-                        (Some(elapsed), stream.local_addr().ok().map(|address| address.ip()), format!("TCP connected in {elapsed} ms"))
+                        let local_ip = stream.local_addr().ok().map(|address| address.ip());
+                        let result = tokio::time::timeout(timeout, link.probe_route(&peer, &key, stream)).await;
+                        let verification = match result {
+                            Ok(Ok(())) => "authenticated probe passed",
+                            _ => "peer authentication unconfirmed",
+                        };
+                        (Some(elapsed), local_ip, format!("TCP connected in {elapsed} ms · {verification}"))
                     }
                     Ok(Err(_)) => (None, None, "Refused or unreachable".to_string()),
                     Err(_) => (None, None, "Timed out".to_string()),
@@ -1070,6 +1080,19 @@ impl Link {
                 let key = peer_key(&peer)?;
                 let hello = open(&node, &key, &n, &c)?;
                 hello.validate(&peer.node_id, &key, now_ms())?;
+                if let Some(probe) = hello.payload.get("route_probe") {
+                    if probe.get("challenge").and_then(Value::as_str) != Some(nonce.as_str()) {
+                        return Err("stale route probe".into());
+                    }
+                    let probe_nonce = probe.get("nonce").and_then(Value::as_str)
+                        .filter(|nonce| nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                        .ok_or("invalid route probe nonce")?;
+                    let reply = self.route_probe_frame(&key, json!({ "route_probe_ack": probe_nonce }))?;
+                    tokio::time::timeout(HANDSHAKE_TIMEOUT, w.write_all(reply.as_bytes())).await
+                        .map_err(|_| "route probe reply timed out".to_string())?
+                        .map_err(|err| err.to_string())?;
+                    return Ok(());
+                }
                 let h = hello.payload.get("hello").ok_or("expected hello")?;
                 if h.get("challenge").and_then(Value::as_str) != Some(nonce.as_str()) {
                     return Err("stale hello".into());
@@ -1348,6 +1371,41 @@ impl Link {
                 }
             }
         }
+    }
+
+    /// A diagnostic handshake does not replace a live session. Older peers close the probe
+    /// before registering it because this first authenticated frame has no session hello.
+    async fn probe_route(&self, peer: &Peer, key: &[u8], stream: TcpStream) -> Result<(), String> {
+        let (r, mut w) = stream.into_split();
+        let mut r = BufReader::new(r);
+        let Wire::Challenge { nonce } = read_wire(&mut r).await? else {
+            return Err("expected challenge".into());
+        };
+        let mine = random_hex(16);
+        let request = self.route_probe_frame(key, json!({ "route_probe": { "challenge": nonce, "nonce": mine } }))?;
+        w.write_all(request.as_bytes()).await.map_err(|err| err.to_string())?;
+        let Wire::Sealed { from, n, c } = read_wire(&mut r).await? else {
+            return Err("expected route probe reply".into());
+        };
+        if from != peer.node_id {
+            return Err("a different computer answered".into());
+        }
+        let reply = open(&from, key, &n, &c)?;
+        reply.validate(&peer.node_id, key, now_ms())?;
+        if reply.payload.get("route_probe_ack").and_then(Value::as_str) != Some(mine.as_str()) {
+            return Err("stale route probe reply".into());
+        }
+        Ok(())
+    }
+
+    fn route_probe_frame(&self, key: &[u8], payload: Value) -> Result<String, String> {
+        let (me, _) = self.me();
+        let packet = PeerPacket::signed(
+            &me, now_ms(), PacketKind::Heartbeat, self.0.seq.fetch_add(1, Ordering::SeqCst), payload, key,
+        )?;
+        let mut line = seal(&me, key, &packet)?;
+        line.push('\n');
+        Ok(line)
     }
 
     async fn authenticate_route(
@@ -2616,24 +2674,88 @@ mod tests {
         joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
 
         let joiner_id = joiner.0.cfg.lock().unwrap().node_id.clone();
-        assert!(wait_for(|| host.status().peers[0].connected).await);
+        assert!(wait_for(|| host.status().peers[0].connected && joiner.status().peers[0].connected).await);
         let unavailable = tokio::net::TcpSocket::new_v4().unwrap();
         unavailable.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let unreachable = unavailable.local_addr().unwrap().to_string();
         let reachable = format!("127.0.0.1:{}", joiner.0.port);
-        host.0.cfg.lock().unwrap().peers[0].addrs = vec![unreachable.clone(), reachable.clone()];
+        let other_service = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unauthenticated = other_service.local_addr().unwrap().to_string();
+        let listener = tokio::spawn(async move { drop(other_service.accept().await); });
+        host.0.cfg.lock().unwrap().peers[0].addrs = vec![unreachable.clone(), reachable.clone(), unauthenticated.clone()];
+        let host_session = host.0.peers.lock().unwrap()[&joiner_id].generation;
+        let host_id = host.status().node_id;
+        let joiner_session = joiner.0.peers.lock().unwrap()[&host_id].generation;
         let report = host.test_peer(&joiner_id).await.unwrap();
+        listener.abort();
         assert_eq!(report.name, joiner.0.cfg.lock().unwrap().name);
         assert!(report.handshake_ok);
         assert_eq!(
             report.routes.iter().map(|route| (route.addr.as_str(), route.reachable)).collect::<Vec<_>>(),
-            [(unreachable.as_str(), false), (reachable.as_str(), true)]
+            [(unreachable.as_str(), false), (reachable.as_str(), true), (unauthenticated.as_str(), true)]
         );
+        assert!(report.routes[1].status.contains("authenticated probe passed"));
+        assert!(report.routes[2].status.contains("peer authentication unconfirmed"));
+        assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, host_session);
+        assert_eq!(joiner.0.peers.lock().unwrap()[&host_id].generation, joiner_session);
         assert_eq!(report.routes[0].local_ip, None);
         assert_eq!(report.routes[0].local_interface, None);
         let loopback = "127.0.0.1".parse().unwrap();
         assert_eq!(report.routes[1].local_ip, Some(loopback));
         assert_eq!(report.routes[1].local_interface, interface_name(&if_addrs::get_if_addrs().unwrap_or_default(), loopback));
+
+        host.stop();
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn three_endpoint_probes_overlap_without_replacing_the_peer_session() {
+        let dir = std::env::temp_dir().join(format!("link-probe-overlap-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, received) = node(&dir, "joiner");
+        let host_addr = format!("127.0.0.1:{}", host.0.port);
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&host_addr, &code.code).await.unwrap();
+        assert!(wait_for(|| host.status().peers[0].connected && joiner.status().peers[0].connected).await);
+
+        let joiner_addr = format!("127.0.0.1:{}", joiner.0.port);
+        let ready = Arc::new(tokio::sync::Barrier::new(3));
+        let mut routes = Vec::new();
+        let mut proxies = tokio::task::JoinSet::new();
+        for _ in 0..3 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            routes.push(listener.local_addr().unwrap().to_string());
+            let (ready, target) = (ready.clone(), joiner_addr.clone());
+            proxies.spawn(async move {
+                let (mut client, _) = listener.accept().await.unwrap();
+                let mut peer = TcpStream::connect(target).await.unwrap();
+                let mut from_peer = BufReader::new(&mut peer);
+                write_wire(&mut client, &read_wire(&mut from_peer).await.unwrap()).await.unwrap();
+                let request = read_wire(&mut BufReader::new(&mut client)).await.unwrap();
+                // Hold all three encrypted requests before forwarding any to the recipient.
+                ready.wait().await;
+                write_wire(from_peer.get_mut(), &request).await.unwrap();
+                let reply = read_wire(&mut from_peer).await.unwrap();
+                write_wire(&mut client, &reply).await.unwrap();
+            });
+        }
+        let joiner_id = joiner.status().node_id;
+        let generation = host.0.peers.lock().unwrap()[&joiner_id].generation;
+        let host_id = host.status().node_id;
+        let remote_generation = joiner.0.peers.lock().unwrap()[&host_id].generation;
+        host.0.cfg.lock().unwrap().peers[0].addrs = routes;
+        let report = host.test_peer(&joiner_id).await.unwrap();
+        assert_eq!(report.routes.len(), 3);
+        assert!(report.routes.iter().all(|route| route.status.contains("authenticated probe passed")), "{report:?}");
+        while let Some(result) = proxies.join_next().await {
+            result.unwrap();
+        }
+        assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, generation);
+        assert_eq!(joiner.0.peers.lock().unwrap()[&host_id].generation, remote_generation);
+        let packet = host.send(PacketKind::Chat, json!({ "text": "after the probes" })).unwrap();
+        assert!(wait_for(|| host.status().peers[0].queued == 0).await);
+        assert_eq!(received.lock().unwrap().iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), [packet.as_str()]);
 
         host.stop();
         joiner.stop();
