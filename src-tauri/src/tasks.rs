@@ -510,7 +510,7 @@ fn split_reason(arg: &str) -> (String, Option<String>) {
 }
 
 /// The board and how to change it, for an AI's instructions.
-pub fn for_prompt(board: &Board, local_agent: Option<&str>) -> String {
+pub fn for_prompt(board: &Board, agent: &str, compact: bool) -> String {
     let mut s = String::from(
         "\n\nTASK BOARD (shared across computers; editable by the human). \
 Before claiming a large task, divide it into independent tasks with affected files and a verification step. Only change your own or unassigned tasks. Claim once, coordinate shared edits through a handoff, and mark done after commit and checks. \
@@ -528,15 +528,17 @@ Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
         .iter()
         .filter(|t| t.status != Status::Done)
         .collect();
-    let omitted_open = if let Some(agent) = local_agent {
-        open.sort_by_key(|task| {
-            let ownership = match task.owner.as_deref() {
-                Some(owner) if owner == agent => 0,
-                None => 1,
-                Some(_) => 2,
-            };
-            (ownership, task.status == Status::Blocked)
-        });
+    open.sort_by_key(|task| {
+        let blocked = task.status == Status::Blocked;
+        let priority = match task.owner.as_deref() {
+            Some(owner) if owner == agent && !blocked => 0,
+            None if !blocked => 1,
+            Some(owner) if owner == agent => 2,
+            _ => 3,
+        };
+        (priority, blocked, task.id)
+    });
+    let omitted_open = if compact {
         let omitted = open.len().saturating_sub(LOCAL_OPEN_IN_PROMPT);
         open.truncate(LOCAL_OPEN_IN_PROMPT);
         omitted
@@ -569,7 +571,7 @@ Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
             .note
             .as_deref()
             .map(|note| {
-                if local_agent.is_none() {
+                if !compact {
                     return format!(" ({note})");
                 }
                 const LOCAL_NOTE_CHARS: usize = 160;
@@ -626,7 +628,7 @@ mod tests {
         board.tasks[0].status = Status::Blocked;
         let prefix = "\u{00e9}".repeat(160);
         board.tasks[29].note = Some(format!("{prefix}remaining details"));
-        let local = for_prompt(&board, Some("local"));
+        let local = for_prompt(&board, "local", true);
         assert_eq!(local.lines().filter(|line| line.starts_with('#')).count(), LOCAL_OPEN_IN_PROMPT);
         assert!(local.contains("#30 [doing"));
         assert!(!local.contains("#1 [blocked"));
@@ -634,9 +636,33 @@ mod tests {
         assert!(local.contains("6 open tasks omitted"));
         assert!(local.contains(&format!("{prefix}...")));
         assert!(!local.contains("remaining details"));
-        let hosted = for_prompt(&board, None);
+        let hosted = for_prompt(&board, "claude", false);
         assert!(hosted.contains("remaining details"));
         assert_eq!(hosted.lines().filter(|line| line.starts_with('#')).count(), 30);
+    }
+
+    #[test]
+    fn active_and_available_tasks_precede_blockers_in_each_agents_prompt() {
+        let mut board = Board::default();
+        let setup = task_lines(
+            "TASK: take Waiting on credentials\nTASK: blocked #1 - needs approval\nTASK: take Review tests",
+        );
+        for op in &setup {
+            assert!(board.apply("claude", op, 1).is_some());
+        }
+        assert!(board.apply("gemini", &Op::Take { task: "Write docs".into() }, 2).is_some());
+        assert!(board.apply("human", &Op::Add { title: "Check screenshots".into(), owner: None }, 3).is_some());
+
+        for (agent, expected) in [("claude", ["#2", "#4", "#1", "#3"]), ("gemini", ["#3", "#4", "#2", "#1"])] {
+            for compact in [true, false] {
+                let prompt = for_prompt(&board, agent, compact);
+                let order: Vec<_> = prompt.lines()
+                    .filter(|line| line.starts_with('#'))
+                    .filter_map(|line| line.split_whitespace().next())
+                    .collect();
+                assert_eq!(order, expected);
+            }
+        }
     }
 
     #[test]
@@ -761,7 +787,7 @@ mod tests {
 
         let board = load(&d, "c1");
         assert_eq!(board.tasks[1].owner.as_deref(), Some("claude"));
-        let p = for_prompt(&board, None);
+        let p = for_prompt(&board, "claude", false);
         assert!(p.contains("#2 [doing · Claude] Review link fixes"), "{p}");
         assert!(p.contains("#1 [done · Claude] Task board"), "{p}");
 

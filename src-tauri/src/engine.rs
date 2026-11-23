@@ -987,7 +987,8 @@ impl council::Host for RealHost {
         // The conversation's shared task board, and how to change it.
         system.push_str(&crate::tasks::for_prompt(
             &crate::tasks::load(self.store.dir(), conv),
-            local.then_some(agent.id),
+            agent.id,
+            local,
         ));
         // The projects' GitHub checks, as last read by the background watcher.
         if let Some(w) = workspace.as_deref().filter(|_| !local) {
