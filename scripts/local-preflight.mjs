@@ -38,12 +38,25 @@ const paths = files.map((file) => {
   return { absolute, path };
 });
 
-const diff = run("git", ["--literal-pathspecs", "-C", root, "diff", "--no-ext-diff", "--check", "HEAD", "--", ...paths.map(({ path }) => path)]);
-let failed = diff.status !== 0;
+const scope = paths.map(({ path }) => path);
+const patchDiagnostics = [];
+function recordPatchFailure(result) {
+  const lines = (result.stdout ?? "").split(/\r?\n/).filter((line) => !line.startsWith("+") && line.trim());
+  patchDiagnostics.push(...(lines.length ? lines.slice(0, 6) : ["Git could not complete the patch check."]));
+}
+const diff = run("git", ["--literal-pathspecs", "-C", root, "diff", "--no-ext-diff", "--check", "HEAD", "--", ...scope]);
+if (diff.status !== 0) recordPatchFailure(diff);
+const untracked = run("git", ["--literal-pathspecs", "-C", root, "ls-files", "--others", "-z", "--", ...scope]);
+if (untracked.status !== 0) recordPatchFailure(untracked);
+for (const path of (untracked.stdout ?? "").split("\0").filter(Boolean)) {
+  const result = run("git", ["-C", root, "-c", "core.whitespace=cr-at-eol", "diff", "--no-index", "--no-ext-diff", "--check", "--", "/dev/null", path]);
+  // A no-index comparison returns 1 for a clean difference.
+  if (result.status !== 0 && result.status !== 1) recordPatchFailure(result);
+}
+let failed = patchDiagnostics.length > 0;
 if (failed) {
-  const diagnostics = (diff.stdout ?? "").split(/\r?\n/).filter((line) => !line.startsWith("+") && line.trim());
   console.error("Patch check failed.");
-  for (const line of diagnostics.slice(0, 6)) console.error(line.slice(0, 240));
+  for (const line of patchDiagnostics.slice(0, 6)) console.error(line.slice(0, 240));
 }
 let checked = 0;
 for (const { absolute, path } of paths) {
