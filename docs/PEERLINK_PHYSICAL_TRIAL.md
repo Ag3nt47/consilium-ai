@@ -61,3 +61,10 @@ With that allowance and the installed file sizes, the per-device free memory tar
 ### Inference measurements
 
 Use a fixed prompt and record load time, time to first token, tokens per second, and peak memory per device. Run the same prompt with internet access disabled and the local paths still connected. During a separate request, interrupt the active path and record whether inference resumes, restarts from saved context, or fails. Confirm that the user sees one terminal result and that all worker allocations are released on cancellation. Report transport recovery and inference recovery separately.
+
+For llama.cpp, use `node scripts/llama-split-args.mjs --model "Custom model"` with a saved
+`model-fit.mjs --json` report piped into standard input. Supply one `--device "Computer=RunnerDevice"`
+per allocated computer, using names reported by the authorized runner's `--list-devices` command.
+The script prints the layer placement argument array and leaves inference idle. The tensor-split
+proportions follow the explicit device order. Check actual layer placement and memory from the logs.
+[llama.cpp b12621 split-mode reference](https://github.com/ggml-org/llama.cpp/blob/b12621/docs/multi-gpu.md).
