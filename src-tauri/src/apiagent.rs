@@ -248,12 +248,19 @@ fn usage_of(v: &serde_json::Value) -> Option<TokenUsage> {
         .or_else(|| u["prompt_cache_hit_tokens"].as_u64())
         .unwrap_or(0);
     let total_tokens = n("total_tokens").max(input_tokens.saturating_add(output_tokens));
+    // llama.cpp includes measured generation timing in some compatible chat replies.
+    let output_rate_milli = v.pointer("/timings/predicted_per_second")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .map(|rate| (rate * 1000.0).round() as u64)
+        .filter(|rate| *rate > 0);
     (total_tokens > 0).then_some(TokenUsage {
         input_tokens,
         output_tokens,
         thinking_tokens,
         cache_read_tokens,
         total_tokens,
+        output_rate_milli,
         ..TokenUsage::default()
     })
 }
@@ -532,7 +539,19 @@ mod tests {
         assert_eq!(text, "Hello");
         let u = usage.unwrap();
         assert_eq!((u.input_tokens, u.output_tokens, u.thinking_tokens, u.cache_read_tokens, u.total_tokens), (10, 5, 3, 4, 15));
+        assert_eq!(u.output_rate_milli, None);
         assert!(parse_reply(r#"{"choices":[{"message":{"content":""}}]}"#).is_err());
+    }
+
+    #[test]
+    fn generation_throughput_uses_only_the_providers_reported_rate() {
+        let body = r#"{"choices":[{"message":{"content":"A reply"}}],"usage":{"completion_tokens":35},"timings":{"prompt_per_second":300.3,"predicted_per_second":52.944949}}"#;
+        let (_, usage) = parse_reply(body).unwrap();
+        assert_eq!(usage.unwrap().output_rate_milli, Some(52_945));
+        for invalid in ["0", "-7", "null", "\"48.2\""] {
+            let body = body.replace("52.944949", invalid);
+            assert_eq!(parse_reply(&body).unwrap().1.unwrap().output_rate_milli, None);
+        }
     }
 
     #[test]
