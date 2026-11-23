@@ -2913,7 +2913,7 @@ export default function App() {
     <div className="app" data-backdrop={prefs.backdrop.enabled ? prefs.backdrop.mode : undefined}>
       {prefs.backdrop.enabled && prefs.backdrop.mode !== "stealth" && (
         <Suspense fallback={null}>
-          <TelemetryBackdrop prefs={prefs.backdrop} agents={agents} workers={thinkingIds} meshPeers={meshPeers}
+          <TelemetryBackdrop prefs={prefs.backdrop} agents={agents} workers={thinkingIds} events={events} meshPeers={meshPeers}
             memory={pressure?.memory_percent} paused={!prefs.effects || adaptiveMode === "eco"} />
         </Suspense>
       )}

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { AgentInfo } from "./api";
+import type { AgentInfo, ChatEvent } from "./api";
 
 export type BackdropMode = "rain" | "static" | "stealth";
 export type BackdropPrefs = {
@@ -12,6 +12,8 @@ export type BackdropPrefs = {
 };
 
 type BackdropSample = { kind: "local" | "cloud" | "mesh" | "alert" | "host"; text: string; active?: boolean };
+type CompletionSample = { sample: BackdropSample; until: number; rate: number };
+const COMPLETION_TTL_MS = 8_000;
 const inks = {
   local: ["#00F0FF", "rgba(0, 240, 255, .22)"],
   cloud: ["#A78BFA", "rgba(138, 92, 246, .22)"],
@@ -21,12 +23,14 @@ const inks = {
 };
 const idle: BackdropSample = { kind: "host", text: "· : ·" };
 
-export default function TelemetryBackdrop({ prefs, agents, workers, meshPeers, memory, paused }: {
-  prefs: BackdropPrefs; agents: AgentInfo[]; workers: string[]; meshPeers: number; memory?: number; paused: boolean;
+export default function TelemetryBackdrop({ prefs, agents, workers, events, meshPeers, memory, paused }: {
+  prefs: BackdropPrefs; agents: AgentInfo[]; workers: string[]; events: ChatEvent[];
+  meshPeers: number; memory?: number; paused: boolean;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const snapshot = useRef<BackdropSample[]>([]);
   const settings = useRef(prefs);
+  const completion = useRef<CompletionSample | null>(null);
   useEffect(() => {
     const samples: BackdropSample[] = [];
     if (prefs.filter !== "mesh") {
@@ -45,6 +49,26 @@ export default function TelemetryBackdrop({ prefs, agents, workers, meshPeers, m
     if (memory !== undefined && prefs.filter === "all") samples.push({ kind: "host", text: `[HOST] RAM ${memory}%` });
     snapshot.current = samples;
   }, [agents, workers, meshPeers, memory, prefs.filter]);
+  useEffect(() => {
+    completion.current = null;
+    if (prefs.filter === "mesh") return;
+    const now = Date.now();
+    for (let index = events.length - 1; index >= 0; index--) {
+      const event = events[index];
+      if (event.ts + COMPLETION_TTL_MS <= now) break;
+      const measured = event.usage?.output_rate_milli;
+      if (event.kind !== "message" || event.via || measured === undefined || !Number.isFinite(measured) || measured <= 0) continue;
+      const agent = agents.find((candidate) => candidate.id === event.sender);
+      if (!agent || agent.local_model === undefined) continue;
+      const rate = measured / 1000;
+      completion.current = {
+        sample: { kind: agent.local_model ? "local" : "cloud", text: `[COMPLETED] ${agent.name} ${rate.toFixed(1)} tok/s` },
+        until: event.ts + COMPLETION_TTL_MS,
+        rate,
+      };
+      break;
+    }
+  }, [agents, events, prefs.filter]);
   useEffect(() => { settings.current = prefs; }, [prefs]);
 
   const rain = prefs.enabled && prefs.mode === "rain" && !paused;
@@ -80,14 +104,18 @@ export default function TelemetryBackdrop({ prefs, agents, workers, meshPeers, m
       const elapsed = last ? Math.min(now - last, 80) / 1000 : 0;
       last = now;
       const entries = snapshot.current;
+      const lastCompletion = completion.current;
+      const recentCompletion = lastCompletion && lastCompletion.until > Date.now() ? lastCompletion : null;
       let active = 0;
       for (const sample of entries) if (sample.active) active++;
       const stride = active ? 2 : 5;
       brush!.clearRect(0, 0, width, height);
       for (let column = 0; column < positions.length; column++) {
-        positions[column] = (positions[column] + elapsed * (14 + Math.min(active, 12) * 6) * speed / 100) % (height + 90);
+        const measured = column === 0 ? recentCompletion : null;
+        const velocity = 14 + (measured ? Math.min(measured.rate * .5, 90) : Math.min(active, 12) * 6);
+        positions[column] = (positions[column] + elapsed * velocity * speed / 100) % (height + 90);
         if (column % stride) continue;
-        const sample = entries.length ? entries[Math.floor(column / stride) % entries.length] : idle;
+        const sample = measured?.sample ?? (entries.length ? entries[Math.floor(column / stride) % entries.length] : idle);
         const [head, trail] = inks[sample.kind];
         const row = Math.floor(positions[column] / cell);
         const x = column * cell * 2 + 8;
