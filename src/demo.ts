@@ -50,7 +50,7 @@ const agents: AgentInfo[] = [
     signed_in: !demoAddAi,
     version: demoAddAi ? "Gemini CLI" : "agy",
     path: demoAddAi ? "gemini" : "agy",
-    usage: demoAddAi ? null : { remaining_percent: 72, windows: [{ label: "5-hour limit", remaining_percent: 72 }, { label: "Weekly limit", remaining_percent: 82 }] },
+    usage: demoAddAi ? null : { remaining_percent: 72, windows: [{ label: "Five Hour Limit", remaining_percent: 72 }, { label: "Weekly Limit", remaining_percent: 82 }] },
     hint: demoAddAi ? "Run `gemini` in a terminal, choose Sign in with Google, then type /quit." : "",
   },
 ];

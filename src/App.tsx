@@ -809,46 +809,46 @@ function ApiKeyField({ agent, onSaved, onError }: { agent: AgentInfo; onSaved: (
   );
 }
 
+function usagePeriod(window: UsageWindow): "session" | "weekly" | "other" {
+  const label = window.label.toLowerCase().replace(/[-_]+/g, " ").trim();
+  if (/^(?:(?:current )?session|(?:5|five) hours?|5h)(?:$|\s)/.test(label)) return "session";
+  if (/^(?:weekly|(?:7|seven) days?)(?:$|\s)/.test(label)) return "weekly";
+  return "other";
+}
+
+function UsagePeriod({ agent, label, windows }: { agent: AgentInfo; label: string; windows: UsageWindow[] }) {
+  return windows.length ? (
+    <UsageBar label={label} percent={Math.min(...windows.map((window) => window.remaining_percent))}
+      windows={windows} aria={`${agent.name} ${label.toLowerCase()} usage remaining`} />
+  ) : (
+    <div className="usage-row" title={`${agent.tool} did not report this usage window`}>
+      <div className="usage-label">
+        <span className="usage-name">{label}</span>
+        <span className="usage-unavailable">Unavailable</span>
+      </div>
+    </div>
+  );
+}
+
 function UsageMeter({ agent, forecast, claudeResets }: { agent: AgentInfo; forecast?: ResetForecast | null; claudeResets?: ClaudeResetHistory | null }) {
   const usage = agent.usage;
-  if (!usage) {
-    return (
-      <div className="usage-meter">
-        {agent.available && (
-          <span className="usage-unavailable" title={`${agent.tool} did not report plan usage`}>
-            usage unavailable
-          </span>
-        )}
-        {forecast && (
-          <div className="usage-forecast" title={`Unofficial estimate${forecast.confidence ? `, ${forecast.confidence} confidence` : ""}. Not affiliated with OpenAI.`}>
-            {forecast.official
-              ? `Reset announced: ${forecast.official}`
-              : `Global reset: ${forecast.chance_24h ?? "?"}% chance in 24 h${forecast.chance_48h != null ? ` (${forecast.chance_48h}% in 48 h)` : ""}`}
-            {" · "}
-            <button title="Open codex-reset.com, the unofficial source of the reset forecast" className="link" onClick={() => openUrl(FORECAST_SITE)}>
-              codex-reset.com
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  }
-  const { model, overall } = usage;
+  const model = usage?.model;
+  const plan = usage?.overall?.windows ?? (model ? [] : usage?.windows ?? []);
   return (
     <div className="usage-meter" title="How much of this AI's plan allowance is left, and when each limit resets">
-      {model && (
+      <UsagePeriod agent={agent} label="Current session" windows={plan.filter((window) => usagePeriod(window) === "session")} />
+      <UsagePeriod agent={agent} label="Overall weekly" windows={plan.filter((window) => usagePeriod(window) === "weekly")} />
+      {plan.filter((window) => usagePeriod(window) === "other").map((window, index) => (
+        <UsageBar key={`${window.label}-${index}`} label={window.label} percent={window.remaining_percent}
+          windows={[window]} aria={`${agent.name} ${window.label} usage remaining`} />
+      ))}
+      {model && !model.shared && (
         <UsageBar
-          label={model.shared ? `${model.label} · shares overall` : model.label}
+          label={`${model.label} · model limit`}
           percent={model.remaining_percent}
           windows={model.windows}
           aria={`${model.label} usage remaining`}
-          note={model.shared ? `${model.label} has no separate limit; it uses ${agent.name}'s overall allowance.` : undefined}
         />
-      )}
-      {overall ? (
-        <UsageBar label={`${agent.name} overall`} percent={overall.remaining_percent} windows={overall.windows} aria={`${agent.name} overall usage remaining`} />
-      ) : (
-        !model && <UsageBar label="usage left" percent={usage.remaining_percent} windows={usage.windows} aria={`${agent.name} plan usage remaining`} />
       )}
       {forecast && (
         <div className="usage-forecast" title={`Unofficial estimate${forecast.confidence ? `, ${forecast.confidence} confidence` : ""}. Not affiliated with OpenAI.`}>
