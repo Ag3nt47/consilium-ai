@@ -2,7 +2,7 @@
   "typescript-symbols": {
     "summary": "Find declarations in a JavaScript or TypeScript file.",
     "command": "node scripts/symbol-map.mjs src/App.tsx App send",
-    "guidance": "Pass a source file and optionally a top-level function and a name filter. Use --filter in place of the function to filter the whole file. Read the relevant lines before editing."
+    "guidance": "Pass a source file and optionally a top-level function and a name filter. Use --filter in place of the function to filter the whole file. For namespace members, filter by qualified name, such as Outer.Inner.Entry. Read the relevant lines before editing."
   },
   "python-symbols": {
     "summary": "Find Python declarations without importing the source.",
