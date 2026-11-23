@@ -3,7 +3,7 @@
 Use the same Consilium build on both computers. Open a dedicated shared chat and keep model runners idle. Perform the outage steps with local access to both computers so you can restore an interface independently of PeerLink.
 
 1. Connect both computers by Ethernet and join a trusted Wi-Fi network on both. In Settings → Linked computers, verify that both peers report connected and have separate Ethernet and Wi-Fi addresses configured. Record the build on each computer.
-2. Run **Communication stress test** on both computers before starting the outage trial. Record the successful authenticated endpoints and the local interfaces that carried traffic. Verify each interface independently. Multiple reachable addresses can share one physical route.
+2. Run **Test Connection** on both computers to check endpoint authentication and record the local adapters. Then run **Communication stress test** to verify traffic after switching endpoints. Multiple reachable addresses can share one physical route.
 3. With both computers connected, use an established PeerLink session over Ethernet as the baseline. On Windows, map the established socket's local address to its adapter. On macOS, record the local address from the established socket and map it to the interface with the active address.
 4. Disconnect Ethernet on one computer. Record the time and send a unique message from that computer while the session is reconnecting. Preserve the send and receive timestamps and count the matching messages on the receiving computer. Verify the send queue drains and confirm that the re-established socket uses Wi-Fi.
 5. Restore Ethernet and repeat with Wi-Fi disconnected and Ethernet available. Start this leg with an active Wi-Fi session, and send the queued message from the other computer. Restore the original interface state after the run.
@@ -33,20 +33,26 @@ Record each leg with the initial and recovered interfaces on both computers, out
 
 ## Preview build for the physical trial
 
-The [PeerLink preview run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45274921105#artifacts)
-built commit `8f43c4d` with the connection handoff fix. Hosted installation and desktop launch
+The [PeerLink preview run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45284171717#artifacts)
+built commit `e8857af` with connection handoff, concurrent endpoint authentication, **Test AI handshake**
+and capacity-weighted model splits. Hosted installation and desktop launch
 checks passed on Windows, Linux and macOS. The macOS job also verified the Apple Silicon and Intel
 executable slices. The workflow skipped publication.
 
 | Platform | Draft archive | Verified archive SHA-256 |
 | --- | --- | --- |
-| Windows | [Windows EXE](https://github.com/Ag3nt47/consilium-ai/actions/runs/45274921105/artifacts/14866997959) | `b8edf3eea7e8647afef3ae816f528dfee147c5c513a77ce0474f57ea91a8cc6a` |
-| macOS | [Universal DMG](https://github.com/Ag3nt47/consilium-ai/actions/runs/45274921105/artifacts/14867189992) | `f6e423cc55d66ef12574290e0ffa3e62bdba86642c4265cce94e4e1eec5605cb` |
-| Linux | [DEB, RPM and AppImage](https://github.com/Ag3nt47/consilium-ai/actions/runs/45274921105/artifacts/14868510598) | `c78e56b041bae3d19cc69f940aeac4d147fe761f117fb0d7b42f46dc465cda55` |
+| Windows | [Windows EXE](https://github.com/Ag3nt47/consilium-ai/actions/runs/45284171717/artifacts/14869979778) | `88f82d4f0ff5e842e090a78bf3db6e52c263a2966d00a7e01a1e60afa4718726` |
+| macOS | [Universal DMG](https://github.com/Ag3nt47/consilium-ai/actions/runs/45284171717/artifacts/14871522091) | `13e28bfb30a3a1a8b28c5bb259d1bbd7f8c88898704da16ab41b63a37b1290aa` |
+| Linux | [DEB, RPM and AppImage](https://github.com/Ag3nt47/consilium-ai/actions/runs/45284171717/artifacts/14870714631) | `f52abb7a1e51c97c72eaa2c9c9bd0999dd054aa7d86ec08f9bd0aa91e069aeff` |
 
-Use the matching Windows and macOS archives for the connection handoff trial. Live Ethernet,
-Wi-Fi and Bluetooth behavior still needs the physical trial. This build predates the per-endpoint
-adapter display in **Test connection**. Use the socket commands above to record observed adapters.
+Use the matching Windows and macOS archives for the connection handoff trial. Use the socket
+commands above to confirm which adapters carry the active session during the outage. Live
+Ethernet, Wi-Fi and Bluetooth behavior still needs the physical trial.
+
+In **Multi-Computer Sync**, click **Test AI handshake** on each connected peer. Record whether a
+fresh council report arrives and how many AIs have confirmations in both directions.
+The check uses existing AI confirmations and sends no new prompts. On this draft, use
+**Add → Add an AI → Check local model memory** for the memory scan.
 
 ## Simultaneous transfer trial
 
