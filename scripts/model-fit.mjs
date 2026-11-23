@@ -27,7 +27,7 @@ try {
   if (values.help) {
     console.log('Usage: node scripts/model-fit.mjs [--json] [--split] [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--weights GiB | --gguf PATH ...]');
     console.log("--split estimates a balanced allocation even when one device can hold the model.");
-    console.log("Device memory is usable RAM before inference overhead. Repeat --device for additional computers.");
+    console.log("Device memory is usable RAM before inference overhead. Repeat --device with a unique name for each additional computer.");
   } else {
     const bits = Number(values.bits);
     if (![4, 8, 16].includes(bits)) throw new Error("--bits must be 4, 8, or 16");
@@ -35,10 +35,15 @@ try {
       name: "This computer",
       memory: values.host === undefined ? freemem() / 2 ** 30 : memory(values.host, "--host"),
     }];
+    const deviceNames = new Set([devices[0].name.toLowerCase()]);
     for (const entry of values.device) {
-      const [name, size, extra] = entry.split("=");
-      if (!name.trim() || extra !== undefined) throw new Error('--device must be "Name=GiB"');
-      devices.push({ name: name.trim(), memory: memory(size, name) });
+      const [label, size, extra] = entry.split("=");
+      const name = label.trim();
+      if (!name || extra !== undefined) throw new Error('--device must be "Name=GiB"');
+      const key = name.toLowerCase();
+      if (deviceNames.has(key)) throw new Error("Use a unique name for each device.");
+      deviceNames.add(key);
+      devices.push({ name, memory: memory(size, name) });
     }
     const overhead = memory(values.overhead, "--overhead");
     if (values.weights !== undefined && values.gguf.length) throw new Error("Choose either --weights or --gguf.");
