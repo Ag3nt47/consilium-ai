@@ -252,7 +252,7 @@ const demoCouncilForApprovals = { members: isBuild ? ALL : ["gpt", "claude", "ge
 export const demoApi = {
   localToolInventory: async () => [],
   peerResources: async () => ({}),
-  requestPeerResources: async () => {},
+  requestPeerResources: async () => "demo-memory-scan",
   agents: async () => activeAgents,
   usage: async () => Object.fromEntries(activeAgents.flatMap((a) => (a.usage ? [[a.id, a.usage]] : []))),
   list: async () => (isBuild ? (demoStep === 0 ? [{ ...buildConversations[0], title: "New conversation" }, ...buildConversations.slice(1)] : buildConversations) : demoStep === 0 ? [{ ...conversations[0], title: "New conversation" }, ...conversations.slice(1)] : conversations),

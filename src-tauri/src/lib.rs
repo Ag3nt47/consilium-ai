@@ -1010,12 +1010,12 @@ fn import_ollama_model(model: ollama::OllamaTagModel, base_url: Option<String>) 
 
 /// Returns the newest host resources reported by each linked peer computer.
 #[tauri::command]
-fn get_peer_resources() -> Result<std::collections::HashMap<String, resources::HostResources>, String> {
-    Ok(peer_sync::peer_resources())
+fn get_peer_resources() -> Result<std::collections::HashMap<String, peer_sync::PeerResourceReport>, String> {
+    Ok(peer_sync::peer_resource_reports())
 }
 
 #[tauri::command]
-fn request_peer_resources() -> Result<(), String> {
+fn request_peer_resources() -> Result<String, String> {
     let Some(link) = link_handle().filter(|link| link.enabled() && link.has_peers()) else {
         return Err("No paired computers are available.".into());
     };
@@ -1027,8 +1027,7 @@ fn request_peer_resources() -> Result<(), String> {
         "kind": "resources_request",
         "to": [],
         "text": "",
-    }))?;
-    Ok(())
+    }))
 }
 
 /// Broadcasts this computer's host resources to linked peers.
