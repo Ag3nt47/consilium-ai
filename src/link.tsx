@@ -5,7 +5,7 @@ import { LocalModelFit } from "./LocalModelFit";
 
 /** Topbar status light and button for multi-computer sync (Mac & Windows).
  *  Displays connection health, fastest active route, and opens the sync setup modal on click. */
-export function LinkIndicator() {
+export function LinkIndicator({ onConnectedCount }: { onConnectedCount?: (count: number) => void }) {
   const [status, setStatus] = useState<LinkStatus | null>(null);
   const [open, setOpen] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -17,6 +17,9 @@ export function LinkIndicator() {
   const [candidates, setCandidates] = useState<string[]>([]);
   const [dismissed, setDismissed] = useState<string[]>([]);
   const linkEnabled = status?.enabled === true;
+  useEffect(() => {
+    onConnectedCount?.(linkEnabled ? status?.peers.filter((peer) => peer.connected).length ?? 0 : 0);
+  }, [linkEnabled, onConnectedCount, status]);
 
   useEffect(() => {
     if (!linkEnabled || !discoveryAlerts) return;

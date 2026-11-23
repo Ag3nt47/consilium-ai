@@ -76,6 +76,7 @@ pub struct AgentInfo {
     pub company: String,
     /// Always "local-cli" for now; API-backed agents will say "api".
     pub transport: String,
+    pub local_model: bool,
     /// An AI the person added themselves (it can be deleted).
     pub custom: bool,
     pub tool: String,
@@ -800,6 +801,7 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
         name: agent.name.into(),
         company: agent.company.into(),
         transport: "local-cli".into(),
+        local_model: false,
         custom: false,
         tool: tool.into(),
         member,
@@ -845,6 +847,7 @@ async fn api_status(agent: &Agent, provider: &crate::apiagent::Provider, member:
         name: agent.name.into(),
         company: agent.company.into(),
         transport: "api".into(),
+        local_model: provider.local,
         custom: matches!(agent.kind, Kind::CustomApi),
         tool: format!("{} API", agent.company),
         member,

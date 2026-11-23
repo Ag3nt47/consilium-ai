@@ -137,6 +137,61 @@ code {
   position: relative;
 }
 
+.app[data-backdrop] {
+  background: #080b10;
+}
+.telemetry-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.telemetry-grid {
+  background-image: repeating-linear-gradient(90deg, #a1bbcf12 0 1px, transparent 1px 24px),
+    repeating-linear-gradient(0deg, #a1bbcf12 0 1px, transparent 1px 24px);
+}
+.app[data-backdrop] > :is(.sidebar, .main) {
+  position: relative;
+  background: rgba(14, 19, 28, .78);
+}
+.app[data-backdrop] :is(.topbar, .composer) {
+  background: rgba(14, 19, 28, .78);
+  border-color: rgba(255, 255, 255, .11);
+}
+.app[data-backdrop="stealth"] > :is(.sidebar, .main),
+.app[data-backdrop="stealth"] :is(.topbar, .composer) {
+  background: #080b10;
+}
+.app[data-backdrop="stealth"] > .fx-scanlines {
+  display: none;
+}
+.telemetry-settings {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  min-inline-size: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.telemetry-settings label:not(.toggle) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+.telemetry-settings input[type="range"] {
+  width: min(40%, 180px);
+  padding: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .telemetry-backdrop {
+    background-image: repeating-linear-gradient(90deg, #a1bbcf12 0 1px, transparent 1px 24px),
+      repeating-linear-gradient(0deg, #a1bbcf12 0 1px, transparent 1px 24px);
+  }
+}
+
 /* ---------- sidebar ---------- */
 .sidebar {
   background: var(--bg-2);
