@@ -16,7 +16,7 @@ test("preflight checks unstaged new files and accepts clean CRLF", () => {
       assert.equal(result.status, 0, result.stderr);
     };
     git("init", "-q");
-    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", // consilium-allow-secret-scan (reserved fixture email)
       "commit", "--allow-empty", "-qm", "Initial commit");
     writeFileSync(join(cwd, "new file.txt"), "clean\r\n");
     const preflight = () => spawnSync(process.execPath, [script, "new file.txt"], { cwd, encoding: "utf8" });
