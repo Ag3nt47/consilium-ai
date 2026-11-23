@@ -35,6 +35,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: node --test scripts/symbol-map.test.mjs
       - run: npm audit --omit=dev --audit-level=high
 
   core:
