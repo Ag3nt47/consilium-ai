@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
 pub const PORT: u16 = 8470;
@@ -734,7 +734,7 @@ impl Link {
         let attempt = token.child_token();
         let spawn_dial = || {
             let (me, p, a, t) = (self.clone(), peer.clone(), addrs.to_vec(), attempt.clone());
-            tokio::spawn(async move { me.dial_on(p, &a, t).await })
+            tokio::spawn(async move { me.dial_on(p, &a, t, None).await })
         };
         let mut dial = spawn_dial();
         let mut switched_at: Option<(String, u64, u64, u64)> = None;
@@ -1247,6 +1247,7 @@ impl Link {
 
     async fn supervise(self, token: CancellationToken) {
         let mut backoff: HashMap<String, (Duration, u64)> = HashMap::new();
+        let mut pending_dials: HashMap<String, oneshot::Receiver<()>> = HashMap::new();
         loop {
             tokio::select! {
                 _ = token.cancelled() => return,
@@ -1257,6 +1258,9 @@ impl Link {
                 let cfg = self.0.cfg.lock().unwrap();
                 (cfg.node_id.clone(), cfg.peers.clone())
             };
+            pending_dials.retain(|_, dial| {
+                matches!(dial.try_recv(), Err(oneshot::error::TryRecvError::Empty))
+            });
             for peer in peers {
                 let now = now_ms();
                 let (connected, down_since) = {
@@ -1267,7 +1271,7 @@ impl Link {
                     }
                     (s.tx.is_some(), s.down_since_ms)
                 };
-                if connected || peer.addrs.is_empty() {
+                if connected || peer.addrs.is_empty() || pending_dials.contains_key(&peer.node_id) {
                     continue;
                 }
                 // Freshly dropped links immediately clear accumulated backoff for instant failover.
@@ -1284,10 +1288,13 @@ impl Link {
                     continue;
                 }
                 backoff.insert(peer.node_id.clone(), ((delay * 2).min(RETRY_MAX), now + delay.as_millis() as u64));
+                let (pending, done) = oneshot::channel();
+                pending_dials.insert(peer.node_id.clone(), done);
                 let me2 = self.clone();
                 let t = token.clone();
                 tokio::spawn(async move {
-                    let _ = me2.dial(peer, t).await;
+                    let addrs = peer.addrs.clone();
+                    let _ = me2.dial_on(peer, &addrs, t, Some(pending)).await;
                 });
             }
             // A working session resets that computer's back-off.
@@ -1296,13 +1303,14 @@ impl Link {
         }
     }
 
-    async fn dial(self, peer: Peer, token: CancellationToken) -> Result<(), String> {
-        let addrs = peer.addrs.clone();
-        self.dial_on(peer, &addrs, token).await
-    }
-
-    /// Connects to `peer` over the fastest of `addrs` and runs the session until it ends.
-    async fn dial_on(self, peer: Peer, addrs: &[String], token: CancellationToken) -> Result<(), String> {
+    /// Connects to the peer and holds the automatic dial slot through authentication.
+    async fn dial_on(
+        self,
+        peer: Peer,
+        addrs: &[String],
+        token: CancellationToken,
+        pending: Option<oneshot::Sender<()>>,
+    ) -> Result<(), String> {
         let key = peer_key(&peer)?;
         let mut remaining: Vec<_> = addrs.iter().take(12).cloned().collect();
         let mut failure = "no route answered".to_string();
@@ -1321,6 +1329,7 @@ impl Link {
             };
             match reply {
                 Ok(reply) => {
+                    drop(pending);
                     self.learn_addrs(&peer.node_id, &reply, route.parse().ok());
                     self.session(peer, key, r, w, route, Some(rtt), token).await;
                     return Ok(());
@@ -2395,6 +2404,29 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn redial_waits_for_the_pending_peer_handshake() {
+        let dir = std::env::temp_dir().join(format!("link-single-dial-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        let direct = format!("127.0.0.1:{}", host.0.port);
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&direct, &code.code).await.unwrap();
+        joiner.stop();
+        host.stop();
+        let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        joiner.0.cfg.lock().unwrap().peers[0].addrs = vec![stalled.local_addr().unwrap().to_string()];
+        joiner.start();
+
+        let (first, _) = tokio::time::timeout(Duration::from_secs(8), stalled.accept()).await.unwrap().unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(2), stalled.accept()).await.is_err());
+        drop(first);
+        assert!(tokio::time::timeout(Duration::from_secs(6), stalled.accept()).await.unwrap().is_ok());
+
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn dial_tries_another_endpoint_after_a_failed_handshake() {
         let dir = std::env::temp_dir().join(format!("link-auth-fallback-{}", uuid::Uuid::new_v4()));
         let (host, _) = node(&dir, "host");
@@ -2428,7 +2460,7 @@ mod tests {
             let me = joiner.clone();
             let token = token.clone();
             let routes = [first, second.clone()];
-            tokio::spawn(async move { me.dial_on(peer, &routes, token).await })
+            tokio::spawn(async move { me.dial_on(peer, &routes, token, None).await })
         };
         assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(second.as_str())).await);
         token.cancel();
