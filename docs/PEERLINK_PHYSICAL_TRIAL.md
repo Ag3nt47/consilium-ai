@@ -33,17 +33,19 @@ Record each leg with the initial and recovered interfaces on both computers, out
 
 ## Preview build for the physical trial
 
-The [PeerLink preview run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45284171717#artifacts)
-built commit `e8857af` with connection handoff, concurrent endpoint authentication, **Test AI handshake**
-and capacity-weighted model splits. Hosted installation and desktop launch
-checks passed on Windows, Linux and macOS. The macOS job also verified the Apple Silicon and Intel
-executable slices. The workflow skipped publication.
+The [draft preview run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45291091103#artifacts)
+built commit `54c40b4` with connection handoff, concurrent endpoint authentication, **Test AI handshake**,
+capacity-weighted model splits, session and weekly council usage, and the opt-in telemetry backdrop.
+Hosted installation and desktop launch checks passed on Windows, macOS and Linux. The macOS job
+verified the Apple Silicon and Intel executable slices. The Linux job exercised DEB and AppImage
+launches on Ubuntu and an RPM installation and launch on Fedora. The workflow skipped publication.
+All three downloaded archives matched GitHub's SHA-256 digests.
 
 | Platform | Draft archive | Verified archive SHA-256 |
 | --- | --- | --- |
-| Windows | [Windows EXE](https://github.com/Ag3nt47/consilium-ai/actions/runs/45284171717/artifacts/14869979778) | `88f82d4f0ff5e842e090a78bf3db6e52c263a2966d00a7e01a1e60afa4718726` |
-| macOS | [Universal DMG](https://github.com/Ag3nt47/consilium-ai/actions/runs/45284171717/artifacts/14871522091) | `13e28bfb30a3a1a8b28c5bb259d1bbd7f8c88898704da16ab41b63a37b1290aa` |
-| Linux | [DEB, RPM and AppImage](https://github.com/Ag3nt47/consilium-ai/actions/runs/45284171717/artifacts/14870714631) | `f52abb7a1e51c97c72eaa2c9c9bd0999dd054aa7d86ec08f9bd0aa91e069aeff` |
+| Windows | [Windows EXE](https://github.com/Ag3nt47/consilium-ai/actions/runs/45291091103/artifacts/14873668553) | `d63eb600ff8b67191b97bd234be242807e4e0fbffb18d8fc99d6bcb9049f46d8` |
+| macOS | [Universal DMG](https://github.com/Ag3nt47/consilium-ai/actions/runs/45291091103/artifacts/14874702191) | `33db5b3e879046b3ea9fe6827871badc18445d5eb30b06b534eacab704eeef11` |
+| Linux | [DEB, RPM and AppImage](https://github.com/Ag3nt47/consilium-ai/actions/runs/45291091103/artifacts/14874976112) | `2bbd7aa30c06de8be829e4ab3b6d10a49617cc7eefde66d5ddda6c9cfa398e0a` |
 
 Use the matching Windows and macOS archives for the connection handoff trial. Use the socket
 commands above to confirm which adapters carry the active session during the outage. Live
@@ -51,8 +53,8 @@ Ethernet, Wi-Fi and Bluetooth behavior still needs the physical trial.
 
 In **Multi-Computer Sync**, click **Test AI handshake** on each connected peer. Record whether a
 fresh council report arrives and how many AIs have confirmations in both directions.
-The check uses existing AI confirmations and sends no new prompts. On this draft, use
-**Add → Add an AI → Check local model memory** for the memory scan.
+The check uses existing AI confirmations and sends no new prompts. In the same menu, open
+**Check local model memory** to scan for fresh peer capacity reports.
 
 ## Simultaneous transfer trial
 
