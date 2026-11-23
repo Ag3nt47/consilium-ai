@@ -324,6 +324,7 @@ struct Pending {
 #[derive(Default)]
 struct PeerState {
     tx: Option<mpsc::UnboundedSender<String>>,
+    session_cancel: Option<CancellationToken>,
     generation: u64,
     route: Option<String>,
     local_interface: Option<String>,
@@ -484,6 +485,7 @@ impl Link {
         }
         for state in self.0.peers.lock().unwrap().values_mut() {
             state.tx = None;
+            state.session_cancel = None;
             state.generation += 1;
         }
     }
@@ -1400,9 +1402,16 @@ impl Link {
             (names.len() == 1).then(|| names.remove(0))
         });
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let token = token.child_token();
         let generation = {
             let mut states = self.0.peers.lock().unwrap();
+            if token.is_cancelled() {
+                return;
+            }
             let s = states.entry(peer.node_id.clone()).or_default();
+            if let Some(previous) = s.session_cancel.replace(token.clone()) {
+                previous.cancel();
+            }
             s.generation += 1;
             s.tx = Some(tx.clone());
             s.route = Some(route);
@@ -1484,6 +1493,7 @@ impl Link {
         if let Some(s) = states.get_mut(&peer.node_id) {
             if s.generation == generation {
                 s.tx = None;
+                s.session_cancel = None;
                 s.down_since_ms = now_ms();
             }
         }
@@ -2197,7 +2207,10 @@ mod tests {
             "A communication stress test is already running"
         );
         drop(running);
+        let host_id = host.status().node_id;
+        let previous_session = joiner.0.peers.lock().unwrap()[&host_id].session_cancel.clone().unwrap();
         let reports = joiner.stress_test().await.unwrap();
+        assert!(previous_session.is_cancelled(), "the replaced session stops writing immediately");
         assert_eq!(reports.len(), 1);
         let r = &reports[0];
         assert_eq!(r.routes.len(), 2);
