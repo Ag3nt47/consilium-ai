@@ -363,6 +363,8 @@ export type RouteTest = {
   kind: string;
   reachable: boolean;
   rtt_ms?: number;
+  local_ip?: string | null;
+  local_interface?: string | null;
   status: string;
 };
 
