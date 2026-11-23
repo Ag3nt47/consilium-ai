@@ -611,9 +611,9 @@ fn claude_usage_from_output(output: &str, model: Option<String>) -> Option<Usage
                 }
             }
         }
-        // Older CLIs have the named windows but not the unified limits array.
-        if overall.is_empty() {
-            for (key, label) in [("five_hour", "5-hour limit"), ("seven_day", "Weekly limit")] {
+        // Fill each missing period independently. Some CLIs provide a partial limits array.
+        for (key, label) in [("five_hour", "5-hour limit"), ("seven_day", "Weekly limit")] {
+            if !overall.iter().any(|window| window.label == label) {
                 if let Some(used) = limits[key]["utilization"].as_f64() {
                     overall.extend(window_from_used(label, used, limits[key]["resets_at"].as_str().and_then(iso_ms)));
                 }
@@ -2406,6 +2406,16 @@ mod plan_tests {
     }
 
     #[test]
+    fn claude_keeps_the_reported_session_and_fills_a_missing_weekly_window() {
+        let output = r#"{"response":{"response":{"rate_limits_available":true,"rate_limits":{"limits":[{"kind":"session","percent":22,"scope":null}],"five_hour":{"utilization":90},"seven_day":{"utilization":59}}}}}"#;
+        let usage = claude_usage_from_output(output, None).unwrap();
+        let windows = usage.overall.unwrap().windows;
+        assert_eq!(windows.len(), 2);
+        assert_eq!((windows[0].label.as_str(), windows[0].remaining_percent), ("5-hour limit", 78));
+        assert_eq!((windows[1].label.as_str(), windows[1].remaining_percent), ("Weekly limit", 41));
+    }
+
+    #[test]
     fn reset_times_are_read_in_each_providers_format() {
         assert_eq!(iso_ms("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(iso_ms("2026-11-17T19:00:00.389055+00:00"), Some(1_794_942_000_389));
@@ -2433,11 +2443,15 @@ mod plan_tests {
 
     #[test]
     fn antigravity_usage_is_the_gemini_group_and_ignores_the_third_party_pool() {
-        let output = r#"{"command":{"data":{"groups":[{"name":"Gemini Models","description":"Models within this group: Gemini 3.8 Flash","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.61},{"name":"Five Hour Limit Remaining","remaining_fraction":0.83}]},{"name":"Claude and GPT models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.1}]}]}}}"#;
+        let output = r#"{"command":{"data":{"groups":[{"name":"Gemini Models","description":"Models within this group: Gemini 3.8 Flash","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.61,"reset_time":"2026-11-30T05:30:00Z"},{"name":"Five Hour Limit Remaining","remaining_fraction":0.83,"reset_time":"2026-11-24T03:30:00Z"}]},{"name":"Claude and GPT models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.1}]}]}}}"#;
         let usage = antigravity_usage_from_output(output).unwrap();
         assert_eq!(usage.remaining_percent, 61);
         assert_eq!(usage.windows.len(), 2);
         assert_eq!(usage.windows[0].label, "Weekly Limit");
+        assert_eq!(usage.windows[0].resets_at, iso_ms("2026-11-30T05:30:00Z"));
+        assert_eq!(usage.windows[1].label, "Five Hour Limit");
+        assert_eq!(usage.windows[1].remaining_percent, 83);
+        assert_eq!(usage.windows[1].resets_at, iso_ms("2026-11-24T03:30:00Z"));
         assert_eq!(pct(&usage.overall), ("Gemini".into(), 61, false));
         assert_eq!(pct(&usage.model), ("Gemini 3.8 Flash".into(), 61, true));
     }
