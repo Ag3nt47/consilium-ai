@@ -55,6 +55,18 @@ test("devices whose free memory is consumed by runtime add no weight capacity", 
   ], 10), "Needs at least 2.0 GiB more for weights");
 });
 
+test("the CLI does not count the same device name twice", () => {
+  for (const names of [["Mac=6", " mac =6"], ["This computer=6"]]) {
+    const result = spawnSync(process.execPath, [
+      "scripts/model-fit.mjs", "--json", "--host", "8",
+      ...names.flatMap(name => ["--device", name]),
+    ], { encoding: "utf8" });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Use a unique name for each device/);
+    assert.equal(result.stdout, "");
+  }
+});
+
 test("the CLI estimates fit from the combined size of separate GGUF shards", (t) => {
   const folder = mkdtempSync(join(tmpdir(), "consilium-model-fit-"));
   t.after(() => rmSync(folder, { recursive: true, force: true }));
