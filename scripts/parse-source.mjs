@@ -1,5 +1,7 @@
 import { constants, openSync, closeSync, fstatSync, readSync } from "node:fs";
-import ts from "typescript-ast";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
 
 const SOURCE_LIMIT = 1024 * 1024;
 export const supportedSourceExtensions = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"]);
@@ -24,6 +26,7 @@ function readSource(file) {
 }
 
 export function parseSource(file) {
+  const ts = require("typescript-ast");
   const text = readSource(file);
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
   const diagnostic = source.parseDiagnostics[0];
