@@ -100,20 +100,24 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
         setScanStatus("No paired computers are connected. Connect a computer or enter memory manually.");
         return;
       }
-      await api.requestPeerResources();
+      const requestId = await api.requestPeerResources();
       const deadline = performance.now() + 6000;
-      let fresh: [string, Awaited<ReturnType<typeof api.peerResources>>[string]][] = [];
+      const fresh = new Map<string, Awaited<ReturnType<typeof api.peerResources>>[string]>();
       do {
         const reports = await api.peerResources();
-        fresh = Object.entries(reports).filter(([id, report]) =>
-          connected.has(id) && report.updated_at > (before[id]?.updated_at ?? 0) && (report.total_memory_mb ?? 0) > 0
-        );
-        if (fresh.length >= expected) break;
+        for (const [id, report] of Object.entries(reports)) {
+          if (!connected.has(id) || (report.total_memory_mb ?? 0) <= 0) continue;
+          const requested = report.supports_request_id
+            ? report.request_id === requestId
+            : report.updated_at > (before[id]?.updated_at ?? 0);
+          if (requested) fresh.set(id, report);
+        }
+        if (fresh.size >= expected) break;
         const remaining = deadline - performance.now();
         if (remaining <= 0) break;
         await new Promise((resolve) => setTimeout(resolve, Math.min(500, remaining)));
       } while (true);
-      const found = fresh.map(([id, report]) => {
+      const found = Array.from(fresh, ([id, report]) => {
         const name = connected.get(id) ?? id;
         const totalMiB = report.total_memory_mb ?? 0;
         const availableMiB = report.available_memory_mb ?? totalMiB * (1 - report.memory_percent / 100);

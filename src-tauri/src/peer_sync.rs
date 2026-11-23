@@ -108,8 +108,16 @@ pub struct Sync {
     reacted: Mutex<HashMap<String, u64>>,
     /// Per conversation: the human message, and how many turns handles have started since it.
     addressed: Mutex<HashMap<String, (u64, u32)>>,
-    /// Host resources reported by linked peer computers (keyed by computer name).
-    resources: Mutex<HashMap<String, crate::resources::HostResources>>,
+    /// Host resources reported by authenticated peer node ID.
+    resources: Mutex<HashMap<String, PeerResourceReport>>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct PeerResourceReport {
+    #[serde(flatten)]
+    resources: crate::resources::HostResources,
+    supports_request_id: bool,
+    request_id: Option<String>,
 }
 
 /// Why an incoming message was turned away.
@@ -498,7 +506,12 @@ impl Sync {
 
         if let Ok(res) = serde_json::from_str::<crate::resources::HostResources>(&shared.text) {
             let mut r = self.resources.lock().unwrap();
-            r.insert(packet.node_id.clone(), res);
+            let correlation = packet.payload.get("resource_request_id");
+            r.insert(packet.node_id.clone(), PeerResourceReport {
+                resources: res,
+                supports_request_id: correlation.is_some(),
+                request_id: correlation.and_then(Value::as_str).map(str::to_owned),
+            });
         }
         Ok(None)
     }
@@ -593,7 +606,7 @@ impl Sync {
         self.send_resources(target_path, None)
     }
 
-    fn send_resources(&self, target_path: Option<&Path>, recipient: Option<&str>) -> Result<(), String> {
+    fn send_resources(&self, target_path: Option<&Path>, request: Option<(&str, &str)>) -> Result<(), String> {
         let Some(link) = crate::link_handle().filter(|l| l.enabled() && l.has_peers()) else { return Ok(()) };
         let host_res = crate::resources::HostResources::sample(&crate::prompt::here_slug(), target_path);
         let serialized = serde_json::to_string(&host_res).map_err(|e| e.to_string())?;
@@ -603,10 +616,11 @@ impl Sync {
             "id": uuid::Uuid::new_v4().to_string(),
             "sender": "system",
             "kind": "resources",
+            "resource_request_id": request.map(|(_, id)| id),
             "to": [],
             "text": serialized,
         });
-        if let Some(node_id) = recipient {
+        if let Some((node_id, _)) = request {
             link.send_to(node_id, PacketKind::Chat, payload)?;
         } else {
             link.send(PacketKind::Chat, payload)?;
@@ -616,6 +630,10 @@ impl Sync {
 
     /// Returns the newest host resources reported by each linked peer computer.
     pub fn peer_resources(&self) -> HashMap<String, crate::resources::HostResources> {
+        self.resources.lock().unwrap().iter().map(|(id, report)| (id.clone(), report.resources.clone())).collect()
+    }
+
+    fn peer_resource_reports(&self) -> HashMap<String, PeerResourceReport> {
         self.resources.lock().unwrap().clone()
     }
 
@@ -802,7 +820,7 @@ impl Sync {
         if shared.kind == "resources_request" {
             if crate::store::now_ms().abs_diff(packet.timestamp_ms) <= 120_000 {
                 let data = crate::data_dir();
-                self.send_resources(data.as_deref(), Some(&packet.node_id))?;
+                self.send_resources(data.as_deref(), Some((&packet.node_id, &packet.id)))?;
             }
             return Ok(None);
         }
@@ -1204,6 +1222,10 @@ pub fn share_resources(target_path: Option<&Path>) -> Result<(), String> {
 /// Returns the newest host resources reported by each linked peer computer.
 pub fn peer_resources() -> HashMap<String, crate::resources::HostResources> {
     SYNC.get().map(|s| s.peer_resources()).unwrap_or_default()
+}
+
+pub fn peer_resource_reports() -> HashMap<String, PeerResourceReport> {
+    SYNC.get().map(|s| s.peer_resource_reports()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1754,11 +1776,22 @@ mod tests {
         let mut second = packet.clone();
         second.id = "res2".into();
         second.node_id = "node-second".into();
+        second.payload["resource_request_id"] = serde_json::json!("memory-request-1");
         b.file(&second, "MSI-AGENT47").unwrap();
         let recorded = b.peer_resources();
         assert_eq!(recorded.len(), 2);
         assert_eq!(recorded.get("node-windows"), Some(&sample));
         assert_eq!(recorded.get("node-second"), Some(&sample));
+        let reports = b.peer_resource_reports();
+        assert!(!reports["node-windows"].supports_request_id);
+        assert!(reports["node-second"].supports_request_id);
+        assert_eq!(reports["node-second"].request_id.as_deref(), Some("memory-request-1"));
+        second.id = "res3".into();
+        second.payload["resource_request_id"] = Value::Null;
+        b.file(&second, "MSI-AGENT47").unwrap();
+        let reports = b.peer_resource_reports();
+        assert!(reports["node-second"].supports_request_id);
+        assert!(reports["node-second"].request_id.is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

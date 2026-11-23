@@ -567,7 +567,7 @@ const appApi = {
     invoke<string>("import_ollama_model", { model, baseUrl }),
   /** Samples host PC CPU and memory pressure (0-100%). */
   systemPressure: () => invoke<SystemPressure>("system_pressure"),
-  requestPeerResources: () => invoke<void>("request_peer_resources"),
+  requestPeerResources: () => invoke<string>("request_peer_resources"),
   peerResources: () => invoke<Record<string, {
     os?: string;
     build_arch?: string;
@@ -576,6 +576,8 @@ const appApi = {
     memory_percent: number;
     tools?: string[];
     updated_at: number;
+    supports_request_id?: boolean;
+    request_id?: string | null;
   }>>("get_peer_resources"),
   securityScanStatus: () => invoke<SecurityScanStatus>("security_scan_status"),
   securityScanSave: (settings: {
