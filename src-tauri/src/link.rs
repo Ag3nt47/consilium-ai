@@ -2710,6 +2710,59 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn three_endpoint_probes_overlap_without_replacing_the_peer_session() {
+        let dir = std::env::temp_dir().join(format!("link-probe-overlap-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, received) = node(&dir, "joiner");
+        let host_addr = format!("127.0.0.1:{}", host.0.port);
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&host_addr, &code.code).await.unwrap();
+        assert!(wait_for(|| host.status().peers[0].connected && joiner.status().peers[0].connected).await);
+
+        let joiner_addr = format!("127.0.0.1:{}", joiner.0.port);
+        let ready = Arc::new(tokio::sync::Barrier::new(3));
+        let mut routes = Vec::new();
+        let mut proxies = tokio::task::JoinSet::new();
+        for _ in 0..3 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            routes.push(listener.local_addr().unwrap().to_string());
+            let (ready, target) = (ready.clone(), joiner_addr.clone());
+            proxies.spawn(async move {
+                let (mut client, _) = listener.accept().await.unwrap();
+                let mut peer = TcpStream::connect(target).await.unwrap();
+                let mut from_peer = BufReader::new(&mut peer);
+                write_wire(&mut client, &read_wire(&mut from_peer).await.unwrap()).await.unwrap();
+                let request = read_wire(&mut BufReader::new(&mut client)).await.unwrap();
+                // Hold all three encrypted requests before forwarding any to the recipient.
+                ready.wait().await;
+                write_wire(from_peer.get_mut(), &request).await.unwrap();
+                let reply = read_wire(&mut from_peer).await.unwrap();
+                write_wire(&mut client, &reply).await.unwrap();
+            });
+        }
+        let joiner_id = joiner.status().node_id;
+        let generation = host.0.peers.lock().unwrap()[&joiner_id].generation;
+        let host_id = host.status().node_id;
+        let remote_generation = joiner.0.peers.lock().unwrap()[&host_id].generation;
+        host.0.cfg.lock().unwrap().peers[0].addrs = routes;
+        let report = host.test_peer(&joiner_id).await.unwrap();
+        assert_eq!(report.routes.len(), 3);
+        assert!(report.routes.iter().all(|route| route.status.contains("authenticated probe passed")), "{report:?}");
+        while let Some(result) = proxies.join_next().await {
+            result.unwrap();
+        }
+        assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, generation);
+        assert_eq!(joiner.0.peers.lock().unwrap()[&host_id].generation, remote_generation);
+        let packet = host.send(PacketKind::Chat, json!({ "text": "after the probes" })).unwrap();
+        assert!(wait_for(|| host.status().peers[0].queued == 0).await);
+        assert_eq!(received.lock().unwrap().iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), [packet.as_str()]);
+
+        host.stop();
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn failover_routes_can_be_added_and_refreshed() {
         let dir = std::env::temp_dir().join(format!("link-test-{}", uuid::Uuid::new_v4()));
         let (host, _) = node(&dir, "host-failover");
