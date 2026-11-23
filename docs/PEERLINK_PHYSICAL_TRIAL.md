@@ -33,14 +33,20 @@ Record each leg with the initial and recovered interfaces on both computers, out
 
 ## Preview build for the physical trial
 
-The [PeerLink preview run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45259525406#artifacts)
-built commit `bdbb8d0` for Windows, macOS and Linux. It includes current-session packet
-accounting and recovery from stalled socket writes. Hosted installation checks passed on
-all three platforms, and the Windows, Linux and universal macOS artifact archives matched
-their published SHA-256 digests. The workflow skipped publication.
+The [PeerLink preview run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45274921105#artifacts)
+built commit `8f43c4d` with the connection handoff fix. Hosted installation and desktop launch
+checks passed on Windows, Linux and macOS. The macOS job also verified the Apple Silicon and Intel
+executable slices. The workflow skipped publication.
 
-These artifacts can serve as matching Windows and macOS builds for the physical trial.
-The hosted checks did not exercise live traffic over Ethernet, Wi-Fi or Bluetooth.
+| Platform | Draft archive | Verified archive SHA-256 |
+| --- | --- | --- |
+| Windows | [Windows EXE](https://github.com/Ag3nt47/consilium-ai/actions/runs/45274921105/artifacts/14866997959) | `b8edf3eea7e8647afef3ae816f528dfee147c5c513a77ce0474f57ea91a8cc6a` |
+| macOS | [Universal DMG](https://github.com/Ag3nt47/consilium-ai/actions/runs/45274921105/artifacts/14867189992) | `f6e423cc55d66ef12574290e0ffa3e62bdba86642c4265cce94e4e1eec5605cb` |
+| Linux | [DEB, RPM and AppImage](https://github.com/Ag3nt47/consilium-ai/actions/runs/45274921105/artifacts/14868510598) | `c78e56b041bae3d19cc69f940aeac4d147fe761f117fb0d7b42f46dc465cda55` |
+
+Use the matching Windows and macOS archives for the connection handoff trial. Live Ethernet,
+Wi-Fi and Bluetooth behavior still needs the physical trial. This build predates the per-endpoint
+adapter display in **Test connection**. Use the socket commands above to record observed adapters.
 
 ## Simultaneous transfer trial
 
@@ -54,9 +60,9 @@ With permission to start the runners, use the same compatible GGUF and runner bu
 
 ### Memory preflight
 
-Use fresh paired-computer reports before allocating weights. In the latest Windows–Mac preflight, the Mac returned 951 MiB out of 8192 MiB over PeerLink. The default 2 GiB runtime allowance left it with zero weight capacity. Windows had about 7.33 GiB available in a separate reading.
+Use fresh paired-computer reports before allocating weights. In the last Mac scan, the Mac returned 951 MiB out of 8192 MiB over PeerLink. The default 2 GiB runtime allowance left it with zero weight capacity. A separate, later Windows reading showed 3.53 GiB free.
 
-With that allowance and the installed file sizes, the per-device free memory targets for a 50/50 weight split are approximately 2.64 GiB for Qwen3 1.7B, 3.17 GiB for Qwen3 4B, and 4.17 GiB for Llama 3. Start with Qwen3 1.7B once both devices have sufficient headroom. These are planning thresholds. Confirm actual model and context allocations from the runner logs during an authorized trial.
+With that allowance and the installed file sizes on Windows, the per-device free memory targets for a 50/50 weight split are approximately 2.63 GiB for Qwen3 1.7B, 3.16 GiB for Qwen3 4B, and 4.17 GiB for Llama 3. Start with Qwen3 1.7B once both devices have sufficient headroom. These are planning thresholds. Confirm actual model and context allocations from the runner logs during an authorized trial.
 
 ### Inference measurements
 
