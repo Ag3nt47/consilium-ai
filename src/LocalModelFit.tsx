@@ -20,6 +20,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
   const [bits, setBits] = useState(4);
   const [overhead, setOverhead] = useState("2");
   const [preferSplit, setPreferSplit] = useState(false);
+  const [distribution, setDistribution] = useState<"balanced" | "capacity">("balanced");
   const [customWeights, setCustomWeights] = useState("");
   const [fileMessage, setFileMessage] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -40,7 +41,7 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
     return true;
   });
   const budgets = [{ name: hostName, memory: host }, ...included];
-  const models = modelFit(budgets, bits, overhead, customWeights, preferSplit);
+  const models = modelFit(budgets, bits, overhead, customWeights, preferSplit, distribution);
   const capacities = weightBudgets(budgets, overhead);
   const totalCapacity = capacities.reduce((total, device) => total + device.capacity, 0);
 
@@ -195,6 +196,13 @@ export function LocalModelFit({ availableGiB, ollamaModels }: {
         <label className="row">
           <input type="checkbox" checked={preferSplit} onChange={(e) => setPreferSplit(e.target.checked)} />
           Estimate a split even when one device can hold the model
+        </label>
+        <label>
+          How to divide weights across devices
+          <select value={distribution} onChange={(e) => setDistribution(e.target.value === "capacity" ? "capacity" : "balanced")}>
+            <option value="balanced">As evenly as memory allows</option>
+            <option value="capacity">More on devices with more free memory</option>
+          </select>
         </label>
         {ollamaModels.some(({ size }) => Number.isFinite(size) && size > 0) && (
           <label>

@@ -25,7 +25,7 @@ export function weightBudgets(devices, overhead) {
   }));
 }
 
-export function modelFit(devices, bits, overhead, customWeights, preferSplit = false) {
+export function modelFit(devices, bits, overhead, customWeights, preferSplit = false, distribution = "balanced") {
   const hasMemory = devices.some(({ memory }) => positive(memory) > 0);
   const budgets = weightBudgets(devices, overhead).filter(({ capacity }) => capacity > 0).sort((a, b) => b.capacity - a.capacity);
   const combined = budgets.reduce((sum, { capacity }) => sum + capacity, 0);
@@ -47,10 +47,13 @@ export function modelFit(devices, bits, overhead, customWeights, preferSplit = f
     if (combined < weights) return {
       name, weights, fit: hasMemory ? `Needs at least ${gib(weights - combined)} more for weights` : "Enter usable memory",
     };
-    // Cap smaller budgets first, then divide the remaining weights evenly.
+    // Balanced splits cap smaller budgets first. Capacity-weighted splits use the
+    // same fraction of every device's post-reserve budget.
+    const weighted = distribution === "capacity";
     let remaining = weights;
     const selected = [...budgets].reverse().map(({ name, capacity }, index) => {
-      const allocated = Math.min(capacity, remaining / (budgets.length - index));
+      const share = weighted ? (capacity / combined) * weights : remaining / (budgets.length - index);
+      const allocated = Math.min(capacity, share);
       remaining -= allocated;
       return { name, allocated };
     }).reverse();
@@ -58,7 +61,8 @@ export function modelFit(devices, bits, overhead, customWeights, preferSplit = f
     const allocation = selected.map(({ name, allocated }) =>
       `${name} ${allocated < 0.05 ? "<0.1 GiB" : gib(allocated)}`
     ).join(", ");
-    return { name, weights, fit: `Split estimate: ${names} (${allocation})`, allocation: selected };
+    const label = weighted ? "Capacity-weighted split estimate" : "Split estimate";
+    return { name, weights, fit: `${label}: ${names} (${allocation})`, allocation: selected };
   });
 }
 

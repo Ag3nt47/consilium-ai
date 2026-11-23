@@ -31,6 +31,29 @@ test("split weights balance across three devices after capping a small peer", ()
     "Split estimate: Windows + Mac + Phone (Windows 8.0 GiB, Mac 4.0 GiB, Phone 1.0 GiB)");
 });
 
+test("a capacity-weighted split allocates by post-reserve RAM and skips full devices", () => {
+  const devices = [
+    { name: "Windows", memory: 14 },
+    { name: "Mac", memory: 6 },
+    { name: "Phone", memory: 2 },
+  ];
+  const estimate = (weights) => modelFit(devices, 4, 2, weights, true, "capacity")
+    .find(({ name }) => name === "Custom model");
+  assert.deepEqual(estimate(8).allocation, [{ name: "Windows", allocated: 6 }, { name: "Mac", allocated: 2 }]);
+  assert.deepEqual(estimate(16).allocation, [{ name: "Windows", allocated: 12 }, { name: "Mac", allocated: 4 }]);
+  assert.match(estimate(17).fit, /Needs at least 1.0 GiB more/);
+});
+
+test("the CLI exports a capacity-weighted split plan", () => {
+  const result = spawnSync(process.execPath, [
+    "scripts/model-fit.mjs", "--json", "--host", "14", "--device", "Mac=6", "--weights", "8", "--split", "--capacity-weighted",
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const custom = JSON.parse(result.stdout).models.find(({ name }) => name === "Custom model");
+  assert.match(custom.fit, /^Capacity-weighted split estimate/);
+  assert.deepEqual(custom.allocation, [{ name: "This computer", allocated: 6 }, { name: "Mac", allocated: 2 }]);
+});
+
 test("single-device fit takes precedence when one computer has enough memory", () => {
   assert.equal(customFit([
     { name: "Windows", memory: 12 },

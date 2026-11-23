@@ -16,6 +16,7 @@ try {
       help: { type: "boolean" },
       json: { type: "boolean" },
       split: { type: "boolean" },
+      "capacity-weighted": { type: "boolean" },
       host: { type: "string" },
       device: { type: "string", multiple: true, default: [] },
       bits: { type: "string", default: "4" },
@@ -25,8 +26,9 @@ try {
     },
   });
   if (values.help) {
-    console.log('Usage: node scripts/model-fit.mjs [--json] [--split] [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--weights GiB | --gguf PATH ...]');
-    console.log("--split estimates a balanced allocation even when one device can hold the model.");
+    console.log('Usage: node scripts/model-fit.mjs [--json] [--split] [--capacity-weighted] [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--weights GiB | --gguf PATH ...]');
+    console.log("--split estimates a split even when one device can hold the model.");
+    console.log("--capacity-weighted splits weights in proportion to each device's memory after the runtime reserve.");
     console.log("Device memory is usable RAM before inference overhead. Repeat --device with a unique name for each additional computer.");
     console.log("For --gguf, select one model file or all numbered shards of one model.");
   } else {
@@ -62,7 +64,8 @@ try {
     if (shardError) throw new Error(shardError);
     const custom = values.weights === undefined ? modelBytes / 2 ** 30 : memory(values.weights, "--weights");
     const capacities = weightBudgets(devices, overhead);
-    const models = modelFit(devices, bits, overhead, custom, values.split).map((row) => {
+    const distribution = values["capacity-weighted"] ? "capacity" : "balanced";
+    const models = modelFit(devices, bits, overhead, custom, values.split, distribution).map((row) => {
       if (!values.split || devices.length < 2) return row;
       const target = equalSplitMemoryGiB(row.weights, devices.length, overhead);
       const equalSplitShortfalls = devices
