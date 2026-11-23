@@ -70,6 +70,22 @@ Use fresh paired-computer reports before allocating weights. In the last Mac sca
 
 With that allowance and the installed file sizes on Windows, the per-device free memory targets for a 50/50 weight split are approximately 2.63 GiB for Qwen3 1.7B, 3.16 GiB for Qwen3 4B, and 4.17 GiB for Llama 3. Start with Qwen3 1.7B once both devices have sufficient headroom. These are planning thresholds. Confirm actual model and context allocations from the runner logs during an authorized trial.
 
+A later read-only preflight on November 23, 2026 found 3,809 MiB available on Windows.
+The paired Mac had 8,192 MiB physical RAM, 493 MiB of free pages and 2,719 MiB of inactive
+pages. Speculative pages were reported separately and were not added to free pages. With
+free pages alone, the Mac had no weight capacity after the 2 GiB reserve. Counting free
+and inactive pages as the placement estimate, the planner projected the following split.
+
+| Model | Windows weights | Mac weights | Outcome |
+| --- | ---: | ---: | --- |
+| Qwen3 1.7B | 0.8 GiB | 0.5 GiB | Fits the estimated pooled budget |
+| Qwen3 4B | 1.4 GiB | 0.9 GiB | Fits the estimated pooled budget |
+| Llama 3 | | | About 1.5 GiB short of the estimated pooled budget |
+
+Both model runners remained idle. Recheck available memory and the selected runner devices
+immediately before a live load. A model that fits this system-memory estimate can still exceed
+the available memory on a selected accelerator.
+
 ### Inference measurements
 
 Use a fixed prompt and record load time, time to first token, tokens per second, and peak memory per device. Run the same prompt with internet access disabled and the local paths still connected. During a separate request, interrupt the active path and record whether inference resumes, restarts from saved context, or fails. Confirm that the user sees one terminal result and that all worker allocations are released on cancellation. Report transport recovery and inference recovery separately.
