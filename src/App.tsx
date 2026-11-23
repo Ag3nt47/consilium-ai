@@ -3359,6 +3359,7 @@ export default function App() {
         )}
         <div className="task-float-anchor">
           <TaskBoardPanel
+            key={current}
             conversation={current}
             changeKey={events.length}
             people={[{ id: "human", name: "You" }, ...members.map((m) => ({ id: m.id, name: m.name }))]}

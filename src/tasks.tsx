@@ -30,19 +30,24 @@ export function TaskBoardPanel({
   const [closed, setClosed] = useState(false);
   const [title, setTitle] = useState("");
   const [error, setError] = useState("");
+  const [refresh, setRefresh] = useState(0);
 
   useEffect(() => {
     if (!conversation) return;
-    api.tasksGet(conversation).then(setBoard).catch(() => undefined);
-  }, [conversation, changeKey]);
+    let active = true;
+    api.tasksGet(conversation).then((snapshot) => {
+      if (active) setBoard(snapshot);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [conversation, changeKey, refresh]);
 
   if (!conversation) return null;
 
   const apply = (op: TaskOp) =>
     api
       .tasksApply(conversation, op)
-      .then((b) => {
-        setBoard(b);
+      .then(() => {
+        setRefresh((value) => value + 1);
         setError("");
       })
       .catch((e) => setError(String(e)));
