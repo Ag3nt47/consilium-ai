@@ -298,6 +298,8 @@ export interface TokenUsage {
   cache_creation_tokens: number;
   thinking_tokens: number;
   total_tokens: number;
+  /** Provider-measured rate for one final reply, in thousandths of a token per second. */
+  output_rate_milli?: number;
 }
 
 export interface TokenUsageReport {

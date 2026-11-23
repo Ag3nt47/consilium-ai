@@ -73,6 +73,9 @@ pub struct TokenUsage {
     pub thinking_tokens: u64,
     #[serde(default)]
     pub total_tokens: u64,
+    /// Provider-measured generation rate for this reply, in thousandths of a token per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_rate_milli: Option<u64>,
 }
 
 impl TokenUsage {
@@ -819,6 +822,7 @@ mod tests {
             output_tokens: 5,
             cache_read_tokens: 3,
             total_tokens: 15,
+            output_rate_milli: Some(48_200),
             ..TokenUsage::default()
         };
         s.append_with_usage(&one.id, "gpt", "message", vec![], "a", Some(usage))
@@ -830,6 +834,7 @@ mod tests {
 
         let report = s.token_usage_report(&one.id, 0).unwrap();
         assert_eq!(report.conversation["gpt"].total_tokens, 30);
+        assert_eq!(report.conversation["gpt"].output_rate_milli, None);
         assert_eq!(report.conversation["gpt"].cache_read_tokens, 6);
         assert_eq!(report.today["gpt"].total_tokens, 30);
         assert_eq!(report.today["claude"].total_tokens, 15);

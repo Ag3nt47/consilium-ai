@@ -3436,9 +3436,11 @@ export default function App() {
                   {e.usage && e.usage.total_tokens > 0 && (
                     <span
                       className="tokens-tag"
+                      aria-label={e.usage.output_rate_milli !== undefined ? `Provider-reported completion rate: ${(e.usage.output_rate_milli / 1000).toFixed(1)} tokens per second` : undefined}
                       title={`Turn usage:\n• Total: ${num(e.usage.total_tokens)}\n• Input: ${num(e.usage.input_tokens)}\n• Output: ${num(e.usage.output_tokens)}${e.usage.thinking_tokens ? `\n• Thinking: ${num(e.usage.thinking_tokens)}` : ""}${e.usage.cache_read_tokens ? `\n• Cache read: ${num(e.usage.cache_read_tokens)}` : ""}`}
                     >
                       {formatTokens(e.usage.total_tokens)} tokens
+                      {e.usage.output_rate_milli !== undefined && ` · ${(e.usage.output_rate_milli / 1000).toFixed(1)} tok/s`}
                     </span>
                   )}
                 </div>
