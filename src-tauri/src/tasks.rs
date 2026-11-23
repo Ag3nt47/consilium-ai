@@ -490,7 +490,7 @@ pub fn title_line(text: &str) -> Option<String> {
             fenced = !fenced;
             continue;
         }
-        if !fenced && t.len() > 6 && t[..6].eq_ignore_ascii_case("TITLE:") {
+        if !fenced && t.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case("TITLE:")) {
             let title = t[6..].trim().trim_matches(|c| c == '"' || c == '`' || c == '*').trim();
             if !title.is_empty() {
                 found = Some(title.to_string());
@@ -676,6 +676,12 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn title_parser_accepts_unicode_replies() {
+        assert_eq!(title_line("✅ 已验证所有测试"), None);
+        assert_eq!(title_line("✅ 已验证所有测试\ntitle: 项目进度"), Some("项目进度".into()));
     }
 
     #[test]
