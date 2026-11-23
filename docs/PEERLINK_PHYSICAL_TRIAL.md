@@ -30,6 +30,18 @@ ifconfig
 
 Record each leg with the initial and recovered interfaces on both computers, outage and recovery times, sender, received message count, and final queue state. Redact addresses and device names before publishing screenshots or logs. A leg passes when the live session recovers over the alternate physical interface, the receiver sees the marker once, and the sender confirms queue drainage. Run Bluetooth PAN as a separate leg if both computers expose an authenticated IP path over it. Native BLE and simultaneous payload transfer over multiple links require separate trials.
 
+
+## Preview build for the physical trial
+
+The [PeerLink preview run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45259525406#artifacts)
+built commit `bdbb8d0` for Windows, macOS and Linux. It includes current-session packet
+accounting and recovery from stalled socket writes. Hosted installation checks passed on
+all three platforms, and the Windows, Linux and universal macOS artifact archives matched
+their published SHA-256 digests. The workflow skipped publication.
+
+These artifacts can serve as matching Windows and macOS builds for the physical trial.
+The hosted checks did not exercise live traffic over Ethernet, Wi-Fi or Bluetooth.
+
 ## Simultaneous transfer trial
 
 After the individual routes pass, test with Ethernet, Wi-Fi and Bluetooth PAN active. Start an isolated transfer that can select each interface explicitly. Record the bound source interface, destination interface, bytes delivered and timestamps for each path. Confirm the same payload checksum at the receiver.
