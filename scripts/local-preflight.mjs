@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { extname, isAbsolute, relative, resolve } from "node:path";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const symbolMap = fileURLToPath(new URL("./symbol-map.mjs", import.meta.url));
@@ -28,6 +28,11 @@ const paths = files.map((file) => {
   const path = relative(root, existsSync(absolute) ? realpathSync(absolute) : absolute);
   if (!path || path === ".." || /^\.\.[\\/]/.test(path) || isAbsolute(path)) {
     console.error("Every file must be inside the current Git worktree.");
+    process.exit(2);
+  }
+  if (existsSync(absolute) ? !statSync(absolute).isFile() :
+    run("git", ["-C", root, "cat-file", "-e", "HEAD:" + path.split("\\").join("/")]).status !== 0) {
+    console.error(`Expected a worktree file or a tracked deletion: ${JSON.stringify(file)}`);
     process.exit(2);
   }
   return { absolute, path };
