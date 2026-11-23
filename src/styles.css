@@ -3079,14 +3079,19 @@ button.attachment {
 }
 .test-route-row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 2px 8px;
   font-size: 11px;
 }
 .test-route-info {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .route-kind-badge {
   font-size: 9px;
