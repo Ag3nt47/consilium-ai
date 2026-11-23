@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -104,6 +104,36 @@ test("numbered GGUF shard sets must be complete and match one model", () => {
   assert.match(ggufShardError(["model-00001-of-00002.gguf", "other-00002-of-00002.gguf"]), /one model/);
   assert.match(ggufShardError(["model-00000-of-00002.gguf", "model-00002-of-00002.gguf"]), /all 2/);
   assert.equal(ggufShardError(["single.gguf"]), undefined);
+});
+
+test("the CLI uses installed Ollama weight blobs without running Ollama", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "consilium-ollama-fit-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const manifests = join(root, "manifests", "registry.ollama.ai", "library", "qwen3");
+  const blobs = join(root, "blobs");
+  mkdirSync(manifests, { recursive: true });
+  mkdirSync(blobs);
+  const digest = "a".repeat(64);
+  writeFileSync(join(manifests, "1.7b"), JSON.stringify({ layers: [
+    { mediaType: "application/vnd.ollama.image.model", digest: `sha256:${digest}`, size: 1024 },
+    { mediaType: "application/vnd.ollama.image.template", size: 256 },
+  ] }));
+  const blob = join(blobs, `sha256-${digest}`);
+  writeFileSync(blob, Buffer.alloc(1024));
+  const run = (...args) => spawnSync(process.execPath, ["scripts/model-fit.mjs", "--json", ...args], {
+    encoding: "utf8", env: { ...process.env, OLLAMA_MODELS: root },
+  });
+
+  const result = run("--ollama", "qwen3:1.7b");
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.ollamaModel, "qwen3:1.7b");
+  assert.equal(report.ollamaBytes, 1024);
+  assert.equal(report.models.find(({ name }) => name === "qwen3:1.7b").weights, 1024 / 2 ** 30);
+  assert.match(run("--ollama", "qwen3:1.7b", "--weights", "1").stderr, /Choose one model size source/);
+  assert.match(run("--ollama", "../qwen3:1.7b").stderr, /expects/);
+  writeFileSync(blob, Buffer.alloc(1));
+  assert.match(run("--ollama", "qwen3:1.7b").stderr, /wrong size/);
 });
 
 test("the CLI reports per-device and combined weight capacity after runtime reserve", () => {
