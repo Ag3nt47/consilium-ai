@@ -1384,6 +1384,11 @@ async fn link_test_peer(node_id: String) -> Result<link::PeerTestReport, String>
 }
 
 #[tauri::command]
+async fn link_test_ai_handshake(node_id: String) -> Result<Vec<link::AiHandshake>, String> {
+    the_link()?.test_ai_handshake(&node_id).await
+}
+
+#[tauri::command]
 async fn link_add_peer_route(node_id: String, address: String) -> Result<Vec<String>, String> {
     the_link()?.add_peer_route(&node_id, &address)
 }
@@ -1680,6 +1685,7 @@ pub fn run() {
             link_pair_join,
             link_unpair,
             link_test_peer,
+            link_test_ai_handshake,
             link_add_peer_route,
             link_refresh_routes,
             link_inbox,

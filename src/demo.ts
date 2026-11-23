@@ -482,6 +482,10 @@ export const demoApi = {
     summary: "Authenticated session via 192.168.1.157:8470 · 4 ms round trip · 0 outgoing queued",
   }),
   linkAddPeerRoute: async (_nodeId: string, address: string) => ["192.168.1.157:8470", address],
+  linkTestAiHandshake: async () => [
+    { ai: "claude", side: "here" as const, handle: "@claude", reads: true, read: true },
+    { ai: "gpt", side: "there" as const, handle: "@gpt-demo", reads: true, read: true },
+  ],
   linkRefreshRoutes: async () => ["192.168.1.157:8470", "192.168.1.170:8470"],
   linkInbox: async () => [],
   linkSend: async () => "demo-pkt-1",
