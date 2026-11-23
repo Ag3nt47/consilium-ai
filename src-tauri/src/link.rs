@@ -345,6 +345,7 @@ struct PeerState {
     /// Its council members ready to answer, and which of ours they have read: our AI -> theirs.
     council: Vec<String>,
     read_ours: std::collections::BTreeMap<String, Vec<String>>,
+    ai_reports: u64,
     /// Authenticated packets received on the current session, used to verify a route switch.
     packets_in: u64,
     route_updates: u64,
@@ -794,6 +795,33 @@ impl Link {
         match switched_at {
             Some((r, _, _, _)) => fail(r, "connected, but nothing came back over it".into()),
             None => fail(label, "timed out".into()),
+        }
+    }
+
+    /// Rechecks the live peer's council and read receipts without sending an AI prompt.
+    pub async fn test_ai_handshake(&self, node_id: &str) -> Result<Vec<AiHandshake>, String> {
+        let peer = self.peer(node_id).ok_or("Linked computer not found")?;
+        let (_, mine) = self.me();
+        let (generation, reports) = {
+            let states = self.0.peers.lock().unwrap();
+            let state = states.get(node_id).filter(|state| state.tx.is_some()).ok_or("The linked computer is offline")?;
+            (state.generation, state.ai_reports)
+        };
+        let deadline = tokio::time::Instant::now() + HEARTBEAT * 2 + Duration::from_millis(500);
+        loop {
+            {
+                let states = self.0.peers.lock().unwrap();
+                let state = states.get(node_id)
+                    .filter(|state| state.tx.is_some() && state.generation == generation)
+                    .ok_or("The connection changed during the AI handshake test. Try again.")?;
+                if state.ai_reports != reports {
+                    return Ok(handshake(node_id, &peer.name, &mine, Some(state)));
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("No fresh AI handshake report arrived. Check that the linked computer supports AI status.".into());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -1515,7 +1543,7 @@ impl Link {
                     let active = self.0.peers.lock().unwrap().get_mut(&peer.node_id)
                         .is_some_and(|state| state.record_packet(generation, now_ms()));
                     if !active { break; }
-                    self.receive(&me, &key, &peer.node_id, packet, &tx);
+                    self.receive(&me, &key, &peer.node_id, generation, packet, &tx);
                 }
                 _ = beat.tick() => {
                     if !current(self) { break; }
@@ -1559,11 +1587,11 @@ impl Link {
         self.0.wake_dial.notify_waiters();
     }
 
-    fn receive(&self, me: &str, key: &[u8], from: &str, packet: PeerPacket, tx: &mpsc::UnboundedSender<String>) {
+    fn receive(&self, me: &str, key: &[u8], from: &str, generation: u64, packet: PeerPacket, tx: &mpsc::UnboundedSender<String>) {
         match packet.kind {
             PacketKind::Heartbeat => {
                 if packet.payload.get("ping").is_some() {
-                    if let Some(s) = self.0.peers.lock().unwrap().get_mut(from) {
+                    if let Some(s) = self.0.peers.lock().unwrap().get_mut(from).filter(|state| state.generation == generation) {
                         s.signal_on = packet.payload.get("signal").and_then(Value::as_bool).unwrap_or(false);
                         s.active_ms = packet.payload.get("active").and_then(Value::as_u64).unwrap_or(0);
                         s.activity = read_activity(packet.payload.get("working"));
@@ -1582,6 +1610,11 @@ impl Link {
                                     .collect()
                             })
                             .unwrap_or_default();
+                        if packet.payload.get("council").is_some_and(Value::is_array)
+                            && packet.payload.get("read").is_some_and(Value::is_object)
+                        {
+                            s.ai_reports = s.ai_reports.wrapping_add(1);
+                        }
                     }
                     if packet.payload.get("addrs").is_some() {
                         self.learn_addrs(from, &packet.payload, None);
@@ -2758,6 +2791,31 @@ mod tests {
         assert_eq!(received.lock().unwrap().iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), [packet.as_str()]);
 
         host.stop();
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ai_handshake_test_waits_for_a_new_report_on_the_existing_session() {
+        let dir = std::env::temp_dir().join(format!("link-ai-check-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
+        let joiner_id = joiner.status().node_id;
+        assert!(wait_for(|| host.status().peers[0].connected && joiner.status().peers[0].connected).await);
+        let (generation, reports) = {
+            let states = host.0.peers.lock().unwrap();
+            (states[&joiner_id].generation, states[&joiner_id].ai_reports)
+        };
+        assert!(host.test_ai_handshake(&joiner_id).await.is_ok());
+        {
+            let states = host.0.peers.lock().unwrap();
+            assert_eq!(states[&joiner_id].generation, generation);
+            assert!(states[&joiner_id].ai_reports > reports);
+        }
+        host.stop();
+        assert_eq!(host.test_ai_handshake(&joiner_id).await.unwrap_err(), "The linked computer is offline");
         joiner.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }

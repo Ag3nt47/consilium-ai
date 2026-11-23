@@ -482,6 +482,7 @@ const appApi = {
   linkPairJoin: (address: string, code: string) => invoke<LinkPeer>("link_pair_join", { address, code }),
   linkUnpair: (nodeId: string) => invoke<LinkStatus>("link_unpair", { nodeId }),
   linkTestPeer: (nodeId: string) => invoke<PeerTestReport>("link_test_peer", { nodeId }),
+  linkTestAiHandshake: (nodeId: string) => invoke<AiHandshake[]>("link_test_ai_handshake", { nodeId }),
   linkAddPeerRoute: (nodeId: string, address: string) =>
     invoke<string[]>("link_add_peer_route", { nodeId, address }),
   linkRefreshRoutes: (nodeId: string) =>

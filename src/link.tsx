@@ -658,6 +658,8 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
 function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUnpair: () => void }) {
   const [testing, setTesting] = useState(false);
   const [testReport, setTestReport] = useState<PeerTestReport | null>(null);
+  const [testingHandshake, setTestingHandshake] = useState(false);
+  const [handshakeResult, setHandshakeResult] = useState<string | null>(null);
   const [refreshingRoutes, setRefreshingRoutes] = useState(false);
   const [showAddRoute, setShowAddRoute] = useState(false);
   const [newRouteAddr, setNewRouteAddr] = useState("");
@@ -717,6 +719,22 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
     }
   };
 
+  const testAiHandshake = async () => {
+    setTestingHandshake(true);
+    setHandshakeResult(null);
+    try {
+      const report = await api.linkTestAiHandshake(peer.node_id);
+      const confirmed = report.filter((ai) => ai.reads && ai.read).length;
+      setHandshakeResult(report.some((ai) => ai.side === "there")
+        ? `Fresh AI status received. ${confirmed} of ${report.length} AIs have confirmations in both directions.`
+        : "Fresh AI status received. The linked computer reported no active AIs.");
+    } catch (error) {
+      setHandshakeResult(String(error));
+    } finally {
+      setTestingHandshake(false);
+    }
+  };
+
   return (
     <div className={`peer-card ${statusClass}`}>
       <div className="row between align-center">
@@ -737,7 +755,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
             className="btn small"
             onClick={runTest}
             disabled={testing}
-            title="Verify mutual HMAC handshake, measure route latencies, and check chat alignment"
+            title="Check PeerLink endpoint reachability and authentication"
           >
             {testing ? "Testing Link…" : "Test Connection"}
           </button>
@@ -790,8 +808,12 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
 
       {peer.connected && (
         <div className="handshake-section">
-          <div className="row between align-center">
+          <div className="row between align-center wrap">
             <span className="failover-title">AI handshake:</span>
+            <button className="btn small ghost" disabled={testingHandshake} onClick={testAiHandshake}
+              title="Check the linked computer's latest AI status and confirmations without sending prompts">
+              {testingHandshake ? "Checking AI handshake…" : "Test AI handshake"}
+            </button>
             <span className="muted small">
               {(peer.handshake ?? []).length === 0
                 ? "Waiting for that computer to report its AIs (it needs this version)"
@@ -800,6 +822,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
                   : "A ✓ appears once an AI has read the other computer's AIs and been read by them"}
             </span>
           </div>
+          {handshakeResult && <p className="small muted" role="status">{handshakeResult}</p>}
           <div className="handshake-list">
             {(peer.handshake ?? []).map((h) => (
               <div key={`${h.side}-${h.ai}`} className={`handshake-item ${h.reads && h.read ? "acknowledged" : "pending"}`}>
