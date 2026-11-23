@@ -65,7 +65,7 @@ export function modelFit(devices, bits, overhead, customWeights, preferSplit = f
 export function ggufShardError(names) {
   const shards = names.map((name) => /^(.*)-(\d{5})-of-(\d{5})\.gguf$/i.exec(name));
   const first = shards.find(Boolean);
-  if (!first) return undefined;
+  if (!first) return names.length > 1 ? "Select one GGUF file or all numbered shards from one model." : undefined;
   const [, model, , countText] = first;
   const count = Number(countText);
   if (shards.some((shard) => !shard || shard[1] !== model || shard[3] !== countText)) {

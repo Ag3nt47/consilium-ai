@@ -28,6 +28,7 @@ try {
     console.log('Usage: node scripts/model-fit.mjs [--json] [--split] [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--weights GiB | --gguf PATH ...]');
     console.log("--split estimates a balanced allocation even when one device can hold the model.");
     console.log("Device memory is usable RAM before inference overhead. Repeat --device with a unique name for each additional computer.");
+    console.log("For --gguf, select one model file or all numbered shards of one model.");
   } else {
     const bits = Number(values.bits);
     if (![4, 8, 16].includes(bits)) throw new Error("--bits must be 4, 8, or 16");

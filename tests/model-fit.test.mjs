@@ -70,8 +70,8 @@ test("the CLI does not count the same device name twice", () => {
 test("the CLI estimates fit from the combined size of separate GGUF shards", (t) => {
   const folder = mkdtempSync(join(tmpdir(), "consilium-model-fit-"));
   t.after(() => rmSync(folder, { recursive: true, force: true }));
-  const first = join(folder, "model-00001.gguf");
-  const second = join(folder, "model-00002.gguf");
+  const first = join(folder, "model-00001-of-00002.gguf");
+  const second = join(folder, "model-00002-of-00002.gguf");
   writeFileSync(first, Buffer.alloc(1024 * 1024));
   writeFileSync(second, Buffer.alloc(1024 * 1024));
   const run = (...args) => spawnSync(process.execPath, [
@@ -87,6 +87,15 @@ test("the CLI estimates fit from the combined size of separate GGUF shards", (t)
   const conflict = run("--gguf", first, "--weights", "1");
   assert.equal(conflict.status, 1);
   assert.match(conflict.stderr, /Choose either --weights or --gguf/);
+
+  const other = join(folder, "other.gguf");
+  const standalone = join(folder, "standalone.gguf");
+  writeFileSync(other, Buffer.alloc(1));
+  writeFileSync(standalone, Buffer.alloc(1));
+  const unrelated = run("--gguf", standalone, "--gguf", other);
+  assert.equal(unrelated.status, 1);
+  assert.match(unrelated.stderr, /Select one GGUF file or all numbered shards/);
+  assert.equal(unrelated.stdout, "");
 });
 
 test("numbered GGUF shard sets must be complete and match one model", () => {
