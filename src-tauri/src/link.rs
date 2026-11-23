@@ -41,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 pub const PORT: u16 = 8470;
 const HEARTBEAT: Duration = Duration::from_millis(1500);
 const DEAD_AFTER_MS: u64 = 4_000;
+const SESSION_WRITE_IDLE: Duration = Duration::from_millis(DEAD_AFTER_MS);
 const RETRY_MIN: Duration = Duration::from_millis(1000);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -1429,7 +1430,7 @@ impl Link {
                 _ = token.cancelled() => break,
                 line = rx.recv() => {
                     let Some(line) = line else { break };
-                    if w.write_all(format!("{line}\n").as_bytes()).await.is_err() { break; }
+                    if !write_session_frame(&mut w, line, &token, SESSION_WRITE_IDLE).await { break; }
                 }
                 frame = in_rx.recv() => {
                     let Some(Ok(Wire::Sealed { from, n, c })) = frame else { break };
@@ -1464,7 +1465,7 @@ impl Link {
                         &key,
                     );
                     if let Ok(line) = ping.and_then(|p| seal(&me, &key, &p)) {
-                        if w.write_all(format!("{line}\n").as_bytes()).await.is_err() { break; }
+                        if !write_session_frame(&mut w, line, &token, SESSION_WRITE_IDLE).await { break; }
                     }
                 }
             }
@@ -1642,6 +1643,30 @@ async fn fastest_route(addrs: &[String]) -> Option<(TcpStream, String, u64)> {
 }
 
 // ---- framing, crypto and helpers --------------------------------------------------------------
+
+/// A stalled write must leave the session so pending messages can be resent after reconnect.
+async fn write_session_frame<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    mut line: String,
+    token: &CancellationToken,
+    idle: Duration,
+) -> bool {
+    line.push('\n');
+    let mut remaining = line.as_bytes();
+    while !remaining.is_empty() {
+        let written = tokio::select! {
+            biased;
+            _ = token.cancelled() => return false,
+            result = tokio::time::timeout(idle, writer.write(remaining)) => result,
+        };
+        match written {
+            Ok(Ok(count)) if count > 0 => remaining = &remaining[count..],
+            _ => return false,
+        }
+    }
+    true
+}
+
 
 async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R) -> Result<String, String> {
     let mut buf = Vec::new();
@@ -2353,6 +2378,20 @@ mod tests {
         host.stop();
         proxies[2].abort();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn session_writes_finish_or_release_the_connection_when_stalled() {
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        let token = CancellationToken::new();
+        assert!(!write_session_frame(&mut writer, "frame".into(), &token, Duration::from_millis(40)).await);
+        token.cancel();
+        assert!(!write_session_frame(&mut writer, "frame".into(), &token, Duration::from_secs(1)).await);
+
+        let (mut writer, reader) = tokio::io::duplex(1);
+        let receive = tokio::spawn(async move { read_line(&mut BufReader::new(reader)).await });
+        assert!(write_session_frame(&mut writer, "frame".into(), &CancellationToken::new(), Duration::from_secs(1)).await);
+        assert_eq!(receive.await.unwrap().unwrap(), "frame");
     }
 
     #[tokio::test(flavor = "multi_thread")]
