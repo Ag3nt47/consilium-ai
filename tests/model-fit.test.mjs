@@ -31,6 +31,29 @@ test("split weights balance across three devices after capping a small peer", ()
     "Split estimate: Windows + Mac + Phone (Windows 8.0 GiB, Mac 4.0 GiB, Phone 1.0 GiB)");
 });
 
+test("a capacity-weighted split allocates by post-reserve RAM and skips full devices", () => {
+  const devices = [
+    { name: "Windows", memory: 14 },
+    { name: "Mac", memory: 6 },
+    { name: "Phone", memory: 2 },
+  ];
+  const estimate = (weights) => modelFit(devices, 4, 2, weights, true, "capacity")
+    .find(({ name }) => name === "Custom model");
+  assert.deepEqual(estimate(8).allocation, [{ name: "Windows", allocated: 6 }, { name: "Mac", allocated: 2 }]);
+  assert.deepEqual(estimate(16).allocation, [{ name: "Windows", allocated: 12 }, { name: "Mac", allocated: 4 }]);
+  assert.match(estimate(17).fit, /Needs at least 1.0 GiB more/);
+});
+
+test("the CLI exports a capacity-weighted split plan", () => {
+  const result = spawnSync(process.execPath, [
+    "scripts/model-fit.mjs", "--json", "--host", "14", "--device", "Mac=6", "--weights", "8", "--split", "--capacity-weighted",
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const custom = JSON.parse(result.stdout).models.find(({ name }) => name === "Custom model");
+  assert.match(custom.fit, /^Capacity-weighted split estimate/);
+  assert.deepEqual(custom.allocation, [{ name: "This computer", allocated: 6 }, { name: "Mac", allocated: 2 }]);
+});
+
 test("single-device fit takes precedence when one computer has enough memory", () => {
   assert.equal(customFit([
     { name: "Windows", memory: 12 },
@@ -124,12 +147,17 @@ test("the CLI uses installed Ollama weight blobs without running Ollama", (t) =>
     encoding: "utf8", env: { ...process.env, OLLAMA_MODELS: root },
   });
 
-  const result = run("--ollama", "qwen3:1.7b");
+  const result = run("--ollama", "qwen3:1.7b", "--split", "--capacity-weighted", "--host", "14", "--device", "Mac=6");
   assert.equal(result.status, 0, result.stderr);
   const report = JSON.parse(result.stdout);
   assert.equal(report.ollamaModel, "qwen3:1.7b");
   assert.equal(report.ollamaBytes, 1024);
-  assert.equal(report.models.find(({ name }) => name === "qwen3:1.7b").weights, 1024 / 2 ** 30);
+  const model = report.models.find(({ name }) => name === "qwen3:1.7b");
+  assert.equal(model.weights, 1024 / 2 ** 30);
+  assert.deepEqual(model.allocation, [
+    { name: "This computer", allocated: 768 / 2 ** 30 },
+    { name: "Mac", allocated: 256 / 2 ** 30 },
+  ]);
   assert.match(run("--ollama", "qwen3:1.7b", "--weights", "1").stderr, /Choose one model size source/);
   assert.match(run("--ollama", "../qwen3:1.7b").stderr, /expects/);
   writeFileSync(blob, Buffer.alloc(1));
