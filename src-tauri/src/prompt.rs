@@ -6,7 +6,7 @@ use crate::store::Event;
 use std::hash::{DefaultHasher, Hasher};
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// Once a transcript passes this budget, older turns become a compact digest and the newest
@@ -54,10 +54,15 @@ struct GitOutput {
     truncated: bool,
 }
 
+fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput> {
+    let (status, output) = git_capture(workspace, args, keep)?;
+    status.success().then_some(output)
+}
+
 /// Runs a read-only git command without a shell, hashes its complete output, and retains only the
 /// bounded prefix needed for the prompt. A reader thread keeps the pipe drained; the parent polls
 /// the child and kills it at the deadline so a stuck Git process cannot survive an async timeout.
-fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput> {
+fn git_capture(workspace: &Path, args: &[&str], keep: usize) -> Option<(ExitStatus, GitOutput)> {
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(workspace)
@@ -100,9 +105,9 @@ fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput>
         })
     });
     let started = Instant::now();
-    let success = loop {
+    let status = loop {
         if let Some(status) = child.try_wait().ok()? {
-            break status.success();
+            break status;
         }
         if started.elapsed() >= GIT_COMMAND_TIMEOUT {
             let _ = child.kill();
@@ -113,7 +118,7 @@ fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput>
         std::thread::sleep(Duration::from_millis(10));
     };
     let output = reader.join().ok().flatten()?;
-    success.then_some(output)
+    Some((status, output))
 }
 
 /// A fresh, redacted snapshot of the repository immediately before an agent starts. It gives each
@@ -150,27 +155,79 @@ fn summarize_git(folder: &str, header: &str, changed: usize, truncated: bool) ->
     out
 }
 
-pub fn workspace_state(workspace: &Path) -> Option<String> {
+/// Returns just the bounded Git-issued diagnostics. The offending lines belong to the diff,
+/// not the preflight report. A failed check invocation is distinct from a detected issue.
+fn patch_preflight(workspace: &Path) -> Option<String> {
+    let (status, report) = git_capture(
+        workspace,
+        &[
+            "-c", "core.whitespace=cr-at-eol", "diff", "--check", "--no-ext-diff", "--no-textconv",
+            "HEAD", "--", ".", ":(exclude,attr:linguist-generated)",
+        ],
+        4096,
+    )?;
+    if status.success() {
+        return Some("Tracked patch preflight: no Git whitespace or conflict marker issues.".into());
+    }
+    if status.code() != Some(2) {
+        return None;
+    }
+    let mut out = String::from("Tracked patch preflight found Git whitespace or conflict marker issues.");
+    let diagnostics = report.shown.lines().filter(|line| {
+        if line.starts_with('+') {
+            return false;
+        }
+        let Some((location, issue)) = line.rsplit_once(": ") else {
+            return false;
+        };
+        location.rsplit_once(':').is_some_and(|(_, n)| n.parse::<u32>().is_ok())
+            && matches!(
+                issue,
+                "trailing whitespace."
+                    | "space before tab in indent."
+                    | "new blank line at EOF."
+                    | "leftover conflict marker"
+            )
+    });
+    for line in diagnostics.take(4) {
+        out.push('\n');
+        out.extend(crate::redact::scrub(line).chars().take(200));
+    }
+    Some(out)
+}
+
+pub fn workspace_state(workspace: &Path, check_patch: bool) -> Option<String> {
     let status = git_output(
         workspace,
         &["status", "--short", "--branch", "--untracked-files=normal"],
         MAX_WORKSPACE_STATUS_BYTES,
     )?;
-    let diff = git_output(
-        workspace,
-        &[
-            "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".", ":(exclude,attr:linguist-generated)",
-        ],
-        MAX_WORKSPACE_DIFF_BYTES,
-    )
-    .or_else(|| {
-        // An unborn repository has no HEAD yet, but its index can still be described.
+    let read_diff = || {
         git_output(
             workspace,
-            &["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".", ":(exclude,attr:linguist-generated)"],
+            &[
+                "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".", ":(exclude,attr:linguist-generated)",
+            ],
             MAX_WORKSPACE_DIFF_BYTES,
         )
-    })?;
+        .or_else(|| {
+            // An unborn repository has no HEAD yet, but its index can still be described.
+            git_output(
+                workspace,
+                &["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".", ":(exclude,attr:linguist-generated)"],
+                MAX_WORKSPACE_DIFF_BYTES,
+            )
+        })
+    };
+    let (diff, preflight) = if check_patch && status.shown.lines().skip(1).any(|line| !line.starts_with("?? ")) {
+        std::thread::scope(|scope| {
+            let check = scope.spawn(|| patch_preflight(workspace));
+            (read_diff(), check.join().ok().flatten())
+        })
+    } else {
+        (read_diff(), None)
+    };
+    let diff = diff?;
     let mut state = DefaultHasher::new();
     state.write_u64(status.digest);
     state.write_u64(diff.digest);
@@ -186,6 +243,10 @@ pub fn workspace_state(workspace: &Path) -> Option<String> {
         if status.truncated {
             out.push_str("\n… status truncated");
         }
+    }
+    if let Some(preflight) = preflight {
+        out.push_str("\n\n");
+        out.push_str(&preflight);
     }
     if !diff_text.is_empty() {
         out.push_str("\n\nCurrent diff excerpt (files marked linguist-generated appear in Git status above):\n");
@@ -1372,7 +1433,7 @@ mod tests {
         let secret = format!("sk-{}", "Ab3_".repeat(8));
         std::fs::write(repo.join("note.txt"), format!("base\nAPI_KEY={secret}\n")).unwrap();
         std::fs::write(repo.join("bundle.txt"), "bulky generated output\n".repeat(1_000)).unwrap();
-        let state = workspace_state(&repo).unwrap();
+        let state = workspace_state(&repo, false).unwrap();
         assert!(state.contains("bundle.txt"));
         assert!(!state.contains("bulky generated output"));
         assert!(state.contains("PROJECT STATE") && state.contains("note.txt"));
@@ -1380,9 +1441,20 @@ mod tests {
         assert!(state.contains("[REDACTED OpenAI key]"));
         assert!(!state.contains(&secret));
 
+        std::fs::write(repo.join("bundle.txt"), "generated trailing whitespace \n").unwrap();
+        std::fs::write(repo.join("note.txt"), "base\r\nclean addition\r\n").unwrap();
+        let checked = workspace_state(&repo, true).unwrap();
+        assert!(checked.contains("no Git whitespace or conflict marker issues"));
+        std::fs::write(repo.join("note.txt"), "base\nprivate fixture source \n").unwrap();
+        let checked = workspace_state(&repo, true).unwrap();
+        assert!(checked.contains("note.txt:2: trailing whitespace."));
+        assert!(patch_preflight(&repo).unwrap().contains("note.txt:2: trailing whitespace."));
+        assert!(!patch_preflight(&repo).unwrap().contains("private fixture source"));
+        assert!(!workspace_state(&repo, false).unwrap().contains("Tracked patch preflight"));
+
         std::fs::remove_dir_all(&repo).unwrap();
         let plain = std::env::temp_dir();
-        assert!(workspace_state(&plain).is_none());
+        assert!(workspace_state(&plain, true).is_none());
     }
 
     #[test]

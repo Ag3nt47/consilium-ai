@@ -1098,7 +1098,7 @@ checking what it would remove (list the folder first), so everything else still 
             if let Some(path) = state_path {
                 if let Ok(Ok(Some(state))) = tokio::time::timeout(
                     Duration::from_secs(3),
-                    tokio::task::spawn_blocking(move || prompt::workspace_state(&path)),
+                    tokio::task::spawn_blocking(move || prompt::workspace_state(&path, !local)),
                 )
                 .await
                 {
