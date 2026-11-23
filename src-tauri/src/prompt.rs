@@ -26,6 +26,8 @@ const LOCAL_LATEST_HUMAN_CHARS: usize = 8_000;
 /// Enough patch context to identify concurrent edits without spending the whole prompt on a diff.
 const MAX_WORKSPACE_DIFF_BYTES: usize = 12_000;
 const MAX_WORKSPACE_STATUS_BYTES: usize = 8_000;
+const LOCAL_WORKSPACE_DIFF_BYTES: usize = 2_000;
+const LOCAL_WORKSPACE_STATUS_BYTES: usize = 1_200;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 type TranscriptPart<'a> = (&'a Event, String);
@@ -196,11 +198,16 @@ fn patch_preflight(workspace: &Path) -> Option<String> {
     Some(out)
 }
 
-pub fn workspace_state(workspace: &Path, check_patch: bool) -> Option<String> {
+pub fn workspace_state(workspace: &Path, detailed: bool) -> Option<String> {
+    let (status_limit, diff_limit) = if detailed {
+        (MAX_WORKSPACE_STATUS_BYTES, MAX_WORKSPACE_DIFF_BYTES)
+    } else {
+        (LOCAL_WORKSPACE_STATUS_BYTES, LOCAL_WORKSPACE_DIFF_BYTES)
+    };
     let status = git_output(
         workspace,
         &["status", "--short", "--branch", "--untracked-files=normal"],
-        MAX_WORKSPACE_STATUS_BYTES,
+        status_limit,
     )?;
     let read_diff = || {
         git_output(
@@ -208,18 +215,18 @@ pub fn workspace_state(workspace: &Path, check_patch: bool) -> Option<String> {
             &[
                 "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".", ":(exclude,attr:linguist-generated)",
             ],
-            MAX_WORKSPACE_DIFF_BYTES,
+            diff_limit,
         )
         .or_else(|| {
             // An unborn repository has no HEAD yet, but its index can still be described.
             git_output(
                 workspace,
                 &["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".", ":(exclude,attr:linguist-generated)"],
-                MAX_WORKSPACE_DIFF_BYTES,
+                diff_limit,
             )
         })
     };
-    let (diff, preflight) = if check_patch && status.shown.lines().skip(1).any(|line| !line.starts_with("?? ")) {
+    let (diff, preflight) = if detailed && status.shown.lines().skip(1).any(|line| !line.starts_with("?? ")) {
         std::thread::scope(|scope| {
             let check = scope.spawn(|| patch_preflight(workspace));
             (read_diff(), check.join().ok().flatten())
@@ -1451,6 +1458,16 @@ mod tests {
         assert!(patch_preflight(&repo).unwrap().contains("note.txt:2: trailing whitespace."));
         assert!(!patch_preflight(&repo).unwrap().contains("private fixture source"));
         assert!(!workspace_state(&repo, false).unwrap().contains("Tracked patch preflight"));
+
+        let edited = format!("base\n{}FULL PATCH TAIL\n", "ordinary source line\n".repeat(260));
+        std::fs::write(repo.join("note.txt"), edited).unwrap();
+        let local = workspace_state(&repo, false).unwrap();
+        let cloud = workspace_state(&repo, true).unwrap();
+        assert!(local.contains("diff truncated") && local.contains("ordinary source line"));
+        assert!(!local.contains("FULL PATCH TAIL"));
+        assert!(local.len() < 2_700, "local snapshot was {} bytes", local.len());
+        assert!(cloud.contains("FULL PATCH TAIL"));
+
 
         std::fs::remove_dir_all(&repo).unwrap();
         let plain = std::env::temp_dir();
