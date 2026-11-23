@@ -1488,6 +1488,7 @@ impl Link {
                 }
             }
         }
+        token.cancel();
         reader.abort();
         let mut states = self.0.peers.lock().unwrap();
         if let Some(s) = states.get_mut(&peer.node_id) {
