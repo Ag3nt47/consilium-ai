@@ -1,38 +1,68 @@
 import { spawnSync } from "node:child_process";
 import { extname, isAbsolute, relative, resolve } from "node:path";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { parseSource, supportedSourceExtensions } from "./parse-source.mjs";
+
+const MAX_FILES = 16;
 
 function run(program, args) {
   return spawnSync(program, args, { encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024 });
 }
 
+function stop(message) {
+  console.error(message);
+  process.exit(2);
+}
+
+function gitPaths(result) {
+  if (result.status !== 0) stop("Git could not list the changed files in this worktree.");
+  return result.stdout.split("\0").filter(Boolean);
+}
+
+function changedSources(root, diffBases) {
+  const scope = [".", ":(exclude,attr:linguist-generated)"];
+  const tracked = diffBases.flatMap((base) => gitPaths(run("git", [
+    "-C", root, "diff", "--name-only", "--no-renames", "--no-ext-diff", "--no-textconv",
+    "--diff-filter=ACMRT", "-z", ...base, "--", ...scope,
+  ])));
+  const untracked = gitPaths(run("git", [
+    "-C", root, "ls-files", "--others", "--exclude-standard", "-z", "--", ...scope,
+  ]));
+  return [...new Set([...tracked, ...untracked])]
+    .filter((path) => supportedSourceExtensions.has(extname(path).toLowerCase()))
+    .map((path) => resolve(root, path))
+    .filter((path) => lstatSync(path, { throwIfNoEntry: false })?.isFile());
+}
+
 const args = process.argv.slice(2);
 const json = args[0] === "--json";
-const files = [...new Set(json ? args.slice(1) : args)];
-if (files.length === 0 || files.length > 16) {
-  console.error("Usage: node scripts/local-preflight.mjs [--json] <file> [up to 16 files]");
-  process.exit(2);
+const selection = json ? args.slice(1) : args;
+const auto = selection[0] === "--changed";
+const explicitFiles = [...new Set(selection)];
+if (!selection.length || (auto && selection.length !== 1) || explicitFiles.length > MAX_FILES) {
+  stop("Usage: node scripts/local-preflight.mjs [--json] (--changed | <file> [up to 16 files])");
 }
 
 const rootResult = run("git", ["rev-parse", "--show-toplevel"]);
-if (rootResult.status !== 0) {
-  console.error("Run preflight from a Git worktree.");
-  process.exit(2);
-}
+if (rootResult.status !== 0) stop("Run preflight from a Git worktree.");
 
 const root = realpathSync(rootResult.stdout.trim());
+const head = run("git", ["-C", root, "rev-parse", "--verify", "--quiet", "HEAD"]);
+if (head.status !== 0 && head.status !== 1) stop("Git could not inspect HEAD.");
+const diffBases = head.status === 0 ? [["HEAD"]] : [["--cached"], []];
+const files = auto ? changedSources(root, diffBases) : explicitFiles;
+if (files.length > MAX_FILES) {
+  stop(`Found ${files.length} changed source files. Pass up to ${MAX_FILES} files from the current task explicitly.`);
+}
 const paths = files.map((file) => {
   const absolute = resolve(file);
   const path = relative(root, existsSync(absolute) ? realpathSync(absolute) : absolute);
   if (!path || path === ".." || /^\.\.[\\/]/.test(path) || isAbsolute(path)) {
-    console.error("Every file must be inside the current Git worktree.");
-    process.exit(2);
+    stop("Every file must be inside the current Git worktree.");
   }
   if (existsSync(absolute) ? !statSync(absolute).isFile() :
     run("git", ["-C", root, "cat-file", "-e", "HEAD:" + path.split("\\").join("/")]).status !== 0) {
-    console.error(`Expected a worktree file or a tracked deletion: ${JSON.stringify(file)}`);
-    process.exit(2);
+    stop(`Expected a worktree file or a tracked deletion: ${JSON.stringify(file)}`);
   }
   return { absolute, path };
 });
@@ -43,14 +73,24 @@ function recordPatchFailure(result) {
   const lines = (result.stdout ?? "").split(/\r?\n/).filter((line) => !line.startsWith("+") && line.trim());
   patchDiagnostics.push(...(lines.length ? lines.slice(0, 6) : ["Git could not complete the patch check."]));
 }
-const diff = run("git", ["--literal-pathspecs", "-C", root, "-c", "core.whitespace=cr-at-eol", "diff", "--no-ext-diff", "--check", "HEAD", "--", ...scope]);
-if (diff.status !== 0) recordPatchFailure(diff);
-const untracked = run("git", ["--literal-pathspecs", "-C", root, "ls-files", "--others", "-z", "--", ...scope]);
-if (untracked.status !== 0) recordPatchFailure(untracked);
-for (const path of (untracked.stdout ?? "").split("\0").filter(Boolean)) {
-  const result = run("git", ["-C", root, "-c", "core.whitespace=cr-at-eol", "diff", "--no-index", "--no-ext-diff", "--check", "--", "/dev/null", path]);
-  // A no-index comparison returns 1 for a clean difference.
-  if (result.status !== 0 && result.status !== 1) recordPatchFailure(result);
+if (scope.length) {
+  for (const base of diffBases) {
+    const diff = run("git", [
+      "--literal-pathspecs", "-C", root, "-c", "core.whitespace=cr-at-eol", "diff",
+      "--no-ext-diff", "--no-textconv", "--check", ...base, "--", ...scope,
+    ]);
+    if (diff.status !== 0) recordPatchFailure(diff);
+  }
+  const untracked = run("git", ["--literal-pathspecs", "-C", root, "ls-files", "--others", "-z", "--", ...scope]);
+  if (untracked.status !== 0) recordPatchFailure(untracked);
+  for (const path of (untracked.stdout ?? "").split("\0").filter(Boolean)) {
+    const result = run("git", [
+      "-C", root, "-c", "core.whitespace=cr-at-eol", "diff", "--no-index",
+      "--no-ext-diff", "--no-textconv", "--check", "--", "/dev/null", `./${path}`,
+    ]);
+    // A no-index comparison returns 1 for a clean difference.
+    if (result.status !== 0 && result.status !== 1) recordPatchFailure(result);
+  }
 }
 const syntaxDiagnostics = [];
 let checked = 0;
@@ -65,7 +105,7 @@ for (const { absolute, path } of paths) {
   }
 }
 const failed = patchDiagnostics.length > 0 || syntaxDiagnostics.length > 0;
-const patchErrors = patchDiagnostics.slice(0, 6).map((line) => line.slice(0, 240));
+const patchErrors = [...new Set(patchDiagnostics)].slice(0, 6).map((line) => line.slice(0, 240));
 if (json) {
   console.log(JSON.stringify({ ok: !failed, syntaxChecked: checked, patchErrors, syntaxErrors: syntaxDiagnostics }));
 } else {
