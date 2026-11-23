@@ -23,6 +23,7 @@ Consilium: a Tauri 2 desktop app (Rust back end in `src-tauri/`, React + TypeScr
 - Before changing a file another participant may have touched this turn, re-read it.
 - List reviewed offline helpers with `node scripts/offline-skills.mjs`. Pass a skill ID to load only its command and guidance. User-installed Markdown files in `~/.consilium/skills/` appear as `runbook:<name>`; open them by ID.
 - For long JavaScript or TypeScript files, run `node scripts/symbol-map.mjs <file>` first, then read the relevant line ranges. To locate an inner declaration, pass the top-level function and a name filter, such as `node scripts/symbol-map.mjs src/App.tsx App send`.
+- Before handing off a JavaScript or TypeScript patch, run `node scripts/local-preflight.mjs <changed-file> ...` from its worktree. Share only failed locations and the required build or test result.
 - For Python, run `python scripts/python-symbol-map.py <file> --filter <name>` to find declarations offline before reading the relevant lines.
 - For PowerShell, run `./scripts/powershell-symbol-map.ps1 <file> -Filter <name>` to outline functions and types without executing the source.
 - Full-capacity CLI agents may use the host's native PowerShell/Command Prompt or Unix shells. Administrator/root elevation always needs a fresh REQUEST for one exact command and the normal visible OS authentication prompt; never collect or pipe credentials.
