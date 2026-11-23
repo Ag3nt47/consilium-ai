@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// The most runbooks listed in a prompt; the rest are still on disk for `ls`.
 const MAX_LISTED: usize = 60;
+const MAX_INDEX_CHARS: usize = 1_800;
 const SUMMARY_CHARS: usize = 140;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,11 +108,17 @@ pub fn for_local(dir: &Path, skills: &[Skill], os: &str) -> String {
         return s;
     }
     s.push_str("Available (name: what it covers):\n");
-    for k in skills.iter().take(MAX_LISTED) {
-        s.push_str(&format!("- {}: {}\n", k.name, k.summary));
+    let mut budget = MAX_INDEX_CHARS;
+    let mut listed = 0;
+    for skill in skills.iter().take(MAX_LISTED) {
+        let line = format!("- {}: {}\n", skill.name, skill.summary);
+        let Some(remaining) = budget.checked_sub(line.chars().count()) else { break };
+        budget = remaining;
+        s.push_str(&line);
+        listed += 1;
     }
-    if skills.len() > MAX_LISTED {
-        s.push_str(&format!("…and {} more; list them with `{list}`.\n", skills.len() - MAX_LISTED));
+    if listed < skills.len() {
+        s.push_str(&format!("…and {} more; list them with `{list}`.\n", skills.len() - listed));
     }
     s
 }
@@ -138,6 +145,22 @@ mod tests {
         let d = std::env::temp_dir().join(format!("consilium-skills-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn large_skill_indexes_fit_the_local_prompt_budget() {
+        let dir = Path::new("skills");
+        let skills: Vec<_> = (0..60).map(|id| Skill {
+            name: format!("runbook-{id:02}"),
+            summary: "é".repeat(SUMMARY_CHARS),
+            path: dir.join(format!("runbook-{id:02}.md")),
+        }).collect();
+        let prompt = for_local(dir, &skills, "windows");
+        let rows: Vec<_> = prompt.lines().filter(|line| line.starts_with("- runbook-")).collect();
+        assert!(!rows.is_empty() && rows.len() < skills.len());
+        assert!(rows.iter().map(|row| row.chars().count() + 1).sum::<usize>() <= MAX_INDEX_CHARS);
+        assert!(prompt.contains(&format!("{} more; list them", skills.len() - rows.len())));
+        assert!(prompt.contains("Get-ChildItem"));
     }
 
     #[test]
