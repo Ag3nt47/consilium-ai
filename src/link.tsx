@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, buildCompare, buildLabel, type Build, type LinkPeer, type LinkStatus, type PeerTestReport, type StressReport } from "./api";
+import { LocalModelFit } from "./LocalModelFit";
 
 /** Topbar status light and button for multi-computer sync (Mac & Windows).
  *  Displays connection health, fastest active route, and opens the sync setup modal on click. */
@@ -637,6 +638,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
           <div className="section-label" style={{ marginTop: "16px" }}>
             Paired Computers ({peers.length})
           </div>
+          {peers.length > 0 && <LocalModelFit />}
 
           <div className="link-peers-list">
             {peers.length === 0 ? (

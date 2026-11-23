@@ -8,9 +8,9 @@ const memoryInput = (gib: number) => (Math.floor(Math.max(0, gib) * 10) / 10).to
 const runnerNames = new Set(["ollama", "llama-cli", "llama-server", "ggml-rpc-server", "rpc-server"]);
 const deviceName = (name: string) => name.trim().toLowerCase();
 
-export function LocalModelFit({ availableGiB, ollamaModels }: {
+export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
   availableGiB?: number;
-  ollamaModels: OllamaModel[];
+  ollamaModels?: OllamaModel[];
 }) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [nextId, setNextId] = useState(1);
