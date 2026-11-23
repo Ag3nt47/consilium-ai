@@ -283,6 +283,8 @@ pub struct RouteTest {
     pub kind: String,
     pub reachable: bool,
     pub rtt_ms: Option<u64>,
+    pub local_ip: Option<std::net::IpAddr>,
+    pub local_interface: Option<String>,
     pub status: String,
 }
 
@@ -808,20 +810,21 @@ impl Link {
                 let kind = route_kind(&addr).to_string();
                 let started = std::time::Instant::now();
                 let timeout = Duration::from_secs(1);
-                let (rtt_ms, status) = match tokio::time::timeout(timeout, TcpStream::connect(&addr)).await {
+                let (rtt_ms, local_ip, status) = match tokio::time::timeout(timeout, TcpStream::connect(&addr)).await {
                     Ok(Ok(stream)) => {
                         let elapsed = started.elapsed().as_millis() as u64;
+                        let local_ip = stream.local_addr().ok().map(|address| address.ip());
                         let result = tokio::time::timeout(timeout, link.probe_route(&peer, &key, stream)).await;
                         let verification = match result {
                             Ok(Ok(())) => "authenticated probe passed",
                             _ => "peer authentication unconfirmed",
                         };
-                        (Some(elapsed), format!("TCP connected in {elapsed} ms · {verification}"))
+                        (Some(elapsed), local_ip, format!("TCP connected in {elapsed} ms · {verification}"))
                     }
-                    Ok(Err(_)) => (None, "Refused or unreachable".to_string()),
-                    Err(_) => (None, "Timed out".to_string()),
+                    Ok(Err(_)) => (None, None, "Refused or unreachable".to_string()),
+                    Err(_) => (None, None, "Timed out".to_string()),
                 };
-                (index, RouteTest { addr, kind, reachable: rtt_ms.is_some(), rtt_ms, status })
+                (index, RouteTest { addr, kind, reachable: rtt_ms.is_some(), rtt_ms, local_ip, local_interface: None, status })
             });
         }
         let mut completed = Vec::new();
@@ -829,7 +832,11 @@ impl Link {
             completed.push(result.map_err(|e| format!("Route check failed: {e}"))?);
         }
         completed.sort_by_key(|(index, _)| *index);
-        let routes: Vec<_> = completed.into_iter().map(|(_, route)| route).collect();
+        let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
+        let routes: Vec<_> = completed.into_iter().map(|(_, mut route)| {
+            route.local_interface = route.local_ip.and_then(|ip| interface_name(&interfaces, ip));
+            route
+        }).collect();
 
         // Use the current session after the probes, since failover might have occurred.
         let (connected, active_route, rtt_ms, queued_outgoing) = {
@@ -1449,14 +1456,7 @@ impl Link {
         let local_addr = r.get_ref().local_addr().ok();
         let local_interface = local_addr.and_then(|socket| {
             let interfaces = if_addrs::get_if_addrs().ok()?;
-            let mut names: Vec<_> = interfaces
-                .into_iter()
-                .filter(|interface| interface.ip().to_canonical() == socket.ip().to_canonical())
-                .map(|interface| interface.name)
-                .collect();
-            names.sort_unstable();
-            names.dedup();
-            (names.len() == 1).then(|| names.remove(0))
+            interface_name(&interfaces, socket.ip())
         });
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let token = token.child_token();
@@ -1634,6 +1634,14 @@ impl Link {
 
 /// Tries every known address at once and keeps whichever connects first.
 /// What kind of connection an address is, for test results.
+fn interface_name(interfaces: &[if_addrs::Interface], ip: std::net::IpAddr) -> Option<String> {
+    let mut names = interfaces.iter()
+        .filter(|interface| interface.ip().to_canonical() == ip.to_canonical())
+        .map(|interface| &interface.name);
+    let first = names.next()?;
+    names.all(|name| name == first).then(|| first.clone())
+}
+
 fn route_kind(addr: &str) -> &'static str {
     match addr.parse::<SocketAddr>().map(|socket| socket.ip().to_canonical()) {
         Ok(ip) if ip.is_loopback() => "Loopback",
@@ -2690,6 +2698,11 @@ mod tests {
         assert!(report.routes[2].status.contains("peer authentication unconfirmed"));
         assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, host_session);
         assert_eq!(joiner.0.peers.lock().unwrap()[&host_id].generation, joiner_session);
+        assert_eq!(report.routes[0].local_ip, None);
+        assert_eq!(report.routes[0].local_interface, None);
+        let loopback = "127.0.0.1".parse().unwrap();
+        assert_eq!(report.routes[1].local_ip, Some(loopback));
+        assert_eq!(report.routes[1].local_interface, interface_name(&if_addrs::get_if_addrs().unwrap_or_default(), loopback));
 
         host.stop();
         joiner.stop();

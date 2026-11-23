@@ -892,6 +892,9 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
                   <div className="test-route-info">
                     <code>{r.addr}</code>
                     <span className="route-kind-badge">{r.kind}</span>
+                    {r.local_ip && (
+                      <span className="muted small">via {r.local_interface ? `${r.local_interface} (${r.local_ip})` : r.local_ip}</span>
+                    )}
                   </div>
                   <span className={`test-route-status ${r.reachable ? "reachable" : "unreachable"}`}>
                     {r.status}
