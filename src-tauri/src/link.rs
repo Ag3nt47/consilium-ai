@@ -341,9 +341,21 @@ struct PeerState {
     /// Its council members ready to answer, and which of ours they have read: our AI -> theirs.
     council: Vec<String>,
     read_ours: std::collections::BTreeMap<String, Vec<String>>,
-    /// Packets received from it, so a route switched to in a stress test is proven by traffic.
+    /// Authenticated packets received on the current session, used to verify a route switch.
     packets_in: u64,
     route_updates: u64,
+}
+
+impl PeerState {
+    /// Only the current socket can prove that its route is alive.
+    fn record_packet(&mut self, generation: u64, received_ms: u64) -> bool {
+        if self.generation != generation || self.tx.is_none() {
+            return false;
+        }
+        self.last_seen_ms = received_ms;
+        self.packets_in += 1;
+        true
+    }
 }
 
 struct Inner {
@@ -1389,6 +1401,7 @@ impl Link {
             s.rtt_ms = rtt_ms;
             s.last_seen_ms = now_ms();
             s.down_since_ms = 0;
+            s.packets_in = 0;
             // Re-send everything not yet acknowledged, re-stamped so it is still fresh.
             for p in &s.outbox {
                 if let Ok(line) = p.resigned(now_ms(), &key).and_then(|p| seal(&me, &key, &p)) {
@@ -1423,10 +1436,9 @@ impl Link {
                     if from != peer.node_id { break; }
                     let Ok(packet) = open(&from, &key, &n, &c) else { break };
                     if packet.validate(&peer.node_id, &key, now_ms()).is_err() { continue; }
-                    if let Some(s) = self.0.peers.lock().unwrap().get_mut(&peer.node_id) {
-                        s.last_seen_ms = now_ms();
-                        s.packets_in += 1;
-                    }
+                    let active = self.0.peers.lock().unwrap().get_mut(&peer.node_id)
+                        .is_some_and(|state| state.record_packet(generation, now_ms()));
+                    if !active { break; }
                     self.receive(&me, &key, &peer.node_id, packet, &tx);
                 }
                 _ = beat.tick() => {
@@ -2112,6 +2124,24 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         false
+    }
+
+    #[test]
+    fn only_the_current_connected_session_can_prove_route_traffic() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = PeerState {
+            tx: Some(tx),
+            generation: 2,
+            last_seen_ms: 100,
+            ..PeerState::default()
+        };
+        assert!(!state.record_packet(1, 110));
+        assert_eq!((state.packets_in, state.last_seen_ms), (0, 100));
+        assert!(state.record_packet(2, 120));
+        assert_eq!((state.packets_in, state.last_seen_ms), (1, 120));
+        state.tx = None;
+        assert!(!state.record_packet(2, 130));
+        assert_eq!((state.packets_in, state.last_seen_ms), (1, 120));
     }
 
     #[tokio::test(flavor = "multi_thread")]
