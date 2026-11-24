@@ -44,7 +44,7 @@ The [physical PeerLink trial](PEERLINK_PHYSICAL_TRIAL.md) records the Windows–
 | MCP client layer | 🕓 | The CLIs already speak MCP themselves |
 | Live terminal watcher drawer | 🕓 | Live activity line above replies ✅ |
 | Rate-limit benching, cooldown, re-routing, 2-model consensus | ✅ | `bench.rs`, `council.rs` |
-| Stall detection (silence + CPU), state lights | ✅ | Working / Stalled lights |
+| Stall detection (silence + CPU), state lights | ✅ | Working / Stalled lights. PR #322 renews a 15-minute inactivity deadline on recognized provider activity, with a separate one-hour cap per CLI invocation; raw output cannot keep a stalled turn alive. Timeout errors identify the last activity. Owner: ChatGPT; scope: runner deadlines and offline native fixtures in `agents.rs`, `run_deadline.rs`, `agent_deadline_tests.rs`, and `tests/fixtures/agent_runner.rs`. Verification: four deadline policy tests and six native fixtures cover active work, large/split records, raw chatter, the total cap and Stop; a saturated-output harness checks immediate expiry. Three-platform CI and peer approval are required before integration. |
 | Freeze controls: interrupt, kill & restart | 🕓 | Stop and Retry exist |
 | Night shift, red/blue team, TDD self-healing, electoral routing, ideation, self-profiling | 🕓 | |
 | Speculative decoding, digital twins, Lean/Coq | 🕓 | Research items |
@@ -128,6 +128,20 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 | "UI integration" (PySide6 signals) | ✅ | Topbar `LinkIndicator` with status LEDs (connected/disconnected/syncing/offline), `LinkSettings` in Settings, pairing code countdown, candidate subnet discovery, route & RTT meters, and Cmd+K palette hook |
 
 ## Document 4: Consilium app improvements.docx
+
+Mac send/restart recovery follow-up: 0.3.58 snapshots the running-turn table
+before filtering the recovery journal, removing the opposite lock order between
+startup resumption and a new send. Login-shell PATH probing now drains output
+while the child runs, bounds the entire exit/EOF operation and cleans up its
+owned process group. Shared PATH snapshots stay available during refresh and
+retain prior folders on failure. Regression checks cover forced startup/send
+contention, concurrent PATH lookups, inherited output pipes and pipe saturation.
+All 20 focused Windows engine/journal/PATH tests, the production front-end build
+and privacy gate passed. Unix production code passed macOS cross-compilation;
+Unix subprocess fixtures remain hosted-runtime checks. The observed Mac hang
+has not been captured in a live thread sample; hosted
+platform checks and installed Mac window/send verification remain deployment
+steps. Native Bluetooth work is isolated from this repair.
 
 Matrix rain follow-up: decorative code trails remain visible through the glass
 surfaces, frame pacing preserves the selected 15/30/60 FPS cadence, and completion

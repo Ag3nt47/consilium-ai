@@ -37,11 +37,18 @@ pub struct Journal {
     /// Serializes this process's changes; a lock file serializes them with the other process (the
     /// app and the terminal command share `turns.json`).
     busy: Mutex<()>,
+    #[cfg(test)]
+    before_resume_filter: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Journal {
     pub fn load(path: PathBuf) -> Self {
-        Journal { path, busy: Mutex::new(()) }
+        Journal {
+            path,
+            busy: Mutex::new(()),
+            #[cfg(test)]
+            before_resume_filter: Mutex::new(None),
+        }
     }
 
     fn read(&self) -> HashMap<String, Pending> {
@@ -140,6 +147,11 @@ impl Journal {
     /// (such as a turn the other process is running right now).
     pub fn interrupted_where(&self, take: impl Fn(&Pending) -> bool) -> (Vec<Pending>, Vec<Pending>) {
         self.update(|items| {
+            #[cfg(test)]
+            {
+                let hook = self.before_resume_filter.lock().unwrap().take();
+                if let Some(hook) = hook { hook(); }
+            }
             let (mut resume, mut give_up) = (Vec::new(), Vec::new());
             for p in items.values_mut().filter(|p| take(p)) {
                 if p.attempts >= MAX_ATTEMPTS {
@@ -155,6 +167,12 @@ impl Journal {
             let changed = !resume.is_empty() || !give_up.is_empty();
             ((resume, give_up), changed)
         })
+    }
+
+    /// Coordinates the real startup/send lock ordering without sleeps or a CLI.
+    #[cfg(test)]
+    pub(crate) fn before_resume_filter_for_test(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.before_resume_filter.lock().unwrap() = Some(Box::new(hook));
     }
 }
 
