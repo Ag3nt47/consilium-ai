@@ -3456,9 +3456,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn startup_stress_stays_on_ip_and_cannot_replace_a_native_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let (host, _) = node(dir.path(), "host");
-        let (client, _) = node(dir.path(), "client");
+        let dir = std::env::temp_dir().join(format!("link-startup-stress-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (client, _) = node(&dir, "client");
         let code = host.begin_pairing().unwrap();
         let ip = format!("127.0.0.1:{}", host.0.port);
         client.join(&ip, &code.code).await.unwrap();
@@ -3519,6 +3519,7 @@ mod tests {
         drop(held);
         client.stop();
         host.stop();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]
