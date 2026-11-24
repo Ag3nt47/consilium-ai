@@ -241,6 +241,7 @@ function buildBoard(step: number): TaskBoard {
   };
 }
 const isBuild = demoScene === "build";
+const demoTitles = new Map<string, string>();
 const buildNow = isBuild ? buildState(demoStep) : null;
 const activeState = buildNow ?? state;
 const activeAgents = isBuild ? buildAgents : agents;
@@ -249,13 +250,21 @@ const ACTIVE_CONV = isBuild ? BUILD : CONV;
 
 const demoCouncilForApprovals = { members: isBuild ? ALL : ["gpt", "claude", "gemini"], access: {}, default_workspace: null, default_access: "chat" as const, saved_grants: [] };
 
+function listedConversations() {
+  const chats = isBuild ? buildConversations : conversations;
+  return chats.map((chat, index) => ({
+    ...chat,
+    title: demoTitles.get(chat.id) ?? (demoStep === 0 && index === 0 ? "New conversation" : chat.title),
+  }));
+}
+
 export const demoApi = {
   localToolInventory: async () => [],
   peerResources: async () => ({}),
   requestPeerResources: async () => "demo-memory-scan",
   agents: async () => activeAgents,
   usage: async () => Object.fromEntries(activeAgents.flatMap((a) => (a.usage ? [[a.id, a.usage]] : []))),
-  list: async () => (isBuild ? (demoStep === 0 ? [{ ...buildConversations[0], title: "New conversation" }, ...buildConversations.slice(1)] : buildConversations) : demoStep === 0 ? [{ ...conversations[0], title: "New conversation" }, ...conversations.slice(1)] : conversations),
+  list: async () => listedConversations(),
   create: async () => (isBuild ? buildConversations[0] : conversations[0]),
   load: async () => activeState.events,
   tokenUsage: async () => ({
@@ -268,7 +277,12 @@ export const demoApi = {
       claude: { input_tokens: 18100, output_tokens: 3800, cache_read_tokens: 7500, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 21900 },
     },
   }),
-  rename: async () => conversations[0],
+  rename: async (id: string, title: string) => {
+    const chat = listedConversations().find((entry) => entry.id === id);
+    if (!chat) throw new Error("Conversation not found");
+    demoTitles.set(id, title);
+    return { ...chat, title };
+  },
   remove: async () => undefined,
   exportMarkdown: async () => "",
   setVoice: async (_id: string, on: boolean) =>

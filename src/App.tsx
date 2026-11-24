@@ -159,6 +159,51 @@ function time(ts: number) {
   return clock(ts);
 }
 
+function ConversationTitle({ title, rename }: { title: string; rename: (title: string) => void }) {
+  const [draft, setDraft] = useState<{ original: string; value: string } | null>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const returnFocus = useRef(false);
+  const editing = draft !== null;
+
+  useEffect(() => {
+    if (!editing && returnFocus.current) {
+      returnFocus.current = false;
+      button.current?.focus();
+    }
+  }, [editing]);
+
+  return draft !== null ? (
+    <input
+      className="title-edit"
+      autoFocus
+      value={draft.value}
+      maxLength={60}
+      aria-label="Conversation title"
+      onChange={(event) => setDraft({ ...draft, value: event.target.value })}
+      onFocus={(event) => event.target.select()}
+      onBlur={(event) => {
+        const next = event.currentTarget.value.trim();
+        setDraft(null);
+        if (next && next !== draft.original.trim() && next !== title) rename(next);
+      }}
+      onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing || (event.key !== "Enter" && event.key !== "Escape")) return;
+        event.preventDefault();
+        returnFocus.current = true;
+        if (event.key === "Enter") event.currentTarget.blur();
+        else setDraft(null);
+      }}
+    />
+  ) : (
+    <h1>
+      <button type="button" className="title-rename" ref={button} onClick={() => setDraft({ original: title, value: title })}
+        title="Rename this conversation" aria-label={`Rename conversation: ${title}`}>
+        {title}<span className="title-pencil" aria-hidden>✎</span>
+      </button>
+    </h1>
+  );
+}
+
 type SeenReceipt = { agent: string; ts: number };
 
 /** Read receipts are compact log events that can cover several messages at the same timestamp. */
@@ -2573,17 +2618,9 @@ export default function App() {
     }
   }
 
-  // Renaming happens in place: the title turns into a text box (prompt() shows nothing in the app window).
-  const [titleDraft, setTitleDraft] = useState<string | null>(null);
-  function renameCurrent() {
-    if (current && meta) setTitleDraft(meta.title);
-  }
-  async function saveTitle() {
-    const title = titleDraft?.trim();
-    setTitleDraft(null);
-    if (!current || !meta || !title || title === meta.title) return;
+  async function saveTitle(conversation: string, title: string) {
     try {
-      await api.rename(current, title);
+      await api.rename(conversation, title);
       refreshList();
     } catch (e) {
       setError(String(e));
@@ -3235,27 +3272,9 @@ export default function App() {
         )}
         <header className="topbar">
           <div className="title-block">
-            {titleDraft !== null ? (
-              <input
-                className="title-edit"
-                autoFocus
-                value={titleDraft}
-                maxLength={60}
-                aria-label="Conversation title"
-                onChange={(e) => setTitleDraft(e.target.value)}
-                onFocus={(e) => e.target.select()}
-                onBlur={saveTitle}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") e.currentTarget.blur();
-                  if (e.key === "Escape") setTitleDraft(null);
-                }}
-              />
-            ) : (
-              <h1 onClick={renameCurrent} title="Click to rename this conversation. The AIs can rename it too.">
-                {meta?.title ?? "Consilium"}
-                {meta && <span className="title-pencil" aria-hidden>✎</span>}
-              </h1>
-            )}
+            {meta
+              ? <ConversationTitle key={meta.id} title={meta.title} rename={(title) => void saveTitle(meta.id, title)} />
+              : <h1>Consilium</h1>}
             <div className="workspace">
               {meta?.workspace ? (
                 <>
