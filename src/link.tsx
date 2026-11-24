@@ -29,7 +29,7 @@ export function LinkIndicator({ onConnectedCount }: { onConnectedCount?: (count:
     let timer: ReturnType<typeof setTimeout>;
     async function scan() {
       try {
-        const found = await api.linkDiscoverLan();
+        const found = await api.linkDiscoverLan(false);
         if (active) setCandidates(found);
       } catch {
         if (active) setCandidates([]);
@@ -172,7 +172,7 @@ export function LinkIndicator({ onConnectedCount }: { onConnectedCount?: (count:
                     setDiscoveryAlerts(enabled);
                     if (!enabled) setCandidates([]);
                   }} />
-                  Look for new PeerLink devices while the direct link is enabled
+                  Show alerts for new PeerLink devices announced on the local network
                 </label>
               </details>
               <LinkSettings status={status} onRefresh={refresh} pairAddress={pairAddress} />
@@ -715,7 +715,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                         className="btn small ghost auto-find-btn"
                         onClick={autoDiscover}
                         disabled={autoDiscovering}
-                        title="Look for devices running PeerLink on directly connected local networks"
+                        title="Find announced devices and scan directly connected private IPv4 networks for older peers"
                       >
                         {autoDiscovering ? "Searching…" : "🔍 Auto-Find on LAN"}
                       </button>
