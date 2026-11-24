@@ -3351,6 +3351,7 @@ button.attachment {
 .tool-state { font-size: 11px; opacity: .7; }
 .tool-state.on { color: var(--ok, #3fb950); opacity: 1; }
 .tool-cmd { display: block; margin-top: 4px; font-size: 11px; overflow-wrap: anywhere; opacity: .8; }
+.offline-skill-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; align-items: start; margin: 4px 0; }
 
 /* In-app Signal link: QR code and the verification code. */
 .msg-qr { flex-basis: 100%; display: flex; justify-content: center; padding: 6px 0; }
