@@ -31,6 +31,21 @@ ifconfig
 Record each leg with the initial and recovered interfaces on both computers, outage and recovery times, sender, received message count, and final queue state. Redact addresses and device names before publishing screenshots or logs. A leg passes when the live session recovers over the alternate physical interface, the receiver sees the marker once, and the sender confirms queue drainage. Run Bluetooth PAN as a separate leg if both computers expose an authenticated IP path over it. Native BLE and simultaneous payload transfer over multiple links require separate trials.
 
 
+## Live Wi-Fi check on November 23, 2026
+
+The installed Windows Consilium 0.3.56 app ran the communication stress test against the paired
+Mac. Both saved endpoints returned traffic after individual switches (1,843 ms and 1,616 ms).
+The Windows app returned to a live Ethernet session.
+
+With Windows Wi-Fi temporarily connected to the same network, a short PeerLink session bound to
+the Windows Wi-Fi address authenticated the paired Mac in 63 ms and received a fresh encrypted
+heartbeat in 78 ms. The separate session was closed, and Windows Wi-Fi was returned to standby
+with the installed app connected over Ethernet. The Mac-side receiving interface was not measured.
+
+The Windows Bluetooth radio was on. Its Bluetooth PAN adapter was disconnected, with no paired
+Mac Bluetooth route available to exercise. An Ethernet outage, Wi-Fi automatic recovery, and
+simultaneous payload transfer on multiple adapters remain separate trial steps.
+
 ## Preview build for the physical trial
 
 The [draft preview run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45291091103#artifacts)
