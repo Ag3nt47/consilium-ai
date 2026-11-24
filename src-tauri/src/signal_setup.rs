@@ -684,30 +684,38 @@ fn verify(cfg: &BridgeConfig, code: &str, run: u64) -> Result<Option<String>, St
     Err("No reply with the code arrived within 10 minutes. Click Try again.".into())
 }
 
-/// A `receive` notification counts if it's from the user's own account (their phone typing in
-/// Note to Self arrives as a sync "sent" message) and its text contains the code.
+/// A `receive` notification counts only if it is the user typing the code in Note to Self: a
+/// sync "sent" message (signal-cli only produces those for this account's own devices), sent
+/// to ourselves outside any group, whose trimmed text is exactly the code. Numbers are compared
+/// by digits so formatting differences don't matter, and a UUID-only envelope still matches;
+/// the exact match rejects our own challenge text, which contains the code.
 /// Returns Some(aci) on a match; the inner value is None when the daemon gave no account ID.
 pub fn reply_with_code(v: &serde_json::Value, account: &str, code: &str) -> Option<Option<String>> {
     let env = crate::signal_chat::receive_envelope(v)?;
-    let from_self = env.get("sourceNumber").and_then(|n| n.as_str()) == Some(account)
-        || env.get("source").and_then(|n| n.as_str()) == Some(account);
-    if !from_self {
+    let digits = |n: &str| n.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+    let own = digits(account);
+    let is_own = |n: &str| !own.is_empty() && digits(n) == own;
+    if let Some(n) = env.get("sourceNumber").and_then(|n| n.as_str()) {
+        if !is_own(n) {
+            return None;
+        }
+    }
+    let source_uuid = env.get("sourceUuid").or_else(|| env.get("sourceAci")).and_then(|u| u.as_str());
+    let sent = env.pointer("/syncMessage/sentMessage")?;
+    if sent.get("groupInfo").is_some_and(|g| !g.is_null()) {
         return None;
     }
-    let text = env
-        .pointer("/syncMessage/sentMessage/message")
-        .or_else(|| env.pointer("/dataMessage/message"))
-        .and_then(|m| m.as_str())?;
-    if !text.split(|c: char| !c.is_ascii_digit()).any(|w| w == code) {
+    let field = |k: &str| sent.get(k).and_then(|x| x.as_str());
+    let dest_num = field("destinationNumber").or_else(|| field("destination"));
+    let dest_uuid = field("destinationUuid").or_else(|| field("destinationAci"));
+    let to_self = dest_num.is_some_and(is_own) || (dest_uuid.is_some() && dest_uuid == source_uuid);
+    if !to_self {
         return None;
     }
-    let aci = env
-        .get("sourceUuid")
-        .or_else(|| env.get("sourceAci"))
-        .and_then(|u| u.as_str())
-        .and_then(|u| uuid::Uuid::parse_str(u).ok())
-        .map(|u| u.to_string());
-    Some(aci)
+    if sent.get("message").and_then(|m| m.as_str())?.trim() != code {
+        return None;
+    }
+    Some(source_uuid.and_then(|u| uuid::Uuid::parse_str(u).ok()).map(|u| u.to_string()))
 }
 
 fn rand_u32() -> u32 {
@@ -755,10 +763,14 @@ mod tests {
         let aci = "8f0c6e1a-1111-4222-8333-944455556666";
         let sync = serde_json::json!({"method":"receive","params":{"envelope":{
             "sourceNumber": acc, "sourceUuid": aci,
-            "syncMessage": {"sentMessage": {"message": "ok 4821"}}}}});
+            "syncMessage": {"sentMessage": {"destinationNumber": acc, "message": "4821"}}}}});
         assert_eq!(reply_with_code(&sync, acc, "4821"), Some(Some(aci.to_string())));
         assert_eq!(reply_with_code(&sync, acc, "1234"), None);
         assert_eq!(reply_with_code(&sync, acc, "482"), None, "a partial code doesn't count");
+        let chatty = serde_json::json!({"method":"receive","params":{"envelope":{
+            "sourceNumber": acc, "sourceUuid": aci,
+            "syncMessage": {"sentMessage": {"destinationNumber": acc, "message": "ok 4821"}}}}});
+        assert_eq!(reply_with_code(&chatty, acc, "4821"), None, "only the bare code counts");
         let stranger = serde_json::json!({"method":"receive","params":{"envelope":{
             "sourceNumber": "+15559999999", "dataMessage": {"message": "4821"}}}});
         assert_eq!(reply_with_code(&stranger, acc, "4821"), None);
@@ -777,6 +789,60 @@ mod tests {
         assert_eq!(reply_with_code(&mine, acc, "1234"), None);
         let stranger = sub(serde_json::json!({"sourceNumber": "+15559999999", "dataMessage": {"message": "8575"}}));
         assert_eq!(reply_with_code(&stranger, acc, "8575"), None);
+    }
+}
+
+#[cfg(test)]
+mod verify_reply_tests {
+    use super::reply_with_code;
+    use serde_json::json;
+
+    const ACCT: &str = "+15550001111";
+    const ME: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn sync(env_extra: serde_json::Value, sent: serde_json::Value) -> serde_json::Value {
+        let mut env = json!({ "sourceUuid": ME, "syncMessage": { "sentMessage": sent } });
+        for (k, v) in env_extra.as_object().unwrap() {
+            env[k] = v.clone();
+        }
+        json!({ "jsonrpc": "2.0", "method": "receive", "params": { "envelope": env } })
+    }
+
+    #[test]
+    fn accepts_note_to_self_with_formatted_number() {
+        let v = sync(json!({ "sourceNumber": "+1 555 000 1111" }), json!({ "destinationNumber": "+1 (555) 000-1111", "message": " 1234 
+" }));
+        assert_eq!(reply_with_code(&v, ACCT, "1234"), Some(Some(ME.to_string())));
+    }
+
+    #[test]
+    fn accepts_uuid_only_note_to_self() {
+        let v = sync(json!({}), json!({ "destinationUuid": ME, "message": "1234" }));
+        assert!(reply_with_code(&v, ACCT, "1234").is_some());
+    }
+
+    #[test]
+    fn rejects_group_message_with_code() {
+        let v = sync(json!({}), json!({ "groupInfo": { "groupId": "x" }, "message": "1234" }));
+        assert!(reply_with_code(&v, ACCT, "1234").is_none());
+    }
+
+    #[test]
+    fn rejects_message_to_someone_else() {
+        let v = sync(json!({}), json!({ "destinationNumber": "+15559998888", "message": "1234" }));
+        assert!(reply_with_code(&v, ACCT, "1234").is_none());
+    }
+
+    #[test]
+    fn rejects_our_own_challenge_text() {
+        let v = sync(json!({}), json!({ "destinationNumber": ACCT, "message": "Consilium (PC) is linked. Reply to this Note to Self chat with 1234 to confirm it works." }));
+        assert!(reply_with_code(&v, ACCT, "1234").is_none());
+    }
+
+    #[test]
+    fn rejects_plain_data_message() {
+        let v = json!({ "method": "receive", "params": { "envelope": { "sourceNumber": ACCT, "dataMessage": { "message": "1234" } } } });
+        assert!(reply_with_code(&v, ACCT, "1234").is_none());
     }
 }
 
