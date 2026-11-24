@@ -467,8 +467,7 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
     }, move |value| {
         let msg = parse_incoming(value, &decode_cfg.account, &decode_cfg.groups)?;
         // The setup code is consumed by the verifier, not sent to the council.
-        let setup = crate::signal_setup::state();
-        if msg.origin == Origin::Council && setup.phase == "verifying" && setup.code.as_deref() == Some(msg.text.as_str()) {
+        if crate::signal_setup::is_verification_reply(&msg.group, msg.timestamp, &msg.text, &decode_cfg.groups.main) {
             return None;
         }
         Some(msg)

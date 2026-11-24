@@ -15,6 +15,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+#[path = "signal_verification.rs"]
+mod verification;
+use verification::RecentReplies;
+
 #[cfg(test)]
 #[path = "signal_registration_tests.rs"]
 mod registration_tests;
@@ -37,6 +41,7 @@ static STATE: Mutex<Option<SetupState>> = Mutex::new(None);
 static LINK_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 /// Bumped whenever a new setup run starts, so a superseded run's thread stops writing state.
 static RUN: Mutex<u64> = Mutex::new(0);
+static RECENT_VERIFICATION_REPLIES: Mutex<RecentReplies> = Mutex::new(RecentReplies::new());
 
 const VERIFY_WINDOW: Duration = Duration::from_secs(10 * 60);
 const LINK_WINDOW: Duration = Duration::from_secs(5 * 60);
@@ -47,6 +52,22 @@ pub fn state() -> SetupState {
         device_name: device_name(),
         ..Default::default()
     })
+}
+
+/// Call only after the incoming parser has checked the configured owner and group.
+pub(crate) fn is_verification_reply(group: &str, timestamp: u64, text: &str, council_group: &str) -> bool {
+    let setup = state();
+    let active_code = if setup.phase == "verifying" { setup.code.as_deref() } else { None };
+    RECENT_VERIFICATION_REPLIES.lock().unwrap().matches(group, timestamp, text, active_code.map(|code| (council_group, code)), Instant::now())
+}
+
+fn remember_verification_reply(value: &serde_json::Value, group: &str) {
+    if let Some(timestamp) = crate::signal_chat::receive_envelope(value)
+        .and_then(|envelope| envelope.pointer("/syncMessage/sentMessage/timestamp"))
+        .and_then(serde_json::Value::as_u64)
+    {
+        RECENT_VERIFICATION_REPLIES.lock().unwrap().remember(group, timestamp, Instant::now());
+    }
 }
 
 fn set(run: u64, f: impl FnOnce(&mut SetupState)) {
@@ -692,6 +713,8 @@ fn verify(cfg: &BridgeConfig, code: &str, run: u64) -> Result<Option<String>, St
             }
             sent = true;
         } else if let Some(aci) = reply_with_code(&v, &cfg.account, &cfg.groups.main, code) {
+            // Remember the exact event before verified/failed state can clear the active code.
+            remember_verification_reply(&v, &cfg.groups.main);
             reply = Some(aci);
         }
         if let Some(aci) = reply.take_if(|_| sent) {
