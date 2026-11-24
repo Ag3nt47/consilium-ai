@@ -37,7 +37,8 @@ interface ReleaseAsset {
   digest: string;
 }
 
-let staging: Promise<void> | null = null;
+let stagingVersion: string | null = null;
+let queuedStage: { version: string; start: () => void } | null = null;
 
 function readCache(): Cache {
   try {
@@ -92,7 +93,7 @@ function releaseAsset(assets: unknown[], linuxPackage: string | null): ReleaseAs
   return matching[0];
 }
 
-/** Stages a cached release asset once. A failed attempt is retried on the next scheduled check. */
+/** Stages a release asset once and retains a newer release found during an active download. */
 function stageRelease(
   current: string,
   latest: Omit<UpdateInfo, "current"> | undefined,
@@ -100,17 +101,32 @@ function stageRelease(
   onStart?: (version: string) => void,
   onFailure?: (error: unknown) => void,
 ) {
-  if (!latest || !asset || compareVersions(latest.latest, current) <= 0 || staging) return;
-  staging = (async () => {
-    const already = await api.updateAvailable().catch(() => null);
-    if (already && compareVersions(already.version, latest.latest) >= 0) return;
-    onStart?.(latest.latest);
-    await api.stageReleaseUpdate(latest.latest, asset.url, asset.digest);
-  })()
-    .catch((error: unknown) => { onFailure?.(error); })
-    .finally(() => {
-      staging = null;
-    });
+  if (!latest || !asset || compareVersions(latest.latest, current) <= 0) return;
+  const version = latest.latest;
+  const start = () => {
+    stagingVersion = version;
+    void (async () => {
+      const already = await api.updateAvailable().catch(() => null);
+      if (already && compareVersions(already.version, version) >= 0) return;
+      onStart?.(version);
+      await api.stageReleaseUpdate(version, asset.url, asset.digest);
+    })()
+      .catch((error: unknown) => { onFailure?.(error); })
+      .finally(() => {
+        stagingVersion = null;
+        const next = queuedStage;
+        queuedStage = null;
+        next?.start();
+      });
+  };
+  if (stagingVersion) {
+    if (compareVersions(version, stagingVersion) > 0 &&
+      (!queuedStage || compareVersions(version, queuedStage.version) > 0)) {
+      queuedStage = { version, start };
+    }
+    return;
+  }
+  start();
 }
 
 /** Returns update details when a newer release exists, otherwise null. */

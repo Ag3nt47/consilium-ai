@@ -169,6 +169,10 @@ actual context memory use and performance on Windows and Mac still need verifica
 | Local validation and mentor escalation | 🕓 | Reuse deterministic checks and the reviewed skills registry. After bounded failures, package a compact redacted report for an allowed mentor. Reuse reviewed repair lessons as retrieval material. |
 | Candidate update synthesis and review | 🕓 | Generate one scoped proposal from relevant diffs and diagnostics, validate it in an isolated worktree, and expose the review and release outcome through the existing update path. |
 
+The release checker keeps the newest update found during an active download and stages it after the
+active attempt finishes. A browser fixture verified that a failed download releases the queue.
+Native release downloads use a connection timeout and a read timeout for stalled transfers.
+
 ## Reliability and portability added during the upgrade
 
 | Item | Status | Notes |
