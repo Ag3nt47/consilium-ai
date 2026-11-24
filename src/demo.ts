@@ -489,7 +489,8 @@ export const demoApi = {
     handshake_ok: true,
     rtt_ms: 4,
     routes: [
-      { addr: "192.168.1.157:8470", kind: "IP route", reachable: true, rtt_ms: 4, status: "TCP connected in 4 ms" },
+      { addr: "192.168.1.157:8470", kind: "IP route", reachable: true, rtt_ms: 4, authenticated_ms: 9, status: "Authenticated probe passed in 9 ms" },
+      { addr: "192.168.1.170:8470", kind: "IP route", reachable: true, rtt_ms: 6, status: "TCP connected in 6 ms · peer authentication unconfirmed" },
       { addr: "169.254.12.34:8470", kind: "Direct Cable / Bluetooth (Link-Local)", reachable: false, status: "Timed out" },
     ],
     queued_outgoing: 0,

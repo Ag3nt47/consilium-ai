@@ -366,6 +366,7 @@ export type RouteTest = {
   kind: string;
   reachable: boolean;
   rtt_ms?: number;
+  authenticated_ms?: number | null;
   local_ip?: string | null;
   local_interface?: string | null;
   status: string;

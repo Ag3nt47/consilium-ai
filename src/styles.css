@@ -3154,8 +3154,11 @@ button.attachment {
   background: rgba(255, 255, 255, 0.08);
   color: var(--muted);
 }
-.test-route-status.reachable {
+.test-route-status.authenticated {
   color: #4ade80;
+}
+.test-route-status.unconfirmed {
+  color: #fbbf24;
 }
 .test-route-status.unreachable {
   color: var(--muted);
