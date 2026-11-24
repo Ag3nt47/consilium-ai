@@ -2774,21 +2774,24 @@ mod tests {
         listener.abort();
         assert_eq!(report.name, joiner.0.cfg.lock().unwrap().name);
         assert!(report.handshake_ok);
-        assert_eq!(
-            report.routes.iter().map(|route| (route.addr.as_str(), route.reachable)).collect::<Vec<_>>(),
-            [(unreachable.as_str(), false), (reachable.as_str(), true), (unauthenticated.as_str(), true)]
-        );
-        assert_eq!(report.routes[0].authenticated_ms, None);
-        assert!(report.routes[1].authenticated_ms.unwrap() >= report.routes[1].rtt_ms.unwrap());
-        assert_eq!(report.routes[2].authenticated_ms, None);
-        assert!(report.routes[2].status.contains("peer authentication unconfirmed"));
+        assert_eq!(report.routes.len(), 3);
+        // An authenticated heartbeat may put the peer's working address first.
+        let route = |addr: &str| report.routes.iter().find(|route| route.addr == addr).unwrap();
+        let unreachable = route(&unreachable);
+        let reachable = route(&reachable);
+        let unauthenticated = route(&unauthenticated);
+        assert!(!unreachable.reachable && reachable.reachable && unauthenticated.reachable);
+        assert_eq!(unreachable.authenticated_ms, None);
+        assert!(reachable.authenticated_ms.unwrap() >= reachable.rtt_ms.unwrap());
+        assert_eq!(unauthenticated.authenticated_ms, None);
+        assert!(unauthenticated.status.contains("peer authentication unconfirmed"));
         assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, host_session);
         assert_eq!(joiner.0.peers.lock().unwrap()[&host_id].generation, joiner_session);
-        assert_eq!(report.routes[0].local_ip, None);
-        assert_eq!(report.routes[0].local_interface, None);
+        assert_eq!(unreachable.local_ip, None);
+        assert_eq!(unreachable.local_interface, None);
         let loopback = "127.0.0.1".parse().unwrap();
-        assert_eq!(report.routes[1].local_ip, Some(loopback));
-        assert_eq!(report.routes[1].local_interface, interface_name(&if_addrs::get_if_addrs().unwrap_or_default(), loopback));
+        assert_eq!(reachable.local_ip, Some(loopback));
+        assert_eq!(reachable.local_interface, interface_name(&if_addrs::get_if_addrs().unwrap_or_default(), loopback));
 
         host.stop();
         joiner.stop();
