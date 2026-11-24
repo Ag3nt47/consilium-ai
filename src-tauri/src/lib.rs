@@ -498,6 +498,25 @@ fn tasks_apply(state: State<AppState>, id: String, op: tasks::Op) -> Result<task
 }
 
 #[tauri::command]
+fn tasks_stage_plan(
+    state: State<AppState>, id: String, plan: String, priority: tasks::Priority,
+) -> Result<tasks::PlanReceipt, String> {
+    if !store::valid_id(&id) {
+        return Err("Unknown conversation.".into());
+    }
+    if let Some(owner) = peer_sync::board_owner(&id) {
+        return Err(format!("This board is kept on {owner}. Open the conversation there to stage the plan."));
+    }
+    state.engine.store.meta(&id)?;
+    let (receipt, note) = tasks::stage_plan(state.engine.store.dir(), &id, &plan, priority)?;
+    if let Some(note) = note {
+        peer_sync::share_board(&id);
+        let _ = state.engine.note(&id, &note);
+    }
+    Ok(receipt)
+}
+
+#[tauri::command]
 fn export_markdown(state: State<AppState>, id: String) -> Result<String, String> {
     let meta = state.engine.store.meta(&id)?;
     let mut md = format!("# {}\n\n", meta.title);
@@ -1612,6 +1631,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             tasks_get,
             tasks_apply,
+            tasks_stage_plan,
             agents_status,
             agents_usage,
             set_member,

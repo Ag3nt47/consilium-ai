@@ -149,6 +149,8 @@ The shared task board supports high, normal and low priorities. Existing tasks d
 normal. Local and cloud prompts show owned work first and sort ready tasks within that
 group by priority. Automatic continuation notes repeat up to five open tasks and leave
 the remaining detail on the shared board.
+The checklist also stages a pasted task list in one operation. Tasks remain unassigned,
+duplicates are skipped, and the chat gets one progress note for the batch.
 
 ## Document 5: Off-line AI development.docx
 

@@ -10,6 +10,56 @@ const STATUS_LABEL: Record<TaskItem["status"], string> = {
 const PRIORITY_RANK: Record<TaskPriority, number> = { high: 0, normal: 1, low: 2 };
 const PRIORITIES = ["high", "normal", "low"] as const;
 
+function StageTaskPlan({ conversation, onStaged }: { conversation: string; onStaged: () => void }) {
+  const [plan, setPlan] = useState("");
+  const [priority, setPriority] = useState<TaskPriority>("normal");
+  const [running, setRunning] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  async function stage() {
+    if (running || !plan.trim()) return;
+    setRunning(true);
+    setNotice("");
+    setError("");
+    try {
+      const { added, skipped } = await api.tasksStagePlan(conversation, plan, priority);
+      setPlan("");
+      setNotice(`${added} staged${skipped ? ` · ${skipped} ${skipped === 1 ? "duplicate" : "duplicates"} skipped` : ""}.`);
+      if (added) onStaged();
+    } catch (failure) {
+      setError(String(failure));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <details className="task-stage">
+      <summary>Stage a task list</summary>
+      <p className="muted small">Paste up to 100 tasks, one per line. Tasks stay unassigned when staged.</p>
+      <textarea aria-label="Task plan" rows={4} value={plan} disabled={running}
+        onChange={(event) => setPlan(event.target.value)} />
+      <div className="row gap-sm">
+        <select aria-label="Task plan priority" value={priority} disabled={running}
+          onChange={(event) => {
+            const selected = PRIORITIES.find((entry) => entry === event.target.value);
+            if (selected) setPriority(selected);
+          }}>
+          <option value="high">High</option>
+          <option value="normal">Normal</option>
+          <option value="low">Low</option>
+        </select>
+        <button className="btn small" type="button" onClick={stage} disabled={running || !plan.trim()}>
+          {running ? "Staging…" : "Stage tasks"}
+        </button>
+      </div>
+      {notice && <p role="status">{notice}</p>}
+      {error && <p className="task-error" role="alert">{error}</p>}
+    </details>
+  );
+}
+
 /**
  * The conversation's shared checklist. AIs change it with TASK: lines; the human changes it here.
  * Every change, from either side, is also noted in the chat by Consilium.
@@ -198,6 +248,7 @@ export function TaskBoardPanel({
             </select>
             <button className="btn small" type="submit" disabled={adding || !title.trim()}>Add</button>
           </form>
+          <StageTaskPlan key={conversation} conversation={conversation} onStaged={() => setRefresh((value) => value + 1)} />
           {error && <div className="task-error">{error}</div>}
         </>
       </div>
