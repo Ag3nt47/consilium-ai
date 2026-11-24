@@ -14,6 +14,7 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Staged {
@@ -459,12 +460,18 @@ pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str)
     result
 }
 
+fn release_download_client(read_timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent("Consilium-Updater")
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(read_timeout)
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))
+}
+
 async fn stage_from_url_inner(data: &Path, version: &str, url: &str, want: &str) -> Result<(), String> {
     use sha2::{Digest, Sha256};
-    let client = reqwest::Client::builder()
-        .user_agent("Consilium-Updater")
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let client = release_download_client(Duration::from_secs(45))?;
     let resp = client.get(url).send().await.map_err(|e| format!("download failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("download returned HTTP {}", resp.status()));
@@ -1108,6 +1115,23 @@ mod tests {
         assert!(setup.contains("DisplayIcon"));
         assert!(setup.contains("if ($null -ne $p -and $p.ExitCode -eq 0)"));
         assert!(setup.trim_end().ends_with("catch { Log ('reopen failed: ' + $_) }"));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_release_body_times_out() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n1").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = release_download_client(Duration::from_millis(300)).unwrap();
+        let response = client.get(url).send().await.unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(3), response.bytes()).await.unwrap().unwrap_err();
+        assert!(error.is_timeout(), "{error}");
+        server.abort();
     }
 
     #[test]
