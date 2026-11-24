@@ -1293,15 +1293,14 @@ fn is_missing_antigravity_model(error: &str) -> bool {
 
 fn antigravity_fallback_model(output: &str) -> Option<String> {
     let models = parse_agy_models(output);
-    // Flash is the established generally available Gemini family. Prefer it when the failed
-    // default was a newly advertised preview/codename; otherwise use the first live Gemini model.
+    // Flash is the established generally available Gemini family. Do not retry an arbitrary
+    // first model: it may be the same stale auto-selected default that just returned a 404.
     models
         .iter()
         .find(|m| {
             let id = m.id.to_ascii_lowercase();
             id.contains("-flash-") || id.ends_with("-flash")
         })
-        .or_else(|| models.first())
         .map(|m| m.id.clone())
 }
 
@@ -2748,8 +2747,15 @@ claude-sonnet-4-6\tClaude Sonnet 4.6";
             Some("gemini-3.8-flash")
         );
         assert_eq!(
+            antigravity_fallback_model(
+                "gemini-3.8-flash-high\tGemini 3.8 Flash (High)"
+            )
+            .as_deref(),
+            Some("gemini-3.8-flash-high")
+        );
+        assert_eq!(
             antigravity_fallback_model("gemini-4-pro-high\tGemini 4 Pro (High)").as_deref(),
-            Some("gemini-4-pro-high")
+            None
         );
     }
 
