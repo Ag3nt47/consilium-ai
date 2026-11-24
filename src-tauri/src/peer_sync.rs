@@ -1672,7 +1672,6 @@ mod tests {
         let root = std::env::temp_dir().join(format!("peer-sync-request-{}", uuid::Uuid::new_v4()));
         let b = Sync::new(Arc::new(Store::new(root.join("c")).unwrap()), &root);
         let conv = b.store.create("Plans").unwrap();
-        crate::follow::clear_install_request();
         let request = packet(
             "node-a",
             "r1",
@@ -1682,12 +1681,12 @@ mod tests {
         assert_eq!(note.conversation, conv.id);
         assert!(note.text.starts_with("MacBook asked every linked computer to update"), "{}", note.text);
         let now = crate::store::now_ms();
-        assert!(crate::follow::install_wanted(now), "installs without waiting for the automatic-install setting");
-        assert!(!crate::follow::install_wanted(now + 31 * 60_000), "the request runs out");
+        let request_at = crate::follow::pending_install_request(now).expect("installs even with automatic install off");
+        assert!(crate::follow::pending_install_request(now + 31 * 60_000).is_none(), "the request runs out");
         assert!(crate::follow::take_release_check(), "the window checks GitHub at once");
         assert!(b.file(&request, "MacBook").unwrap().is_none(), "once");
-        crate::follow::clear_install_request();
-        assert!(!crate::follow::install_wanted(now));
+        crate::follow::consume_install_request(request_at);
+        assert!(crate::follow::pending_install_request(now).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -746,14 +746,12 @@ fn start_auto_install(app: AppHandle, engine: Arc<Engine>) {
             tokio::time::sleep(CHECK_EVERY).await;
             let Some(data) = data_dir() else { continue };
             // A linked computer's Request Update counts even with automatic install off.
-            let requested = follow::install_wanted(store::now_ms());
-            if !(engine.config.get().auto_install_updates || requested) || runcmd::running() > 0 {
+            let requested_at = follow::pending_install_request(store::now_ms());
+            let automatic = engine.config.get().auto_install_updates;
+            if !(automatic || requested_at.is_some()) || runcmd::running() > 0 {
                 continue;
             }
             let Some(staged) = update::staged(&data) else { continue };
-            if requested {
-                follow::clear_install_request();
-            }
             if failed.as_ref().is_some_and(|(b, at)| *b == staged.build && store::now_ms() < at + AUTO_INSTALL_RETRY_MS) {
                 continue;
             }
@@ -768,10 +766,19 @@ fn start_auto_install(app: AppHandle, engine: Arc<Engine>) {
                     ),
                 );
             }
-            if let Err(e) = install_staged(&app, &engine) {
+            let result = install_staged(&app, &engine);
+            if let Some(at) = requested_at {
+                follow::consume_install_request(at);
+            }
+            if let Err(e) = result {
                 failed = Some((staged.build.clone(), store::now_ms()));
                 if let Some(id) = &newest {
-                    let _ = engine.note(id, &format!("The automatic install of Consilium {} didn't start: {e}. Trying again in 30 minutes; Update Now works too.", staged.build));
+                    let retry = if automatic {
+                        "Automatic install will retry after 30 minutes. You can also use Update Now."
+                    } else {
+                        "Use Update Now or send a new Request Update to retry."
+                    };
+                    let _ = engine.note(id, &format!("The automatic install of Consilium {} didn't start: {e}. {retry}", staged.build));
                 }
             }
         }
