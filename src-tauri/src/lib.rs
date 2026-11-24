@@ -632,7 +632,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: the Stop button in an AI's council box now also ends what that AI is doing right now in the chat (its CLI, or a local model's request), not only its next turns; the other AIs carry on.";
+const WHATS_NEW: &str = "What's new: background project and GitHub checks stay quiet on Windows. Matrix code rain is clearer and follows its selected frame rate. Signal setup detects missing phone links and keeps account data when a check fails; complete the phone verification step to confirm the connection.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs

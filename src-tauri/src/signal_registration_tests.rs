@@ -54,25 +54,25 @@ fn unregistered_or_unreadable_accounts_never_start_a_daemon_or_silently_relink()
     assert_eq!(link_if_needed(Registration::Registered, || panic!("Existing registration must be preserved")), Ok(false));
 }
 
+fn native_fixture() -> &'static std::path::Path {
+    static PROGRAM: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    PROGRAM.get_or_init(|| {
+        let directory = std::env::temp_dir().join(format!("consilium-registration-fixture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let program = directory.join(if cfg!(windows) { "probe.exe" } else { "probe" });
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/signal_probe.rs");
+        let mut compiler = std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()));
+        compiler.arg("--edition=2021").arg(&source).arg("-o").arg(&program);
+        let output = quiet(&mut compiler).output().expect("The existing Rust toolchain must compile the native fixture");
+        assert!(output.status.success(), "Native fixture compilation failed: {}", String::from_utf8_lossy(&output.stderr));
+        program
+    }).as_path()
+}
+
 fn fixture_command(output: &str, exit_code: i32, hang: bool) -> tokio::process::Command {
-    #[cfg(windows)]
-    {
-        let mut command = tokio::process::Command::new("powershell.exe");
-        let script = if hang { "Start-Sleep -Seconds 5".into() } else {
-            format!("[Console]::Error.WriteLine('WARN account {ACCOUNT} is not registered: NotRegisteredException'); [Console]::Out.Write('{}'); exit {exit_code}", output.replace('\'', "''"))
-        };
-        command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
-        command
-    }
-    #[cfg(not(windows))]
-    {
-        let mut command = tokio::process::Command::new("/bin/sh");
-        let script = if hang { "exec sleep 5".into() } else {
-            format!("printf '%s' 'WARN account {ACCOUNT} is not registered: NotRegisteredException' >&2; printf '%s' '{}'; exit {exit_code}", output.replace('\'', "'\\''"))
-        };
-        command.args(["-c", &script]);
-        command
-    }
+    let mut command = tokio::process::Command::new(native_fixture());
+    if hang { command.arg("hang"); } else { command.args(["reply", output, &exit_code.to_string()]); }
+    command
 }
 
 #[test]
@@ -89,31 +89,36 @@ fn a_failed_or_invalid_cli_probe_cannot_claim_registration_or_request_a_relink()
 
 #[test]
 fn a_stuck_probe_has_a_bounded_deadline_and_keeps_phone_data_out_of_errors() {
+    let command = fixture_command("", 0, true);
     let started = Instant::now();
-    assert_eq!(registration_probe(fixture_command("", 0, true), ACCOUNT, Duration::from_millis(50)), Registration::Unavailable(CHECK_TIMED_OUT));
+    assert_eq!(registration_probe(command, ACCOUNT, Duration::from_millis(50)), Registration::Unavailable(CHECK_TIMED_OUT));
     assert!(started.elapsed() < Duration::from_secs(8));
 }
 
 #[test]
-fn a_timed_out_shell_probe_does_not_leave_its_owned_descendant_running() {
-    let marker = std::env::temp_dir().join(format!("consilium-registration-child-{}.pid", uuid::Uuid::new_v4()));
+fn a_timed_out_ready_probe_does_not_leave_its_owned_descendant_running() {
+    use tokio::io::AsyncBufReadExt;
+    let mut command = tokio::process::Command::new(native_fixture());
+    command.arg("descendant").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
     #[cfg(windows)]
-    let command = {
-        let mut command = tokio::process::Command::new("powershell.exe");
-        let script = format!("$c = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -WindowStyle Hidden -PassThru; Set-Content -LiteralPath '{}' -Value $c.Id; Start-Sleep -Seconds 30", marker.to_string_lossy().replace('\'', "''"));
-        command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
-        command
-    };
-    #[cfg(not(windows))]
-    let command = {
-        let mut command = tokio::process::Command::new("/bin/sh");
-        let script = format!("sleep 30 & child=$!; printf '%s' \"$child\" > '{}'; wait", marker.to_string_lossy().replace('\'', "'\\''"));
-        command.args(["-c", &script]);
-        command
-    };
-    assert_eq!(registration_probe(command, ACCOUNT, Duration::from_secs(8)), Registration::Unavailable(CHECK_TIMED_OUT));
-    let pid: u32 = std::fs::read_to_string(&marker).expect("The fixture must create a real descendant before timing out").trim().parse().unwrap();
-    let _ = std::fs::remove_file(marker);
+    command.creation_flags(0x0800_0000);
+    #[cfg(unix)]
+    command.process_group(0);
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let pid = runtime.block_on(async {
+        let mut parent = command.spawn().unwrap();
+        let mut reader = tokio::io::BufReader::new(parent.stdout.take().unwrap());
+        let mut line = String::new();
+        let ready = tokio::time::timeout(Duration::from_secs(30), reader.read_line(&mut line)).await;
+        if !matches!(ready, Ok(Ok(count)) if count > 0) {
+            stop_registration_probe(&mut parent).await;
+            panic!("The owned native fixture did not report descendant readiness");
+        }
+        let pid: u32 = line.trim().parse().unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(50), parent.wait()).await.is_err());
+        stop_registration_probe(&mut parent).await;
+        pid
+    });
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let system = sysinfo::System::new_all();

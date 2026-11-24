@@ -145,6 +145,12 @@ stale status errors. Eight offline registration fixtures and the front-end check
 passed. A real Windows Note to Self send/reply round trip was verified; council
 chat routing and phone Approve/Deny remain separate live checks.
 
+Release follow-up: 0.3.57 keeps the npm, Cargo and Tauri versions aligned so
+the normal GitHub release workflow can deliver the Matrix, quiet Windows checks
+and Signal fixes to every platform. The production front-end build, all 48 Node
+tests and the privacy gate passed locally. Hosted platform checks, publication
+and the physical Mac update remain deployment verification steps.
+
 | Item | Status | Acceptance and dependencies |
 |---|---|---|
 | Concise engineering mode and compact handoffs | 🔨 | The shared editable-workspace prompt now assigns file scope once and asks for a compact handoff. The prompt tests passed on Windows, macOS and Linux. In task prompts, both local and cloud agents see their active tasks and ready unassigned work ahead of blockers and other owners' tasks. Windows, macOS and Ubuntu tests cover that ordering ([PR #261](https://github.com/Ag3nt47/consilium-ai/pull/261)). Comparing actual replies with fixed task fixtures and verifying routing behavior remain open. |
