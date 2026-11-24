@@ -3960,7 +3960,7 @@ export default function App() {
             )}
             <div className="section-label">Tools</div>
             <Suspense fallback={null}>
-              <OfflineSkills />
+              <OfflineSkills copyText={copyText} />
             </Suspense>
             <ToolsSettings
               ais={members.map((a) => ({ id: a.id, name: a.name }))}
