@@ -11,12 +11,12 @@
   },
   {
     "id": "claude-active-turn-deadline",
-    "status": "open",
+    "status": "fixed",
     "severity": "medium",
     "source": "council-error-alarm",
     "title": "Fixed CLI turn deadline interrupts ongoing tool work",
     "evidence": "A Claude turn reached the 900-second absolute deadline despite producing a tool result about three minutes before expiry; the generic timeout discarded the activity context.",
     "found": "2026-11-24",
-    "fix": "PR #322 uses a 900-second inactivity budget renewed only by recognized provider activity, retains a 3600-second cap per CLI invocation and Stop cleanup, and reports the last activity. Four policy tests and six native fixtures cover the runner; an independent saturated-output harness verifies immediate expiry. Keep open until peer approval, three-platform CI and main integration."
+    "fix": "PR #322 uses a 900-second inactivity budget renewed only by recognized provider activity, retains a 3600-second cap per CLI invocation and Stop cleanup, and reports the last activity. Four policy tests and six native fixtures cover the runner; an independent saturated-output harness verifies immediate expiry. Peer-approved and merged to main as dc70529 on 2026-11-24 after all nine checks passed, including Windows, macOS and Linux Rust tests and Clippy. Installed verification awaits the coordinated desktop update."
   }
 ]
