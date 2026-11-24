@@ -160,7 +160,7 @@ function time(ts: number) {
 }
 
 function ConversationTitle({ title, rename }: { title: string; rename: (title: string) => void }) {
-  const [draft, setDraft] = useState<string | null>(null);
+  const [draft, setDraft] = useState<{ original: string; value: string } | null>(null);
   const button = useRef<HTMLButtonElement>(null);
   const returnFocus = useRef(false);
   const editing = draft !== null;
@@ -176,15 +176,15 @@ function ConversationTitle({ title, rename }: { title: string; rename: (title: s
     <input
       className="title-edit"
       autoFocus
-      value={draft}
+      value={draft.value}
       maxLength={60}
       aria-label="Conversation title"
-      onChange={(event) => setDraft(event.target.value)}
+      onChange={(event) => setDraft({ ...draft, value: event.target.value })}
       onFocus={(event) => event.target.select()}
       onBlur={(event) => {
         const next = event.currentTarget.value.trim();
         setDraft(null);
-        if (next && next !== title) rename(next);
+        if (next && next !== draft.original.trim() && next !== title) rename(next);
       }}
       onKeyDown={(event) => {
         if (event.nativeEvent.isComposing || (event.key !== "Enter" && event.key !== "Escape")) return;
@@ -196,7 +196,7 @@ function ConversationTitle({ title, rename }: { title: string; rename: (title: s
     />
   ) : (
     <h1>
-      <button type="button" className="title-rename" ref={button} onClick={() => setDraft(title)}
+      <button type="button" className="title-rename" ref={button} onClick={() => setDraft({ original: title, value: title })}
         title="Rename this conversation" aria-label={`Rename conversation: ${title}`}>
         {title}<span className="title-pencil" aria-hidden>✎</span>
       </button>
