@@ -1119,12 +1119,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_stalled_release_body_times_out() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n1").await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if stream.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            stream.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n1").await.unwrap();
             std::future::pending::<()>().await;
         });
         let client = release_download_client(Duration::from_millis(300)).unwrap();
