@@ -44,6 +44,7 @@ mod discovery;
 pub const PORT: u16 = 8470;
 const HEARTBEAT: Duration = Duration::from_millis(1500);
 const DEAD_AFTER_MS: u64 = 4_000;
+const SIGNAL_REPORT_TTL: Duration = Duration::from_millis(DEAD_AFTER_MS);
 const SESSION_WRITE_IDLE: Duration = Duration::from_millis(DEAD_AFTER_MS);
 const RETRY_MIN: Duration = Duration::from_millis(1000);
 const RETRY_MAX: Duration = Duration::from_secs(30);
@@ -434,6 +435,8 @@ struct PeerState {
     supports_lan_notes: bool,
     /// From the peer's latest heartbeat: Signal is running there, and when it was last used.
     signal_on: bool,
+    /// A separate clock: unrelated authenticated traffic cannot renew Signal readiness.
+    signal_report: Option<SignalReport>,
     active_ms: u64,
     activity: Vec<String>,
     git: Option<String>,
@@ -449,6 +452,20 @@ struct PeerState {
 }
 
 impl PeerState {
+    fn reset_signal_report(&mut self) {
+        self.signal_report = None;
+    }
+
+    fn record_signal_report(&mut self, generation: u64, payload: &Value, received: Instant) {
+        if self.generation != generation || self.tx.is_none() {
+            return;
+        }
+        self.signal_report = match (payload.get("ping").and_then(Value::as_u64), payload.get("signal").and_then(Value::as_bool)) {
+            (Some(_), Some(healthy)) => Some(SignalReport { generation, received, healthy }),
+            _ => None,
+        };
+    }
+
     /// Only the current socket can prove that its route is alive.
     fn record_packet(&mut self, generation: u64, received_ms: u64) -> bool {
         if self.generation != generation || self.tx.is_none() {
@@ -458,6 +475,28 @@ impl PeerState {
         self.packets_in += 1;
         true
     }
+}
+
+struct SignalReport {
+    generation: u64,
+    received: Instant,
+    healthy: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SignalRelayPeer {
+    node_id: String,
+    name: String,
+}
+
+/// Readiness reported by a trusted peer, not a local daemon probe or a delivery receipt.
+#[derive(Debug, Serialize)]
+pub struct SignalRelayStatus {
+    state: &'static str,
+    peer: Option<SignalRelayPeer>,
+    candidate_count: usize,
+    valid_for_ms: u64,
+    local_direct_active: bool,
 }
 
 struct Inner {
@@ -598,6 +637,7 @@ impl Link {
             state.tx = None;
             state.session_cancel = None;
             state.generation += 1;
+            state.reset_signal_report();
         }
     }
 
@@ -639,6 +679,48 @@ impl Link {
             .map(|(id, s)| (id.as_str(), s.active_ms))
             .collect();
         answers_signal((cfg.node_id.as_str(), LOCAL_ACTIVE_MS.load(Ordering::SeqCst)), &others)
+    }
+
+    pub fn signal_relay_status(&self) -> SignalRelayStatus {
+        self.signal_relay_status_at(Instant::now())
+    }
+
+    fn signal_relay_status_at(&self, now: Instant) -> SignalRelayStatus {
+        let cfg = self.0.cfg.lock().unwrap().clone();
+        let running = self.0.running.lock().unwrap().clone();
+        let mut result = SignalRelayStatus {
+            state: "unavailable",
+            peer: None,
+            candidate_count: 0,
+            valid_for_ms: 0,
+            local_direct_active: signal_on(),
+        };
+        if !cfg.enabled || running.as_ref().is_none_or(CancellationToken::is_cancelled) {
+            return result;
+        }
+        let states = self.0.peers.lock().unwrap();
+        let candidates: Vec<_> = cfg.peers.iter().filter_map(|peer| {
+            let state = states.get(&peer.node_id)?;
+            if state.tx.as_ref().is_none_or(mpsc::UnboundedSender::is_closed)
+                || state.session_cancel.as_ref().is_none_or(CancellationToken::is_cancelled)
+            {
+                return None;
+            }
+            let report = state.signal_report.as_ref()?;
+            let age = now.checked_duration_since(report.received)?;
+            (report.healthy && report.generation == state.generation && age <= SIGNAL_REPORT_TTL)
+                .then_some((peer, SIGNAL_REPORT_TTL.saturating_sub(age)))
+        }).collect();
+        result.candidate_count = candidates.len();
+        if let [(peer, remaining)] = candidates.as_slice() {
+            result.state = "available";
+            result.peer = Some(SignalRelayPeer { node_id: peer.node_id.clone(), name: peer.name.clone() });
+            result.valid_for_ms = remaining.as_millis() as u64;
+        } else if candidates.len() > 1 {
+            result.state = "multiple";
+            result.valid_for_ms = candidates.iter().map(|(_, remaining)| remaining.as_millis() as u64).min().unwrap_or(0);
+        }
+        result
     }
 
     pub(crate) fn connected_peer_ids(&self) -> Vec<String> {
@@ -1780,6 +1862,7 @@ impl Link {
             s.down_since_ms = 0;
             s.packets_in = 0;
             s.supports_lan_notes = false;
+            s.reset_signal_report();
             // Re-send everything not yet acknowledged, re-stamped so it is still fresh.
             for p in &s.outbox {
                 if let Ok(line) = p.resigned(now_ms(), &key).and_then(|p| seal(&me, &key, &p)) {
@@ -1865,6 +1948,9 @@ impl Link {
     fn receive(&self, me: &str, key: &[u8], from: &str, generation: u64, packet: PeerPacket, tx: &mpsc::UnboundedSender<String>) {
         match packet.kind {
             PacketKind::Heartbeat => {
+                if let Some(state) = self.0.peers.lock().unwrap().get_mut(from) {
+                    state.record_signal_report(generation, &packet.payload, Instant::now());
+                }
                 if packet.payload.get("ping").is_some() {
                     if let Some(s) = self.0.peers.lock().unwrap().get_mut(from).filter(|state| state.generation == generation) {
                         s.signal_on = packet.payload.get("signal").and_then(Value::as_bool).unwrap_or(false);
@@ -2443,6 +2529,10 @@ fn route_ip_allowed(ip: std::net::IpAddr) -> bool {
         std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
     }
 }
+
+#[cfg(test)]
+#[path = "link_signal_status_tests.rs"]
+mod signal_status_tests;
 
 #[cfg(test)]
 mod tests {

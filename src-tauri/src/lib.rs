@@ -1248,6 +1248,12 @@ async fn messaging_status() -> Vec<bridge::ConnectorStatus> {
     .unwrap_or_default()
 }
 
+/// Cheap peer readiness snapshot; never probes a local Signal daemon.
+#[tauri::command]
+async fn signal_relay_status() -> Result<link::SignalRelayStatus, String> {
+    Ok(the_link()?.signal_relay_status())
+}
+
 /// Messaging settings for the setup panel, with the phone number masked.
 #[tauri::command]
 fn messaging_config() -> Result<bridge::SetupView, String> {
@@ -1678,6 +1684,7 @@ pub fn run() {
             security_scan_save,
             security_scan_run,
             messaging_status,
+            signal_relay_status,
             messaging_config,
             messaging_save,
             messaging_setup,

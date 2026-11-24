@@ -267,6 +267,14 @@ export interface ConnectorStatus {
   detail: string;
 }
 
+export interface SignalRelayStatus {
+  state: "available" | "unavailable" | "multiple";
+  peer: { node_id: string; name: string } | null;
+  candidate_count: number;
+  valid_for_ms: number;
+  local_direct_active: boolean;
+}
+
 export interface SystemPressure {
   percent: number;
   cpu_percent: number;
@@ -639,6 +647,7 @@ const appApi = {
   }) => invoke<SecurityScanStatus>("security_scan_save", { settings }),
   securityScanRun: () => invoke<SecurityScanStatus>("security_scan_run"),
   messagingStatus: () => invoke<ConnectorStatus[]>("messaging_status"),
+  signalRelayStatus: () => invoke<SignalRelayStatus>("signal_relay_status"),
   /** Messaging settings, phone number masked. */
   messagingConfig: () => invoke<MessagingSetup>("messaging_config"),
   /** Validates and saves messaging settings on this computer. */
