@@ -55,19 +55,19 @@ simultaneous payload transfer on multiple adapters remain separate trial steps.
 
 ## Preview build for the physical trial
 
-The [draft preview run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45291091103#artifacts)
-built commit `54c40b4` with connection handoff, concurrent endpoint authentication, **Test AI handshake**,
-capacity-weighted model splits, session and weekly council usage, and the opt-in telemetry backdrop.
+The [draft preview run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45307151629#artifacts)
+built commit `a00a4c8` with sequential source switching, parallel handshakes, authenticated
+payload transfer tests, and the Bluetooth PAN setup guide.
 Hosted installation and desktop launch checks passed on Windows, macOS and Linux. The macOS job
 verified the Apple Silicon and Intel executable slices. The Linux job exercised DEB and AppImage
 launches on Ubuntu and an RPM installation and launch on Fedora. The workflow skipped publication.
-All three downloaded archives matched GitHub's SHA-256 digests.
+All three downloaded archives matched the SHA-256 digests published by GitHub.
 
-| Platform | Draft archive | Verified archive SHA-256 |
+| Platform | Draft archive | GitHub archive SHA-256 |
 | --- | --- | --- |
-| Windows | [Windows EXE](https://github.com/Ag3nt47/consilium-ai/actions/runs/45291091103/artifacts/14873668553) | `d63eb600ff8b67191b97bd234be242807e4e0fbffb18d8fc99d6bcb9049f46d8` |
-| macOS | [Universal DMG](https://github.com/Ag3nt47/consilium-ai/actions/runs/45291091103/artifacts/14874702191) | `33db5b3e879046b3ea9fe6827871badc18445d5eb30b06b534eacab704eeef11` |
-| Linux | [DEB, RPM and AppImage](https://github.com/Ag3nt47/consilium-ai/actions/runs/45291091103/artifacts/14874976112) | `2bbd7aa30c06de8be829e4ab3b6d10a49617cc7eefde66d5ddda6c9cfa398e0a` |
+| Windows | [Windows EXE](https://github.com/Ag3nt47/consilium-ai/actions/runs/45307151629/artifacts/14880509896) | `9322e4a662c380c7399709c4725003d6ad6922696d9f13159354abf47f8f69ed` |
+| macOS | [Universal DMG](https://github.com/Ag3nt47/consilium-ai/actions/runs/45307151629/artifacts/14881847623) | `7af686aeb7c4ce8f7630fae313a96368ca7437cd1b34beed411481ef168a7192` |
+| Linux | [DEB, RPM and AppImage](https://github.com/Ag3nt47/consilium-ai/actions/runs/45307151629/artifacts/14881089369) | `81c57e1be13eee3cb8840a0f4206817e7287331449a0e631f86b33607014ddbc` |
 
 Use the matching Windows and macOS archives for the connection handoff trial. Use the socket
 commands above to confirm which adapters carry the active session during the outage. Live
@@ -93,11 +93,15 @@ After the individual routes pass, test with Ethernet, Wi-Fi and Bluetooth PAN ac
 **Test parallel payload transfer**, choose one computer, then match each local adapter with
 its peer endpoint. Use both computers' network settings to confirm the selected addresses
 belong to distinct physical adapters. Run the test and record the bound source interface,
-receiver IP address, checksum-verified bytes and receipt window for each path. Consilium
+receiver IP and mapped adapter, checksum-verified bytes and receipt window for each path. Consilium
 sends four independently authenticated 8 KiB chunks per selected path and checks their
 SHA-256 receipts. The overlap is the shared first-to-last receipt window on the same receiving
 process, with a checksum-verified sample from each path inside that window. This bounded
 diagnostic can run alongside the live session.
+
+Use the reported receiving adapter names to check the endpoint mapping. The receiving
+computer supplies those names from its socket addresses. Use OS measurements at both ends
+to establish which physical interface actually carried the traffic.
 
 For a throughput comparison, compare the three-path run against each single-path baseline
 with the same payload and computers. To pass the physical overlap trial, authenticated payload

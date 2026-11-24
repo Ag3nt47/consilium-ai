@@ -376,10 +376,11 @@ export type ProbeSource = { address: string; interface: string };
 export type TransferPath = { source: string; endpoint: string };
 export type TransferTrial = {
   overlap_ms: number | null;
+  distinct_receiver_interfaces: boolean;
   paths: {
     source: ProbeSource;
     endpoint: string;
-    receipts: { bytes: number; sha256: string; receiver_ip: string; received_ms: number }[];
+    receipts: { bytes: number; sha256: string; receiver_ip: string; receiver_interface?: string | null; received_ms: number }[];
     error: string | null;
   }[];
 };
