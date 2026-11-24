@@ -68,6 +68,11 @@ fn repos_dir() -> Result<PathBuf, String> {
 
 fn run_git(args: &[&str], dir: Option<&Path>) -> Result<String, String> {
     let mut cmd = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
     if let Some(d) = dir {
         cmd.arg("-C").arg(d);
     }
@@ -82,6 +87,7 @@ fn run_git(args: &[&str], dir: Option<&Path>) -> Result<String, String> {
         ])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
         .env("GIT_LFS_SKIP_SMUDGE", "1")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .stdin(Stdio::null())

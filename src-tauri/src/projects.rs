@@ -42,11 +42,18 @@ static LAST_FETCH: Mutex<Option<HashMap<PathBuf, Instant>>> = Mutex::new(None);
 
 /// Runs git with a hard timeout: the process is killed, not left running, if it hangs.
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let mut child = command
         .arg("-C")
         .arg(dir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
         .env(
             "GIT_SSH_COMMAND",
             "ssh -o BatchMode=yes -o ConnectTimeout=10",
