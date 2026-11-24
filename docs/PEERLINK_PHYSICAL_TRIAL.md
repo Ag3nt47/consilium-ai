@@ -53,6 +53,26 @@ Windows reported it as unpaired and disconnected. The PAN adapter was disconnect
 IP neighbors. An Ethernet outage, Wi-Fi automatic recovery, and
 simultaneous payload transfer on multiple adapters remain separate trial steps.
 
+### Repeat check on November 23, 2026
+
+Both saved Mac endpoints returned a fresh authenticated hello and encrypted heartbeat when
+the Windows diagnostic bound its TCP connection to each local adapter in turn.
+
+| Windows source | Authenticated hello | Encrypted heartbeat |
+| --- | ---: | ---: |
+| Ethernet | 17 and 22 ms | 19 and 24 ms |
+| Wi-Fi | 10 and 8 ms | 14 and 11 ms |
+
+Windows had weak-host send and receive disabled on both interfaces. The receiving Mac
+adapter was not sampled. Windows restored Wi-Fi to on and disconnected and later showed
+an established PeerLink socket over Ethernet.
+
+A separate Classic Bluetooth inquiry found the Mac and reported it as unpaired and
+disconnected. The Windows Bluetooth network adapter had no usable IPv4 address. Its
+data transfer test needs device pairing and an active Bluetooth network on both computers.
+The separate address-bound checks provide no result for simultaneous transfer or physical
+failover.
+
 ## Preview build for the physical trial
 
 The [draft preview run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45307151629#artifacts)
