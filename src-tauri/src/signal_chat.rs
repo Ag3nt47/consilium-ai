@@ -262,6 +262,7 @@ fn addr(cfg: &BridgeConfig) -> Result<SocketAddr, String> {
 fn call(cfg: &BridgeConfig, method: &str, params: Value) -> Result<Value, String> {
     let s = TcpStream::connect_timeout(&addr(cfg)?, Duration::from_secs(5)).map_err(|e| e.to_string())?;
     s.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
+    s.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
     let id = format!("consilium-{}", uuid::Uuid::new_v4());
     let req = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
     (&s).write_all(format!("{req}\n").as_bytes()).map_err(|e| e.to_string())?;
@@ -423,9 +424,11 @@ pub fn run(engine: Arc<Engine>, cfg_path: PathBuf) {
     });
 }
 
+#[derive(Default)]
 struct Outbox {
     /// Cursors for active conversations: conversation ID -> highest seq mirrored.
     cursors: HashMap<String, u64>,
+    retry_after: HashMap<String, Instant>,
     /// Human events Consilium created from phone messages, and where each came from.
     origins: HashMap<String, Origin>,
 }
@@ -459,6 +462,10 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
             return Err(e);
         }
     };
+    let mut out = Outbox::default();
+    // Seed the cursors before receiving: an immediate reply to the first phone message
+    // must not be mistaken for old desktop history.
+    forward(engine, &cfg, &mut out);
     let expected = cfg.clone();
     let current_path = cfg_path.to_path_buf();
     let decode_cfg = cfg.clone();
@@ -475,7 +482,6 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
     let mut revive_after = Instant::now();
     let mut seen: VecDeque<u64> = VecDeque::new();
     let mut seen_set: HashSet<u64> = HashSet::new();
-    let mut out = Outbox { cursors: HashMap::new(), origins: HashMap::new() };
     static ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     loop {
         // Stop if Signal was switched off or re-set up; the outer loop starts again.
@@ -539,6 +545,7 @@ fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Inco
     };
     let members = engine.config.get().members;
     let events = engine.store.load(&conv.id).unwrap_or_default();
+    out.cursors.entry(conv.id.clone()).or_insert_with(|| events.last().map_or(0, |e| e.seq));
     let recent = &events[events.len().saturating_sub(400)..];
     let pending = pending_requests(recent);
     let auto = BridgeConfig::load(&bridge::config_path(None)).map(|c| c.auto_forward_decisions).unwrap_or(true);
@@ -633,7 +640,7 @@ pub fn formatted_receipt(nobody_can_answer: bool, decision: bool, targets: &[Str
     }
 }
 
-/// Sends new messages (AI replies, in-app human messages, Consilium notes) across active conversations to Signal.
+/// Send at most one new message before giving phone intake another turn.
 fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
     let convs = engine.store.list();
     if convs.is_empty() {
@@ -641,6 +648,9 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
     }
     let answers = crate::link_answers_signal();
     for conv in convs.into_iter().filter(|c| answers || !crate::peer_sync::is_mirror(&c.id)).take(10) {
+        if out.retry_after.get(&conv.id).is_some_and(|until| Instant::now() < *until) {
+            continue;
+        }
         let events = engine.store.load(&conv.id).unwrap_or_default();
         let newest = events.last().map_or(0, |e| e.seq);
         let cursor = match out.cursors.get(&conv.id) {
@@ -652,8 +662,10 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
             }
         };
         if newest <= cursor {
+            out.retry_after.remove(&conv.id);
             continue;
         }
+        let mut through = cursor;
         let mut last_human: Option<&Event> = events.iter().rev().find(|e| e.seq <= cursor && e.sender == "human");
         for e in events.iter().filter(|e| e.seq > cursor) {
             if e.sender == "human" {
@@ -676,16 +688,29 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
             let text = match outbound_text(e) {
                 Some(t) => t,
                 None if !files.is_empty() && e.sender == "human" => format!("You: (sent {} file(s))", files.len()),
-                None => continue,
+                None => {
+                    through = e.seq;
+                    continue;
+                }
             };
             // Keep replies in the group that asked. The council group is the default for
             // desktop messages and for mirrored conversations with no local origin record.
             let origin = last_human.and_then(|h| out.origins.get(&h.id));
             if let Some(group) = outbound_group(&cfg.groups, origin) {
-                if let Err(err) = send_group_files(cfg, group, &text, &files) {
-                    eprintln!("signal chat: couldn't send to the Signal group: {err}");
+                match send_group_files(cfg, group, &text, &files) {
+                    Ok(()) => {
+                        out.cursors.insert(conv.id.clone(), e.seq);
+                        out.retry_after.remove(&conv.id);
+                    }
+                    Err(err) => {
+                        eprintln!("signal chat: couldn't send to the Signal group: {err}");
+                        out.cursors.insert(conv.id.clone(), through);
+                        out.retry_after.insert(conv.id, Instant::now() + Duration::from_secs(10));
+                    }
                 }
+                return;
             }
+            through = e.seq;
         }
         out.cursors.insert(conv.id, newest);
     }
@@ -820,7 +845,7 @@ mod tests {
 
     #[test]
     fn a_message_split_by_a_read_timeout_arrives_whole() {
-        let msg = sync("+15551234567", json!({"message": "héllo", "destinationNumber": "+15551234567"})).to_string();
+        let msg = sync(ACC, json!({"message": "héllo", "groupInfo": {"groupId": "MAIN="}})).to_string();
         let bytes = format!("{msg}\n").into_bytes();
         // Split inside the two-byte "é" as well, and between lines.
         let cut = msg.find('é').unwrap() + 1;

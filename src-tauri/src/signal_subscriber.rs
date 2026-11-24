@@ -89,7 +89,7 @@ where
                 // A parsed message retained during EOF, an RPC timeout or
                 // backpressure belongs to this unchanged configuration.
                 offer(&mut pending, &send, &shared, &current, None, options.poll)?;
-                connection(endpoint, &send, &mut pending, &shared, &current, &decode, &ready, options)
+                connection(endpoint, Delivery { queue: &send, pending: &mut pending }, &shared, &current, &decode, &ready, options)
             })();
             match attempt {
                 Err(Failure::Stopped) => break,
@@ -169,7 +169,12 @@ impl<Ready: Fn(bool)> Drop for Connected<'_, Ready> {
     }
 }
 
-fn connection<T>(endpoint: SocketAddr, send: &mpsc::SyncSender<T>, pending: &mut Option<T>,
+struct Delivery<'a, T> {
+    queue: &'a mpsc::SyncSender<T>,
+    pending: &'a mut Option<T>,
+}
+
+fn connection<T>(endpoint: SocketAddr, delivery: Delivery<'_, T>,
     control: &Control, current: &impl Fn() -> Result<bool, String>, decode: &impl Fn(&Value) -> Option<T>,
     ready: &impl Fn(bool), options: Options) -> Result<(), Failure> {
     check(control, current)?;
@@ -208,7 +213,7 @@ fn connection<T>(endpoint: SocketAddr, send: &mpsc::SyncSender<T>, pending: &mut
             health = Some((id, Instant::now() + options.rpc_timeout));
         }
         let deadline = if !subscribed { Some(subscribe_until) } else { Some(health.as_ref().map_or(next_health + options.rpc_timeout, |(_, until)| *until)) };
-        offer(pending, send, control, current, deadline, options.poll)?;
+        offer(delivery.pending, delivery.queue, control, current, deadline, options.poll)?;
         let Some(line) = read_frame(&mut reader, &mut bytes, options.frame_limit)? else { continue };
         let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
         if value.get("id").and_then(Value::as_str) == Some(SUBSCRIBE_ID) {
@@ -237,7 +242,7 @@ fn connection<T>(endpoint: SocketAddr, send: &mpsc::SyncSender<T>, pending: &mut
         }
         // Notifications may precede the subscription response or race a
         // health reply. Preserve them without treating them as RPC success.
-        if let Some(message) = decode(&value) { *pending = Some(message); }
+        if let Some(message) = decode(&value) { *delivery.pending = Some(message); }
     }
 }
 
