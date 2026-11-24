@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, buildCompare, buildLabel, type Build, type LinkPeer, type LinkStatus, type PeerTestReport, type ProbeSource, type StressReport } from "./api";
 import { LocalModelFit } from "./LocalModelFit";
 
@@ -566,6 +567,23 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                 <li>Run <strong>Communication stress test</strong> above and check that authenticated traffic used two distinct local interfaces. With access to both computers, disconnect the active path, check that the alternate interface becomes active, then restore the first path.</li>
               </ol>
             </details>
+            <details className="small">
+              <summary>Set up a Bluetooth PAN</summary>
+              <ol>
+                <li>Open the Bluetooth settings on both computers. Pair the devices and confirm the matching code if prompted.</li>
+                <li>Check whether one computer offers Bluetooth network sharing. In Windows 11, open <strong>Bluetooth &amp; devices → Devices</strong>, expand the paired computer, and choose <strong>Join</strong> next to <strong>Personal Area Network</strong> if offered. On a Mac, check <strong>System Settings → Network</strong> for a Bluetooth network service.</li>
+                <li>Confirm that both Bluetooth network adapters have IP addresses. Add the peer’s PAN address in Consilium if it is missing. On its peer card, open <strong>Test from a local adapter</strong>, refresh the sources, and select your PAN address before running <strong>Test Connection</strong>.</li>
+              </ol>
+              <p className="muted">A paired device needs a working Bluetooth network service before Consilium can send traffic over it.</p>
+              <div className="row wrap gap-sm">
+                <button type="button" className="link" onClick={() => void openUrl("https://support.microsoft.com/en-gb/windows/hardware/bluetooth/connect-to-a-bluetooth-network-in-windows").catch((error) => setError(String(error)))}>
+                  Microsoft PAN setup
+                </button>
+                <button type="button" className="link" onClick={() => void openUrl("https://support.apple.com/en-euro/guide/mac-help/blth1004/mac").catch((error) => setError(String(error)))}>
+                  Apple Bluetooth pairing
+                </button>
+              </div>
+            </details>
             <div className="pairing-tabs">
               <button
                 className={`tab-btn ${mode === "host" ? "active" : ""}`}
@@ -716,6 +734,8 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
   const [probeSources, setProbeSources] = useState<ProbeSource[]>([]);
   const [probeSource, setProbeSource] = useState("");
   const [probeSourcesError, setProbeSourcesError] = useState("");
+  const [probeSourcesLoading, setProbeSourcesLoading] = useState(false);
+  const unavailableSource = !!probeSource && !probeSources.some(({ address }) => address === probeSource);
   const [testingHandshake, setTestingHandshake] = useState(false);
   const [handshakeResult, setHandshakeResult] = useState<string | null>(null);
   const [refreshingRoutes, setRefreshingRoutes] = useState(false);
@@ -778,11 +798,16 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
   };
 
   async function refreshProbeSources() {
+    if (probeSourcesLoading) return;
+    setProbeSourcesLoading(true);
     setProbeSourcesError("");
     try {
       setProbeSources(await api.linkProbeSources());
     } catch (error) {
+      setProbeSources([]);
       setProbeSourcesError(`Could not read local adapters: ${String(error)}`);
+    } finally {
+      setProbeSourcesLoading(false);
     }
   }
 
@@ -821,7 +846,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
           <button
             className="btn small"
             onClick={runTest}
-            disabled={testing}
+            disabled={testing || unavailableSource}
             title="Check PeerLink endpoint reachability and authentication"
           >
             {testing ? "Testing Link…" : "Test Connection"}
@@ -967,12 +992,12 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         <summary>Test from a local adapter</summary>
         <label className="row gap-sm">
           Local source
-          <select disabled={testing} value={probeSource} onChange={(event) => {
+          <select disabled={testing || probeSourcesLoading} value={probeSource} onChange={(event) => {
             setProbeSource(event.target.value);
             setTestReport(null);
           }}>
             <option value="">System default</option>
-            {probeSource && !probeSources.some(({ address }) => address === probeSource) && (
+            {unavailableSource && (
               <option value={probeSource} disabled>{probeSource} (unavailable)</option>
             )}
             {probeSources.map(({ address, interface: adapter }) => (
@@ -980,6 +1005,10 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
             ))}
           </select>
         </label>
+        <button type="button" className="btn small ghost" disabled={testing || probeSourcesLoading}
+          onClick={() => void refreshProbeSources()}>
+          {probeSourcesLoading ? "Refreshing sources…" : "Refresh local sources"}
+        </button>
         {probeSourcesError && <p role="alert">{probeSourcesError}</p>}
         <p className="muted">Choose a source address, then run Test Connection. The live session stays in place.</p>
       </details>

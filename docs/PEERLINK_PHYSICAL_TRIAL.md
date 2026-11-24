@@ -72,6 +72,15 @@ fresh council report arrives and how many AIs have confirmations in both directi
 The check uses existing AI confirmations and sends no new prompts. In the same menu, open
 **Check local model memory** to scan for fresh peer capacity reports.
 
+### Bluetooth adapter check
+
+Pair the computers in their operating systems and establish a Bluetooth Personal Area Network
+(PAN) with an IP address on each end. The Consilium pairing guide under Multi-computer sync
+links to the platform setup instructions. Add the peer's PAN address if it is missing from the
+peer card, then open **Test from a local adapter** and choose **Refresh local sources**. Select
+the local PAN address and run **Test Connection**. An authenticated result from that source to
+the peer's PAN address is required before an outage or simultaneous transfer trial.
+
 ## Simultaneous transfer trial
 
 After the individual routes pass, test with Ethernet, Wi-Fi and Bluetooth PAN active. Start an isolated transfer that can select each interface explicitly. Record the bound source interface, destination interface, bytes delivered and timestamps for each path. Confirm the same payload checksum at the receiver.
