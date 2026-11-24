@@ -1001,7 +1001,7 @@ impl Link {
                 }
                 let receipt = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
                     let stream = connect_with_source(&endpoint, Some(source.address)).await
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| format!("Could not connect to the peer endpoint: {error}"))?;
                     let sender_ip = stream.local_addr().map_err(|error| error.to_string())?.ip().to_canonical();
                     let remote_ip = stream.peer_addr().map_err(|error| error.to_string())?.ip().to_canonical();
                     let chunk = random_hex(TRIAL_CHUNK_BYTES / 2);
@@ -1014,7 +1014,9 @@ impl Link {
                         return Err("The payload receipt did not match the requested path or checksum".into());
                     }
                     Ok::<_, String>(receipt)
-                }).await.map_err(|_| "Payload probe timed out")??;
+                }).await
+                    .unwrap_or_else(|_| Err("Payload probe timed out".into()))
+                    .map_err(|error| format!("Sample {} of {TRIAL_CHUNKS}: {error}", index + 1))?;
                 if receipts.last().is_some_and(|prev| prev.clock_id != receipt.clock_id || prev.received_ms > receipt.received_ms) {
                     return Err("The receiver clock changed during the test".into());
                 }
@@ -1622,7 +1624,8 @@ impl Link {
         let _ = stream.set_nodelay(true);
         let (r, mut w) = stream.into_split();
         let mut r = BufReader::new(r);
-        let Wire::Challenge { nonce } = read_wire(&mut r).await? else {
+        let Wire::Challenge { nonce } = read_wire(&mut r).await
+            .map_err(|error| format!("Could not read the peer challenge: {error}"))? else {
             return Err("expected challenge".into());
         };
         let mine = random_hex(16);
@@ -1631,8 +1634,9 @@ impl Link {
             payload["route_probe"]["transfer_chunk"] = json!(chunk);
         }
         let request = self.route_probe_frame(key, payload)?;
-        w.write_all(request.as_bytes()).await.map_err(|err| err.to_string())?;
-        let Wire::Sealed { from, n, c } = read_wire(&mut r).await? else {
+        w.write_all(request.as_bytes()).await.map_err(|error| format!("Could not send the probe: {error}"))?;
+        let Wire::Sealed { from, n, c } = read_wire(&mut r).await
+            .map_err(|error| format!("Could not read the authenticated probe reply: {error}"))? else {
             return Err("expected route probe reply".into());
         };
         if from != peer.node_id {
@@ -3090,6 +3094,13 @@ mod tests {
         let duplicate = || TransferPath { source: address, endpoint: dest.clone() };
         assert!(host.transfer_trial(&joiner_id, vec![duplicate(), duplicate()]).await.unwrap_err()
             .contains("different local adapter"));
+        let stub = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stub_endpoint = stub.local_addr().unwrap().to_string();
+        let close = tokio::spawn(async move { drop(stub.accept().await.unwrap()); });
+        let unavailable = host.transfer_path(&peer, &key, paths[0].source.clone(), stub_endpoint).await;
+        close.await.unwrap();
+        assert!(unavailable.receipts.is_empty());
+        assert!(unavailable.error.as_deref().unwrap().starts_with("Sample 1 of 4: Could not read the peer challenge"));
         assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, generation);
         assert!(transfer_receipt("a", address).is_err());
         assert!(transfer_receipt(&"g".repeat(TRIAL_CHUNK_BYTES), address).is_err());

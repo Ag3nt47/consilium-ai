@@ -61,7 +61,7 @@ payload transfer tests, and the Bluetooth PAN setup guide.
 Hosted installation and desktop launch checks passed on Windows, macOS and Linux. The macOS job
 verified the Apple Silicon and Intel executable slices. The Linux job exercised DEB and AppImage
 launches on Ubuntu and an RPM installation and launch on Fedora. The workflow skipped publication.
-The downloaded Windows and macOS archives matched the SHA-256 digests published by GitHub.
+All three downloaded archives matched the SHA-256 digests published by GitHub.
 
 | Platform | Draft archive | GitHub archive SHA-256 |
 | --- | --- | --- |
