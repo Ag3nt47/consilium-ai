@@ -810,8 +810,7 @@ mod verify_reply_tests {
 
     #[test]
     fn accepts_note_to_self_with_formatted_number() {
-        let v = sync(json!({ "sourceNumber": "+1 555 000 1111" }), json!({ "destinationNumber": "+1 (555) 000-1111", "message": " 1234 
-" }));
+        let v = sync(json!({ "sourceNumber": "+1 555 000 1111" }), json!({ "destinationNumber": "+1 (555) 000-1111", "message": " 1234 \n" }));
         assert_eq!(reply_with_code(&v, ACCT, "1234"), Some(Some(ME.to_string())));
     }
 
@@ -823,7 +822,7 @@ mod verify_reply_tests {
 
     #[test]
     fn rejects_group_message_with_code() {
-        let v = sync(json!({}), json!({ "groupInfo": { "groupId": "x" }, "message": "1234" }));
+        let v = sync(json!({}), json!({ "destinationNumber": ACCT, "groupInfo": { "groupId": "x" }, "message": "1234" }));
         assert!(reply_with_code(&v, ACCT, "1234").is_none());
     }
 
