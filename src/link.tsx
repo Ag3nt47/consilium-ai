@@ -197,14 +197,24 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
   const [stressing, setStressing] = useState(false);
   const [stress, setStress] = useState<StressReport[] | null>(null);
   const [stressPeer, setStressPeer] = useState("");
+  const [stressSources, setStressSources] = useState<ProbeSource[]>([]);
+  const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const stressPeers = status?.peers ?? [];
-  const canStress = stressPeers.some((peer) => peer.connected && (!stressPeer || stressPeer === peer.node_id));
+  const canStress = stressPeers.some((peer) => peer.connected && (!stressPeer || stressPeer === peer.node_id))
+    && selectedSources.every((address) => stressSources.some((source) => source.address === address));
+  const refreshStressSources = async () => {
+    try {
+      setStressSources(await api.linkProbeSources());
+    } catch (error) {
+      setError(`Could not read local adapters: ${String(error)}`);
+    }
+  };
   const runStress = async () => {
     setStressing(true);
     setStress(null);
     setError(null);
     try {
-      setStress(await api.stressTestLink(stressPeer || undefined));
+      setStress(await api.stressTestLink(stressPeer || undefined, selectedSources));
     } catch (e) {
       setError(`Stress test failed: ${e}`);
     } finally {
@@ -449,11 +459,28 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                   </select>
                 </label>
               )}
+              <details className="small" onToggle={(event) => { if (event.currentTarget.open) void refreshStressSources(); }}>
+                <summary>Try local source addresses</summary>
+                <p className="muted">Select source addresses to try them in order, then restore the default route. Leave them clear to test each saved endpoint.</p>
+                {stressSources.map(({ address, interface: adapter }) => (
+                  <label key={address} className="row gap-sm">
+                    <input type="checkbox" disabled={stressing} checked={selectedSources.includes(address)}
+                      onChange={(event) => {
+                        setSelectedSources((previous) => event.target.checked
+                          ? [...previous, address] : previous.filter((entry) => entry !== address));
+                        setStress(null);
+                      }} />
+                    {adapter} ({address})
+                  </label>
+                ))}
+                {selectedSources.length > 0 && <button type="button" className="btn small ghost" disabled={stressing}
+                  onClick={() => { setSelectedSources([]); setStress(null); }}>Clear selected sources</button>}
+              </details>
               <button
                 className="btn small"
                 onClick={runStress}
                 disabled={stressing || !canStress}
-                title="Tries each configured endpoint in turn and checks for an authenticated packet. Shows the local interface when available, then tries to reconnect using the saved endpoints. Results are posted in chat. Physical failover requires a separate test with a transport disconnected."
+                title="Tries the selected source addresses or each configured endpoint and checks for an authenticated packet. Shows the local interface when available, then tries to reconnect using the saved endpoints. Results are posted in chat. Physical failover requires a separate test with a transport disconnected."
               >
                 {stressing ? "Stress testing routes…" : "Communication stress test"}
               </button>
@@ -466,7 +493,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                       {r.computer}:{" "}
                       {r.routes.length === 0
                         ? "not connected, nothing tested"
-                        : `${r.routes.filter((x) => x.ok).length} of ${r.routes.length} endpoints carried traffic`}
+                        : `${passed.length} of ${r.routes.length} ${r.routes.some((route) => route.requested_source) ? "local sources" : "endpoints"} carried traffic`}
                     </div>
                     {r.restored && (
                       <div className="muted small">
@@ -485,10 +512,10 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                       </div>
                     )}
                     {r.routes.map((x) => (
-                      <div key={x.addr} className={`handshake-item ${x.ok ? "acknowledged" : "pending"}`}>
+                      <div key={x.requested_source ?? x.addr} className={`handshake-item ${x.ok ? "acknowledged" : "pending"}`}>
                         <span className="handshake-mark">{x.ok ? "✓" : "✗"}</span> {x.kind} <code>{x.addr}</code>{" "}
                         <span className="muted small">
-                          {x.detail}{x.ok && `, local interface ${x.local_interface ?? "unavailable"}${x.local_addr ? `, source ${x.local_addr}` : ""}`}
+                          {x.detail}{x.requested_source && `, requested source ${x.requested_source}`}{x.ok && `, local interface ${x.local_interface ?? "unavailable"}${x.local_addr ? `, source ${x.local_addr}` : ""}`}
                         </span>
                       </div>
                     ))}

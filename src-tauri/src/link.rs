@@ -699,9 +699,15 @@ impl Link {
     /// of its routes in turn (the others are left out, as if they had failed), proves each with a
     /// packet received over it, and finally returns the link to the fastest route. A route that
     /// doesn't connect, or carries nothing, fails and the test moves on.
-    pub async fn stress_test(&self, node_id: Option<&str>) -> Result<Vec<StressReport>, String> {
+    pub async fn stress_test(&self, node_id: Option<&str>, sources: &[IpAddr]) -> Result<Vec<StressReport>, String> {
         let _run = self.0.stress_test_lock.try_lock().map_err(|_| "A communication stress test is already running")?;
         let token = self.0.running.lock().unwrap().clone().ok_or("linking is off")?;
+        if !sources.is_empty() {
+            let interfaces = if_addrs::get_if_addrs().map_err(|error| error.to_string())?;
+            for &source in sources {
+                validate_probe_source(&interfaces, source)?;
+            }
+        }
         let peers = match node_id {
             Some(id) => {
                 let peer = self.peer(id).ok_or("Linked computer not found")?;
@@ -736,11 +742,17 @@ impl Link {
             }
             let Some(peer) = self.peer(&peer.node_id) else { continue };
             let mut routes = Vec::new();
-            for addr in peer.addrs.iter().take(12) {
-                routes.push(self.switch_to(&peer, std::slice::from_ref(addr), &token).await);
+            if sources.is_empty() {
+                for addr in peer.addrs.iter().take(12) {
+                    routes.push(self.switch_to(&peer, std::slice::from_ref(addr), None, &token).await);
+                }
+            } else {
+                for &source in sources {
+                    routes.push(self.switch_to(&peer, &peer.addrs, Some(source), &token).await);
+                }
             }
             // Back to normal: the fastest route that answers.
-            let restored = self.switch_to(&peer, &peer.addrs, &token).await;
+            let restored = self.switch_to(&peer, &peer.addrs, None, &token).await;
             out.push(StressReport {
                 computer: self.peer_name(&peer.node_id),
                 node_id: peer.node_id,
@@ -752,18 +764,18 @@ impl Link {
     }
 
     /// Moves the live link with `peer` onto the fastest of `addrs`, and waits for a packet over it.
-    async fn switch_to(&self, peer: &Peer, addrs: &[String], token: &CancellationToken) -> RouteSwitch {
+    async fn switch_to(&self, peer: &Peer, addrs: &[String], source: Option<IpAddr>, token: &CancellationToken) -> RouteSwitch {
         let label = addrs.first().cloned().unwrap_or_default();
         let generation = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| s.generation);
         let started = std::time::Instant::now();
         let attempt = token.child_token();
         let spawn_dial = || {
             let (me, p, a, t) = (self.clone(), peer.clone(), addrs.to_vec(), attempt.clone());
-            tokio::spawn(async move { me.dial_on(p, &a, t, None).await })
+            tokio::spawn(async move { me.dial_on(p, &a, source, t, None).await })
         };
         let mut dial = spawn_dial();
         let mut switched_at: Option<(String, u64, u64, u64)> = None;
-        let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, local_interface: None, local_addr: None, detail };
+        let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, requested_source: source, local_interface: None, local_addr: None, detail };
         while started.elapsed() < STRESS_SWITCH_TIMEOUT {
             tokio::select! {
                 _ = attempt.cancelled() => return fail(label, "the direct link was turned off".into()),
@@ -775,7 +787,8 @@ impl Link {
                 // Only a session over one of the routes under test counts. The other computer may
                 // dial in meanwhile, and that session's route is its own outgoing port: crediting
                 // it passed a dead route, or reported the working one under the wrong address.
-                if s.generation <= generation || s.tx.is_none() {
+                if s.generation <= generation || s.tx.is_none() ||
+                    source.is_some_and(|ip| s.local_addr.is_none_or(|addr| addr.ip().to_canonical() != ip.to_canonical())) {
                     (None, 0, s.generation, None, None)
                 } else {
                     (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in, s.generation, s.local_interface.clone(), s.local_addr)
@@ -789,6 +802,7 @@ impl Link {
                             addr: r.clone(),
                             ok: true,
                             ms: Some(*ms),
+                            requested_source: source,
                             local_interface: interface,
                             local_addr,
                             detail: format!("switched in {ms} ms, traffic confirmed after {} ms", started.elapsed().as_millis()),
@@ -850,12 +864,7 @@ impl Link {
         let peer = self.peer(node_id).ok_or_else(|| format!("computer {node_id} not found"))?;
         let key = peer_key(&peer)?;
         let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
-        let selected = source.map(|address| {
-            interface_name(&interfaces, address)
-                .filter(|_| route_ip_allowed(address))
-                .map(|interface| ProbeSource { address, interface })
-                .ok_or("The selected source address is not available on a unique local interface")
-        }).transpose()?;
+        let selected = source.map(|address| validate_probe_source(&interfaces, address)).transpose()?;
         let mut probes = tokio::task::JoinSet::new();
         for (index, addr) in peer.addrs.iter().take(12).cloned().enumerate() {
             let link = self.clone();
@@ -865,7 +874,7 @@ impl Link {
                 let kind = route_kind(&addr).to_string();
                 let started = std::time::Instant::now();
                 let timeout = Duration::from_secs(1);
-                let (rtt_ms, authenticated_ms, local_ip, status) = match tokio::time::timeout(timeout, connect_probe(&addr, source)).await {
+                let (rtt_ms, authenticated_ms, local_ip, status) = match tokio::time::timeout(timeout, connect_with_source(&addr, source)).await {
                     Ok(Ok(stream)) => {
                         let elapsed = started.elapsed().as_millis() as u64;
                         let local_ip = stream.local_addr().ok().map(|address| address.ip());
@@ -1382,7 +1391,7 @@ impl Link {
                 let t = token.clone();
                 tokio::spawn(async move {
                     let addrs = peer.addrs.clone();
-                    let _ = me2.dial_on(peer, &addrs, t, Some(pending)).await;
+                    let _ = me2.dial_on(peer, &addrs, None, t, Some(pending)).await;
                 });
             }
             // A working session resets that computer's back-off.
@@ -1396,6 +1405,7 @@ impl Link {
         self,
         peer: Peer,
         addrs: &[String],
+        source: Option<IpAddr>,
         token: CancellationToken,
         pending: Option<oneshot::Sender<()>>,
     ) -> Result<(), String> {
@@ -1405,7 +1415,7 @@ impl Link {
         loop {
             let result = tokio::select! {
                 _ = token.cancelled() => return Ok(()),
-                result = fastest_route(&remaining) => result,
+                result = fastest_route(&remaining, source) => result,
             };
             let Some((stream, route, rtt)) = result else { return Err(failure) };
             let _ = stream.set_nodelay(true);
@@ -1694,7 +1704,7 @@ impl Link {
     }
 }
 
-async fn connect_probe(endpoint: &str, source: Option<IpAddr>) -> std::io::Result<TcpStream> {
+async fn connect_with_source(endpoint: &str, source: Option<IpAddr>) -> std::io::Result<TcpStream> {
     let Some(source) = source else { return TcpStream::connect(endpoint).await };
     let target = tokio::net::lookup_host(endpoint).await?
         .find(|target| target.is_ipv4() == source.is_ipv4())
@@ -1702,6 +1712,13 @@ async fn connect_probe(endpoint: &str, source: Option<IpAddr>) -> std::io::Resul
     let socket = if source.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
     socket.bind(SocketAddr::new(source, 0))?;
     socket.connect(target).await
+}
+
+fn validate_probe_source(interfaces: &[if_addrs::Interface], address: IpAddr) -> Result<ProbeSource, &'static str> {
+    interface_name(interfaces, address)
+        .filter(|_| route_ip_allowed(address))
+        .map(|interface| ProbeSource { address, interface })
+        .ok_or("The selected source address is not available on a unique local interface")
 }
 
 /// Usable source addresses with an unambiguous local interface, for the connection diagnostic.
@@ -1745,6 +1762,7 @@ pub struct RouteSwitch {
     pub ok: bool,
     /// How long the switch took.
     pub ms: Option<u64>,
+    pub requested_source: Option<IpAddr>,
     pub local_interface: Option<String>,
     pub local_addr: Option<SocketAddr>,
     pub detail: String,
@@ -1767,13 +1785,17 @@ impl StressReport {
             return format!("Communication stress test ({when}) with {}: not connected right now, so nothing was tested.", self.computer);
         }
         let ok = self.routes.iter().filter(|r| r.ok).count();
+        let subject = if self.routes.iter().any(|r| r.requested_source.is_some()) { "local sources" } else { "configured endpoints" };
         let mut s = format!(
-            "Communication stress test ({when}) with {}: {ok} of {} configured endpoints carried authenticated traffic during individual connection attempts.",
+            "Communication stress test ({when}) with {}: {ok} of {} {subject} carried authenticated traffic during individual connection attempts.",
             self.computer,
             self.routes.len()
         );
         for r in &self.routes {
             s.push_str(&format!("\n{} {} {}: {}", if r.ok { "✓" } else { "✗" }, r.kind, r.addr, r.detail));
+            if let Some(address) = r.requested_source {
+                s.push_str(&format!(", requested source {address}"));
+            }
             if let Some(interface) = &r.local_interface {
                 s.push_str(&format!(", local interface {interface}"));
             }
@@ -1792,12 +1814,12 @@ impl StressReport {
     }
 }
 
-async fn fastest_route(addrs: &[String]) -> Option<(TcpStream, String, u64)> {
+async fn fastest_route(addrs: &[String], source: Option<IpAddr>) -> Option<(TcpStream, String, u64)> {
     let mut probes = tokio::task::JoinSet::new();
     for addr in addrs.iter().take(12).cloned() {
         probes.spawn(async move {
             let started = std::time::Instant::now();
-            let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr)).await.ok()?.ok()?;
+            let stream = tokio::time::timeout(CONNECT_TIMEOUT, connect_with_source(&addr, source)).await.ok()?.ok()?;
             Some((stream, addr, started.elapsed().as_millis() as u64))
         });
     }
@@ -2352,13 +2374,13 @@ mod tests {
         // A startup test holding the guard blocks a second diagnostic on the same device.
         let running = joiner.0.stress_test_lock.lock().await;
         assert_eq!(
-            joiner.stress_test(None).await.unwrap_err(),
+            joiner.stress_test(None, &[]).await.unwrap_err(),
             "A communication stress test is already running"
         );
         drop(running);
         let host_id = host.status().node_id;
         let previous_session = joiner.0.peers.lock().unwrap()[&host_id].session_cancel.clone().unwrap();
-        let reports = joiner.stress_test(None).await.unwrap();
+        let reports = joiner.stress_test(None, &[]).await.unwrap();
         assert!(previous_session.is_cancelled(), "the replaced session stops writing immediately");
         assert_eq!(reports.len(), 1);
         let r = &reports[0];
@@ -2399,11 +2421,18 @@ mod tests {
             let peers = host.0.peers.lock().unwrap();
             (peers[&selected_id].generation, peers[&other_id].generation)
         };
-        assert_eq!(host.stress_test(Some("missing")).await.unwrap_err(), "Linked computer not found");
-        let reports = host.stress_test(Some(&selected_id)).await.unwrap();
+        assert_eq!(host.stress_test(Some("missing"), &[]).await.unwrap_err(), "Linked computer not found");
+        let source: IpAddr = "127.0.0.1".parse().unwrap();
+        let reports = host.stress_test(Some(&selected_id), &[source]).await.unwrap();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].node_id, selected_id);
+        assert_eq!(reports[0].routes.len(), 1);
+        let route = &reports[0].routes[0];
+        assert!(route.ok, "{route:?}");
+        assert_eq!(route.requested_source, Some(source));
+        assert_eq!(route.local_addr.unwrap().ip(), source);
         assert!(reports[0].restored.as_ref().is_some_and(|route| route.ok), "{reports:?}");
+        assert!(reports[0].restored.as_ref().unwrap().requested_source.is_none());
         {
             let peers = host.0.peers.lock().unwrap();
             assert!(peers[&selected_id].generation > selected_before);
@@ -2657,7 +2686,7 @@ mod tests {
             let me = joiner.clone();
             let token = token.clone();
             let routes = [first, second.clone()];
-            tokio::spawn(async move { me.dial_on(peer, &routes, token, None).await })
+            tokio::spawn(async move { me.dial_on(peer, &routes, None, token, None).await })
         };
         assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(second.as_str())).await);
         token.cancel();
