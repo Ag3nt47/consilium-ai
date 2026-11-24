@@ -148,6 +148,14 @@ pub fn git_summary(workspace: &Path) -> Option<String> {
     Some(summary_from_status(workspace, &status))
 }
 
+/// Read tracked project state for the local audit without starting a repository fsmonitor hook.
+pub(crate) fn audit_git_summary(workspace: &Path) -> Option<String> {
+    let status = git_output(workspace, &[
+        "-c", "core.fsmonitor=false", "status", "--short", "--branch", "--untracked-files=no",
+    ], PEER_STATUS_BYTES)?;
+    Some(summary_from_status(workspace, &status))
+}
+
 fn workspace_status(workspace: &Path) -> Option<GitOutput> {
     git_output(workspace, &["status", "--short", "--branch", "--untracked-files=normal"], PEER_STATUS_BYTES)
 }

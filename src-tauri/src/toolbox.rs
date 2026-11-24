@@ -220,6 +220,16 @@ pub fn inventory() -> Vec<(String, PathBuf)> {
     inventory_in(&search_dirs())
 }
 
+/// File presence only, for the on-demand local audit. No provider CLI is launched.
+pub(crate) fn audit_tools() -> Vec<(&'static str, bool)> {
+    let dirs = search_dirs();
+    ["git", "gh", "node", "npm", "cargo", "rustc", "python", "python3", "powershell", "pwsh",
+        "claude", "codex", "gemini", "agy", "ollama", "llama-cli", "llama-server", "rpc-server"]
+        .into_iter()
+        .map(|name| (name, present(name, &dirs).is_some()))
+        .collect()
+}
+
 fn inventory_in(dirs_: &[PathBuf]) -> Vec<(String, PathBuf)> {
     known_tools(std::env::consts::OS)
         .iter()

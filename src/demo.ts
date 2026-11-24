@@ -484,6 +484,9 @@ export const demoApi = {
     error: null,
   }),
   linkProbeSources: async () => [{ address: "192.168.1.15", interface: "Wi-Fi" }],
+  readEnvironmentAudit: async () => {
+    throw new Error("Open the desktop app to audit this computer.");
+  },
   linkTransferTrial: async () => {
     throw new Error("Open the desktop app to send an authenticated sample to a linked computer.");
   },

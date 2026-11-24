@@ -57,6 +57,7 @@ import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo"
 
 const UpgradeProgress = lazy(() => import("./UpgradeProgress"));
 const OfflineSkills = lazy(() => import("./OfflineSkills"));
+const EnvironmentAudit = lazy(() => import("./EnvironmentAudit"));
 
 const THEMES = [
   { id: "glass", name: "visionOS Glass", note: "Frosted translucent glass, ambient glow" },
@@ -4005,6 +4006,7 @@ export default function App() {
             <div className="section-label">Tools</div>
             <Suspense fallback={null}>
               <OfflineSkills copyText={copyText} />
+              <EnvironmentAudit key={current ?? ""} conversation={current ?? undefined} />
             </Suspense>
             <ToolsSettings
               ais={members.map((a) => ({ id: a.id, name: a.name }))}
