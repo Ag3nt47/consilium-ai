@@ -288,7 +288,11 @@ mod tests {
         let until = Instant::now() + Duration::from_secs(3);
         loop {
             match listener.accept() {
-                Ok((stream, _)) => { stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap(); return stream; }
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    return stream;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until => thread::sleep(Duration::from_millis(5)),
                 Err(error) => panic!("fake daemon accept: {error}"),
             }
@@ -429,6 +433,7 @@ mod tests {
     fn a_notification_interleaved_with_the_matching_health_reply_is_retained() {
         let listener = listener();
         let endpoint = listener.local_addr().unwrap();
+        let (healthy, next_health) = mpsc::channel();
         let server = thread::spawn(move || {
             let mut stream = accept(&listener);
             let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -436,10 +441,14 @@ mod tests {
             let health = read(&mut reader);
             event(&mut stream, 81);
             write(&mut stream, json!({"jsonrpc":"2.0","id":health["id"], "result":{"version":"fixture"}}));
+            // A second probe shows the first response was consumed before teardown.
+            assert_eq!(read(&mut reader)["method"], "version");
+            healthy.send(()).unwrap();
             eof(&mut reader);
         });
         let subscription = start_with(endpoint, || Ok(true), decode, |_| {}, options()).unwrap();
         assert_eq!(subscription.recv_timeout(Duration::from_secs(2)).unwrap(), 81);
+        next_health.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(subscription.is_ready());
         drop(subscription);
         server.join().unwrap();
