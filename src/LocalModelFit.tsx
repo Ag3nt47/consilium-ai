@@ -22,6 +22,7 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
   const [preferSplit, setPreferSplit] = useState(false);
   const [distribution, setDistribution] = useState<"balanced" | "capacity">("balanced");
   const [customWeights, setCustomWeights] = useState("");
+  const [customModelName, setCustomModelName] = useState("");
   const [fileMessage, setFileMessage] = useState("");
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
@@ -29,19 +30,21 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
   const host = hostMemory ?? scannedHostMemory ?? (availableGiB && availableGiB > 0 ? memoryInput(availableGiB) : "");
   const hostName = "This computer";
   const usedNames = new Set([deviceName(hostName)]);
-  for (const device of devices) {
-    if (typeof device.id === "string") usedNames.add(deviceName(device.name));
-  }
-  const included = devices.filter((device) => {
-    if (typeof device.id === "string") return true;
+  const included = new Set<Device>();
+  // Prefer fresh scans over manual entries when both refer to the same named computer.
+  for (const device of [...devices.filter((entry) => typeof entry.id === "string"), ...devices.filter((entry) => typeof entry.id === "number")]) {
     const name = deviceName(device.name);
-    if (!name) return true;
-    if (usedNames.has(name)) return false;
+    if (!name || usedNames.has(name)) continue;
     usedNames.add(name);
-    return true;
-  });
-  const budgets = [{ name: hostName, memory: host }, ...included];
-  const models = modelFit(budgets, bits, overhead, customWeights, preferSplit, distribution);
+    included.add(device);
+  }
+  const budgets = [{ name: hostName, memory: host }, ...devices.filter((device) => included.has(device))
+    .map(({ name, memory }) => ({ name: name.trim(), memory }))];
+  const models = modelFit(budgets, bits, overhead, customWeights, preferSplit, distribution).map((model) =>
+    customModelName && model.name === "Custom model" ? { ...model, name: customModelName } : model);
+  const splits = models.flatMap(({ name, weights, allocation }) => allocation && allocation.length >= 2
+    ? [{ name, weights, allocation }] : []);
+  const exportableSplits = splits.filter(({ allocation }) => allocation.every(({ name }) => !name.includes("=")));
   const capacities = weightBudgets(budgets, overhead);
   const totalCapacity = capacities.reduce((total, device) => total + device.capacity, 0);
 
@@ -60,7 +63,16 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
     return [gib(Math.ceil(target * 10) / 10), ...shortfalls].join(" · ");
   };
 
-  async function copyEstimate() {
+  async function copyReport(report: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(report);
+      setCopyStatus(`${label} copied.`);
+    } catch {
+      setCopyStatus(`Could not copy the ${label.toLowerCase()}.`);
+    }
+  }
+
+  function copyEstimate() {
     const report = [
       "Consilium local model memory estimate",
       `Catalog precision: ${bits}-bit. Runtime allowance: ${gib(Number(overhead))} per device.`,
@@ -74,12 +86,7 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
       "",
       "Memory estimate only. Verify runner compatibility and inference performance separately.",
     ].join("\n");
-    try {
-      await navigator.clipboard.writeText(report);
-      setCopyStatus("Memory estimate copied.");
-    } catch {
-      setCopyStatus("Could not copy the memory estimate.");
-    }
+    return copyReport(report, "Memory estimate");
   }
 
   async function scanPeers() {
@@ -178,7 +185,7 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
             </label>
             <button type="button" className="btn ghost small-btn" onClick={() => setDevices((previous) => previous.filter((item) => item.id !== device.id))}>Remove device {typeof device.id === "number" ? device.id : device.name}</button>
             {device.runners && <span className="muted">Model tools detected: {device.runners.join(", ") || "none reported"}.</span>}
-            {!included.includes(device) && <span className="muted">Excluded because another device uses this name. Use a unique name to include it.</span>}
+            {!included.has(device) && <span className="muted">Enter a unique device name to include this device.</span>}
           </div>
         ))}
         <button type="button" className="btn ghost small-btn" onClick={() => {
@@ -215,6 +222,7 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
               const model = ollamaModels.find(({ name }) => name === event.target.value);
               if (!model) return;
               setCustomWeights(String(model.size / 2 ** 30));
+              setCustomModelName(model.name);
               setFileMessage(`Estimated from the installed size of ${model.name}.`);
             }}>
               <option value="">Choose a model</option>
@@ -228,6 +236,7 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
           Custom model weight file size (GiB)
           <input type="number" min="0" step="any" value={customWeights} onChange={(e) => {
             setCustomWeights(e.target.value);
+            setCustomModelName("");
             setFileMessage("");
           }} />
         </label>
@@ -247,6 +256,7 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
               return;
             }
             setCustomWeights(String(files.reduce((total, file) => total + file.size, 0) / 2 ** 30));
+            setCustomModelName("");
             setFileMessage(`Estimated from ${files.length} GGUF ${files.length === 1 ? "file" : "files"}.`);
           }} />
         </label>
@@ -273,7 +283,15 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
         </tbody>
       </table>
       <button type="button" className="btn ghost small-btn" onClick={() => void copyEstimate()}>Copy memory estimate</button>
+      {splits.length > 0 && (
+        <button type="button" className="btn ghost small-btn" disabled={!exportableSplits.length}
+          onClick={() => void copyReport(JSON.stringify({ models: exportableSplits }, null, 2), "Split plan JSON")}>
+          Copy split plan JSON
+        </button>
+      )}
       {copyStatus && <span className="muted small" role="status"> {copyStatus}</span>}
+      {exportableSplits.length < splits.length && <p className="muted small">Use device names without an equals sign to export those splits.</p>}
+      {exportableSplits.length > 0 && <p className="muted small">Save the JSON and pass it to <code>scripts/llama-split-args.mjs</code> with the exact model name and your runner's device names.</p>}
       <p className="muted">Weights use parameter count × precision, with 15% packed-weight overhead at 4 or 8 bits. Increase the runtime allowance for longer contexts or larger batches. A split estimate requires a runner that supports the model and can partition it across those devices. Check available disk space, supported GPU memory, and wired-network throughput before testing.</p>
     </details>
   );

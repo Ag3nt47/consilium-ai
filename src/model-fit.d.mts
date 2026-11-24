@@ -6,7 +6,7 @@ export function modelFit(
   customWeights?: string | number,
   preferSplit?: boolean,
   distribution?: "balanced" | "capacity",
-): { name: string; weights: number; fit: string }[];
+): { name: string; weights: number; fit: string; allocation?: { name: string; allocated: number }[] }[];
 
 export function equalSplitMemoryGiB(weights: number, count: number, overhead: number | string): number;
 
