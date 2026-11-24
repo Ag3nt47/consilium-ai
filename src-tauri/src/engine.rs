@@ -1091,21 +1091,24 @@ checking what it would remove (list the folder first), so everything else still 
             };
             // Git can briefly touch many files in a large repository, so keep it off the async
             // executor and bound the wait. A slow/non-git folder must never delay the AI turn.
-            // The project's git state for linked computers, refreshed before and after each answer.
-            if let Some(path) = ws_path.clone() {
-                refresh_git_summary(path.clone()).await;
-            }
+            // Share one status read between the prompt and the linked-computer summary.
             let summary_path = ws_path.clone();
             if let Some(path) = state_path {
-                if let Ok(Ok(Some(state))) = tokio::time::timeout(
+                if let Ok(Ok(snapshot)) = tokio::time::timeout(
                     Duration::from_secs(3),
-                    tokio::task::spawn_blocking(move || prompt::workspace_state(&path, !local)),
+                    tokio::task::spawn_blocking(move || prompt::workspace_snapshot(&path, !local)),
                 )
                 .await
                 {
-                    system.push_str("\n\n");
-                    system.push_str(&state);
+                    let (peer_summary, state) = snapshot.map_or((None, None), |snapshot| (Some(snapshot.peer_summary), snapshot.prompt));
+                    crate::link::set_git_summary(peer_summary);
+                    if let Some(state) = state {
+                        system.push_str("\n\n");
+                        system.push_str(&state);
+                    }
                 }
+            } else if let Some(path) = ws_path.clone() {
+                refresh_git_summary(path).await;
             }
             let local_window = match agents::provider_of(agent) {
                 Some(provider) => tokio::select! {

@@ -29,6 +29,7 @@ const MAX_WORKSPACE_STATUS_BYTES: usize = 8_000;
 const LOCAL_WORKSPACE_DIFF_BYTES: usize = 2_000;
 const LOCAL_WORKSPACE_STATUS_BYTES: usize = 1_200;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_millis(1_500);
+const PEER_STATUS_BYTES: usize = 64 * 1024;
 const MAX_UNTRACKED_PREFLIGHT_FILES: usize = 4;
 const MAX_UNTRACKED_PREFLIGHT_BYTES: u64 = 256 * 1024;
 const MAX_PATCH_DIAGNOSTICS: usize = 4;
@@ -143,11 +144,19 @@ fn git_capture_until(
 /// A one-line git summary of a project folder for linked computers, such as
 /// "consilium-ai · main @ 1a2b3c4 · 3 changed". `None` if the folder isn't a git repository.
 pub fn git_summary(workspace: &Path) -> Option<String> {
-    let status = git_output(workspace, &["status", "--short", "--branch", "--untracked-files=normal"], 64 * 1024)?;
+    let status = workspace_status(workspace)?;
+    Some(summary_from_status(workspace, &status))
+}
+
+fn workspace_status(workspace: &Path) -> Option<GitOutput> {
+    git_output(workspace, &["status", "--short", "--branch", "--untracked-files=normal"], PEER_STATUS_BYTES)
+}
+
+fn summary_from_status(workspace: &Path, status: &GitOutput) -> String {
     let mut lines = status.shown.lines();
     let head = lines.next().unwrap_or_default();
     let changed = lines.filter(|l| !l.trim().is_empty()).count();
-    Some(summarize_git(&folder_name(workspace), head, changed, status.truncated))
+    summarize_git(&folder_name(workspace), head, changed, status.truncated)
 }
 
 fn folder_name(workspace: &Path) -> String {
@@ -265,17 +274,30 @@ fn untracked_preflight(workspace: &Path) -> Option<String> {
     (remaining < MAX_PATCH_DIAGNOSTICS).then_some(out)
 }
 
-pub fn workspace_state(workspace: &Path, detailed: bool) -> Option<String> {
+pub struct WorkspaceSnapshot {
+    pub peer_summary: String,
+    pub prompt: Option<String>,
+}
+
+pub fn workspace_snapshot(workspace: &Path, detailed: bool) -> Option<WorkspaceSnapshot> {
+    let status = workspace_status(workspace)?;
+    Some(WorkspaceSnapshot {
+        peer_summary: summary_from_status(workspace, &status),
+        prompt: workspace_prompt(workspace, &status, detailed),
+    })
+}
+
+fn workspace_prompt(workspace: &Path, status: &GitOutput, detailed: bool) -> Option<String> {
     let (status_limit, diff_limit) = if detailed {
         (MAX_WORKSPACE_STATUS_BYTES, MAX_WORKSPACE_DIFF_BYTES)
     } else {
         (LOCAL_WORKSPACE_STATUS_BYTES, LOCAL_WORKSPACE_DIFF_BYTES)
     };
-    let status = git_output(
-        workspace,
-        &["status", "--short", "--branch", "--untracked-files=normal"],
-        status_limit,
-    )?;
+    let mut status_end = status_limit.min(status.shown.len());
+    while !status.shown.is_char_boundary(status_end) {
+        status_end -= 1;
+    }
+    let status_excerpt = &status.shown[..status_end];
     let read_diff = || {
         git_output(
             workspace,
@@ -314,7 +336,7 @@ pub fn workspace_state(workspace: &Path, detailed: bool) -> Option<String> {
     state.write_u64(status.digest);
     state.write_u64(diff.digest);
     let id = state.finish();
-    let status_text = crate::redact::scrub(status.shown.trim());
+    let status_text = crate::redact::scrub(status_excerpt.trim());
     let diff_text = crate::redact::scrub(diff.shown.trim());
     let mut out = format!("PROJECT STATE (read-only snapshot refreshed immediately before this answer; id {id:016x}):\n");
     if status_text.is_empty() {
@@ -322,7 +344,7 @@ pub fn workspace_state(workspace: &Path, detailed: bool) -> Option<String> {
     } else {
         out.push_str("Git status:\n");
         out.push_str(&status_text);
-        if status.truncated {
+        if status.truncated || status_end < status.shown.len() {
             out.push_str("\n… status truncated");
         }
     }
@@ -1511,11 +1533,12 @@ mod tests {
         std::fs::write(repo.join("bundle.txt"), "initial generated content\n").unwrap();
         git(&["add", "note.txt", "bundle.txt", ".gitattributes"]);
         git(&["commit", "-qm", "base", "--no-gpg-sign"]);
+        let snapshot = |detailed| workspace_snapshot(&repo, detailed).unwrap().prompt.unwrap();
 
         let secret = format!("sk-{}", "Ab3_".repeat(8));
         std::fs::write(repo.join("note.txt"), format!("base\nAPI_KEY={secret}\n")).unwrap();
         std::fs::write(repo.join("bundle.txt"), "bulky generated output\n".repeat(1_000)).unwrap();
-        let state = workspace_state(&repo, false).unwrap();
+        let state = snapshot(false);
         assert!(state.contains("bundle.txt"));
         assert!(!state.contains("bulky generated output"));
         assert!(state.contains("PROJECT STATE") && state.contains("note.txt"));
@@ -1525,19 +1548,19 @@ mod tests {
 
         std::fs::write(repo.join("bundle.txt"), "generated trailing whitespace \n").unwrap();
         std::fs::write(repo.join("note.txt"), "base\r\nclean addition\r\n").unwrap();
-        let checked = workspace_state(&repo, true).unwrap();
+        let checked = snapshot(true);
         assert!(checked.contains("no Git whitespace or conflict marker issues"));
         std::fs::write(repo.join("note.txt"), "base\nprivate fixture source \n").unwrap();
-        let checked = workspace_state(&repo, true).unwrap();
+        let checked = snapshot(true);
         assert!(checked.contains("note.txt:2: trailing whitespace."));
         assert!(patch_preflight(&repo).unwrap().contains("note.txt:2: trailing whitespace."));
         assert!(!patch_preflight(&repo).unwrap().contains("private fixture source"));
-        assert!(!workspace_state(&repo, false).unwrap().contains("Tracked patch preflight"));
+        assert!(!snapshot(false).contains("Tracked patch preflight"));
 
         let edited = format!("base\n{}FULL PATCH TAIL\n", "ordinary source line\n".repeat(260));
         std::fs::write(repo.join("note.txt"), edited).unwrap();
-        let local = workspace_state(&repo, false).unwrap();
-        let cloud = workspace_state(&repo, true).unwrap();
+        let local = snapshot(false);
+        let cloud = snapshot(true);
         assert!(local.contains("diff truncated") && local.contains("ordinary source line"));
         assert!(!local.contains("FULL PATCH TAIL"));
         assert!(local.len() < 2_700, "local snapshot was {} bytes", local.len());
@@ -1553,17 +1576,27 @@ mod tests {
         std::fs::write(repo.join("scratch-data.txt"), "generated issue \n").unwrap();
         std::fs::write(repo.join("clean.txt"), "valid CRLF\r\n").unwrap();
         std::fs::write(repo.join("large.txt"), "irrelevant data \n".repeat(20_000)).unwrap();
-        let checked = workspace_state(&repo, true).unwrap();
+        let checked = snapshot(true);
         assert!(checked.contains("Untracked file preflight"));
         assert!(checked.contains("new notes.txt:1: trailing whitespace."));
         for excluded in ["Tracked patch preflight", "fixture source to omit", "ignored.txt", "scratch-data.txt:1", "clean.txt:1", "large.txt:1"] {
             assert!(!checked.contains(excluded), "unexpected {excluded} in {checked}");
         }
-        assert!(!workspace_state(&repo, false).unwrap().contains("Untracked file preflight"));
+        assert!(!snapshot(false).contains("Untracked file preflight"));
+
+        for index in 0..90 {
+            std::fs::write(repo.join(format!("untouched-snapshot-status-fixture-{index:02}.txt")), "").unwrap();
+        }
+        let split = workspace_snapshot(&repo, false).unwrap();
+        assert_eq!(Some(&split.peer_summary), git_summary(&repo).as_ref());
+        assert!(split.peer_summary.contains("94 changed"), "{}", split.peer_summary);
+        let local = split.prompt.unwrap();
+        assert!(local.contains("status truncated") && local.len() < 1_750);
+        assert!(!local.contains("untouched-snapshot-status-fixture-89.txt"));
 
         std::fs::remove_dir_all(&repo).unwrap();
         let plain = std::env::temp_dir();
-        assert!(workspace_state(&plain, true).is_none());
+        assert!(workspace_snapshot(&plain, true).is_none());
     }
 
     #[test]
