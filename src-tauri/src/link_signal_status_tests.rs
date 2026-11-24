@@ -87,6 +87,18 @@ fn several_ready_peers_are_reported_without_selecting_an_account() {
     assert!(status.peer.is_none());
 }
 
+#[test]
+fn typed_readiness_accessor_rejects_expired_snapshots_and_exposes_ambiguity() {
+    let (_dir, link, _receiver) = fixture();
+    let received = Instant::now();
+    link.0.peers.lock().unwrap().get_mut("registered-pc").unwrap()
+        .record_signal_report(3, &json!({"ping": 1, "signal": true}), received);
+    assert_eq!(link.signal_relay_status_at(received).readiness(), SignalRelayReadiness::Available("Computer registered-pc"));
+    assert_eq!(link.signal_relay_status_at(received + SIGNAL_REPORT_TTL).readiness(), SignalRelayReadiness::Unavailable);
+    let _second = add_peer(&link, "second-pc", received);
+    assert_eq!(link.signal_relay_status_at(received).readiness(), SignalRelayReadiness::Multiple);
+}
+
 #[tokio::test]
 async fn reconnect_clears_prior_signal_readiness_before_the_first_report() {
     let (_dir, link, _receiver) = fixture();

@@ -621,6 +621,27 @@ pub struct SignalRelayStatus {
     local_direct_active: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignalRelayReadiness<'a> {
+    Unavailable,
+    Available(&'a str),
+    Multiple,
+}
+
+impl SignalRelayStatus {
+    /// Consume immediately: the remaining report lease is measured when the snapshot is queried.
+    pub(crate) fn readiness(&self) -> SignalRelayReadiness<'_> {
+        if self.valid_for_ms == 0 {
+            return SignalRelayReadiness::Unavailable;
+        }
+        match (self.state, self.peer.as_ref()) {
+            ("available", Some(peer)) => SignalRelayReadiness::Available(&peer.name),
+            ("multiple", _) => SignalRelayReadiness::Multiple,
+            _ => SignalRelayReadiness::Unavailable,
+        }
+    }
+}
+
 struct Inner {
     cfg_path: PathBuf,
     outbox_path: PathBuf,
