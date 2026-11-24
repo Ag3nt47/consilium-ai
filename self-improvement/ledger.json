@@ -8,5 +8,15 @@
     "evidence": "glib 0.18.5 (Linux only, via Tauri's GTK3/webkit2gtk stack); fixed in glib 0.20",
     "found": "2026-11-14",
     "fix": "Blocked upstream: Tauri 2 pins gtk-rs 0.18. Consilium doesn't use VariantStrIter. Re-check when Tauri moves to GTK4/gtk-rs 0.20+."
+  },
+  {
+    "id": "claude-active-turn-deadline",
+    "status": "open",
+    "severity": "medium",
+    "source": "council-error-alarm",
+    "title": "Fixed CLI turn deadline interrupts ongoing tool work",
+    "evidence": "A Claude turn reached the 900-second absolute deadline despite producing a tool result about three minutes before expiry; the generic timeout discarded the activity context.",
+    "found": "2026-11-24",
+    "fix": "Use a 900-second inactivity budget renewed only by recognized provider activity, retain a 3600-second total runtime cap and Stop cleanup, and report the last activity. Policy tests pass; native runner tests, peer review and three-platform CI pending."
   }
 ]

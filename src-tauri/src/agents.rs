@@ -25,6 +25,16 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[path = "run_deadline.rs"]
+mod run_deadline;
+use run_deadline::RunDeadline;
+
+#[cfg(test)]
+#[path = "agent_deadline_tests.rs"]
+mod deadline_tests;
+
+/// CLI inactivity budget. Recognized activity renews it, up to four times this total runtime.
+/// API agents retain their request deadline because they do not expose CLI activity events.
 pub const RUN_TIMEOUT: Duration = Duration::from_secs(900);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -1432,16 +1442,17 @@ async fn execute(
     // output remains on ordinary pipes (a PTY would corrupt JSON framing), while a surprise
     // interactive prompt is caught before it can leave a turn apparently frozen for 15 minutes.
     let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
-    let (out_buf, out_task) = drain(stdout, chunk_tx.clone());
-    let (err_buf, err_task) = drain(stderr, chunk_tx.clone());
+    let (out_buf, out_task) = drain(stdout, chunk_tx.clone(), OutputPipe::Stdout);
+    let (err_buf, err_task) = drain(stderr, chunk_tx.clone(), OutputPipe::Stderr);
     drop(chunk_tx);
+    let mut watchdog = RunDeadline::new(std::time::Instant::now(), timeout);
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
     let mut recent_output = String::new();
     let mut activity_output = String::new();
     let mut watch_output = true;
 
-    let mut check_stream = |line: &str| -> Result<(), String> {
+    let mut check_stream = |line: &str, watchdog: &mut RunDeadline| -> Result<(), String> {
         // Read access only reads files; plan mode isn't documented to block shell tools, so stop here.
         if access == Access::Read && kind == Kind::Antigravity {
             if let Some(command) = streamed_command(kind, line) {
@@ -1510,6 +1521,7 @@ async fn execute(
             }
         }
         if let Some(signal) = activity_from_line(kind, line) {
+            watchdog.progress(std::time::Instant::now(), &safe_activity_detail(&signal.label));
             if let Some(sink) = &activity {
                 sink(signal);
             }
@@ -1517,17 +1529,20 @@ async fn execute(
         Ok(())
     };
 
-    let mut process_chunk = |chunk: &[u8]| -> Result<(), String> {
+    let mut process_chunk = |pipe: OutputPipe, chunk: &[u8], watchdog: &mut RunDeadline| -> Result<(), String> {
         recent_output.push_str(&String::from_utf8_lossy(chunk));
         keep_tail(&mut recent_output, 8_192);
-        if activity.is_some() || matches!(access, Access::Own | Access::Unrestricted) {
+        // Parse progress even without a UI sink (terminal turns and tests). Arbitrary stderr,
+        // keepalives and provider retry notices must not extend the inactivity deadline.
+        if pipe == OutputPipe::Stdout {
+            // Keep complete stdout records: a single tool result can exceed 32 KiB. Stderr
+            // diagnostics must not split JSON records or supply apparent provider progress.
             activity_output.push_str(&String::from_utf8_lossy(chunk));
             while let Some(end) = activity_output.find('\n') {
                 let line = activity_output[..end].trim_end_matches('\r').to_string();
                 activity_output.drain(..=end);
-                check_stream(&line)?;
+                check_stream(&line, watchdog)?;
             }
-            keep_tail(&mut activity_output, 32_768);
         }
         if let Some(line) = interactive_prompt(&recent_output) {
             return Err(format!(
@@ -1543,15 +1558,16 @@ async fn execute(
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break Err("stopped".to_string()),
-            _ = &mut deadline => break Err(format!("no answer within {} seconds", timeout.as_secs())),
+            _ = &mut deadline => break Err(watchdog.message(std::time::Instant::now())),
             chunk = chunk_rx.recv(), if watch_output => {
-                let Some(chunk) = chunk else {
+                let Some((pipe, chunk)) = chunk else {
                     watch_output = false;
                     continue;
                 };
-                if let Err(why) = process_chunk(&chunk) {
+                if let Err(why) = process_chunk(pipe, &chunk, &mut watchdog) {
                     break 'watch Err(why);
                 }
+                deadline.as_mut().reset(tokio::time::Instant::now() + watchdog.remaining(std::time::Instant::now()));
             }
             status = child.wait() => break Ok(status),
         }
@@ -1579,8 +1595,8 @@ async fn execute(
         _ = tokio::time::sleep(PIPE_GRACE) => {}
         _ = cancel.cancelled() => return Err("stopped".to_string()),
     }
-    while let Ok(chunk) = chunk_rx.try_recv() {
-        if let Err(why) = process_chunk(&chunk) {
+    while let Ok((pipe, chunk)) = chunk_rx.try_recv() {
+        if let Err(why) = process_chunk(pipe, &chunk, &mut watchdog) {
             kill_tree(pid, &mut child).await;
             return Err(why);
         }
@@ -1588,7 +1604,7 @@ async fn execute(
     if !activity_output.trim().is_empty() {
         let line = activity_output.trim().to_string();
         activity_output.clear();
-        if let Err(why) = check_stream(&line) {
+        if let Err(why) = check_stream(&line, &mut watchdog) {
             kill_tree(pid, &mut child).await;
             return Err(why);
         }
@@ -1805,11 +1821,18 @@ fn token_usage_from_output(kind: Kind, stdout: &str) -> Option<TokenUsage> {
 /// How long to keep reading output after the CLI exits (see `execute`).
 const PIPE_GRACE: Duration = Duration::from_secs(3);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputPipe {
+    Stdout,
+    Stderr,
+}
+
 /// Reads a pipe into a shared buffer in the background, so what has arrived can be used even if
 /// the pipe never closes.
 fn drain<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     mut r: R,
-    chunks: mpsc::UnboundedSender<Vec<u8>>,
+    chunks: mpsc::UnboundedSender<(OutputPipe, Vec<u8>)>,
+    pipe: OutputPipe,
 ) -> (
     std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     tokio::task::JoinHandle<()>,
@@ -1823,7 +1846,7 @@ fn drain<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     b.lock().unwrap().extend_from_slice(&chunk[..n]);
-                    let _ = chunks.send(chunk[..n].to_vec());
+                    let _ = chunks.send((pipe, chunk[..n].to_vec()));
                 }
             }
         }
@@ -3086,7 +3109,7 @@ exit 1"#,
     async fn time_limit_applies() {
         let p = fake("sleep 30");
         let r = run_at(&p, Kind::Codex, Access::Chat, None, "s", "p", &CancellationToken::new(), Duration::from_millis(500)).await;
-        assert!(r.unwrap_err().contains("no answer within"));
+        assert!(r.unwrap_err().contains("no activity for"));
     }
 
     #[tokio::test]

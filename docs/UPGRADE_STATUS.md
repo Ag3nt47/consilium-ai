@@ -44,7 +44,7 @@ The [physical PeerLink trial](PEERLINK_PHYSICAL_TRIAL.md) records the Windows–
 | MCP client layer | 🕓 | The CLIs already speak MCP themselves |
 | Live terminal watcher drawer | 🕓 | Live activity line above replies ✅ |
 | Rate-limit benching, cooldown, re-routing, 2-model consensus | ✅ | `bench.rs`, `council.rs` |
-| Stall detection (silence + CPU), state lights | ✅ | Working / Stalled lights |
+| Stall detection (silence + CPU), state lights | ✅ | Working / Stalled lights. CLI turns renew a 15-minute inactivity deadline on recognized provider activity, with a separate one-hour total cap; raw output cannot keep a stalled turn alive. Timeout errors identify the last activity. Owner: ChatGPT; scope: runner deadlines and offline native fixtures in `agents.rs`, `run_deadline.rs`, `agent_deadline_tests.rs`, and `tests/fixtures/agent_runner.rs`. Verification: deadline policy tests passed; native runner tests and three-platform CI pending. |
 | Freeze controls: interrupt, kill & restart | 🕓 | Stop and Retry exist |
 | Night shift, red/blue team, TDD self-healing, electoral routing, ideation, self-profiling | 🕓 | |
 | Speculative decoding, digital twins, Lean/Coq | 🕓 | Research items |
