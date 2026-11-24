@@ -305,7 +305,7 @@ impl Engine {
                 Some(r) if tried.as_deref() != Some(r.turn.as_str()) => {
                     let (council, turn) = (r.council.clone(), r.turn.clone());
                     drop(running);
-                    if council.join(&event, &targets) {
+                    if council.join(&event, &targets, self.spawn.as_ref()) {
                         self.journal.join(id, &turn, &targets);
                         return Ok(event);
                     }
@@ -406,7 +406,7 @@ impl Engine {
             let live = self.running.lock().unwrap().get(id).map(|r| (r.council.clone(), r.turn.clone()));
             if let Some((council, turn)) = live.filter(|(_, t)| tried.as_deref() != Some(t.as_str())) {
                 let taken = if event.sender == "human" {
-                    let joined = council.join(event, &members);
+                    let joined = council.join(event, &members, self.spawn.as_ref());
                     if joined {
                         self.journal.join(id, &turn, &members);
                     }
@@ -834,7 +834,7 @@ don't repeat changes that are already made.",
                         *c = m.seq;
                         continue;
                     }
-                    if !council.join(&m, &targets) {
+                    if !council.join(&m, &targets, self.spawn.as_ref()) {
                         // The turn is ending; `run` gives this message a turn of its own.
                         all = false;
                         break;
