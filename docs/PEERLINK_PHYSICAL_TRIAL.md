@@ -98,7 +98,36 @@ fresh council report arrives and how many AIs have confirmations in both directi
 The check uses existing AI confirmations and sends no new prompts. In the same menu, open
 **Check local model memory** to scan for fresh peer capacity reports.
 
-### Bluetooth adapter check
+## Bluetooth verification
+
+### Native Bluetooth between Windows and Mac
+
+Use matching installed builds that include native Bluetooth. Pair the two computers
+in their operating systems, confirming the matching code. Keep the existing
+Ethernet PeerLink connection while enabling **Native Bluetooth · Windows and Mac**
+in Consilium's linked-computer settings on both hosts. Allow macOS Bluetooth access
+when requested. The Mac announces its RFCOMM endpoint only after its transient
+service is published; the Windows peer learns it through authenticated heartbeats.
+This route does not require a Bluetooth PAN network or an IP address.
+
+On Windows, select **Native Bluetooth** under **Connection and AI handshake route**
+and run **Test Connection**, then **Test AI handshake**. Select the Mac as the
+communication test target, choose **Native Bluetooth** under **Routes to test**,
+and run **Communication stress test**. Record fresh authentication and traffic,
+actual Bluetooth adapter identities, service UUID and the discovered channel.
+The AI check must receive a fresh status report on the selected native session;
+an existing Ethernet session cannot supply that proof. Verify default routing
+returns after the temporary tests, including failed or cancelled checks.
+
+For parallel payload trials, choose **Native Bluetooth** as one path's local
+adapter and match its RFCOMM endpoint. Native paths have no source/receiver IP;
+receipts must identify the reversed radio endpoints and service/channel instead.
+Verify checksum receipts, distinct receiving adapters and overlapping receipt
+windows across the selected transports. Repeat the outage-and-single-delivery
+steps above with Bluetooth as the surviving route. Pairing, type checks and
+loopback tests alone do not establish this physical result.
+
+### Optional Bluetooth PAN
 
 Pair the computers in their operating systems and establish a Bluetooth Personal Area Network
 (PAN) with an IP address on each end. The Consilium pairing guide under Multi-computer sync

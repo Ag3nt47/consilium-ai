@@ -93,13 +93,15 @@ async fn reconnect_clears_prior_signal_readiness_before_the_first_report() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
     let (socket, _) = listener.accept().await.unwrap();
-    let (read, write) = socket.into_split();
+    let LinkConnection { stream, evidence } = LinkConnection::tcp(socket).unwrap();
+    let route = evidence.remote_endpoint();
+    let (read, write) = tokio::io::split(stream);
     let peer = link.0.cfg.lock().unwrap().peers[0].clone();
     let token = CancellationToken::new();
     let session_link = link.clone();
     let session_token = token.clone();
     let task = tokio::spawn(async move {
-        session_link.session(peer, vec![7; 32], BufReader::new(read), write, "127.0.0.1:1".into(), None, session_token).await;
+        session_link.session(peer, vec![7; 32], BufReader::new(read), write, route, evidence, None, session_token).await;
     });
     tokio::time::timeout(Duration::from_secs(1), async {
         while link.0.peers.lock().unwrap()["registered-pc"].generation == 3 {
