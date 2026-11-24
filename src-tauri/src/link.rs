@@ -690,15 +690,25 @@ impl Link {
     /// of its routes in turn (the others are left out, as if they had failed), proves each with a
     /// packet received over it, and finally returns the link to the fastest route. A route that
     /// doesn't connect, or carries nothing, fails and the test moves on.
-    pub async fn stress_test(&self) -> Result<Vec<StressReport>, String> {
+    pub async fn stress_test(&self, node_id: Option<&str>) -> Result<Vec<StressReport>, String> {
         let _run = self.0.stress_test_lock.try_lock().map_err(|_| "A communication stress test is already running")?;
         let token = self.0.running.lock().unwrap().clone().ok_or("linking is off")?;
-        let peers = self.0.cfg.lock().unwrap().peers.clone();
+        let peers = match node_id {
+            Some(id) => {
+                let peer = self.peer(id).ok_or("Linked computer not found")?;
+                if peer.addrs.is_empty() {
+                    return Err("The selected computer has no configured endpoints".into());
+                }
+                vec![peer]
+            }
+            None => self.0.cfg.lock().unwrap().peers.clone(),
+        };
         let mut out = Vec::new();
         for peer in peers.into_iter().filter(|p| !p.addrs.is_empty()) {
             let connected = self.0.peers.lock().unwrap().get(&peer.node_id).is_some_and(|s| s.tx.is_some());
             if !connected {
-                out.push(StressReport { computer: self.peer_name(&peer.node_id), routes: vec![], restored: None });
+                let computer = self.peer_name(&peer.node_id);
+                out.push(StressReport { node_id: peer.node_id, computer, routes: vec![], restored: None });
                 continue;
             }
             let updates = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| s.route_updates);
@@ -724,6 +734,7 @@ impl Link {
             let restored = self.switch_to(&peer, &peer.addrs, &token).await;
             out.push(StressReport {
                 computer: self.peer_name(&peer.node_id),
+                node_id: peer.node_id,
                 routes,
                 restored: Some(restored),
             });
@@ -1704,6 +1715,7 @@ pub struct RouteSwitch {
 /// The stress test with one linked computer: each route, and where the link ended up.
 #[derive(Debug, Clone, Serialize)]
 pub struct StressReport {
+    pub node_id: String,
     pub computer: String,
     pub routes: Vec<RouteSwitch>,
     /// The final reconnect attempt, absent when no routes were tested.
@@ -2302,13 +2314,13 @@ mod tests {
         // A startup test holding the guard blocks a second diagnostic on the same device.
         let running = joiner.0.stress_test_lock.lock().await;
         assert_eq!(
-            joiner.stress_test().await.unwrap_err(),
+            joiner.stress_test(None).await.unwrap_err(),
             "A communication stress test is already running"
         );
         drop(running);
         let host_id = host.status().node_id;
         let previous_session = joiner.0.peers.lock().unwrap()[&host_id].session_cancel.clone().unwrap();
-        let reports = joiner.stress_test().await.unwrap();
+        let reports = joiner.stress_test(None).await.unwrap();
         assert!(previous_session.is_cancelled(), "the replaced session stops writing immediately");
         assert_eq!(reports.len(), 1);
         let r = &reports[0];
@@ -2328,6 +2340,41 @@ mod tests {
         assert!(note.contains("1 of 2 configured endpoints carried authenticated traffic") && note.contains("✓ Loopback") && note.contains("✗ Loopback"), "{note}");
         host.stop();
         joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_scoped_stress_test_leaves_other_peers_on_their_sessions() {
+        let dir = std::env::temp_dir().join(format!("link-scoped-stress-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (selected, _) = node(&dir, "selected");
+        let (other, _) = node(&dir, "other");
+        let address = format!("127.0.0.1:{}", host.0.port);
+        for peer in [&selected, &other] {
+            let code = host.begin_pairing().unwrap();
+            peer.join(&address, &code.code).await.unwrap();
+        }
+        let selected_id = selected.status().node_id;
+        let other_id = other.status().node_id;
+        assert!(wait_for(|| host.connected_peer_ids().len() == 2).await);
+        let (selected_before, other_before) = {
+            let peers = host.0.peers.lock().unwrap();
+            (peers[&selected_id].generation, peers[&other_id].generation)
+        };
+        assert_eq!(host.stress_test(Some("missing")).await.unwrap_err(), "Linked computer not found");
+        let reports = host.stress_test(Some(&selected_id)).await.unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].node_id, selected_id);
+        assert!(reports[0].restored.as_ref().is_some_and(|route| route.ok), "{reports:?}");
+        {
+            let peers = host.0.peers.lock().unwrap();
+            assert!(peers[&selected_id].generation > selected_before);
+            assert_eq!(peers[&other_id].generation, other_before);
+            assert!(peers[&other_id].tx.is_some());
+        }
+        host.stop();
+        selected.stop();
+        other.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
