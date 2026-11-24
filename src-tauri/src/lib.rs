@@ -20,6 +20,7 @@ mod engine;
 mod environment_audit;
 mod follow;
 mod link;
+mod lan_notes;
 mod liveui;
 mod memory;
 mod offload;
@@ -1453,6 +1454,16 @@ async fn link_send(payload: serde_json::Value) -> Result<String, String> {
     the_link()?.send(peer_protocol::PacketKind::Chat, payload)
 }
 
+#[tauri::command]
+async fn link_lan_notes() -> Result<Vec<lan_notes::Note>, String> {
+    tokio::task::spawn_blocking(peer_sync::lan_notes).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn link_send_lan_note(node_id: String, text: String) -> Result<String, String> {
+    peer_sync::send_lan_note(the_link()?, &node_id, &text)
+}
+
 struct QuickSummon(bool);
 
 #[tauri::command]
@@ -1737,6 +1748,8 @@ pub fn run() {
             link_refresh_routes,
             link_inbox,
             link_send,
+            link_lan_notes,
+            link_send_lan_note,
             session_safety_status,
             session_safety_restore,
             get_peer_resources,

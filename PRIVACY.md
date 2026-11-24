@@ -19,6 +19,7 @@
 | An AI with Read, Edit or Full access works in a project folder | Whatever files that AI's tool reads there | That AI's company, as part of its turn |
 | Once a day, if "Check for updates" is on | A request for the latest release (no identifying data beyond what any web request carries) | GitHub's public API |
 | While the direct link is enabled | A local discovery announcement with a temporary service name, local IPv4 address and PeerLink port | Devices on the same private network |
+| You send a LAN note | The note, over the authenticated PeerLink connection | The linked computer you select |
 
 Only the AIs you address receive a message. Turning off update checks in Settings stops the GitHub request.
 

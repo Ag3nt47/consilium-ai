@@ -456,6 +456,7 @@ export const demoApi = {
         node_id: "demo-node-win",
         name: "Windows-Desktop",
         connected: true,
+        supports_lan_notes: true,
         route: "192.168.1.42:8470",
         addrs: ["192.168.1.42:8470", "192.168.1.170:8470", "169.254.12.34:8470"],
         rtt_ms: 3,
@@ -532,6 +533,8 @@ export const demoApi = {
   linkRefreshRoutes: async () => ["192.168.1.157:8470", "192.168.1.170:8470"],
   linkInbox: async () => [],
   linkSend: async () => "demo-pkt-1",
+  linkLanNotes: async () => [{ id: "demo-note", source: "Windows-Desktop", text: "Ready to compare the mesh routes.", sent_at: Date.now() }],
+  linkSendLanNote: async () => "demo-note-sent",
   sessionSafetyStatus: async () => null,
   sessionSafetyRestore: async () => "Demo: restored session safety snapshot",
   // Calls the app gained after demo mode was written; harmless no-ops in the browser preview.
