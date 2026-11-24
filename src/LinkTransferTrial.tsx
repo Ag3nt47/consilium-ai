@@ -114,11 +114,18 @@ export function LinkTransferTrial({ peers, disabled }: { peers: LinkPeer[]; disa
       {report && (
         <div className="stress-report" role="status">
           <p>{report.overlap_ms == null ? "Overlap across all selected paths was unconfirmed." : `Receiver observed overlapping receipt windows for ${report.overlap_ms} ms.`}</p>
+          <p className="muted">{report.distinct_receiver_interfaces
+            ? "Each receiving IP mapped to a different adapter on the other computer."
+            : "Distinct receiving adapters could not be confirmed."}</p>
           {report.paths.map(({ source, endpoint, receipts, error: failure }) => (
             <div className={`handshake-item ${failure ? "pending" : "acknowledged"}`} key={source.address}>
               {source.interface} <code>{source.address}</code> → <code>{endpoint}</code>
               {" · "}{receipts.reduce((bytes, receipt) => bytes + receipt.bytes, 0).toLocaleString()} bytes checksum-verified
-              {receipts.length > 0 && ` · Receiver ${receipts[0].receiver_ip} · ${receipts[receipts.length - 1].received_ms - receipts[0].received_ms} ms between first and last receipt`}
+              {receipts.length > 0 && (
+                <>{" · Receiver "}<code>{receipts[0].receiver_ip}</code>
+                  {" · "}{[...new Set(receipts.map((receipt) => receipt.receiver_interface || "Adapter unavailable"))].join(", ")}
+                  {" · "}{receipts[receipts.length - 1].received_ms - receipts[0].received_ms} ms between first and last receipt</>
+              )}
               {failure && ` · ${failure}`}
             </div>
           ))}

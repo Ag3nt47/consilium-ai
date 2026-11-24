@@ -93,11 +93,15 @@ After the individual routes pass, test with Ethernet, Wi-Fi and Bluetooth PAN ac
 **Test parallel payload transfer**, choose one computer, then match each local adapter with
 its peer endpoint. Use both computers' network settings to confirm the selected addresses
 belong to distinct physical adapters. Run the test and record the bound source interface,
-receiver IP address, checksum-verified bytes and receipt window for each path. Consilium
+receiver IP and mapped adapter, checksum-verified bytes and receipt window for each path. Consilium
 sends four independently authenticated 8 KiB chunks per selected path and checks their
 SHA-256 receipts. The overlap is the shared first-to-last receipt window on the same receiving
 process, with a checksum-verified sample from each path inside that window. This bounded
 diagnostic can run alongside the live session.
+
+Use the reported receiving adapter names to check the endpoint mapping. The receiving
+computer supplies those names from its socket addresses. Use OS measurements at both ends
+to establish which physical interface actually carried the traffic.
 
 For a throughput comparison, compare the three-path run against each single-path baseline
 with the same payload and computers. To pass the physical overlap trial, authenticated payload

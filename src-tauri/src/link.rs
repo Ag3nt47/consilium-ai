@@ -66,6 +66,8 @@ struct TransferReceipt {
     sha256: String,
     bytes: usize,
     receiver_ip: IpAddr,
+    #[serde(default)]
+    receiver_interface: Option<String>,
     received_ms: u64,
     clock_id: String,
 }
@@ -82,6 +84,18 @@ pub struct TransferResult {
 pub struct TransferTrial {
     paths: Vec<TransferResult>,
     overlap_ms: Option<u64>,
+    distinct_receiver_interfaces: bool,
+}
+
+fn distinct_receiver_interfaces(paths: &[TransferResult]) -> bool {
+    let mut interfaces = std::collections::HashSet::new();
+    paths.len() >= 2 && paths.iter().all(|path| {
+        path.receipts.len() == TRIAL_CHUNKS
+            && path.receipts[0].receiver_interface.as_ref().is_some_and(|first| {
+                path.receipts.iter().all(|receipt| receipt.receiver_interface.as_ref() == Some(first))
+                    && interfaces.insert(first)
+            })
+    })
 }
 
 fn transfer_overlap(paths: &[TransferResult]) -> Option<u64> {
@@ -108,11 +122,15 @@ fn transfer_receipt(payload: &str, receiver_ip: IpAddr) -> Result<TransferReceip
     }
     static CLOCK: OnceLock<(Instant, String)> = OnceLock::new();
     let (started, clock_id) = CLOCK.get_or_init(|| (Instant::now(), random_hex(16)));
+    let received_ms = started.elapsed().as_millis() as u64;
+    let receiver_interface = if_addrs::get_if_addrs().ok()
+        .and_then(|interfaces| interface_name(&interfaces, receiver_ip));
     Ok(TransferReceipt {
         sha256: hex(&Sha256::digest(payload.as_bytes())),
         bytes: payload.len(),
         receiver_ip,
-        received_ms: started.elapsed().as_millis() as u64,
+        receiver_interface,
+        received_ms,
         clock_id: clock_id.clone(),
     })
 }
@@ -967,7 +985,11 @@ impl Link {
         }
         results.sort_by_key(|(index, _)| *index);
         let paths: Vec<_> = results.into_iter().map(|(_, result)| result).collect();
-        Ok(TransferTrial { overlap_ms: transfer_overlap(&paths), paths })
+        Ok(TransferTrial {
+            overlap_ms: transfer_overlap(&paths),
+            distinct_receiver_interfaces: distinct_receiver_interfaces(&paths),
+            paths,
+        })
     }
 
     async fn transfer_path(&self, peer: &Peer, key: &[u8], source: ProbeSource, endpoint: String) -> TransferResult {
@@ -3051,8 +3073,18 @@ mod tests {
             assert!(path.error.is_none(), "{:?}", path.error);
             assert_eq!(path.receipts.iter().map(|receipt| receipt.bytes).sum::<usize>(), 32 * 1024);
             assert!(path.receipts.iter().all(|receipt| receipt.receiver_ip == address && receipt.sha256.len() == 64));
+            assert!(path.receipts.iter().all(|receipt| receipt.receiver_interface.as_deref() == Some(path.source.interface.as_str())));
         }
         assert!(transfer_overlap(&paths).is_some());
+        assert!(!distinct_receiver_interfaces(&paths), "loopback samples share the same receiving adapter");
+        for (index, path) in paths.iter_mut().enumerate() {
+            for receipt in &mut path.receipts {
+                receipt.receiver_interface = Some(format!("adapter-{index}"));
+            }
+        }
+        assert!(distinct_receiver_interfaces(&paths));
+        paths[1].receipts[0].receiver_interface = None;
+        assert!(!distinct_receiver_interfaces(&paths));
         paths[0].receipts.pop();
         assert_eq!(transfer_overlap(&paths), None);
         let duplicate = || TransferPath { source: address, endpoint: dest.clone() };
