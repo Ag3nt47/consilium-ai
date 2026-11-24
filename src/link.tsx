@@ -200,14 +200,55 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
   const [stressPeer, setStressPeer] = useState("");
   const [stressSources, setStressSources] = useState<ProbeSource[]>([]);
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
+  const [readingSources, setReadingSources] = useState(false);
+  const [checkingAdapters, setCheckingAdapters] = useState(false);
+  const [adapterChecks, setAdapterChecks] = useState<{ source: ProbeSource; detail: string; ok: boolean }[]>([]);
+  const testingRoutes = stressing || checkingAdapters;
   const stressPeers = status?.peers ?? [];
-  const canStress = stressPeers.some((peer) => peer.connected && (!stressPeer || stressPeer === peer.node_id))
-    && selectedSources.every((address) => stressSources.some((source) => source.address === address));
+  const availableSources = selectedSources.flatMap((address) => stressSources.filter((source) => source.address === address));
+  const missingSources = availableSources.length !== selectedSources.length;
+  const canStress = !testingRoutes && !readingSources && !missingSources
+    && stressPeers.some((peer) => peer.connected && (!stressPeer || stressPeer === peer.node_id));
+  const canCheckAdapters = canStress && !!stressPeer
+    && new Set(availableSources.map((source) => source.interface)).size >= 2;
   const refreshStressSources = async () => {
+    if (readingSources || testingRoutes) return;
+    setReadingSources(true);
+    setAdapterChecks([]);
     try {
       setStressSources(await api.linkProbeSources());
     } catch (error) {
+      setStressSources([]);
       setError(`Could not read local adapters: ${String(error)}`);
+    } finally {
+      setReadingSources(false);
+    }
+  };
+  const checkAdapters = async () => {
+    setCheckingAdapters(true);
+    setAdapterChecks([]);
+    setError(null);
+    try {
+      const checks = await Promise.all(availableSources.map(async (source) => {
+        try {
+          const report = await api.linkTestPeer(stressPeer, source.address);
+          const confirmed = report.routes.filter((route) =>
+            route.authenticated_ms != null && route.local_ip === source.address
+            && route.local_interface === source.interface);
+          return {
+            source,
+            ok: confirmed.length > 0,
+            detail: confirmed.length > 0
+              ? confirmed.map((route) => `${route.addr} (${route.authenticated_ms} ms)`).join(", ")
+              : "Peer authentication on this adapter was unconfirmed.",
+          };
+        } catch (error) {
+          return { source, ok: false, detail: String(error) };
+        }
+      }));
+      setAdapterChecks(checks);
+    } finally {
+      setCheckingAdapters(false);
     }
   };
   const runStress = async () => {
@@ -444,9 +485,10 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
               {stressPeers.length > 0 && (
                 <label className="row gap-sm small">
                   Test target
-                  <select value={stressPeer} disabled={stressing} onChange={(event) => {
+                  <select value={stressPeer} disabled={testingRoutes} onChange={(event) => {
                     setStressPeer(event.target.value);
                     setStress(null);
+                    setAdapterChecks([]);
                   }}>
                     <option value="">All connected computers</option>
                     {stressPeer && !stressPeers.some((peer) => peer.node_id === stressPeer) && (
@@ -462,25 +504,43 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
               )}
               <details className="small" onToggle={(event) => { if (event.currentTarget.open) void refreshStressSources(); }}>
                 <summary>Try local source addresses</summary>
-                <p className="muted">Select source addresses to try them in order, then restore the default route. Leave them clear to test each saved endpoint.</p>
+                  <p className="muted">Select up to four addresses to try them in order during the stress test. Leave them clear to test each saved endpoint. To check handshakes in parallel, select one computer and addresses on at least two adapters.</p>
+                  <button type="button" className="btn small ghost" disabled={testingRoutes || readingSources}
+                    onClick={() => void refreshStressSources()}>{readingSources ? "Refreshing adapters…" : "Refresh adapters"}</button>
+                  {missingSources && <p className="muted">A selected address is unavailable. Clear the selection or reconnect the adapter and refresh.</p>}
                 {stressSources.map(({ address, interface: adapter }) => (
                   <label key={address} className="row gap-sm">
-                    <input type="checkbox" disabled={stressing} checked={selectedSources.includes(address)}
+                      <input type="checkbox" disabled={testingRoutes || readingSources || (selectedSources.length >= 4 && !selectedSources.includes(address))}
+                        checked={selectedSources.includes(address)}
                       onChange={(event) => {
                         setSelectedSources((previous) => event.target.checked
                           ? [...previous, address] : previous.filter((entry) => entry !== address));
                         setStress(null);
+                          setAdapterChecks([]);
                       }} />
                     {adapter} ({address})
                   </label>
                 ))}
-                {selectedSources.length > 0 && <button type="button" className="btn small ghost" disabled={stressing}
-                  onClick={() => { setSelectedSources([]); setStress(null); }}>Clear selected sources</button>}
+                  {selectedSources.length > 0 && <button type="button" className="btn small ghost" disabled={testingRoutes}
+                    onClick={() => { setSelectedSources([]); setStress(null); setAdapterChecks([]); }}>Clear selected sources</button>}
+                  <button type="button" className="btn small" disabled={!canCheckAdapters}
+                    onClick={checkAdapters}>{checkingAdapters ? "Checking adapters…" : "Check handshakes in parallel"}</button>
+                  {adapterChecks.length > 0 && (
+                    <div className="stress-report" role="status">
+                      <p className="muted">Parallel handshake results. The live session stays in place.</p>
+                      {adapterChecks.map(({ source, detail, ok }) => (
+                        <div key={source.address} className={`handshake-item ${ok ? "acknowledged" : "pending"}`}>
+                          <span className="handshake-mark">{ok ? "✓" : "✗"}</span>
+                          {" "}{source.interface} <code>{source.address}</code>{" · "}{detail}
+                        </div>
+                      ))}
+                    </div>
+                  )}
               </details>
               <button
                 className="btn small"
                 onClick={runStress}
-                disabled={stressing || !canStress}
+                disabled={!canStress}
                 title="Tries the selected source addresses or each configured endpoint and checks for an authenticated packet. Shows the local interface when available, then tries to reconnect using the saved endpoints. Results are posted in chat. Physical failover requires a separate test with a transport disconnected."
               >
                 {stressing ? "Stress testing routes…" : "Communication stress test"}
