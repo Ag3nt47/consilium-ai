@@ -145,6 +145,11 @@ Concurrent quota reads within one Consilium process share a single provider CLI 
 A background turn refresh rechecks the saved snapshot before sampling, and a later explicit
 refresh still requests current session and weekly readings from providers that expose them.
 
+The shared task board supports high, normal and low priorities. Existing tasks default to
+normal. Local and cloud prompts show owned work first and sort ready tasks within that
+group by priority. Automatic continuation notes repeat up to five open tasks and leave
+the remaining detail on the shared board.
+
 ## Document 5: Off-line AI development.docx
 
 | Item | Status | Acceptance and dependencies |

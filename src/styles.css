@@ -3416,7 +3416,9 @@ button.attachment {
 .task-meta .task-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
 .task-assign { flex: none; width: 26px; font-size: 11px; padding: 0; background: transparent; color: inherit; border: none; cursor: pointer; opacity: 0.6; }
 .task-assign:hover { opacity: 1; }
-.task-add input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 4px 6px; margin-top: 4px; }
+.task-add { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
+.task-add input { flex: 1; min-width: 0; font-size: 12px; padding: 4px 6px; }
+.task-add select { font-size: 12px; padding: 4px; }
 .task-error { color: #e5534b; font-size: 11px; }
 
 /* Click-to-rename conversation title. */

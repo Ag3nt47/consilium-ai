@@ -5,7 +5,7 @@
 //
 // `step` (0-5) picks a moment in the scripted conversation; `setup=1` shows the first-run setup
 // state; `settings=1` opens Settings. Nothing here touches the network or real conversations.
-import type { AgentInfo, ChatEvent, Conversation, TaskBoard, TurnState } from "./api";
+import type { AgentInfo, ChatEvent, Conversation, TaskBoard, TaskOp, TurnState } from "./api";
 
 const params = new URLSearchParams(location.search);
 // `scene=build` swaps in a six-AI council building an app together (the README's animated demo).
@@ -393,13 +393,14 @@ export const demoApi = {
   mergeAgentBranch: async () => "0000000",
   discardAgentBranch: async () => undefined,
   tasksGet: async () => activeBoard,
-  tasksApply: async (_id: string, op: { op: string; task?: string; title?: string; to?: string }) => {
-    const num = Number((op.task ?? "").replace("#", ""));
+  tasksApply: async (_id: string, op: TaskOp) => {
+    const num = "task" in op ? Number(op.task.replace("#", "")) : 0;
     const t = activeBoard.tasks.find((x) => x.id === num);
-    if (op.op === "add" && op.title) activeBoard.tasks.push({ id: ++activeBoard.next, title: op.title, owner: null, status: "todo", by: "human", updated: Date.now() });
+    if (op.op === "add" && op.title) activeBoard.tasks.push({ id: ++activeBoard.next, title: op.title, owner: null, status: "todo", priority: op.priority, by: "human", updated: Date.now() });
     if (t && op.op === "done") t.status = "done";
     if (t && op.op === "reopen") t.status = t.owner ? "doing" : "todo";
     if (t && op.op === "hand" && op.to) Object.assign(t, { owner: op.to, status: "doing" });
+    if (t && op.op === "priority") t.priority = op.priority;
     if (t && op.op === "drop") activeBoard.tasks = activeBoard.tasks.filter((x) => x !== t);
     return { ...activeBoard, tasks: [...activeBoard.tasks] };
   },

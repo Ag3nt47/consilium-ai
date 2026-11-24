@@ -34,6 +34,29 @@ pub enum Status {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    High,
+    #[default]
+    Normal,
+    Low,
+}
+
+impl Priority {
+    fn is_normal(&self) -> bool {
+        *self == Self::Normal
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Normal => "normal",
+            Self::Low => "low",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Task {
     pub id: u32,
@@ -42,6 +65,8 @@ pub struct Task {
     #[serde(default)]
     pub owner: Option<String>,
     pub status: Status,
+    #[serde(default, skip_serializing_if = "Priority::is_normal")]
+    pub priority: Priority,
     /// Why it's blocked, if it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -66,6 +91,8 @@ pub enum Op {
         title: String,
         #[serde(default)]
         owner: Option<String>,
+        #[serde(default)]
+        priority: Priority,
     },
     /// Take a task and start it; a title that matches nothing becomes a new task.
     Take {
@@ -90,6 +117,10 @@ pub enum Op {
     },
     Drop {
         task: String,
+    },
+    Priority {
+        task: String,
+        priority: Priority,
     },
 }
 
@@ -235,6 +266,7 @@ impl Board {
             title,
             owner,
             status,
+            priority: Priority::Normal,
             note: None,
             by: who.to_string(),
             updated: now,
@@ -272,14 +304,16 @@ impl Board {
     /// Applies one change; returns what happened, worded for the chat note.
     fn apply(&mut self, who: &str, op: &Op, now: u64) -> Option<String> {
         let (i, verb) = match op {
-            Op::Add { title, owner } => {
+            Op::Add { title, owner, priority } => {
                 let owner = owner.clone().filter(|o| !o.is_empty());
                 let status = if owner.is_some() {
                     Status::Doing
                 } else {
                     Status::Todo
                 };
-                (self.add(title, owner, status, who, now)?, "added")
+                let i = self.add(title, owner, status, who, now)?;
+                self.tasks[i].priority = *priority;
+                (i, "added")
             }
             Op::Take { task } => {
                 let (i, new) = self.find_or_add(task, Status::Doing, who, now)?;
@@ -355,6 +389,17 @@ impl Board {
                 }
                 let t = self.tasks.remove(i);
                 return Some(format!("removed #{} {}", t.id, t.title));
+            }
+            Op::Priority { task, priority } => {
+                let i = self.find(task)?;
+                if !self.can_update(i, who) || self.tasks[i].priority == *priority {
+                    return None;
+                }
+                let t = &mut self.tasks[i];
+                t.priority = *priority;
+                t.by = who.to_string();
+                t.updated = now;
+                return Some(format!("set #{} {} to {} priority", t.id, t.title, priority.label()));
             }
         };
         let t = &mut self.tasks[i];
@@ -469,7 +514,18 @@ pub fn task_lines(text: &str) -> Vec<Op> {
             "add" | "todo" | "new" => Op::Add {
                 title: task,
                 owner: None,
+                priority: Priority::Normal,
             },
+            "priority" => {
+                let Some((task, level)) = arg.rsplit_once(char::is_whitespace) else { continue };
+                let priority = match level.to_ascii_lowercase().as_str() {
+                    "high" => Priority::High,
+                    "normal" => Priority::Normal,
+                    "low" => Priority::Low,
+                    _ => continue,
+                };
+                Op::Priority { task: task.trim().into(), priority }
+            }
             "reopen" | "undo" => Op::Reopen { task },
             "drop" | "remove" | "cancel" => Op::Drop { task },
             _ => continue,
@@ -513,9 +569,9 @@ fn split_reason(arg: &str) -> (String, Option<String>) {
 pub fn for_prompt(board: &Board, agent: &str, compact: bool) -> String {
     let mut s = String::from(
         "\n\nTASK BOARD (shared across computers; editable by the human). \
-Before claiming a large task, divide it into independent tasks with affected files and a verification step. Only change your own or unassigned tasks. Claim once, coordinate shared edits through a handoff, and mark done after commit and checks. \
+Before claiming a large task, divide it into independent tasks with affected files and a verification step. Within ready work, take high priority before normal or low. Only change your own or unassigned tasks. Claim once, coordinate shared edits through a handoff, and mark done after commit and checks. \
 Put each action on its own line: `TASK: take <title or #n>` (adds a new title), `TASK: done <title or #n>`, \
-`TASK: blocked <#n> - <why>`, `TASK: hand <#n> to @name`, `TASK: add <title>`, `TASK: drop <#n>`. \
+`TASK: blocked <#n> - <why>`, `TASK: hand <#n> to @name`, `TASK: add <title>`, `TASK: priority <#n> <high|normal|low>`, `TASK: drop <#n>`. \
 Task numbers are shared. An owner shown as \"<AI> (<computer>)\" is remote. \
 Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
     );
@@ -536,7 +592,7 @@ Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
             Some(owner) if owner == agent => 2,
             _ => 3,
         };
-        (priority, blocked, task.id)
+        (priority, blocked, task.priority, task.id)
     });
     let omitted_open = if compact {
         let omitted = open.len().saturating_sub(LOCAL_OPEN_IN_PROMPT);
@@ -581,7 +637,12 @@ Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
                 format!(" ({excerpt}{suffix})")
             })
             .unwrap_or_default();
-        s.push_str(&format!("\n#{} [{state}] {}{note}", t.id, t.title));
+        let priority = match t.priority {
+            Priority::Normal => "",
+            Priority::High => " [high priority]",
+            Priority::Low => " [low priority]",
+        };
+        s.push_str(&format!("\n#{} [{state}]{priority} {}{note}", t.id, t.title));
     }
     if omitted_open > 0 {
         s.push_str(&format!("\n({omitted_open} open tasks omitted. The task board in the app shows every task.)"));
@@ -620,6 +681,7 @@ mod tests {
                 title: format!("Assigned task {id}"),
                 owner: Some(if id == 30 { "local" } else { "other" }.to_string()),
                 status: Status::Doing,
+                priority: Priority::Normal,
                 note: None,
                 by: "human".into(),
                 updated: 0,
@@ -651,7 +713,7 @@ mod tests {
             assert!(board.apply("claude", op, 1).is_some());
         }
         assert!(board.apply("gemini", &Op::Take { task: "Write docs".into() }, 2).is_some());
-        assert!(board.apply("human", &Op::Add { title: "Check screenshots".into(), owner: None }, 3).is_some());
+        assert!(board.apply("human", &Op::Add { title: "Check screenshots".into(), owner: None, priority: Priority::Normal }, 3).is_some());
 
         for (agent, expected) in [("claude", ["#2", "#4", "#1", "#3"]), ("gemini", ["#3", "#4", "#2", "#1"])] {
             for compact in [true, false] {
@@ -662,6 +724,26 @@ mod tests {
                     .collect();
                 assert_eq!(order, expected);
             }
+        }
+    }
+
+    #[test]
+    fn priority_defaults_for_existing_boards_and_orders_ready_work_in_both_prompts() {
+        let mut board: Board = serde_json::from_str(r#"{"tasks":[{"id":1,"title":"Existing task","status":"todo","by":"human","updated":0}],"next":1}"#).unwrap();
+        assert_eq!(board.tasks[0].priority, Priority::Normal);
+        for op in task_lines("TASK: add Test recovery\nTASK: priority #2 high\nTASK: take Check fixture") {
+            assert!(board.apply("claude", &op, 1).is_some());
+        }
+        let priority = Op::Priority { task: "#3".into(), priority: Priority::Low };
+        assert!(board.apply("gemini", &priority, 2).is_none());
+        assert!(board.apply("human", &priority, 3).is_some());
+        let saved = serde_json::to_string(&board).unwrap();
+        assert_eq!(serde_json::from_str::<Board>(&saved).unwrap(), board);
+        for compact in [true, false] {
+            let prompt = for_prompt(&board, "claude", compact);
+            assert!(prompt.contains("[high priority] Test recovery"));
+            assert!(prompt.find("#3 [").unwrap() < prompt.find("#2 [").unwrap());
+            assert!(prompt.find("#2 [").unwrap() < prompt.find("#1 [").unwrap());
         }
     }
 
