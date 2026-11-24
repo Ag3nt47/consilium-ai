@@ -511,7 +511,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                 <li>Open Consilium on both computers and enable the direct link. Connect them to the same trusted network using Ethernet or Wi-Fi.</li>
                 <li>On the first computer, choose <strong>Show Pairing Code</strong>. Generate a code and copy one of its local addresses above.</li>
                 <li>On the second computer, choose <strong>Join Another Computer</strong>. Enter the address and code from the first computer, then pair. Auto-Find on LAN can suggest addresses.</li>
-                <li>On the linked computer card, choose <strong>Test Connection</strong> and confirm there is an authenticated session. If it fails, check the address, generate a fresh code if needed, and allow Consilium through the firewall on the trusted network.</li>
+                <li>On the linked computer card, choose <strong>Test Connection</strong>. Look for an authenticated active session and check each endpoint separately. An amber result means the address answered on TCP but did not confirm the paired computer. If an endpoint fails, verify the address, confirm Consilium is running on that computer, and check that its firewall allows Consilium on the trusted network.</li>
                 <li>For a backup path, connect another interface on both computers. Keep Ethernet connected while joining Wi-Fi. For Bluetooth, first establish a Bluetooth network connection in the operating system. Add the other computer’s address on the backup path if it is missing.</li>
                 <li>Run <strong>Communication stress test</strong> above and check that authenticated traffic used two distinct local interfaces. With access to both computers, disconnect the active path, check that the alternate interface becomes active, then restore the first path.</li>
               </ol>
@@ -905,7 +905,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         <div className="peer-test-report">
           <div className="row between align-center test-header">
             <span className="test-summary-title">
-              {testReport.handshake_ok ? "✔ Authenticated connection" : "⚠️ Handshake Warning"}
+              {testReport.handshake_ok ? "✔ Active session authenticated" : "⚠️ No authenticated active session"}
             </span>
             <button className="btn small ghost" onClick={() => setTestReport(null)}>
               Dismiss
@@ -915,6 +915,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
           {testReport.routes.length > 0 && (
             <div className="test-routes-list">
               <span className="muted small">TCP reachability and peer authentication by endpoint</span>
+              <span className="small">{testReport.routes.filter((route) => route.authenticated_ms != null).length} of {testReport.routes.length} endpoints authenticated</span>
               {testReport.routes.map((r) => (
                 <div key={r.addr} className="test-route-row">
                   <div className="test-route-info">
@@ -924,7 +925,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
                       <span className="muted small">via {r.local_interface ? `${r.local_interface} (${r.local_ip})` : r.local_ip}</span>
                     )}
                   </div>
-                  <span className={`test-route-status ${r.reachable ? "reachable" : "unreachable"}`}>
+                  <span className={`test-route-status ${r.authenticated_ms != null ? "authenticated" : r.reachable ? "unconfirmed" : "unreachable"}`}>
                     {r.status}
                   </span>
                 </div>

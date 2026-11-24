@@ -283,6 +283,8 @@ pub struct RouteTest {
     pub kind: String,
     pub reachable: bool,
     pub rtt_ms: Option<u64>,
+    /// Elapsed time from dial to authenticated reply on this endpoint.
+    pub authenticated_ms: Option<u64>,
     pub local_ip: Option<std::net::IpAddr>,
     pub local_interface: Option<String>,
     pub status: String,
@@ -838,21 +840,23 @@ impl Link {
                 let kind = route_kind(&addr).to_string();
                 let started = std::time::Instant::now();
                 let timeout = Duration::from_secs(1);
-                let (rtt_ms, local_ip, status) = match tokio::time::timeout(timeout, TcpStream::connect(&addr)).await {
+                let (rtt_ms, authenticated_ms, local_ip, status) = match tokio::time::timeout(timeout, TcpStream::connect(&addr)).await {
                     Ok(Ok(stream)) => {
                         let elapsed = started.elapsed().as_millis() as u64;
                         let local_ip = stream.local_addr().ok().map(|address| address.ip());
                         let result = tokio::time::timeout(timeout, link.probe_route(&peer, &key, stream)).await;
-                        let verification = match result {
-                            Ok(Ok(())) => "authenticated probe passed",
-                            _ => "peer authentication unconfirmed",
+                        let authenticated_ms = matches!(result, Ok(Ok(())))
+                            .then(|| started.elapsed().as_millis() as u64);
+                        let status = match authenticated_ms {
+                            Some(total) => format!("Authenticated probe passed in {total} ms"),
+                            None => format!("TCP connected in {elapsed} ms · peer authentication unconfirmed"),
                         };
-                        (Some(elapsed), local_ip, format!("TCP connected in {elapsed} ms · {verification}"))
+                        (Some(elapsed), authenticated_ms, local_ip, status)
                     }
-                    Ok(Err(_)) => (None, None, "Refused or unreachable".to_string()),
-                    Err(_) => (None, None, "Timed out".to_string()),
+                    Ok(Err(_)) => (None, None, None, "Refused or unreachable".to_string()),
+                    Err(_) => (None, None, None, "Timed out".to_string()),
                 };
-                (index, RouteTest { addr, kind, reachable: rtt_ms.is_some(), rtt_ms, local_ip, local_interface: None, status })
+                (index, RouteTest { addr, kind, reachable: rtt_ms.is_some(), rtt_ms, authenticated_ms, local_ip, local_interface: None, status })
             });
         }
         let mut completed = Vec::new();
@@ -2727,7 +2731,9 @@ mod tests {
             report.routes.iter().map(|route| (route.addr.as_str(), route.reachable)).collect::<Vec<_>>(),
             [(unreachable.as_str(), false), (reachable.as_str(), true), (unauthenticated.as_str(), true)]
         );
-        assert!(report.routes[1].status.contains("authenticated probe passed"));
+        assert_eq!(report.routes[0].authenticated_ms, None);
+        assert!(report.routes[1].authenticated_ms.unwrap() >= report.routes[1].rtt_ms.unwrap());
+        assert_eq!(report.routes[2].authenticated_ms, None);
         assert!(report.routes[2].status.contains("peer authentication unconfirmed"));
         assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, host_session);
         assert_eq!(joiner.0.peers.lock().unwrap()[&host_id].generation, joiner_session);
@@ -2780,7 +2786,7 @@ mod tests {
         host.0.cfg.lock().unwrap().peers[0].addrs = routes;
         let report = host.test_peer(&joiner_id).await.unwrap();
         assert_eq!(report.routes.len(), 3);
-        assert!(report.routes.iter().all(|route| route.status.contains("authenticated probe passed")), "{report:?}");
+        assert!(report.routes.iter().all(|route| route.authenticated_ms.is_some()), "{report:?}");
         while let Some(result) = proxies.join_next().await {
             result.unwrap();
         }
