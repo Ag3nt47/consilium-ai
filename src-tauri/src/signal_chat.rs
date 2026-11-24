@@ -409,12 +409,72 @@ pub fn read_whole_line(r: &mut impl BufRead, buf: &mut Vec<u8>) -> Result<Option
     Ok(Some(line))
 }
 
-pub fn run(engine: Arc<Engine>, cfg_path: PathBuf) {
-    std::thread::spawn(move || loop {
-        if let Err(e) = session(&engine, &cfg_path) {
-            eprintln!("signal chat: {e}");
+fn is_unregistered_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("not registered") || lower.contains("unregistered")
+}
+
+fn cfg_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
+/// Keeps Signal off on this computer after an unregistered-account send error until settings or
+/// guided setup changes, preventing 5-second `signal_on` flapping against linked peers.
+struct UnregisteredHold {
+    account: String,
+    allowed_acis: Vec<String>,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl UnregisteredHold {
+    fn from_cfg(cfg: &BridgeConfig, cfg_path: &std::path::Path) -> Self {
+        Self {
+            account: cfg.account.clone(),
+            allowed_acis: cfg.allowed_acis.clone(),
+            modified: cfg_mtime(cfg_path),
         }
-        std::thread::sleep(Duration::from_secs(5));
+    }
+
+    fn should_wait(&self, cfg_path: &std::path::Path, setup_phase: &str) -> bool {
+        if matches!(setup_phase, "linking" | "starting" | "verifying") {
+            return false;
+        }
+        if cfg_mtime(cfg_path) != self.modified {
+            return false;
+        }
+        match BridgeConfig::load(cfg_path) {
+            Ok(now) => {
+                now.enabled
+                    && now.account == self.account
+                    && now.allowed_acis == self.allowed_acis
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+pub fn run(engine: Arc<Engine>, cfg_path: PathBuf) {
+    std::thread::spawn(move || {
+        let mut hold: Option<UnregisteredHold> = None;
+        loop {
+            if let Some(ref h) = hold {
+                let phase = crate::signal_setup::state().phase;
+                if h.should_wait(&cfg_path, &phase) {
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
+                hold = None;
+            }
+            if let Err(e) = session(&engine, &cfg_path) {
+                eprintln!("signal chat: {e}");
+                if is_unregistered_error(&e) {
+                    if let Ok(cfg) = BridgeConfig::load(&cfg_path) {
+                        hold = Some(UnregisteredHold::from_cfg(&cfg, &cfg_path));
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        }
     });
 }
 
@@ -423,6 +483,19 @@ struct Outbox {
     cursors: HashMap<String, u64>,
     /// Human events Consilium created from phone messages, and where each came from.
     origins: HashMap<String, Origin>,
+}
+
+fn send_ack(cfg: &BridgeConfig, group_id: Option<&str>, text: &str) -> Result<(), String> {
+    let self_res = send_self(cfg, text);
+    if let Err(ref e) = self_res {
+        eprintln!("signal chat: couldn't acknowledge the phone message to Note to Self: {e}");
+    }
+    if let Some(g) = group_id {
+        if let Err(e) = send_group(cfg, g, text) {
+            eprintln!("signal chat: couldn't acknowledge the phone message to group: {e}");
+        }
+    }
+    self_res
 }
 
 fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), String> {
@@ -461,6 +534,12 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
     // this connection is subscribed, so messages sent while Consilium is closed wait there.
     (&s).write_all(SUBSCRIBE.as_bytes()).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(s);
+    // Verify we can actually send to Note to Self before claiming Signal ownership over peers.
+    static ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !ANNOUNCED.load(std::sync::atomic::Ordering::SeqCst) {
+        send_self(&cfg, notice::BACK_ONLINE)?;
+        ANNOUNCED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     crate::link::set_signal_on(true);
     // Whatever way the session ends, linked computers stop counting on this one.
     struct Off;
@@ -474,10 +553,6 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
     let mut seen_set: HashSet<u64> = HashSet::new();
     let mut out = Outbox { cursors: HashMap::new(), origins: HashMap::new() };
     let mut buf: Vec<u8> = Vec::new();
-    static ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        let _ = send_self(&cfg, notice::BACK_ONLINE);
-    }
     loop {
         // Stop if Signal was switched off or re-set up; the outer loop starts again.
         let now = BridgeConfig::load(cfg_path)?;
@@ -487,7 +562,13 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
         if engine.config.get().members.iter().any(|m| !cfg.groups.agents.contains_key(m)) {
             return Ok(()); // a new member needs its own group
         }
-        forward(engine, &cfg, &mut out);
+        forward_with(
+            engine,
+            &cfg,
+            &mut out,
+            |text, files| send_self_files(&cfg, text, files),
+            |group, text| send_group(&cfg, group, text),
+        )?;
         let Some(line) = read_whole_line(&mut reader, &mut buf)? else { continue };
         if line.len() > 512 * 1024 {
             continue;
@@ -514,24 +595,25 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
             continue;
         }
         let group_id = msg.group.clone();
-        let reply = deliver(engine, &cfg, &mut out, msg);
-        if let Err(e) = send_self(&cfg, &reply) {
-            eprintln!("signal chat: couldn't acknowledge the phone message to Note to Self: {e}");
-        }
-        if let Some(ref g) = group_id {
-            if let Err(e) = send_group(&cfg, g, &reply) {
-                eprintln!("signal chat: couldn't acknowledge the phone message to group: {e}");
-            }
-        }
+        deliver_with(engine, &cfg, &mut out, msg, |ack| send_ack(&cfg, group_id.as_deref(), ack))?;
     }
 }
 
-/// Posts a phone message as the human's message in the newest conversation, and returns the
-/// ready-made notice that tells the phone what happened to it.
-fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Incoming) -> String {
+/// Sends the generic receipt to Signal before posting the phone message and starting the council
+/// turn, so the human hears back right away and send failures hand off to linked peers.
+fn deliver_with<F>(
+    engine: &Arc<Engine>,
+    cfg: &BridgeConfig,
+    out: &mut Outbox,
+    msg: Incoming,
+    mut send_ack: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str) -> Result<(), String>,
+{
     let convs = engine.store.list();
     let Some(conv) = convs.iter().find(|c| !crate::peer_sync::is_mirror(&c.id)).or_else(|| convs.first()) else {
-        return notice::NO_CONVERSATION.to_string();
+        return send_ack(notice::NO_CONVERSATION);
     };
     let members = engine.config.get().members;
     let events = engine.store.load(&conv.id).unwrap_or_default();
@@ -559,7 +641,6 @@ fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Inco
         }
     };
     let targets: Vec<String> = targets.into_iter().filter(|t| members.contains(t)).collect();
-    let nobody = targets.is_empty();
     // Pictures and documents sent from the phone are saved into the conversation, so every AI
     // sees them like files attached in the app.
     let mut attachments = Vec::new();
@@ -578,20 +659,35 @@ fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Inco
         text.push_str(&format!("\n\n({failed} file(s) sent from the phone couldn't be downloaded from Signal.)"));
     }
     let text = text.trim().to_string();
-    if text.is_empty() && attachments.is_empty() {
-        return notice::NOT_POSTED.to_string();
+    if (text.is_empty() && attachments.is_empty())
+        || (crate::peer_sync::is_mirror(&conv.id) && !attachments.is_empty())
+    {
+        return send_ack(notice::NOT_POSTED);
     }
-    match engine.send_via(&conv.id, &text, attachments, targets.clone(), 1, Some("Signal")) {
+    let mentioned: Vec<String> = crate::prompt::mentioned_agents(&text)
+        .into_iter()
+        .filter(|m| members.contains(m))
+        .collect();
+    let active_targets = if mentioned.is_empty() { &targets } else { &mentioned };
+    let off = crate::switched::off(engine.store.dir(), &conv.id);
+    let nobody = active_targets.is_empty() || active_targets.iter().all(|t| off.contains(t));
+    // Acknowledge to Signal before starting the council turn, then still post the message if
+    // acknowledgment fails so an already-accepted phone message isn't lost before handoff.
+    let ack_res = send_ack(receipt(nobody, decision));
+    match engine.send_via(&conv.id, &text, attachments, targets, 1, Some("Signal")) {
         Ok(e) => {
             out.origins.insert(e.id.clone(), msg.origin);
             if out.origins.len() > 500 {
                 out.origins.clear();
             }
-            formatted_receipt(nobody, decision, if e.to.is_empty() { &targets } else { &e.to })
+            ack_res
         }
         Err(e) => {
             eprintln!("signal chat: couldn't post the phone message: {e}");
-            notice::NOT_POSTED.to_string()
+            if ack_res.is_ok() {
+                send_ack(notice::NOT_POSTED)?;
+            }
+            ack_res
         }
     }
 }
@@ -605,35 +701,21 @@ pub fn receipt(nobody_can_answer: bool, decision: bool) -> &'static str {
     }
 }
 
-/// Formats a specific verification notice for a phone message, indicating which AI is assigned or taking the task.
-pub fn formatted_receipt(nobody_can_answer: bool, decision: bool, targets: &[String]) -> String {
-    if nobody_can_answer {
-        return receipt(true, decision).to_string();
-    }
-    let names: Vec<String> = targets
-        .iter()
-        .map(|id| crate::agents::by_id(id).map_or(id.clone(), |a| a.name.to_string()))
-        .collect();
-    if decision {
-        if names.is_empty() {
-            receipt(false, true).to_string()
-        } else {
-            format!("Consilium: Decision received and passed to {}.", names.join(", "))
-        }
-    } else if names.is_empty() {
-        receipt(false, false).to_string()
-    } else if names.len() == 1 {
-        format!("Consilium: Message received. Assigned to {}. Please wait for the response.", names[0])
-    } else {
-        format!("Consilium: Message received. Assigned to the council ({}). Please wait for the response.", names.join(", "))
-    }
-}
-
 /// Sends new messages (AI replies, in-app human messages, Consilium notes) across active conversations to Signal.
-fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
+fn forward_with<S, G>(
+    engine: &Arc<Engine>,
+    cfg: &BridgeConfig,
+    out: &mut Outbox,
+    mut send_note_to_self: S,
+    mut send_to_group: G,
+) -> Result<(), String>
+where
+    S: FnMut(&str, &[String]) -> Result<(), String>,
+    G: FnMut(&str, &str) -> Result<(), String>,
+{
     let convs = engine.store.list();
     if convs.is_empty() {
-        return;
+        return Ok(());
     }
     let answers = crate::link_answers_signal();
     for conv in convs.into_iter().filter(|c| answers || !crate::peer_sync::is_mirror(&c.id)).take(10) {
@@ -672,7 +754,10 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
             let text = match outbound_text(e) {
                 Some(t) => t,
                 None if !files.is_empty() && e.sender == "human" => format!("You: (sent {} file(s))", files.len()),
-                None => continue,
+                None => {
+                    out.cursors.insert(conv.id.clone(), e.seq);
+                    continue;
+                }
             };
             // An AI answering a message sent from its own group answers there.
             let asked_privately = last_human
@@ -681,9 +766,11 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
             let private_to = asked_privately
                 .then(|| crate::agents::by_id(&e.sender).map_or(e.sender.clone(), |a| a.name.to_string()));
             let formatted = self_text(&text, private_to.as_deref());
-            if let Err(err) = send_self_files(cfg, &formatted, &files) {
+            if let Err(err) = send_note_to_self(&formatted, &files) {
                 eprintln!("signal chat: couldn't send to Signal: {err}");
+                return Err(err);
             }
+            out.cursors.insert(conv.id.clone(), e.seq);
             let mut target_groups: Vec<&str> = Vec::new();
             if asked_privately {
                 if let Some(g) = cfg.groups.agents.get(&e.sender) {
@@ -700,11 +787,12 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
                 target_groups.push(cfg.groups.main.as_str());
             }
             for group in target_groups {
-                let _ = send_group(cfg, group, &text);
+                let _ = send_to_group(group, &text);
             }
         }
         out.cursors.insert(conv.id, newest);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -848,6 +936,49 @@ mod tests {
         assert_eq!(parse_incoming(&v, "+15551234567", &groups()).unwrap().text, "héllo");
     }
 
+    fn test_engine() -> (Arc<Engine>, PathBuf) {
+        struct Quiet;
+        impl crate::engine::Ui for Quiet {
+            fn event(&self, _: &Event) {}
+            fn turn(&self, _: crate::engine::TurnState) {}
+            fn activity(&self, _: &crate::engine::AgentActivity) {}
+        }
+        struct NoopHost;
+        impl crate::council::Host for NoopHost {
+            fn ask(
+                &self,
+                _: &'static crate::agents::Agent,
+                _: u32,
+                _: u32,
+                _: Vec<Event>,
+                _: tokio_util::sync::CancellationToken,
+            ) -> crate::council::Reply {
+                Box::pin(async {
+                    Ok(crate::agents::AgentReply {
+                        text: String::new(),
+                        usage: None,
+                        model: None,
+                    })
+                })
+            }
+            fn event(&self, _: &Event) {}
+            fn thinking(&self, _: Vec<String>, _: u32) {}
+            fn installed(&self, _: &'static crate::agents::Agent) -> bool {
+                true
+            }
+            fn remember(&self, _: &'static crate::agents::Agent, _: &str) -> Option<String> {
+                None
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("consilium-signal-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("council.json"), r#"{"members":["claude","gemini"]}"#).unwrap();
+        let engine = Engine::open(&dir, Arc::new(Quiet), Box::new(|_| {}))
+            .unwrap()
+            .with_host(Box::new(|_, _| Arc::new(NoopHost)));
+        (Arc::new(engine), dir)
+    }
+
     #[test]
     fn every_phone_message_gets_a_notice_back() {
         assert_eq!(receipt(false, false), notice::RECEIVED);
@@ -860,23 +991,115 @@ mod tests {
     }
 
     #[test]
-    fn formatted_receipt_specifies_assigned_ai_and_council() {
-        assert_eq!(
-            formatted_receipt(false, false, &["gemini".into()]),
-            "Consilium: Message received. Assigned to Gemini. Please wait for the response."
-        );
-        assert_eq!(
-            formatted_receipt(false, false, &["claude".into(), "gemini".into()]),
-            "Consilium: Message received. Assigned to the council (Claude, Gemini). Please wait for the response."
-        );
-        assert_eq!(
-            formatted_receipt(false, true, &["claude".into()]),
-            "Consilium: Decision received and passed to Claude."
-        );
-        assert_eq!(
-            formatted_receipt(true, false, &[]),
-            notice::NO_AI
-        );
+    fn deliver_sends_generic_receipt_before_starting_turn() {
+        let (engine, dir) = test_engine();
+        let conv = engine.store.create("chat").unwrap();
+        let cfg = BridgeConfig::default();
+        let mut out = Outbox { cursors: HashMap::new(), origins: HashMap::new() };
+        let msg = Incoming {
+            origin: Origin::Council,
+            text: "check status".into(),
+            timestamp: 42,
+            files: vec![],
+            group: None,
+        };
+        let mut acks = Vec::new();
+        let mut events_at_ack = usize::MAX;
+        let mut busy_at_ack = true;
+        deliver_with(&engine, &cfg, &mut out, msg, |ack| {
+            acks.push(ack.to_string());
+            events_at_ack = engine.store.load(&conv.id).unwrap().len();
+            busy_at_ack = engine.busy(&conv.id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(acks, vec![notice::RECEIVED]);
+        assert_eq!(events_at_ack, 0, "receipt must go out before posting or thinking");
+        assert!(!busy_at_ack, "turn must not start before receipt is sent");
+        let events = engine.store.load(&conv.id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, "check status");
+        assert_eq!(events[0].via.as_deref(), Some("Signal"));
+        assert_eq!(out.origins.get(&events[0].id), Some(&Origin::Council));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deliver_returns_send_failure_for_handoff_while_keeping_message() {
+        let (engine, dir) = test_engine();
+        let conv = engine.store.create("chat").unwrap();
+        let cfg = BridgeConfig::default();
+        let mut out = Outbox { cursors: HashMap::new(), origins: HashMap::new() };
+        let msg = Incoming {
+            origin: Origin::Council,
+            text: "hello".into(),
+            timestamp: 43,
+            files: vec![],
+            group: None,
+        };
+        let err = deliver_with(&engine, &cfg, &mut out, msg, |_| {
+            Err("User +15551234567 is not registered.".into())
+        })
+        .unwrap_err();
+        assert!(is_unregistered_error(&err));
+        let events = engine.store.load(&conv.id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, "hello");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forward_returns_error_and_preserves_cursor_on_send_failure() {
+        let (engine, dir) = test_engine();
+        let conv = engine.store.create("chat").unwrap();
+        let cfg = BridgeConfig::default();
+        let mut out = Outbox { cursors: HashMap::new(), origins: HashMap::new() };
+        forward_with(&engine, &cfg, &mut out, |_, _| Ok(()), |_, _| Ok(())).unwrap();
+        assert_eq!(out.cursors.get(&conv.id), Some(&0));
+
+        let e1 = engine.store.append(&conv.id, "claude", "message", vec![], "first reply").unwrap();
+        let _e2 = engine.store.append(&conv.id, "gemini", "message", vec![], "second reply").unwrap();
+        let mut sent = 0;
+        let err = forward_with(
+            &engine,
+            &cfg,
+            &mut out,
+            |_, _| {
+                sent += 1;
+                if sent == 1 {
+                    Ok(())
+                } else {
+                    Err("User +15551234567 is not registered.".into())
+                }
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert!(is_unregistered_error(&err));
+        assert_eq!(out.cursors.get(&conv.id), Some(&e1.seq));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unregistered_hold_waits_until_config_or_setup_changes() {
+        let dir = std::env::temp_dir().join(format!("consilium-hold-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("bridge.json");
+        let mut cfg = BridgeConfig {
+            enabled: true,
+            account: ACC.into(),
+            allowed_acis: vec!["aci-1".into()],
+            ..Default::default()
+        };
+        cfg.save(&cfg_path).unwrap();
+        let hold = UnregisteredHold::from_cfg(&cfg, &cfg_path);
+        assert!(hold.should_wait(&cfg_path, "idle"));
+        assert!(!hold.should_wait(&cfg_path, "linking"));
+        assert!(!hold.should_wait(&cfg_path, "verifying"));
+        cfg.allowed_acis.push("aci-2".into());
+        cfg.save(&cfg_path).unwrap();
+        assert!(!hold.should_wait(&cfg_path, "idle"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
