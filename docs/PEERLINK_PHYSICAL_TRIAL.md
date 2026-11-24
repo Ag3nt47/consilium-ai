@@ -74,9 +74,21 @@ The check uses existing AI confirmations and sends no new prompts. In the same m
 
 ## Simultaneous transfer trial
 
-After the individual routes pass, test with Ethernet, Wi-Fi and Bluetooth PAN active. Start an isolated transfer that can select each interface explicitly. Record the bound source interface, destination interface, bytes delivered and timestamps for each path. Confirm the same payload checksum at the receiver.
+After the individual routes pass, test with Ethernet, Wi-Fi and Bluetooth PAN active. Open
+**Test parallel payload transfer**, choose one computer, then match each local adapter with
+its peer endpoint. Use both computers' network settings to confirm the selected addresses
+belong to distinct physical adapters. Run the test and record the bound source interface,
+receiver IP address, checksum-verified bytes and receipt window for each path. Consilium
+sends four independently authenticated 8 KiB chunks per selected path and checks their
+SHA-256 receipts. The overlap is the shared first-to-last receipt window on the same receiving
+process, with a checksum-verified sample from each path inside that window. This bounded
+diagnostic can run alongside the live session.
 
-Compare the three-path run against each single-path baseline with the same payload and computers. To pass, authenticated payload bytes must arrive over each claimed path during overlapping time intervals. TCP handshakes, heartbeats and changes in whole-adapter counters alone do not show that the transfer used all three paths. Repeat while disconnecting each path in turn. Check payload integrity and whether the transfer completed, retried or stopped.
+For a throughput comparison, compare the three-path run against each single-path baseline
+with the same payload and computers. To pass the physical overlap trial, authenticated payload
+bytes must arrive over each claimed path during overlapping receipt windows. Repeat while
+disconnecting each path in turn. Check payload integrity and record whether the trial returned
+a partial result. Live chat and model traffic use their own routing and recovery logic.
 
 ## Split-model inference trial
 

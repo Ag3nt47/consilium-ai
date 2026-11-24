@@ -439,6 +439,7 @@ export const demoApi = {
         name: "Windows-Desktop",
         connected: true,
         route: "192.168.1.42:8470",
+        addrs: ["192.168.1.42:8470", "192.168.1.170:8470", "169.254.12.34:8470"],
         rtt_ms: 3,
         last_seen_ms: Date.now() - 1200,
         queued: 0,
@@ -465,6 +466,7 @@ export const demoApi = {
     name: "Windows-Desktop",
     connected: true,
     route: "192.168.1.42:8470",
+    addrs: ["192.168.1.42:8470", "192.168.1.170:8470", "169.254.12.34:8470"],
     rtt_ms: 3,
     last_seen_ms: Date.now(),
     queued: 0,
@@ -482,6 +484,9 @@ export const demoApi = {
     error: null,
   }),
   linkProbeSources: async () => [{ address: "192.168.1.15", interface: "Wi-Fi" }],
+  linkTransferTrial: async () => {
+    throw new Error("Open the desktop app to send an authenticated sample to a linked computer.");
+  },
   linkTestPeer: async (nodeId: string, source?: string) => ({
     node_id: nodeId,
     name: "Demo Peer",

@@ -373,6 +373,16 @@ export type RouteTest = {
 };
 
 export type ProbeSource = { address: string; interface: string };
+export type TransferPath = { source: string; endpoint: string };
+export type TransferTrial = {
+  overlap_ms: number | null;
+  paths: {
+    source: ProbeSource;
+    endpoint: string;
+    receipts: { bytes: number; sha256: string; receiver_ip: string; received_ms: number }[];
+    error: string | null;
+  }[];
+};
 
 export type PeerTestReport = {
   node_id: string;
@@ -491,6 +501,7 @@ const appApi = {
   linkUnpair: (nodeId: string) => invoke<LinkStatus>("link_unpair", { nodeId }),
   linkProbeSources: () => invoke<ProbeSource[]>("link_probe_sources"),
   linkTestPeer: (nodeId: string, source?: string) => invoke<PeerTestReport>("link_test_peer", { nodeId, source }),
+  linkTransferTrial: (nodeId: string, paths: TransferPath[]) => invoke<TransferTrial>("link_transfer_trial", { nodeId, paths }),
   linkTestAiHandshake: (nodeId: string) => invoke<AiHandshake[]>("link_test_ai_handshake", { nodeId }),
   linkAddPeerRoute: (nodeId: string, address: string) =>
     invoke<string[]>("link_add_peer_route", { nodeId, address }),
