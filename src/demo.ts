@@ -481,13 +481,15 @@ export const demoApi = {
     peers: [],
     error: null,
   }),
-  linkTestPeer: async (nodeId: string) => ({
+  linkProbeSources: async () => [{ address: "192.168.1.15", interface: "Wi-Fi" }],
+  linkTestPeer: async (nodeId: string, source?: string) => ({
     node_id: nodeId,
     name: "Demo Peer",
     connected: true,
     active_route: "192.168.1.157:8470",
     handshake_ok: true,
     rtt_ms: 4,
+    source: source ? { address: source, interface: "Wi-Fi" } : null,
     routes: [
       { addr: "192.168.1.157:8470", kind: "IP route", reachable: true, rtt_ms: 4, authenticated_ms: 9, status: "Authenticated probe passed in 9 ms" },
       { addr: "192.168.1.170:8470", kind: "IP route", reachable: true, rtt_ms: 6, status: "TCP connected in 6 ms · peer authentication unconfirmed" },

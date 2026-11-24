@@ -28,13 +28,13 @@ use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -291,6 +291,12 @@ pub struct RouteTest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeSource {
+    pub address: IpAddr,
+    pub interface: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerTestReport {
     pub node_id: String,
     pub name: String,
@@ -299,6 +305,7 @@ pub struct PeerTestReport {
     pub handshake_ok: bool,
     pub rtt_ms: Option<u64>,
     pub routes: Vec<RouteTest>,
+    pub source: Option<ProbeSource>,
     pub queued_outgoing: usize,
     pub summary: String,
 }
@@ -839,9 +846,16 @@ impl Link {
     }
 
     /// Tests connectivity, route latency, and sync alignment for a paired computer.
-    pub async fn test_peer(&self, node_id: &str) -> Result<PeerTestReport, String> {
+    pub async fn test_peer(&self, node_id: &str, source: Option<IpAddr>) -> Result<PeerTestReport, String> {
         let peer = self.peer(node_id).ok_or_else(|| format!("computer {node_id} not found"))?;
         let key = peer_key(&peer)?;
+        let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
+        let selected = source.map(|address| {
+            interface_name(&interfaces, address)
+                .filter(|_| route_ip_allowed(address))
+                .map(|interface| ProbeSource { address, interface })
+                .ok_or("The selected source address is not available on a unique local interface")
+        }).transpose()?;
         let mut probes = tokio::task::JoinSet::new();
         for (index, addr) in peer.addrs.iter().take(12).cloned().enumerate() {
             let link = self.clone();
@@ -851,7 +865,7 @@ impl Link {
                 let kind = route_kind(&addr).to_string();
                 let started = std::time::Instant::now();
                 let timeout = Duration::from_secs(1);
-                let (rtt_ms, authenticated_ms, local_ip, status) = match tokio::time::timeout(timeout, TcpStream::connect(&addr)).await {
+                let (rtt_ms, authenticated_ms, local_ip, status) = match tokio::time::timeout(timeout, connect_probe(&addr, source)).await {
                     Ok(Ok(stream)) => {
                         let elapsed = started.elapsed().as_millis() as u64;
                         let local_ip = stream.local_addr().ok().map(|address| address.ip());
@@ -875,7 +889,6 @@ impl Link {
             completed.push(result.map_err(|e| format!("Route check failed: {e}"))?);
         }
         completed.sort_by_key(|(index, _)| *index);
-        let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
         let routes: Vec<_> = completed.into_iter().map(|(_, mut route)| {
             route.local_interface = route.local_ip.and_then(|ip| interface_name(&interfaces, ip));
             route
@@ -909,6 +922,7 @@ impl Link {
         };
 
         Ok(PeerTestReport {
+            source: selected,
             node_id: peer.node_id,
             name: peer.name,
             connected,
@@ -1680,8 +1694,28 @@ impl Link {
     }
 }
 
-/// Tries every known address at once and keeps whichever connects first.
-/// What kind of connection an address is, for test results.
+async fn connect_probe(endpoint: &str, source: Option<IpAddr>) -> std::io::Result<TcpStream> {
+    let Some(source) = source else { return TcpStream::connect(endpoint).await };
+    let target = tokio::net::lookup_host(endpoint).await?
+        .find(|target| target.is_ipv4() == source.is_ipv4())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no endpoint in the selected address family"))?;
+    let socket = if source.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
+    socket.bind(SocketAddr::new(source, 0))?;
+    socket.connect(target).await
+}
+
+/// Usable source addresses with an unambiguous local interface, for the connection diagnostic.
+pub fn probe_sources() -> Result<Vec<ProbeSource>, String> {
+    let interfaces = if_addrs::get_if_addrs().map_err(|error| error.to_string())?;
+    let mut sources: Vec<_> = interfaces.iter().map(|interface| interface.ip().to_canonical())
+        .filter(|address| !address.is_loopback() && route_ip_allowed(*address))
+        .filter_map(|address| interface_name(&interfaces, address).map(|interface| ProbeSource { address, interface }))
+        .collect();
+    sources.sort_by(|a, b| (&a.interface, a.address).cmp(&(&b.interface, b.address)));
+    sources.dedup_by(|a, b| a.address == b.address);
+    Ok(sources)
+}
+
 fn interface_name(interfaces: &[if_addrs::Interface], ip: std::net::IpAddr) -> Option<String> {
     let mut names = interfaces.iter()
         .filter(|interface| interface.ip().to_canonical() == ip.to_canonical())
@@ -2423,7 +2457,7 @@ mod tests {
         let disconnected = &host.status().peers[0];
         assert_eq!(disconnected.local_interface, None);
         assert_eq!(disconnected.rtt_ms, None);
-        let report = host.test_peer(&disconnected.node_id).await.unwrap();
+        let report = host.test_peer(&disconnected.node_id, None).await.unwrap();
         assert!(!report.connected);
         assert_eq!(report.active_route, None);
         assert_eq!(report.rtt_ms, None);
@@ -2770,7 +2804,8 @@ mod tests {
         let host_session = host.0.peers.lock().unwrap()[&joiner_id].generation;
         let host_id = host.status().node_id;
         let joiner_session = joiner.0.peers.lock().unwrap()[&host_id].generation;
-        let report = host.test_peer(&joiner_id).await.unwrap();
+        let loopback = "127.0.0.1".parse().unwrap();
+        let report = host.test_peer(&joiner_id, Some(loopback)).await.unwrap();
         listener.abort();
         assert_eq!(report.name, joiner.0.cfg.lock().unwrap().name);
         assert!(report.handshake_ok);
@@ -2789,9 +2824,13 @@ mod tests {
         assert_eq!(joiner.0.peers.lock().unwrap()[&host_id].generation, joiner_session);
         assert_eq!(unreachable.local_ip, None);
         assert_eq!(unreachable.local_interface, None);
-        let loopback = "127.0.0.1".parse().unwrap();
+        let source = report.source.as_ref().unwrap();
+        assert_eq!(source.address, loopback);
         assert_eq!(reachable.local_ip, Some(loopback));
         assert_eq!(reachable.local_interface, interface_name(&if_addrs::get_if_addrs().unwrap_or_default(), loopback));
+        assert_eq!(reachable.local_interface.as_deref(), Some(source.interface.as_str()));
+        assert!(host.test_peer(&joiner_id, Some("198.51.100.1".parse().unwrap())).await.unwrap_err()
+            .contains("selected source address"));
 
         host.stop();
         joiner.stop();
@@ -2834,7 +2873,7 @@ mod tests {
         let host_id = host.status().node_id;
         let remote_generation = joiner.0.peers.lock().unwrap()[&host_id].generation;
         host.0.cfg.lock().unwrap().peers[0].addrs = routes;
-        let report = host.test_peer(&joiner_id).await.unwrap();
+        let report = host.test_peer(&joiner_id, None).await.unwrap();
         assert_eq!(report.routes.len(), 3);
         assert!(report.routes.iter().all(|route| route.authenticated_ms.is_some()), "{report:?}");
         while let Some(result) = proxies.join_next().await {

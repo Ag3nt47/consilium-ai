@@ -372,6 +372,8 @@ export type RouteTest = {
   status: string;
 };
 
+export type ProbeSource = { address: string; interface: string };
+
 export type PeerTestReport = {
   node_id: string;
   name: string;
@@ -380,6 +382,7 @@ export type PeerTestReport = {
   handshake_ok: boolean;
   rtt_ms: number | null;
   routes: RouteTest[];
+  source?: ProbeSource | null;
   queued_outgoing: number;
   summary: string;
 };
@@ -486,7 +489,8 @@ const appApi = {
   linkPairCancel: () => invoke<void>("link_pair_cancel"),
   linkPairJoin: (address: string, code: string) => invoke<LinkPeer>("link_pair_join", { address, code }),
   linkUnpair: (nodeId: string) => invoke<LinkStatus>("link_unpair", { nodeId }),
-  linkTestPeer: (nodeId: string) => invoke<PeerTestReport>("link_test_peer", { nodeId }),
+  linkProbeSources: () => invoke<ProbeSource[]>("link_probe_sources"),
+  linkTestPeer: (nodeId: string, source?: string) => invoke<PeerTestReport>("link_test_peer", { nodeId, source }),
   linkTestAiHandshake: (nodeId: string) => invoke<AiHandshake[]>("link_test_ai_handshake", { nodeId }),
   linkAddPeerRoute: (nodeId: string, address: string) =>
     invoke<string[]>("link_add_peer_route", { nodeId, address }),
