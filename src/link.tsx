@@ -196,11 +196,15 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
   // The communication stress test: running, and its last results (also posted in the chat).
   const [stressing, setStressing] = useState(false);
   const [stress, setStress] = useState<StressReport[] | null>(null);
+  const [stressPeer, setStressPeer] = useState("");
+  const stressPeers = status?.peers ?? [];
+  const canStress = stressPeers.some((peer) => peer.connected && (!stressPeer || stressPeer === peer.node_id));
   const runStress = async () => {
     setStressing(true);
+    setStress(null);
     setError(null);
     try {
-      setStress(await api.stressTestLink());
+      setStress(await api.stressTestLink(stressPeer || undefined));
     } catch (e) {
       setError(`Stress test failed: ${e}`);
     } finally {
@@ -426,10 +430,29 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
             )}
 
             <div className="stress-test" style={{ marginTop: "8px" }}>
+              {stressPeers.length > 0 && (
+                <label className="row gap-sm small">
+                  Test target
+                  <select value={stressPeer} disabled={stressing} onChange={(event) => {
+                    setStressPeer(event.target.value);
+                    setStress(null);
+                  }}>
+                    <option value="">All connected computers</option>
+                    {stressPeer && !stressPeers.some((peer) => peer.node_id === stressPeer) && (
+                      <option value={stressPeer} disabled>Previous computer is unavailable</option>
+                    )}
+                    {stressPeers.map((peer) => (
+                      <option key={peer.node_id} value={peer.node_id} disabled={!peer.connected}>
+                        {peer.name}{peer.connected ? "" : " (offline)"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <button
                 className="btn small"
                 onClick={runStress}
-                disabled={stressing || !(status.peers ?? []).some((p) => p.connected)}
+                disabled={stressing || !canStress}
                 title="Tries each configured endpoint in turn and checks for an authenticated packet. Shows the local interface when available, then tries to reconnect using the saved endpoints. Results are posted in chat. Physical failover requires a separate test with a transport disconnected."
               >
                 {stressing ? "Stress testing routes…" : "Communication stress test"}
@@ -438,7 +461,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                 const passed = r.routes.filter((route) => route.ok);
                 const interfaces = [...new Set(passed.flatMap(({ local_interface }) => local_interface ? [local_interface] : []))];
                 return (
-                  <div key={r.computer} className="stress-report">
+                  <div key={r.node_id} className="stress-report">
                     <div className="muted small">
                       {r.computer}:{" "}
                       {r.routes.length === 0

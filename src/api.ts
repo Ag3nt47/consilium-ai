@@ -401,6 +401,7 @@ export type LinkStatus = {
 
 /** The communication stress test with one linked computer (src-tauri/src/link.rs). */
 export type StressReport = {
+  node_id: string;
   computer: string;
   routes: { addr: string; kind: string; ok: boolean; ms: number | null; local_interface?: string | null; local_addr?: string | null; detail: string }[];
   restored: StressReport["routes"][number] | null;
@@ -518,7 +519,7 @@ const appApi = {
   /** Restarts Consilium on this computer, targeted linked computers, or all computers. */
   restartApp: (targets: string[]) => invoke<void>("restart_app", { targets }),
   /** Moves the link onto each route in turn, verifies it, and posts the results in the chat. */
-  stressTestLink: () => invoke<StressReport[]>("stress_test_link"),
+  stressTestLink: (nodeId?: string) => invoke<StressReport[]>("stress_test_link", { nodeId }),
   agentBranches: (conversation?: string) => invoke<AgentBranch[]>("agent_branches", { conversation }),
   mergeAgentBranch: (repo: string, agent: string, conversation?: string) =>
     invoke<string>("merge_agent_branch", { conversation, repo, agent }),
