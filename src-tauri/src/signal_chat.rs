@@ -19,7 +19,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[path = "signal_subscriber.rs"]
+mod subscriber;
 
 /// Longest text sent in one Signal message; longer replies are cut with a pointer to Consilium.
 const MAX_OUT: usize = 3500;
@@ -387,7 +390,7 @@ pub fn ensure_groups(cfg_path: &std::path::Path, members: &[String]) -> Result<B
 /// Runs for the life of the app: links Signal and the newest conversation in both directions
 /// while Signal is switched on and verified.
 /// Asks signal-cli (in manual receive mode) to start passing messages to this connection.
-pub const SUBSCRIBE: &str = "{\"jsonrpc\":\"2.0\",\"id\":\"consilium-subscribe\",\"method\":\"subscribeReceive\"}\n";
+pub const SUBSCRIBE: &str = subscriber::SUBSCRIBE_REQUEST;
 
 /// Reads one whole line from signal-cli. A read timeout part-way through a line keeps what has
 /// arrived in `buf` for the next call, so a long message (a photo, a long text) that arrives in
@@ -427,6 +430,12 @@ struct Outbox {
     origins: HashMap<String, Origin>,
 }
 
+fn same_receiver_config(now: &BridgeConfig, expected: &BridgeConfig) -> bool {
+    now.enabled && now.account == expected.account && now.endpoint == expected.endpoint
+        && now.groups == expected.groups && now.allowed_acis == expected.allowed_acis
+        && !now.allowed_acis.is_empty()
+}
+
 fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), String> {
     crate::link::set_signal_on(false);
     let cfg = BridgeConfig::load(cfg_path)?;
@@ -450,57 +459,55 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
             return Err(e);
         }
     };
-    let s = match TcpStream::connect_timeout(&addr(&cfg)?, Duration::from_secs(5)) {
-        Ok(s) => s,
-        Err(e) => {
-            crate::signal_setup::revive(&cfg);
-            return Err(e.to_string());
+    let expected = cfg.clone();
+    let current_path = cfg_path.to_path_buf();
+    let decode_cfg = cfg.clone();
+    let subscription = subscriber::start(addr(&cfg)?, move || {
+        BridgeConfig::load(&current_path).map(|now| same_receiver_config(&now, &expected))
+    }, move |value| {
+        let msg = parse_incoming(value, &decode_cfg.account, &decode_cfg.groups)?;
+        // The setup code is consumed by the verifier, not sent to the council.
+        let setup = crate::signal_setup::state();
+        if msg.origin == Origin::Council && setup.phase == "verifying" && setup.code.as_deref() == Some(msg.text.as_str()) {
+            return None;
         }
-    };
-    // Short, so AI replies go out to the phone within a quarter of a second.
-    s.set_read_timeout(Some(Duration::from_millis(250))).map_err(|e| e.to_string())?;
-    // signal-cli runs in manual receive mode: it takes messages off Signal's servers only while
-    // this connection is subscribed, so messages sent while Consilium is closed wait there.
-    (&s).write_all(SUBSCRIBE.as_bytes()).map_err(|e| e.to_string())?;
-    let mut reader = BufReader::new(s);
-    crate::link::set_signal_on(true);
-    // Whatever way the session ends, linked computers stop counting on this one.
-    struct Off;
-    impl Drop for Off {
-        fn drop(&mut self) {
-            crate::link::set_signal_on(false);
-        }
-    }
-    let _off = Off;
+        Some(msg)
+    }, crate::link::set_signal_on)?;
+    let mut revive_after = Instant::now();
     let mut seen: VecDeque<u64> = VecDeque::new();
     let mut seen_set: HashSet<u64> = HashSet::new();
     let mut out = Outbox { cursors: HashMap::new(), origins: HashMap::new() };
-    let mut buf: Vec<u8> = Vec::new();
     static ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        let _ = send_group(&cfg, &cfg.groups.main, notice::BACK_ONLINE);
-    }
     loop {
         // Stop if Signal was switched off or re-set up; the outer loop starts again.
-        let now = BridgeConfig::load(cfg_path)?;
-        if !now.enabled || now.account != cfg.account || now.groups != cfg.groups {
-            return Ok(());
-        }
+        let now = match BridgeConfig::load(cfg_path) {
+            Ok(now) => now,
+            // A short config-write gap pauses both dispatch and the socket;
+            // accepted messages stay in this configuration's bounded channel.
+            Err(_) => { std::thread::sleep(Duration::from_millis(250)); continue; }
+        };
+        if !same_receiver_config(&now, &cfg) { return Ok(()); }
         if engine.config.get().members.iter().any(|m| !cfg.groups.agents.contains_key(m)) {
             return Ok(()); // a new member needs its own group
         }
-        forward(engine, &cfg, &mut out);
-        let Some(line) = read_whole_line(&mut reader, &mut buf)? else { continue };
-        if line.len() > 512 * 1024 {
-            continue;
+        if subscription.take_connect_failure() && Instant::now() >= revive_after {
+            crate::signal_setup::revive(&cfg);
+            revive_after = Instant::now() + Duration::from_secs(5);
         }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-        let Some(msg) = parse_incoming(&v, &cfg.account, &cfg.groups) else { continue };
-        // The setup code is consumed by the verifier rather than sent to the council.
-        let setup = crate::signal_setup::state();
-        if msg.origin == Origin::Council && setup.phase == "verifying" && setup.code.as_deref() == Some(msg.text.as_str()) {
-            continue;
-        }
+        let msg = match subscription.recv_timeout(Duration::from_millis(250)) {
+            Ok(message) => message,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if subscription.is_ready() {
+                    if ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        forward(engine, &cfg, &mut out);
+                    } else {
+                        let _ = send_group(&cfg, &cfg.groups.main, notice::BACK_ONLINE);
+                    }
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err("Signal subscriber stopped".into()),
+        };
         if msg.timestamp != 0 {
             if !seen_set.insert(msg.timestamp) {
                 continue;
