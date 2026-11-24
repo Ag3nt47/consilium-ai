@@ -129,6 +129,20 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 
 ## Document 4: Consilium app improvements.docx
 
+Mac send/restart recovery follow-up: 0.3.58 snapshots the running-turn table
+before filtering the recovery journal, removing the opposite lock order between
+startup resumption and a new send. Login-shell PATH probing now drains output
+while the child runs, bounds the entire exit/EOF operation and cleans up its
+owned process group. Shared PATH snapshots stay available during refresh and
+retain prior folders on failure. Regression checks cover forced startup/send
+contention, concurrent PATH lookups, inherited output pipes and pipe saturation.
+All 20 focused Windows engine/journal/PATH tests, the production front-end build
+and privacy gate passed. Unix production code passed macOS cross-compilation;
+Unix subprocess fixtures remain hosted-runtime checks. The observed Mac hang
+has not been captured in a live thread sample; hosted
+platform checks and installed Mac window/send verification remain deployment
+steps. Native Bluetooth work is isolated from this repair.
+
 Matrix rain follow-up: decorative code trails remain visible through the glass
 surfaces, frame pacing preserves the selected 15/30/60 FPS cadence, and completion
 telemetry rejects future timestamps and expires after eight seconds. Local

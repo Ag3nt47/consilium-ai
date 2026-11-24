@@ -10,23 +10,53 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const REFRESH: Duration = Duration::from_secs(60);
 
-static CACHE: Mutex<Option<(Instant, Vec<PathBuf>)>> = Mutex::new(None);
+struct PathCache {
+    snapshot: Mutex<Option<(Instant, Vec<PathBuf>)>>,
+    refreshing: AtomicBool,
+}
+
+impl PathCache {
+    const fn new() -> Self { Self { snapshot: Mutex::new(None), refreshing: AtomicBool::new(false) } }
+
+    fn dirs(&self, current: Vec<PathBuf>, usual: Vec<PathBuf>, probe: impl FnOnce() -> Option<Vec<PathBuf>>) -> Vec<PathBuf> {
+        let previous = self.snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some((at, folders)) = &previous {
+            if at.elapsed() < REFRESH { return folders.clone(); }
+        }
+        if self.refreshing.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return merge(current, previous.map(|(_, folders)| folders).unwrap_or_default(), usual);
+        }
+        struct Refresh<'a>(&'a AtomicBool);
+        impl Drop for Refresh<'_> { fn drop(&mut self) { self.0.store(false, Ordering::Release); } }
+        let _refresh = Refresh(&self.refreshing);
+        // A different refresh can finish between our snapshot and gate acquisition.
+        if let Some((at, folders)) = self.snapshot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            if at.elapsed() < REFRESH { return folders.clone(); }
+        }
+        // Never run a shell or registry query while holding the shared snapshot lock.
+        let saved = probe().unwrap_or_else(|| previous.map(|(_, folders)| folders).unwrap_or_default());
+        let folders = merge(current, saved, usual);
+        *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), folders.clone()));
+        folders
+    }
+}
+
+static CACHE: PathCache = PathCache::new();
 
 /// Every folder to search, in order, without duplicates.
 pub fn dirs() -> Vec<PathBuf> {
-    let mut cache = CACHE.lock().unwrap();
-    if let Some((at, dirs)) = cache.as_ref() {
-        if at.elapsed() < REFRESH {
-            return dirs.clone();
-        }
-    }
-    let fresh = gather();
-    *cache = Some((Instant::now(), fresh.clone()));
-    fresh
+    let current = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    CACHE.dirs(current, usual_dirs(), || {
+        #[cfg(windows)]
+        { Some(saved_path()) }
+        #[cfg(not(windows))]
+        { saved_path() }
+    })
 }
 
 /// `dirs`, joined for a PATH variable.
@@ -34,20 +64,20 @@ pub fn joined() -> Option<std::ffi::OsString> {
     std::env::join_paths(dirs()).ok()
 }
 
-fn gather() -> Vec<PathBuf> {
+fn merge(current: Vec<PathBuf>, saved: Vec<PathBuf>, usual: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut add = |p: PathBuf| {
         if !p.as_os_str().is_empty() && !out.iter().any(|o| same(o, &p)) {
             out.push(p);
         }
     };
-    for p in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+    for p in current {
         add(p);
     }
-    for p in saved_path() {
+    for p in saved {
         add(p);
     }
-    for p in usual_dirs() {
+    for p in usual {
         add(p);
     }
     out
@@ -153,35 +183,83 @@ fn expand(s: &str) -> String {
 
 /// The login shell's PATH (what a new Terminal window gets), or nothing if it takes too long.
 #[cfg(not(windows))]
-fn saved_path() -> Vec<PathBuf> {
-    use std::io::Read;
+fn saved_path() -> Option<Vec<PathBuf>> {
     let shell = std::env::var("SHELL").ok().filter(|s| s.starts_with('/')).unwrap_or_else(|| "/bin/sh".into());
-    let Ok(mut child) = std::process::Command::new(shell)
-        .args(["-l", "-c", "printf '%s' \"$PATH\""])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    else {
-        return vec![];
-    };
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() < Duration::from_secs(3) => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                return vec![];
-            }
-        }
-    }
-    let mut text = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = out.read_to_string(&mut text);
-    }
-    std::env::split_paths(text.trim()).collect()
+    let mut command = std::process::Command::new(shell);
+    command.args(["-l", "-c", "printf '%s' \"$PATH\""]);
+    let output = path_output(command, Duration::from_secs(3), 128 * 1024)?;
+    let text = String::from_utf8(output).ok()?;
+    Some(std::env::split_paths(text.trim()).collect())
 }
+
+/// Drain while the child runs, including after it exits if descendants still own
+/// its pipe. No blocking read or reader thread survives the operation deadline.
+#[cfg(unix)]
+fn path_output(mut command: std::process::Command, budget: Duration, limit: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let started = Instant::now();
+    let mut child = command.process_group(0)
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null())
+        .spawn().ok()?;
+    let group = child.id() as libc::pid_t;
+    let mut completed = false;
+    let result = (|| {
+        let mut stdout = child.stdout.take()?;
+        let fd = stdout.as_raw_fd();
+        // SAFETY: fd is the live, owned pipe descriptor; no flags or other
+        // processes are changed outside this newly spawned process group.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 { return None; }
+        let mut output = Vec::new();
+        let mut eof = false;
+        let mut status = None;
+        let mut buffer = [0u8; 8192];
+        loop {
+            if started.elapsed() >= budget { return None; }
+            if !eof {
+                loop {
+                    if started.elapsed() >= budget { return None; }
+                    let capacity = buffer.len().min(limit.saturating_sub(output.len()).saturating_add(1));
+                    match stdout.read(&mut buffer[..capacity]) {
+                        Ok(0) => { eof = true; break; }
+                        Ok(count) => {
+                            output.extend_from_slice(&buffer[..count]);
+                            if output.len() > limit { return None; }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => return None,
+                    }
+                }
+            }
+            if status.is_none() { status = child.try_wait().ok()?; }
+            if eof {
+                if let Some(status) = status {
+                    completed = true;
+                    return status.success().then_some(output);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5).min(budget.saturating_sub(started.elapsed())));
+        }
+    })();
+    if !completed {
+        // SAFETY: process_group(0) created a group whose ID is this exact
+        // child's PID. Never signal the app's or another user's process group.
+        unsafe { libc::kill(-group, libc::SIGKILL); }
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    result
+}
+
+#[cfg(all(not(windows), not(unix)))]
+fn path_output(_: std::process::Command, _: Duration, _: usize) -> Option<Vec<u8>> { None }
+
+#[cfg(test)]
+#[path = "searchpath_tests.rs"]
+mod focused_tests;
 
 #[cfg(test)]
 mod tests {

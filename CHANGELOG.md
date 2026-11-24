@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.3.58
+
+- Avoid a lock-order deadlock between interrupted-turn recovery and sending or starting a new turn.
+- Bound the whole login-shell PATH check, including inherited output pipes, so a shell descendant cannot leave tool detection waiting indefinitely.
+- Keep concurrent tool lookups responsive during PATH refresh and retain previously known folders when a refresh fails.
+
 ## 0.3.57
 
 - Keep Windows project-version and GitHub checks in the background without opening terminal windows or credential prompts.

@@ -697,8 +697,11 @@ impl Engine {
     /// Continues turns that a quit, crash, restart or update cut short, in every conversation, or
     /// only in `only`. A turn the other process is running is left to it.
     pub fn resume_interrupted(self: &Arc<Self>, only: Option<&str>) {
+        // begin() holds running before updating the journal. Never take running
+        // from the journal's predicate: startup resumption can race a new send.
+        let running: HashSet<String> = self.running.lock().unwrap().keys().cloned().collect();
         let (resume, give_up) = self.journal.interrupted_where(|p| {
-            only.is_none_or(|c| c == p.conversation) && !self.running_here(&p.conversation) && !self.store.turn_locked(&p.conversation)
+            only.is_none_or(|c| c == p.conversation) && !running.contains(&p.conversation) && !self.store.turn_locked(&p.conversation)
         });
         for p in give_up {
             let _ = self.note(
@@ -1440,6 +1443,58 @@ mod tests {
         assert!(!app.running_here(&conv), "the terminal's turn is left to the terminal");
         until_idle(&[&app, &term], &conv).await;
         assert_eq!(said(&app, &conv).len(), 2, "one answer, not two");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn startup_resumption_does_not_wait_for_the_turn_table_while_holding_the_journal() {
+        use std::sync::mpsc;
+
+        let dir = std::env::temp_dir().join(format!("consilium-engine-resume-send-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("council.json"), r#"{"members":["gpt"]}"#).unwrap();
+        let (journal_held, journal_ready) = mpsc::channel();
+        let (send_has_running, send_is_ready) = mpsc::channel();
+        let (resume_finished, resume_is_done) = mpsc::channel();
+        let resume_is_done = Mutex::new(resume_is_done);
+        // Spawning is deliberately inert: this test runs no AI, CLI, or network.
+        let app = Arc::new(Engine::open(&dir, Arc::new(Quiet), Box::new(drop)).unwrap()
+            .with_host(Box::new(move |_, _| {
+                // begin() reaches this factory with the turn table held. Keep
+                // it taken until startup has completed its journal predicate.
+                send_has_running.send(()).unwrap();
+                resume_is_done.lock().unwrap().recv_timeout(Duration::from_secs(5))
+                    .expect("Startup must not reacquire the turn table from inside the journal lock");
+                Arc::new(Echo { delay: 0 })
+            })));
+        let conv = app.store.create("startup/send race").unwrap().id;
+        app.journal.begin(Pending::new(&conv, vec!["gpt".into()], 1));
+        app.journal.before_resume_filter_for_test(move || {
+            // This hook runs while Journal.busy is held. The new send then
+            // takes Engine.running, reproducing the former ABBA ordering.
+            journal_held.send(()).unwrap();
+            send_is_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        let resuming = app.clone();
+        let resume = std::thread::spawn(move || {
+            resuming.resume_interrupted(None);
+            resume_finished.send(()).unwrap();
+        });
+        journal_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        let sending = app.clone();
+        let target = conv.clone();
+        let send = std::thread::spawn(move || {
+            // Explicit addressing bypasses installed-CLI tier probes as well.
+            sending.send(&target, "@gpt keep this new message", vec!["gpt".into()], 1)
+        });
+        let sent = send.join().expect("The new send must not deadlock with startup").unwrap();
+        resume.join().expect("Startup must finish while the new send owns the turn table");
+        assert!(app.running_here(&conv), "The new send owns the one running turn");
+        assert_eq!(app.journal.pending_conversations(), vec![conv.clone()]);
+        let humans: Vec<_> = app.store.load(&conv).unwrap().into_iter().filter(|event| event.sender == "human").collect();
+        assert_eq!(humans.len(), 1);
+        assert_eq!(humans[0].id, sent.id);
+        drop(app);
         let _ = std::fs::remove_dir_all(dir);
     }
 
