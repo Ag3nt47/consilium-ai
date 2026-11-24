@@ -17,6 +17,7 @@ mod config;
 mod customai;
 mod council;
 mod engine;
+mod environment_audit;
 mod follow;
 mod link;
 mod liveui;
@@ -292,6 +293,13 @@ fn workspace_for(state: &AppState, conversation: Option<String>) -> Result<std::
         .map(std::path::PathBuf::from)
         .filter(|p| p.is_dir())
         .ok_or_else(|| "no project folder is set".to_string())
+}
+
+#[tauri::command]
+async fn read_environment_audit(state: State<'_, AppState>, conversation: Option<String>) -> Result<environment_audit::EnvironmentAudit, String> {
+    let workspace = workspace_for(&state, conversation).ok();
+    tokio::task::spawn_blocking(move || environment_audit::sample(workspace.as_deref()))
+        .await.map_err(|error| error.to_string())
 }
 
 /// Each AI's isolated copy of the project and what merging it would bring in.
@@ -1679,6 +1687,7 @@ pub fn run() {
             request_peer_update,
             restart_app,
             agent_branches,
+            read_environment_audit,
             merge_agent_branch,
             discard_agent_branch,
             save_approval,

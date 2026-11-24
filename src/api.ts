@@ -373,6 +373,23 @@ export type RouteTest = {
 };
 
 export type ProbeSource = { address: string; interface: string };
+export type EnvironmentAudit = {
+  platform: string;
+  architecture: string;
+  project_set: boolean;
+  git_summary: string | null;
+  dependencies: {
+    name: string;
+    requested: string;
+    locked: string | null;
+    installed: string | null;
+    lockfile_matches: boolean | null;
+  }[];
+  dependency_note: string | null;
+  tools: [string, boolean][];
+  ollama_models: string[];
+  ollama_note: string | null;
+};
 export type TransferPath = { source: string; endpoint: string };
 export type TransferTrial = {
   overlap_ms: number | null;
@@ -537,6 +554,7 @@ const appApi = {
   /** Moves the link onto each route in turn, verifies it, and posts the results in the chat. */
   stressTestLink: (nodeId?: string, sources?: string[]) => invoke<StressReport[]>("stress_test_link", { nodeId, sources }),
   agentBranches: (conversation?: string) => invoke<AgentBranch[]>("agent_branches", { conversation }),
+  readEnvironmentAudit: (conversation?: string) => invoke<EnvironmentAudit>("read_environment_audit", { conversation }),
   mergeAgentBranch: (repo: string, agent: string, conversation?: string) =>
     invoke<string>("merge_agent_branch", { conversation, repo, agent }),
   discardAgentBranch: (repo: string, agent: string, conversation?: string) =>
