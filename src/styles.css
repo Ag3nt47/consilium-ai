@@ -3419,6 +3419,8 @@ button.attachment {
 .task-add { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
 .task-add input { flex: 1; min-width: 0; font-size: 12px; padding: 4px 6px; }
 .task-add select { font-size: 12px; padding: 4px; }
+.task-stage { font-size: 12px; margin-top: 8px; }
+.task-stage textarea { box-sizing: border-box; resize: vertical; width: 100%; margin-bottom: 4px; }
 .task-error { color: #e5534b; font-size: 11px; }
 
 /* Click-to-rename conversation title. */

@@ -48,6 +48,8 @@ export interface TaskBoard {
   next: number;
 }
 
+export type TaskPlanReceipt = { added: number; skipped: number };
+
 export type TaskOp =
   | { op: "add"; title: string; owner?: string; priority?: TaskPriority }
   | { op: "take"; task: string }
@@ -567,6 +569,8 @@ const appApi = {
   tasksGet: (id: string) => invoke<TaskBoard>("tasks_get", { id }),
   /** A change by the human; Consilium also notes it in the chat. */
   tasksApply: (id: string, op: TaskOp) => invoke<TaskBoard>("tasks_apply", { id, op }),
+  tasksStagePlan: (id: string, plan: string, priority: TaskPriority) =>
+    invoke<TaskPlanReceipt>("tasks_stage_plan", { id, plan, priority }),
   saveApproval: (request: string) => invoke<Council>("save_approval", { request }),
   forgetApproval: (grant: string) => invoke<Council>("forget_approval", { grant }),
   /** Settings → Tools: not-bundled tools the AIs know about, with install state and pinned commands. */

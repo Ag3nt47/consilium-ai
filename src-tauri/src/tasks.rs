@@ -19,6 +19,8 @@ use std::sync::Mutex;
 const MAX_TITLE: usize = 140;
 /// Most tasks a board holds; the oldest finished ones go first.
 const MAX_TASKS: usize = 200;
+const MAX_PLAN_TASKS: usize = 100;
+const MAX_PLAN_BYTES: usize = 64 * 1024;
 /// Finished tasks shown to the AIs (the newest ones).
 const DONE_IN_PROMPT: usize = 5;
 const LOCAL_OPEN_IN_PROMPT: usize = 24;
@@ -80,6 +82,12 @@ pub struct Board {
     pub tasks: Vec<Task>,
     #[serde(default)]
     pub next: u32,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct PlanReceipt {
+    pub added: usize,
+    pub skipped: usize,
 }
 
 /// A change to the board, from a `TASK:` line or the app.
@@ -217,6 +225,59 @@ pub fn apply(
     )))
 }
 
+/// Stage an unassigned task list as one board update. Repeated imports skip existing titles.
+pub fn stage_plan(
+    conversations: &Path,
+    conversation: &str,
+    plan: &str,
+    priority: Priority,
+) -> Result<(PlanReceipt, Option<String>), String> {
+    if plan.len() > MAX_PLAN_BYTES {
+        return Err("The task plan is too long. Split it into smaller lists.".into());
+    }
+    let titles: Vec<_> = plan.lines().filter_map(plan_title).take(MAX_PLAN_TASKS + 1).collect();
+    if titles.is_empty() {
+        return Err("Enter at least one task, one per line.".into());
+    }
+    if titles.len() > MAX_PLAN_TASKS {
+        return Err(format!("Stage at most {MAX_PLAN_TASKS} tasks at a time."));
+    }
+
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut board = load(conversations, conversation);
+    let mut known: std::collections::HashSet<_> = board.tasks.iter().map(|task| task.title.to_lowercase()).collect();
+    let total = titles.len();
+    let new: Vec<_> = titles.into_iter().filter(|title| known.insert(title.to_lowercase())).collect();
+    if board.tasks.len().saturating_add(new.len()) > MAX_TASKS {
+        return Err(format!("The task board holds up to {MAX_TASKS} tasks. Remove finished tasks before staging more."));
+    }
+    let receipt = PlanReceipt { added: new.len(), skipped: total - new.len() };
+    if new.is_empty() {
+        return Ok((receipt, None));
+    }
+
+    let now = crate::store::now_ms();
+    for title in &new {
+        let index = board.add_clean(title.clone(), None, Status::Todo, "human", now)
+            .ok_or("The board could not allocate another task number.")?;
+        board.tasks[index].priority = priority;
+    }
+    save(conversations, conversation, &board)?;
+    let noun = if receipt.added == 1 { "task" } else { "tasks" };
+    let note = format!("Tasks: The human staged {} unassigned {noun}. {}", receipt.added, board.progress());
+    Ok((receipt, Some(note)))
+}
+
+fn plan_title(line: &str) -> Option<String> {
+    let line = line.trim();
+    let bullet = ["- ", "* ", "+ "].into_iter().find_map(|prefix| line.strip_prefix(prefix));
+    let numbered = line.split_once(['.', ')'])
+        .filter(|(number, _)| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|(_, title)| title.strip_prefix(' '));
+    let title = bullet.or(numbered).unwrap_or(line).trim_start();
+    clean(title.strip_prefix("[ ] ").unwrap_or(title))
+}
+
 impl Board {
     fn find(&self, reference: &str) -> Option<usize> {
         let r = reference.trim().trim_end_matches('.');
@@ -256,11 +317,16 @@ impl Board {
         who: &str,
         now: u64,
     ) -> Option<usize> {
-        let title = clean(title)?;
+        self.add_clean(clean(title)?, owner, status, who, now)
+    }
+
+    fn add_clean(
+        &mut self, title: String, owner: Option<String>, status: Status, who: &str, now: u64,
+    ) -> Option<usize> {
         self.next = self
             .next
             .max(self.tasks.iter().map(|t| t.id).max().unwrap_or(0))
-            + 1;
+            .checked_add(1)?;
         self.tasks.push(Task {
             id: self.next,
             title,
@@ -745,6 +811,44 @@ mod tests {
             assert!(prompt.find("#3 [").unwrap() < prompt.find("#2 [").unwrap());
             assert!(prompt.find("#2 [").unwrap() < prompt.find("#1 [").unwrap());
         }
+    }
+
+    #[test]
+    fn staging_a_plan_is_repeatable_and_keeps_tasks_unassigned() {
+        let root = std::env::temp_dir().join(format!("consilium-plan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let text = "1. Verify transport\r\n- [ ] Review tests\r\n\r\n* verify transport\r\n3) Write notes";
+        let (first, note) = stage_plan(&root, "c1", text, Priority::High).unwrap();
+        assert_eq!(first, PlanReceipt { added: 3, skipped: 1 });
+        let note = note.unwrap();
+        assert!(note.contains("staged 3 unassigned"));
+        assert!(!note.contains("Verify transport"));
+        let board = load(&root, "c1");
+        assert_eq!(board.tasks.iter().map(|task| task.title.as_str()).collect::<Vec<_>>(),
+            ["Verify transport", "Review tests", "Write notes"]);
+        assert!(board.tasks.iter().all(|task| task.priority == Priority::High && task.status == Status::Todo && task.owner.is_none()));
+        let (repeat, note) = stage_plan(&root, "c1", text, Priority::Low).unwrap();
+        assert_eq!(repeat, PlanReceipt { added: 0, skipped: 4 });
+        assert!(note.is_none());
+        assert_eq!(load(&root, "c1"), board);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn staging_over_cap_keeps_existing_board_intact() {
+        let root = std::env::temp_dir().join(format!("consilium-plan-limit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let range = |start, count| (start..start + count).map(|idx| format!("Task {idx}\n")).collect::<String>();
+        let oversized = range(0, MAX_PLAN_TASKS + 1);
+        assert!(stage_plan(&root, "c1", &oversized, Priority::Normal).unwrap_err().contains("100 tasks"));
+        for start in [0, MAX_PLAN_TASKS] {
+            stage_plan(&root, "c1", &range(start, MAX_PLAN_TASKS), Priority::Normal).unwrap();
+        }
+        let board = load(&root, "c1");
+        assert_eq!(board.tasks.len(), MAX_TASKS);
+        assert!(stage_plan(&root, "c1", "Task 0\nExtra task", Priority::Normal).unwrap_err().contains("200 tasks"));
+        assert_eq!(load(&root, "c1"), board);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //
 // `step` (0-5) picks a moment in the scripted conversation; `setup=1` shows the first-run setup
 // state; `settings=1` opens Settings. Nothing here touches the network or real conversations.
-import type { AgentInfo, ChatEvent, Conversation, TaskBoard, TaskOp, TurnState } from "./api";
+import type { AgentInfo, ChatEvent, Conversation, TaskBoard, TaskOp, TaskPriority, TurnState } from "./api";
 
 const params = new URLSearchParams(location.search);
 // `scene=build` swaps in a six-AI council building an app together (the README's animated demo).
@@ -393,6 +393,23 @@ export const demoApi = {
   mergeAgentBranch: async () => "0000000",
   discardAgentBranch: async () => undefined,
   tasksGet: async () => activeBoard,
+  tasksStagePlan: async (_id: string, plan: string, priority: TaskPriority) => {
+    const titles = plan.split(/\r?\n/).map((line) => line
+      .replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\[ \]\s+)?/, "").trim()).filter(Boolean);
+    if (titles.length > 100) throw new Error("Stage at most 100 tasks at a time.");
+    const known = new Set(activeBoard.tasks.map(({ title }) => title.toLowerCase()));
+    const added = titles.filter((title) => {
+      const key = title.toLowerCase();
+      if (known.has(key)) return false;
+      known.add(key);
+      return true;
+    });
+    if (activeBoard.tasks.length + added.length > 200) throw new Error("The task board is full.");
+    for (const title of added) {
+      activeBoard.tasks.push({ id: ++activeBoard.next, title, status: "todo", priority, by: "human", updated: Date.now() });
+    }
+    return { added: added.length, skipped: titles.length - added.length };
+  },
   tasksApply: async (_id: string, op: TaskOp) => {
     const num = "task" in op ? Number(op.task.replace("#", "")) : 0;
     const t = activeBoard.tasks.find((x) => x.id === num);
