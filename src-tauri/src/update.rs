@@ -561,21 +561,35 @@ fn stage_macos_app(data: &Path, version: &str, source: &Path) -> Result<(), Stri
     Ok(())
 }
 
-/// The user's keychain search list, in order, as `security list-keychains` prints it.
 #[cfg(target_os = "macos")]
-fn keychain_search_list() -> Option<Vec<String>> {
-    let out = std::process::Command::new("/usr/bin/security")
-        .args(["list-keychains", "-d", "user"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    Some(parse_keychain_list(&String::from_utf8_lossy(&out.stdout)))
-}
+struct SystemRunner;
 
-#[cfg(any(target_os = "macos", test))]
-fn parse_keychain_list(text: &str) -> Vec<String> {
-    text.lines().map(|l| l.trim().trim_matches('"').to_string()).filter(|l| !l.is_empty()).collect()
+#[cfg(target_os = "macos")]
+impl crate::mac_signing::Runner for SystemRunner {
+    fn run(&mut self, program: &str, args: &[std::ffi::OsString]) -> bool {
+        use std::process::{Command, Stdio};
+        // Output is discarded and only the exit status is used, so the keychain password passed
+        // to `unlock-keychain` can never reach a log through an error message.
+        Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn search_list(&mut self) -> Option<Vec<String>> {
+        let out = std::process::Command::new("/usr/bin/security")
+            .args(["list-keychains", "-d", "user"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(crate::mac_signing::parse_list(&String::from_utf8_lossy(&out.stdout)))
+    }
 }
 
 /// Stable local signing when this Mac has the private key, matching `scripts/stage-update.mjs`;
@@ -586,78 +600,18 @@ fn sign_macos_app(data: &Path, app: &Path) -> Result<(), String> {
 
     let signing = data.join("signing");
     let keychain = signing.join("consilium-signing.keychain-db");
-    let password_file = signing.join("keychain-password");
-    let password = std::fs::read_to_string(password_file).ok();
-    let unlocked = keychain.is_file()
-        && password.as_deref().is_some_and(|password| {
-            Command::new("/usr/bin/security")
-                .args(["unlock-keychain", "-p", password.trim()])
-                .arg(&keychain)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        });
-    // codesign only finds an identity in a keychain on the user's search list, even with
-    // `--keychain`; without this it fell back to ad-hoc, and every update then lost the app's
-    // firewall and privacy permissions. Join it for this signing only, as stage-update.mjs does.
-    let before = if unlocked { keychain_search_list() } else { None };
-    let joined = before.as_ref().is_some_and(|list| {
-        list.iter().any(|k| Path::new(k) == keychain.as_path())
-            || Command::new("/usr/bin/security")
-                .args(["list-keychains", "-d", "user", "-s"])
-                .args(list)
-                .arg(&keychain)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-    });
-    let mut signed = joined
-        && Command::new("/usr/bin/codesign")
-            .args(["--force", "--deep", "--sign", "Consilium Local Signing", "--keychain"])
-            .arg(&keychain)
-            .arg(app)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-    if !signed {
-        signed = Command::new("/usr/bin/codesign")
-            .args(["--force", "--deep", "--sign", "-"])
-            .arg(app)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+    let password = keychain
+        .is_file()
+        .then(|| std::fs::read_to_string(signing.join("keychain-password")).ok())
+        .flatten();
+    let report = crate::mac_signing::sign(&mut SystemRunner, &keychain, password.as_deref(), app);
+    if let Some(why) = report.stable_failure {
+        eprintln!("Consilium update: signed ad-hoc because {why}; macOS may ask for permissions again.");
     }
-    if let Some(list) = before.as_ref().filter(|_| joined) {
-        // Put the user's search list back exactly.
-        let _ = Command::new("/usr/bin/security")
-            .args(["list-keychains", "-d", "user", "-s"])
-            .args(list)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    if let Some(why) = report.restore_failure {
+        eprintln!("Consilium update: {why}; remove it in Keychain Access if it stays listed.");
     }
-    if unlocked {
-        let _ = Command::new("/usr/bin/security")
-            .arg("lock-keychain")
-            .arg(&keychain)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
+    let signed = report.signed;
     if !signed {
         return Err("sign the app from the update DMG: codesign failed".into());
     }
@@ -883,19 +837,6 @@ pub fn start_install(data: &Path) -> Result<Staged, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn keychain_search_list_parses_quoted_paths_in_order() {
-        let out = "    \"/kc/Keychains/login.keychain-db\"\n    \"/kc/Application Support/x/signing/consilium-signing.keychain-db\"\n\n";
-        assert_eq!(
-            parse_keychain_list(out),
-            vec![
-                "/kc/Keychains/login.keychain-db".to_string(),
-                "/kc/Application Support/x/signing/consilium-signing.keychain-db".to_string(),
-            ]
-        );
-    }
-
-
     #[test]
     fn the_wmi_launcher_quotes_the_helper_path_for_powershell() {
         let s = wmi_launch_script(Path::new("C:\\Users\\O'Neil\\update\\install-helper.ps1"));

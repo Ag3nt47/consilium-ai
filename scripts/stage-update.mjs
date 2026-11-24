@@ -103,25 +103,43 @@ function ensureSigningKeychain() {
   return pass;
 }
 
+// execFileSync's error message repeats the whole command line, which for `security` can include
+// the keychain password, so only the exit status or signal is ever shown.
+const why = (e) => (e && typeof e.status === "number" ? `exit ${e.status}` : e?.signal ? `signal ${e.signal}` : "failed to run");
+
+// The user's keychain search list is shared by every process and macOS has no lock for it, so
+// the restore re-reads it and removes only the keychain this run added; a change made by another
+// process meanwhile (such as an in-app update staging) is kept. Consilium's own staging also
+// serialises its steps in src-tauri/src/mac_signing.rs.
 function signStably(app) {
   let pass;
   try {
     pass = ensureSigningKeychain();
   } catch (e) {
-    console.warn(`Couldn't set up stable signing (${e.message}); keeping the ad-hoc signature.`);
+    console.warn(`Couldn't set up stable signing (${why(e)}); keeping the ad-hoc signature.`);
     return;
   }
-  const before = searchList();
+  let added = false;
   try {
     sec(["unlock-keychain", "-p", pass, KEYCHAIN]);
-    if (!before.includes(KEYCHAIN)) sec(["list-keychains", "-d", "user", "-s", ...before, KEYCHAIN]);
+    const before = searchList();
+    if (!before.includes(KEYCHAIN)) {
+      sec(["list-keychains", "-d", "user", "-s", ...before, KEYCHAIN]);
+      added = true;
+    }
     execFileSync("/usr/bin/codesign", ["--force", "--deep", "--sign", SIGN_NAME, app], { stdio: "inherit" });
     console.log(`Signed with "${SIGN_NAME}", so macOS keeps this app's permissions across updates.`);
   } catch (e) {
-    console.warn(`Stable signing failed (${e.message}); keeping the ad-hoc signature.`);
+    console.warn(`Stable signing failed (${why(e)}); keeping the ad-hoc signature.`);
     execFileSync("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", app], { stdio: "inherit" });
   } finally {
-    sec(["list-keychains", "-d", "user", "-s", ...before]); // put the user's search list back exactly
+    if (added) {
+      try {
+        sec(["list-keychains", "-d", "user", "-s", ...searchList().filter((k) => k !== KEYCHAIN)]);
+      } catch (e) {
+        console.warn(`Couldn't take the signing keychain off the search list (${why(e)}); remove it in Keychain Access.`);
+      }
+    }
     try { sec(["lock-keychain", KEYCHAIN]); } catch { /* already locked */ }
   }
 }
