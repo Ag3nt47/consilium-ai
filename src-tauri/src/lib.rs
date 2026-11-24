@@ -1378,8 +1378,13 @@ async fn link_unpair(node_id: String) -> Result<link::LinkStatus, String> {
 }
 
 #[tauri::command]
-async fn link_test_peer(node_id: String) -> Result<link::PeerTestReport, String> {
-    the_link()?.test_peer(&node_id).await
+async fn link_test_peer(node_id: String, source: Option<std::net::IpAddr>) -> Result<link::PeerTestReport, String> {
+    the_link()?.test_peer(&node_id, source).await
+}
+
+#[tauri::command]
+fn link_probe_sources() -> Result<Vec<link::ProbeSource>, String> {
+    link::probe_sources()
 }
 
 #[tauri::command]
@@ -1684,6 +1689,7 @@ pub fn run() {
             link_pair_join,
             link_unpair,
             link_test_peer,
+            link_probe_sources,
             link_test_ai_handshake,
             link_add_peer_route,
             link_refresh_routes,

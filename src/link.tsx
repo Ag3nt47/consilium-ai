@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, buildCompare, buildLabel, type Build, type LinkPeer, type LinkStatus, type PeerTestReport, type StressReport } from "./api";
+import { api, buildCompare, buildLabel, type Build, type LinkPeer, type LinkStatus, type PeerTestReport, type ProbeSource, type StressReport } from "./api";
 import { LocalModelFit } from "./LocalModelFit";
 
 /** Topbar status light and button for multi-computer sync (Mac & Windows).
@@ -686,6 +686,9 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
 function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUnpair: () => void }) {
   const [testing, setTesting] = useState(false);
   const [testReport, setTestReport] = useState<PeerTestReport | null>(null);
+  const [probeSources, setProbeSources] = useState<ProbeSource[]>([]);
+  const [probeSource, setProbeSource] = useState("");
+  const [probeSourcesError, setProbeSourcesError] = useState("");
   const [testingHandshake, setTestingHandshake] = useState(false);
   const [handshakeResult, setHandshakeResult] = useState<string | null>(null);
   const [refreshingRoutes, setRefreshingRoutes] = useState(false);
@@ -728,7 +731,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
     setTesting(true);
     setTestReport(null);
     try {
-      const res = await api.linkTestPeer(peer.node_id);
+      const res = await api.linkTestPeer(peer.node_id, probeSource || undefined);
       setTestReport(res);
     } catch (e) {
       setTestReport({
@@ -746,6 +749,15 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
       setTesting(false);
     }
   };
+
+  async function refreshProbeSources() {
+    setProbeSourcesError("");
+    try {
+      setProbeSources(await api.linkProbeSources());
+    } catch (error) {
+      setProbeSourcesError(`Could not read local adapters: ${String(error)}`);
+    }
+  }
 
   const testAiHandshake = async () => {
     setTestingHandshake(true);
@@ -924,6 +936,27 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         </div>
       </div>
 
+      <details className="small" onToggle={(event) => { if (event.currentTarget.open) void refreshProbeSources(); }}>
+        <summary>Test from a local adapter</summary>
+        <label className="row gap-sm">
+          Local source
+          <select disabled={testing} value={probeSource} onChange={(event) => {
+            setProbeSource(event.target.value);
+            setTestReport(null);
+          }}>
+            <option value="">System default</option>
+            {probeSource && !probeSources.some(({ address }) => address === probeSource) && (
+              <option value={probeSource} disabled>{probeSource} (unavailable)</option>
+            )}
+            {probeSources.map(({ address, interface: adapter }) => (
+              <option key={address} value={address}>{adapter} ({address})</option>
+            ))}
+          </select>
+        </label>
+        {probeSourcesError && <p role="alert">{probeSourcesError}</p>}
+        <p className="muted">Choose a source address, then run Test Connection. The live session stays in place.</p>
+      </details>
+
       {testReport && (
         <div className="peer-test-report">
           <div className="row between align-center test-header">
@@ -935,6 +968,9 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
             </button>
           </div>
           <p className="test-summary-text small">{testReport.summary}</p>
+          {testReport.source && (
+            <p className="muted small">Probe source: {testReport.source.interface} ({testReport.source.address})</p>
+          )}
           {testReport.routes.length > 0 && (
             <div className="test-routes-list">
               <span className="muted small">TCP reachability and peer authentication by endpoint</span>
