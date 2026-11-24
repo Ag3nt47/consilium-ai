@@ -1567,7 +1567,13 @@ async fn execute(
                 if let Err(why) = process_chunk(pipe, &chunk, &mut watchdog) {
                     break 'watch Err(why);
                 }
-                deadline.as_mut().reset(tokio::time::Instant::now() + watchdog.remaining(std::time::Instant::now()));
+                let now = std::time::Instant::now();
+                let remaining = watchdog.remaining(now);
+                // A busy pipe must not keep resetting an expired timer ahead of its next tick.
+                if remaining.is_zero() {
+                    break 'watch Err(watchdog.message(now));
+                }
+                deadline.as_mut().reset(tokio::time::Instant::now() + remaining);
             }
             status = child.wait() => break Ok(status),
         }
