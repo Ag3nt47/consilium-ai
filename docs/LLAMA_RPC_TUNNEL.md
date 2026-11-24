@@ -6,7 +6,7 @@ install a runner, load weights, register a council model or change app settings.
 It does not use PeerLink's persistent message queue or its pairing keys. A
 standalone stream avoids replaying stateful RPC commands after reconnection.
 
-The [upstream RPC backend](https://github.com/ggml-org/llama.cpp/blob/b12621/tools/rpc/README.md)
+The [upstream RPC backend](https://github.com/ggml-org/llama.cpp/blob/b12681/tools/rpc/README.md)
 is experimental. Keep the raw worker bound to `127.0.0.1`; only the authenticated
 TLS listener can bind a specific private IPv4 address. On the inference host,
 the helper also exposes raw RPC only at `127.0.0.1`. Other processes on either
@@ -53,7 +53,9 @@ With both helpers and the worker running, capture the inference host's actual
 `--rpc 127.0.0.1:50054 --list-devices` output. Supply that inventory to
 `scripts/llama-split-args.mjs` with `--rpc-tunnel "Mac=127.0.0.1:50054"` in the
 same registration order. Select runner devices from this inventory, rather than
-assuming a GPU or RPC device name. Use matching llama.cpp builds on both hosts.
+assuming a GPU or RPC device name. The coordinated trial targets llama.cpp
+b12681 on both hosts; an installed binary or a device list alone does not verify
+that a remote worker can load weights or complete generation.
 
 Allocate one model at a time from fresh available memory after OS, context and
 runtime reserves. Integrated GPU shared memory is part of host RAM, not extra

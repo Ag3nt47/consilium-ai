@@ -222,6 +222,15 @@ two-host weight allocation, council restoration and Ethernet/Wi-Fi/Bluetooth
 acceptance remain open. Owner: ChatGPT; scope: the helper, offline tests and
 trial documentation, with no app-source or network-setting changes.
 
+Windows b12681 capability checks confirmed build 12681 (`d141011c2`), the RPC
+backend, NVIDIA GTX 1060 and Intel HD 530 Vulkan devices. The integrated device
+shares host RAM and adds no separate memory budget. At draft #326 head
+`0ce8305`, hosted Node tests, the privacy gate, front-end build and CodeQL passed;
+all three Rust jobs failed the unchanged
+`startup_stress_stays_on_ip_and_cannot_replace_a_native_session` fixture
+([CI run](https://github.com/Ag3nt47/consilium-ai/actions/runs/45480830172)).
+Integration remains held; Mac TLS setup and physical split inference are pending.
+
 ## Document 6: Fourth consilium update (1).docx
 
 | Item | Status | Acceptance and dependencies |
