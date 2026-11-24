@@ -213,6 +213,15 @@ order and converts the allocation into layer-mode arguments. Live unequal weight
 actual context memory use and performance on Windows and Mac still need verification.
 [Installed weights](https://github.com/Ag3nt47/consilium-ai/pull/276) · [Weighted splits](https://github.com/Ag3nt47/consilium-ai/pull/278) · [Runner arguments](https://github.com/Ag3nt47/consilium-ai/pull/279)
 
+The standalone [RPC tunnel helper](LLAMA_RPC_TUNNEL.md) carries temporary trial
+streams with mutual TLS, exact peer certificate pins and loopback-only raw RPC
+endpoints. Synthetic local tests verify certificate rejection, opaque binary
+transfer, connection bounds and cleanup. This is separate from paired PeerLink
+message delivery. No physical-host TLS credentials have been provisioned; live
+two-host weight allocation, council restoration and Ethernet/Wi-Fi/Bluetooth
+acceptance remain open. Owner: ChatGPT; scope: the helper, offline tests and
+trial documentation, with no app-source or network-setting changes.
+
 ## Document 6: Fourth consilium update (1).docx
 
 | Item | Status | Acceptance and dependencies |
