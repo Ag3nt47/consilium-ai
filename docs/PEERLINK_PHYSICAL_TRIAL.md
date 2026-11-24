@@ -99,6 +99,15 @@ The script prints the layer placement argument array and leaves inference idle. 
 proportions follow the explicit device order. Check actual layer placement and memory from the logs.
 [llama.cpp b12621 split-mode reference](https://github.com/ggml-org/llama.cpp/blob/b12621/docs/multi-gpu.md).
 
+To include the tunnel endpoints in the argument array, add `--runner-inventory devices.txt` and
+one `--rpc-tunnel "Computer=127.0.0.1:Port"` per remote computer. Use saved `--list-devices` output
+from the inference host with the same tunnels registered in the same order. For b12621 a remote
+entry looks like `RPC0: 127.0.0.1:50052 (4096 MiB, 3000 MiB free)`. The mapper matches each remote
+device to its endpoint before printing `--rpc`, `--device` and `--tensor-split`. It only reads
+the saved report and inventory. Bind each RPC worker to loopback and forward it through an
+authenticated tunnel during the authorized trial.
+[llama.cpp b12621 RPC setup](https://github.com/ggml-org/llama.cpp/blob/b12621/tools/rpc/README.md).
+
 The following dry run uses an installed Qwen model and example free-memory readings. Replace
 the two memory readings with fresh samples before planning a live load. Replace the example
 runner device names with the actual names in the desired order.

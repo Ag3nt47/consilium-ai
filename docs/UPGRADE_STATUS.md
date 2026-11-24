@@ -154,7 +154,7 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 
 The split planner can size installed Ollama weight blobs offline and assign each device a share
 proportional to its memory after the runtime reserve. Windows dry runs exercised the combined
-options with installed Qwen3 and Llama 3 weights. The llama.cpp argument mapper checks the device
+options with installed Qwen3 and Llama 3 weights. The offline llama.cpp argument mapper can also verify local RPC tunnel endpoints and registration order against a saved runner inventory before emitting launch arguments. It checks the device
 order and converts the allocation into layer-mode arguments. Live unequal weight allocation,
 actual context memory use and performance on Windows and Mac still need verification.
 [Installed weights](https://github.com/Ag3nt47/consilium-ai/pull/276) · [Weighted splits](https://github.com/Ag3nt47/consilium-ai/pull/278) · [Runner arguments](https://github.com/Ag3nt47/consilium-ai/pull/279)
