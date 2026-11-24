@@ -248,12 +248,19 @@ fn usage_of(v: &serde_json::Value) -> Option<TokenUsage> {
         .or_else(|| u["prompt_cache_hit_tokens"].as_u64())
         .unwrap_or(0);
     let total_tokens = n("total_tokens").max(input_tokens.saturating_add(output_tokens));
+    // llama.cpp includes measured generation timing in some compatible chat replies.
+    let output_rate_milli = v.pointer("/timings/predicted_per_second")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .map(|rate| (rate * 1000.0).round() as u64)
+        .filter(|rate| *rate > 0);
     (total_tokens > 0).then_some(TokenUsage {
         input_tokens,
         output_tokens,
         thinking_tokens,
         cache_read_tokens,
         total_tokens,
+        output_rate_milli,
         ..TokenUsage::default()
     })
 }
@@ -287,6 +294,7 @@ pub fn parse_reply(body: &str) -> Result<(String, Option<TokenUsage>), String> {
 }
 
 /// One council turn.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     agent: &str,
     name: &str,
@@ -295,11 +303,11 @@ pub async fn run(
     prompt: &str,
     cancel: &CancellationToken,
     timeout: Duration,
+    window: Option<usize>,
 ) -> Result<(String, Option<TokenUsage>, String), String> {
     let key = key(agent, provider).ok_or_else(|| format!("No {name} API key. Add one in Add AI."))?;
     let model = model_for(agent, name, provider, &key).await?;
     // A local model's window is small: fit the prompt to the size its server reports.
-    let window = if provider.local { local_window(provider.base_url).await } else { None };
     let (system, prompt) = match window {
         Some(ctx) => fit_to_window(system, prompt, ctx),
         None => (system.to_string(), prompt.to_string()),
@@ -340,11 +348,15 @@ pub async fn run(
 
 /// Characters per token when budgeting a local window: low on purpose (code, paths and
 /// non-English text run denser than prose), so the estimate errs toward fitting.
-const CHARS_PER_TOKEN: usize = 3;
+pub(crate) const CHARS_PER_TOKEN: usize = 3;
 
 /// The context window (tokens) a local server has loaded its model with: llama.cpp's `/props`.
 /// None when the server doesn't say (Ollama), so the prompt goes as it is.
-async fn local_window(base_url: &str) -> Option<usize> {
+pub async fn local_window(provider: &Provider) -> Option<usize> {
+    if !provider.local {
+        return None;
+    }
+    let base_url = provider.base_url;
     let root = base_url.trim_end_matches('/').trim_end_matches("/v1");
     let resp = client().ok()?.get(format!("{root}/props")).timeout(Duration::from_secs(3)).send().await.ok()?;
     let v: serde_json::Value = resp.json().await.ok()?;
@@ -527,7 +539,19 @@ mod tests {
         assert_eq!(text, "Hello");
         let u = usage.unwrap();
         assert_eq!((u.input_tokens, u.output_tokens, u.thinking_tokens, u.cache_read_tokens, u.total_tokens), (10, 5, 3, 4, 15));
+        assert_eq!(u.output_rate_milli, None);
         assert!(parse_reply(r#"{"choices":[{"message":{"content":""}}]}"#).is_err());
+    }
+
+    #[test]
+    fn generation_throughput_uses_only_the_providers_reported_rate() {
+        let body = r#"{"choices":[{"message":{"content":"A reply"}}],"usage":{"completion_tokens":35},"timings":{"prompt_per_second":300.3,"predicted_per_second":52.944949}}"#;
+        let (_, usage) = parse_reply(body).unwrap();
+        assert_eq!(usage.unwrap().output_rate_milli, Some(52_945));
+        for invalid in ["0", "-7", "null", "\"48.2\""] {
+            let body = body.replace("52.944949", invalid);
+            assert_eq!(parse_reply(&body).unwrap().1.unwrap().output_rate_milli, None);
+        }
     }
 
     #[test]

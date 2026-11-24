@@ -5,7 +5,7 @@
 //
 // `step` (0-5) picks a moment in the scripted conversation; `setup=1` shows the first-run setup
 // state; `settings=1` opens Settings. Nothing here touches the network or real conversations.
-import type { AgentInfo, ChatEvent, Conversation, TaskBoard, TurnState } from "./api";
+import type { AgentInfo, ChatEvent, Conversation, TaskBoard, TaskOp, TaskPriority, TurnState } from "./api";
 
 const params = new URLSearchParams(location.search);
 // `scene=build` swaps in a six-AI council building an app together (the README's animated demo).
@@ -50,7 +50,7 @@ const agents: AgentInfo[] = [
     signed_in: !demoAddAi,
     version: demoAddAi ? "Gemini CLI" : "agy",
     path: demoAddAi ? "gemini" : "agy",
-    usage: demoAddAi ? null : { remaining_percent: 72, windows: [{ label: "5-hour limit", remaining_percent: 72 }, { label: "Weekly limit", remaining_percent: 82 }] },
+    usage: demoAddAi ? null : { remaining_percent: 72, windows: [{ label: "Five Hour Limit", remaining_percent: 72 }, { label: "Weekly Limit", remaining_percent: 82 }] },
     hint: demoAddAi ? "Run `gemini` in a terminal, choose Sign in with Google, then type /quit." : "",
   },
 ];
@@ -241,6 +241,7 @@ function buildBoard(step: number): TaskBoard {
   };
 }
 const isBuild = demoScene === "build";
+const demoTitles = new Map<string, string>();
 const buildNow = isBuild ? buildState(demoStep) : null;
 const activeState = buildNow ?? state;
 const activeAgents = isBuild ? buildAgents : agents;
@@ -249,10 +250,21 @@ const ACTIVE_CONV = isBuild ? BUILD : CONV;
 
 const demoCouncilForApprovals = { members: isBuild ? ALL : ["gpt", "claude", "gemini"], access: {}, default_workspace: null, default_access: "chat" as const, saved_grants: [] };
 
+function listedConversations() {
+  const chats = isBuild ? buildConversations : conversations;
+  return chats.map((chat, index) => ({
+    ...chat,
+    title: demoTitles.get(chat.id) ?? (demoStep === 0 && index === 0 ? "New conversation" : chat.title),
+  }));
+}
+
 export const demoApi = {
+  localToolInventory: async () => [],
+  peerResources: async () => ({}),
+  requestPeerResources: async () => "demo-memory-scan",
   agents: async () => activeAgents,
   usage: async () => Object.fromEntries(activeAgents.flatMap((a) => (a.usage ? [[a.id, a.usage]] : []))),
-  list: async () => (isBuild ? (demoStep === 0 ? [{ ...buildConversations[0], title: "New conversation" }, ...buildConversations.slice(1)] : buildConversations) : demoStep === 0 ? [{ ...conversations[0], title: "New conversation" }, ...conversations.slice(1)] : conversations),
+  list: async () => listedConversations(),
   create: async () => (isBuild ? buildConversations[0] : conversations[0]),
   load: async () => activeState.events,
   tokenUsage: async () => ({
@@ -265,7 +277,12 @@ export const demoApi = {
       claude: { input_tokens: 18100, output_tokens: 3800, cache_read_tokens: 7500, cache_creation_tokens: 0, thinking_tokens: 0, total_tokens: 21900 },
     },
   }),
-  rename: async () => conversations[0],
+  rename: async (id: string, title: string) => {
+    const chat = listedConversations().find((entry) => entry.id === id);
+    if (!chat) throw new Error("Conversation not found");
+    demoTitles.set(id, title);
+    return { ...chat, title };
+  },
   remove: async () => undefined,
   exportMarkdown: async () => "",
   setVoice: async (_id: string, on: boolean) =>
@@ -376,13 +393,31 @@ export const demoApi = {
   mergeAgentBranch: async () => "0000000",
   discardAgentBranch: async () => undefined,
   tasksGet: async () => activeBoard,
-  tasksApply: async (_id: string, op: { op: string; task?: string; title?: string; to?: string }) => {
-    const num = Number((op.task ?? "").replace("#", ""));
+  tasksStagePlan: async (_id: string, plan: string, priority: TaskPriority) => {
+    const titles = plan.split(/\r?\n/).map((line) => line
+      .replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\[ \]\s+)?/, "").trim()).filter(Boolean);
+    if (titles.length > 100) throw new Error("Stage at most 100 tasks at a time.");
+    const known = new Set(activeBoard.tasks.map(({ title }) => title.toLowerCase()));
+    const added = titles.filter((title) => {
+      const key = title.toLowerCase();
+      if (known.has(key)) return false;
+      known.add(key);
+      return true;
+    });
+    if (activeBoard.tasks.length + added.length > 200) throw new Error("The task board is full.");
+    for (const title of added) {
+      activeBoard.tasks.push({ id: ++activeBoard.next, title, status: "todo", priority, by: "human", updated: Date.now() });
+    }
+    return { added: added.length, skipped: titles.length - added.length };
+  },
+  tasksApply: async (_id: string, op: TaskOp) => {
+    const num = "task" in op ? Number(op.task.replace("#", "")) : 0;
     const t = activeBoard.tasks.find((x) => x.id === num);
-    if (op.op === "add" && op.title) activeBoard.tasks.push({ id: ++activeBoard.next, title: op.title, owner: null, status: "todo", by: "human", updated: Date.now() });
+    if (op.op === "add" && op.title) activeBoard.tasks.push({ id: ++activeBoard.next, title: op.title, owner: null, status: "todo", priority: op.priority, by: "human", updated: Date.now() });
     if (t && op.op === "done") t.status = "done";
     if (t && op.op === "reopen") t.status = t.owner ? "doing" : "todo";
     if (t && op.op === "hand" && op.to) Object.assign(t, { owner: op.to, status: "doing" });
+    if (t && op.op === "priority") t.priority = op.priority;
     if (t && op.op === "drop") activeBoard.tasks = activeBoard.tasks.filter((x) => x !== t);
     return { ...activeBoard, tasks: [...activeBoard.tasks] };
   },
@@ -408,6 +443,7 @@ export const demoApi = {
           data_url: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%' stop-color='%230f172a'/><stop offset='50%' stop-color='%231e1b4b'/><stop offset='100%' stop-color='%23020617'/></linearGradient></defs><rect width='100%' height='100%' fill='url(%23g)'/><circle cx='60%' cy='40%' r='300' fill='%23312e81' opacity='0.4'/></svg>",
         }
       : null,
+  linkDiscoverLan: async () => [],
   linkStatus: async () => ({
     enabled: true,
     node_id: "demo-node-mac",
@@ -420,7 +456,9 @@ export const demoApi = {
         node_id: "demo-node-win",
         name: "Windows-Desktop",
         connected: true,
+        supports_lan_notes: true,
         route: "192.168.1.42:8470",
+        addrs: ["192.168.1.42:8470", "192.168.1.170:8470", "169.254.12.34:8470"],
         rtt_ms: 3,
         last_seen_ms: Date.now() - 1200,
         queued: 0,
@@ -447,6 +485,7 @@ export const demoApi = {
     name: "Windows-Desktop",
     connected: true,
     route: "192.168.1.42:8470",
+    addrs: ["192.168.1.42:8470", "192.168.1.170:8470", "169.254.12.34:8470"],
     rtt_ms: 3,
     last_seen_ms: Date.now(),
     queued: 0,
@@ -463,24 +502,39 @@ export const demoApi = {
     peers: [],
     error: null,
   }),
-  linkTestPeer: async (nodeId: string) => ({
+  linkProbeSources: async () => [{ address: "192.168.1.15", interface: "Wi-Fi" }],
+  readEnvironmentAudit: async () => {
+    throw new Error("Open the desktop app to audit this computer.");
+  },
+  linkTransferTrial: async () => {
+    throw new Error("Open the desktop app to send an authenticated sample to a linked computer.");
+  },
+  linkTestPeer: async (nodeId: string, source?: string) => ({
     node_id: nodeId,
     name: "Demo Peer",
     connected: true,
     active_route: "192.168.1.157:8470",
     handshake_ok: true,
     rtt_ms: 4,
+    source: source ? { address: source, interface: "Wi-Fi" } : null,
     routes: [
-      { addr: "192.168.1.157:8470", kind: "Gigabit / Wi-Fi LAN", reachable: true, rtt_ms: 4, status: "Reachable (4 ms)" },
+      { addr: "192.168.1.157:8470", kind: "IP route", reachable: true, rtt_ms: 4, authenticated_ms: 9, status: "Authenticated probe passed in 9 ms" },
+      { addr: "192.168.1.170:8470", kind: "IP route", reachable: true, rtt_ms: 6, status: "TCP connected in 6 ms · peer authentication unconfirmed" },
       { addr: "169.254.12.34:8470", kind: "Direct Cable / Bluetooth (Link-Local)", reachable: false, status: "Timed out" },
     ],
     queued_outgoing: 0,
-    summary: "✔ Handshake verified (4 ms via 192.168.1.157:8470) · Chats aligned (0 queued)",
+    summary: "Authenticated session via 192.168.1.157:8470 · 4 ms round trip · 0 outgoing queued",
   }),
   linkAddPeerRoute: async (_nodeId: string, address: string) => ["192.168.1.157:8470", address],
+  linkTestAiHandshake: async () => [
+    { ai: "claude", side: "here" as const, handle: "@claude", reads: true, read: true },
+    { ai: "gpt", side: "there" as const, handle: "@gpt-demo", reads: true, read: true },
+  ],
   linkRefreshRoutes: async () => ["192.168.1.157:8470", "192.168.1.170:8470"],
   linkInbox: async () => [],
   linkSend: async () => "demo-pkt-1",
+  linkLanNotes: async () => [{ id: "demo-note", source: "Windows-Desktop", text: "Ready to compare the mesh routes.", sent_at: Date.now() }],
+  linkSendLanNote: async () => "demo-note-sent",
   sessionSafetyStatus: async () => null,
   sessionSafetyRestore: async () => "Demo: restored session safety snapshot",
   // Calls the app gained after demo mode was written; harmless no-ops in the browser preview.

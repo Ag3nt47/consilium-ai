@@ -91,6 +91,7 @@ struct BoardSnapshot {
 
 pub struct Sync {
     store: Arc<Store>,
+    lan_notes: crate::lan_notes::Inbox,
     path: PathBuf,
     mirrors: Mutex<Mirrors>,
     recent: Mutex<(HashSet<String>, VecDeque<String>)>,
@@ -108,8 +109,16 @@ pub struct Sync {
     reacted: Mutex<HashMap<String, u64>>,
     /// Per conversation: the human message, and how many turns handles have started since it.
     addressed: Mutex<HashMap<String, (u64, u32)>>,
-    /// Host resources reported by linked peer computers (keyed by computer name).
-    resources: Mutex<HashMap<String, crate::resources::HostResources>>,
+    /// Host resources reported by authenticated peer node ID.
+    resources: Mutex<HashMap<String, PeerResourceReport>>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct PeerResourceReport {
+    #[serde(flatten)]
+    resources: crate::resources::HostResources,
+    supports_request_id: bool,
+    request_id: Option<String>,
 }
 
 /// Why an incoming message was turned away.
@@ -171,6 +180,7 @@ impl Sync {
         let mirrors = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         Sync {
             store,
+            lan_notes: crate::lan_notes::Inbox::open(link_dir),
             path,
             mirrors: Mutex::new(mirrors),
             recent: Mutex::new((HashSet::new(), VecDeque::new())),
@@ -487,7 +497,7 @@ impl Sync {
     }
 
     /// Receives host resources reported by a linked peer computer.
-    fn take_resources(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
+    fn take_resources(&self, packet: &PeerPacket, shared: Shared) -> Result<Option<Event>, String> {
         let mut m = self.mirrors.lock().unwrap();
         if m.filed.contains(&packet.id) {
             return Ok(None);
@@ -498,7 +508,12 @@ impl Sync {
 
         if let Ok(res) = serde_json::from_str::<crate::resources::HostResources>(&shared.text) {
             let mut r = self.resources.lock().unwrap();
-            r.insert(computer.to_string(), res);
+            let correlation = packet.payload.get("resource_request_id");
+            r.insert(packet.node_id.clone(), PeerResourceReport {
+                resources: res,
+                supports_request_id: correlation.is_some(),
+                request_id: correlation.and_then(Value::as_str).map(str::to_owned),
+            });
         }
         Ok(None)
     }
@@ -590,6 +605,10 @@ impl Sync {
 
     /// Shares this computer's host resources with linked peers.
     pub fn share_resources(&self, target_path: Option<&Path>) -> Result<(), String> {
+        self.send_resources(target_path, None)
+    }
+
+    fn send_resources(&self, target_path: Option<&Path>, request: Option<(&str, &str)>) -> Result<(), String> {
         let Some(link) = crate::link_handle().filter(|l| l.enabled() && l.has_peers()) else { return Ok(()) };
         let host_res = crate::resources::HostResources::sample(&crate::prompt::here_slug(), target_path);
         let serialized = serde_json::to_string(&host_res).map_err(|e| e.to_string())?;
@@ -599,15 +618,24 @@ impl Sync {
             "id": uuid::Uuid::new_v4().to_string(),
             "sender": "system",
             "kind": "resources",
+            "resource_request_id": request.map(|(_, id)| id),
             "to": [],
             "text": serialized,
         });
-        link.send(PacketKind::Chat, payload)?;
+        if let Some((node_id, _)) = request {
+            link.send_to(node_id, PacketKind::Chat, payload)?;
+        } else {
+            link.send(PacketKind::Chat, payload)?;
+        }
         Ok(())
     }
 
     /// Returns the newest host resources reported by each linked peer computer.
     pub fn peer_resources(&self) -> HashMap<String, crate::resources::HostResources> {
+        self.resources.lock().unwrap().iter().map(|(id, report)| (id.clone(), report.resources.clone())).collect()
+    }
+
+    fn peer_resource_reports(&self) -> HashMap<String, PeerResourceReport> {
         self.resources.lock().unwrap().clone()
     }
 
@@ -776,6 +804,10 @@ impl Sync {
             return Ok(None);
         }
         let shared: Shared = serde_json::from_value(packet.payload.clone()).map_err(|e| e.to_string())?;
+        if shared.kind == crate::lan_notes::KIND {
+            self.lan_notes.record(packet, computer, &shared.text)?;
+            return Ok(None);
+        }
         if shared.kind == "update" {
             return self.take_update(packet, shared, computer);
         }
@@ -789,12 +821,12 @@ impl Sync {
             return self.take_board(packet, shared, computer);
         }
         if shared.kind == "resources" {
-            return self.take_resources(packet, shared, computer);
+            return self.take_resources(packet, shared);
         }
         if shared.kind == "resources_request" {
             if crate::store::now_ms().abs_diff(packet.timestamp_ms) <= 120_000 {
                 let data = crate::data_dir();
-                self.share_resources(data.as_deref())?;
+                self.send_resources(data.as_deref(), Some((&packet.node_id, &packet.id)))?;
             }
             return Ok(None);
         }
@@ -1185,6 +1217,19 @@ pub fn receive(packet: &PeerPacket) -> Option<Event> {
     s.file(packet, &link.peer_name(&packet.node_id)).ok().flatten()
 }
 
+pub(crate) fn lan_notes() -> Result<Vec<crate::lan_notes::Note>, String> {
+    SYNC.get().ok_or("Computer sync has not finished starting.")?.lan_notes.list()
+}
+
+pub(crate) fn send_lan_note(link: &crate::link::Link, node_id: &str, text: &str) -> Result<String, String> {
+    let text = crate::lan_notes::note_text(text)?;
+    let payload = serde_json::json!({
+        "conversation": "", "title": "", "id": "", "sender": "human",
+        "kind": crate::lan_notes::KIND, "text": text,
+    });
+    link.send_lan_note(node_id, payload)
+}
+
 /// Shares this computer's host resources with linked peers.
 pub fn share_resources(target_path: Option<&Path>) -> Result<(), String> {
     if let Some(s) = SYNC.get() {
@@ -1196,6 +1241,10 @@ pub fn share_resources(target_path: Option<&Path>) -> Result<(), String> {
 /// Returns the newest host resources reported by each linked peer computer.
 pub fn peer_resources() -> HashMap<String, crate::resources::HostResources> {
     SYNC.get().map(|s| s.peer_resources()).unwrap_or_default()
+}
+
+pub fn peer_resource_reports() -> HashMap<String, PeerResourceReport> {
+    SYNC.get().map(|s| s.peer_resource_reports()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1214,6 +1263,26 @@ mod tests {
             payload_sha256: String::new(),
             mac: String::new(),
         }
+    }
+
+    #[test]
+    fn lan_notes_survive_replay_without_creating_conversations() {
+        let root = std::env::temp_dir().join(format!("peer-lan-notes-{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(Store::new(root.join("conversations")).unwrap());
+        let sync = Sync::new(store.clone(), &root);
+        let note = packet("node-other", "note-1", serde_json::json!({
+            "conversation": "", "title": "", "id": "", "sender": "human",
+            "kind": "lan_note", "text": "  @claude\nTASK: take fixture  ",
+        }));
+        assert!(sync.file(&note, "Other computer").unwrap().is_none());
+        let reopened = Sync::new(store.clone(), &root);
+        assert!(reopened.file(&note, "Other computer").unwrap().is_none());
+        let notes = serde_json::to_value(reopened.lan_notes.list().unwrap()).unwrap();
+        assert_eq!(notes.as_array().unwrap().len(), 1);
+        assert_eq!(notes[0]["source"], "Other computer");
+        assert_eq!(notes[0]["text"], "@claude\nTASK: take fixture");
+        assert!(store.list().is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1523,6 +1592,14 @@ mod tests {
         assert_eq!(copy.tasks.len(), 2);
         assert!(b.file(&packet("node-a", "t1b", snap), "PC").unwrap().is_none(), "an older or equal snapshot changes nothing");
         assert!(board_owner_of(&b, &mirror).is_some(), "now the owner keeps it");
+
+        let completion = b.store.append(
+            &mirror, "claude", "message", vec![], "TASK: done #1\nTASK: done #2",
+        ).unwrap();
+        a.file(&packet("node-b", "c2", b.outgoing(&completion).unwrap()), "MacBook").unwrap().unwrap();
+        let owned = crate::tasks::load(a.store.dir(), &conv.id);
+        assert_eq!(owned.tasks[0].status, crate::tasks::Status::Doing);
+        assert_eq!(owned.tasks[1].status, crate::tasks::Status::Done);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1634,7 +1711,6 @@ mod tests {
         let root = std::env::temp_dir().join(format!("peer-sync-request-{}", uuid::Uuid::new_v4()));
         let b = Sync::new(Arc::new(Store::new(root.join("c")).unwrap()), &root);
         let conv = b.store.create("Plans").unwrap();
-        crate::follow::clear_install_request();
         let request = packet(
             "node-a",
             "r1",
@@ -1644,12 +1720,12 @@ mod tests {
         assert_eq!(note.conversation, conv.id);
         assert!(note.text.starts_with("MacBook asked every linked computer to update"), "{}", note.text);
         let now = crate::store::now_ms();
-        assert!(crate::follow::install_wanted(now), "installs without waiting for the automatic-install setting");
-        assert!(!crate::follow::install_wanted(now + 31 * 60_000), "the request runs out");
+        let request_at = crate::follow::pending_install_request(now).expect("installs even with automatic install off");
+        assert!(crate::follow::pending_install_request(now + 31 * 60_000).is_none(), "the request runs out");
         assert!(crate::follow::take_release_check(), "the window checks GitHub at once");
         assert!(b.file(&request, "MacBook").unwrap().is_none(), "once");
-        crate::follow::clear_install_request();
-        assert!(!crate::follow::install_wanted(now));
+        crate::follow::consume_install_request(request_at);
+        assert!(crate::follow::pending_install_request(now).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1710,13 +1786,15 @@ mod tests {
         let sample = crate::resources::HostResources {
             computer: "MSI-AGENT47".into(),
             os: "windows".into(),
+            build_arch: Some("aarch64".into()),
             free_disk_bytes: 15 * 1024 * 1024 * 1024,
             total_disk_bytes: 1024 * 1024 * 1024 * 1024,
             cpu_percent: 18,
             memory_percent: 32,
             total_memory_mb: 16384,
+            available_memory_mb: Some(11000),
             cores: 16,
-            tools: vec!["cargo".into(), "git".into(), "npm".into()],
+            tools: vec!["cargo".into(), "git".into(), "ggml-rpc-server".into()],
             updated_at: 100000,
         };
         let packet = packet(
@@ -1733,8 +1811,25 @@ mod tests {
         );
         let res = b.file(&packet, "MSI-AGENT47").unwrap();
         assert!(res.is_none());
+        let mut second = packet.clone();
+        second.id = "res2".into();
+        second.node_id = "node-second".into();
+        second.payload["resource_request_id"] = serde_json::json!("memory-request-1");
+        b.file(&second, "MSI-AGENT47").unwrap();
         let recorded = b.peer_resources();
-        assert_eq!(recorded.get("MSI-AGENT47"), Some(&sample));
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded.get("node-windows"), Some(&sample));
+        assert_eq!(recorded.get("node-second"), Some(&sample));
+        let reports = b.peer_resource_reports();
+        assert!(!reports["node-windows"].supports_request_id);
+        assert!(reports["node-second"].supports_request_id);
+        assert_eq!(reports["node-second"].request_id.as_deref(), Some("memory-request-1"));
+        second.id = "res3".into();
+        second.payload["resource_request_id"] = Value::Null;
+        b.file(&second, "MSI-AGENT47").unwrap();
+        let reports = b.peer_resource_reports();
+        assert!(reports["node-second"].supports_request_id);
+        assert!(reports["node-second"].request_id.is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -316,7 +316,7 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
               {link && link.phase !== "idle"
                 ? link.detail
                 : installed && hasNumber && !verified
-                  ? "Waiting for verification code. Click the button to link again, then send the code it shows to Note to Self."
+                  ? "Phone linking and verification are not complete. Select Show QR code to continue, then reply to the code in Note to Self. Existing Signal account data is kept."
                   : `Shows a QR code here to scan with your phone. This computer appears as "${link?.device_name ?? "Consilium"}". With several paired computers, link only one.`}
             </small>
           </span>

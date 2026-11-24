@@ -159,6 +159,7 @@ pub struct Engine {
     pub journal: Arc<Journal>,
     pub memory: Arc<Memory>,
     pub bench: Arc<Bench>,
+    pub(crate) usage_refresh: tokio::sync::Mutex<Option<crate::usage::Snapshot>>,
     pub ui: Arc<dyn Ui>,
     spawn: Box<Spawn>,
     make_host: Box<MakeHost>,
@@ -183,6 +184,7 @@ impl Engine {
             journal: Arc::new(Journal::load(data.join("turns.json"))),
             memory: Arc::new(Memory::new(data.join("memory.md"))),
             bench: Arc::new(Bench::with_usage(data.to_path_buf())),
+            usage_refresh: tokio::sync::Mutex::new(None),
             ui,
             spawn,
             make_host: Box::new(|engine, pending| Arc::new(RealHost::new(engine, pending))),
@@ -457,30 +459,7 @@ impl Engine {
     /// Tiered candidate selection: flagship paid models take work first; local offline models act
     /// as silent standby fallback when all active flagship models exhaust their quota or rate limits.
     pub fn tier_targets(&self, candidates: &[String]) -> Vec<String> {
-        let (flagship, local): (Vec<String>, Vec<String>) = candidates
-            .iter()
-            .cloned()
-            .partition(|id| !crate::agents::is_local_id(id));
-
-        let available_flagship: Vec<String> = flagship
-            .into_iter()
-            .filter(|id| self.is_available(id))
-            .collect();
-
-        if !available_flagship.is_empty() {
-            return available_flagship;
-        }
-
-        let available_local: Vec<String> = local
-            .into_iter()
-            .filter(|id| self.is_available(id))
-            .collect();
-
-        if !available_local.is_empty() {
-            available_local
-        } else {
-            candidates.to_vec()
-        }
+        select_tier_targets(candidates, crate::agents::is_local_id, |id| self.is_available(id))
     }
 
     /// Sets up the turn `pending` and runs it in the background. `cursor` is the newest event it
@@ -966,9 +945,9 @@ impl council::Host for RealHost {
         );
         // The model chosen in this AI's council box (#29), read fresh like the folder.
         let chosen_model = self.config.model(agent.id);
-        let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w)));
-        // A local model's window is small (often 4k–8k tokens): it gets only the newest notes.
+        // Keep project notes and shared memory compact for local models' smaller context windows.
         let local = agents::is_local(agent);
+        let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w), local));
         let shared = if local { self.memory.for_prompt_within(LOCAL_MEMORY_CHARS) } else { self.memory.for_prompt() };
         let members = self.config.get().members;
         let ctx = prompt::Context {
@@ -1008,18 +987,16 @@ impl council::Host for RealHost {
             system.push_str(&usage);
         }
         // The conversation's shared task board, and how to change it.
-        system.push_str(&crate::tasks::for_prompt(&crate::tasks::load(self.store.dir(), conv)));
+        system.push_str(&crate::tasks::for_prompt(
+            &crate::tasks::load(self.store.dir(), conv),
+            agent.id,
+            local,
+        ));
         // The projects' GitHub checks, as last read by the background watcher.
         if let Some(w) = workspace.as_deref().filter(|_| !local) {
             system.push_str(&crate::ci::for_prompt(std::path::Path::new(w)));
         }
-        // Local models have small context windows: they get a smaller transcript, with long
-        // command outputs and files offloaded to the data folder (offline blueprint, phase 4).
-        let transcript = if agents::is_local(agent) {
-            prompt::local_transcript(&events, agent.id, Some(&self.data))
-        } else {
-            prompt::transcript(&events, agent.id)
-        };
+        let handoff = self.store.handoff_path(conv);
         let mut elevated_commands = prompt::elevated_command_grants(&events, agent.id);
         // The Tools page's Install button: one pinned catalog install for the AI it was sent to.
         if let Some(command) = prompt::catalog_install_grant(&events, agent.id, &self.data) {
@@ -1116,22 +1093,37 @@ checking what it would remove (list the folder first), so everything else still 
             };
             // Git can briefly touch many files in a large repository, so keep it off the async
             // executor and bound the wait. A slow/non-git folder must never delay the AI turn.
-            // The project's git state for linked computers, refreshed before and after each answer.
-            if let Some(path) = ws_path.clone() {
-                refresh_git_summary(path.clone()).await;
-            }
+            // Share one status read between the prompt and the linked-computer summary.
             let summary_path = ws_path.clone();
             if let Some(path) = state_path {
-                if let Ok(Ok(Some(state))) = tokio::time::timeout(
+                if let Ok(Ok(snapshot)) = tokio::time::timeout(
                     Duration::from_secs(3),
-                    tokio::task::spawn_blocking(move || prompt::workspace_state(&path)),
+                    tokio::task::spawn_blocking(move || prompt::workspace_snapshot(&path, !local)),
                 )
                 .await
                 {
-                    system.push_str("\n\n");
-                    system.push_str(&state);
+                    let (peer_summary, state) = snapshot.map_or((None, None), |snapshot| (Some(snapshot.peer_summary), snapshot.prompt));
+                    crate::link::set_git_summary(peer_summary);
+                    if let Some(state) = state {
+                        system.push_str("\n\n");
+                        system.push_str(&state);
+                    }
                 }
+            } else if let Some(path) = ws_path.clone() {
+                refresh_git_summary(path).await;
             }
+            let local_window = match agents::provider_of(agent) {
+                Some(provider) => tokio::select! {
+                    window = crate::apiagent::local_window(provider) => window,
+                    _ = cancel.cancelled() => return Err("stopped".into()),
+                },
+                None => None,
+            };
+            let transcript = if local {
+                prompt::local_transcript(&events, agent.id, Some(&data), handoff.as_deref(), local_window, &system)
+            } else {
+                prompt::transcript(&events, agent.id)
+            };
             let reply = agents::run_with_files_observed(
                 agent,
                 access,
@@ -1143,6 +1135,7 @@ checking what it would remove (list the folder first), so everything else still 
                 Some(activity),
                 elevated_commands,
                 chosen_model.as_deref(),
+                local_window,
             )
             .await;
             drop(permit);
@@ -1524,23 +1517,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn tier_targets_prefers_flagship_and_falls_back_to_local_when_exhausted() {
-        let (app, _term, dir) = pair(0);
-        let candidates = vec!["gpt".to_string(), "claude".to_string()];
-        let selected = app.tier_targets(&candidates);
-        assert!(!selected.is_empty());
-        assert!(selected.iter().all(|id| !crate::agents::is_local_id(id)));
-
-        // Bench all flagship models
-        let now = crate::store::now_ms();
-        app.bench.bench("gpt", now + 100_000, true);
-        app.bench.bench("claude", now + 100_000, true);
-
-        let exhausted = app.tier_targets(&candidates);
-        assert_eq!(exhausted, candidates, "falls back cleanly when all candidates are benched");
-        let _ = std::fs::remove_dir_all(dir);
+    #[test]
+    fn tier_targets_prefers_flagship_and_falls_back_to_local_when_exhausted() {
+        let candidates = ["gpt", "claude", "qwen"].map(str::to_string);
+        let is_local = |id: &str| id == "qwen";
+        assert_eq!(select_tier_targets(&candidates, is_local, |_| true), ["gpt", "claude"]);
+        assert_eq!(select_tier_targets(&candidates, is_local, |id| id != "gpt"), ["claude"]);
+        assert_eq!(select_tier_targets(&candidates, is_local, |id| id == "qwen"), ["qwen"]);
+        assert_eq!(select_tier_targets(&candidates, is_local, |_| false), candidates);
     }
+}
+
+fn select_tier_targets(
+    candidates: &[String],
+    is_local: impl Fn(&str) -> bool,
+    available: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let (local, flagship): (Vec<_>, Vec<_>) = candidates.iter().partition(|id| is_local(id));
+    for tier in [flagship, local] {
+        let ready: Vec<_> = tier.into_iter().filter(|id| available(id)).cloned().collect();
+        if !ready.is_empty() {
+            return ready;
+        }
+    }
+    candidates.to_vec()
 }
 
 /// Who a message goes to: the council members it @mentions if it names any, else the ticked ones.

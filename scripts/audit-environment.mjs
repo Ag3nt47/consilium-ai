@@ -57,7 +57,7 @@ try {
   console.log("Dependencies: package manifest or lockfile could not be read.");
 }
 
-for (const name of ["git", "npm", "cargo", "rustc", "claude", "codex", "gemini", "ollama", "llama-server"]) {
+for (const name of ["git", "gh", "node", "npm", "cargo", "rustc", "python", "python3", "powershell", "pwsh", "claude", "codex", "gemini", "ollama", "llama-server"]) {
   console.log(`Tool ${name}: ${onPath(name) ? "on PATH" : "not found on PATH"}`);
 }
 

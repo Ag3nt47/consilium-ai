@@ -19,8 +19,11 @@ use std::sync::Mutex;
 const MAX_TITLE: usize = 140;
 /// Most tasks a board holds; the oldest finished ones go first.
 const MAX_TASKS: usize = 200;
-/// Finished tasks shown to the AIs (the newest ones); open tasks are always shown.
+const MAX_PLAN_TASKS: usize = 100;
+const MAX_PLAN_BYTES: usize = 64 * 1024;
+/// Finished tasks shown to the AIs (the newest ones).
 const DONE_IN_PROMPT: usize = 5;
+const LOCAL_OPEN_IN_PROMPT: usize = 24;
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -33,6 +36,29 @@ pub enum Status {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    High,
+    #[default]
+    Normal,
+    Low,
+}
+
+impl Priority {
+    fn is_normal(&self) -> bool {
+        *self == Self::Normal
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Normal => "normal",
+            Self::Low => "low",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Task {
     pub id: u32,
@@ -41,6 +67,8 @@ pub struct Task {
     #[serde(default)]
     pub owner: Option<String>,
     pub status: Status,
+    #[serde(default, skip_serializing_if = "Priority::is_normal")]
+    pub priority: Priority,
     /// Why it's blocked, if it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -56,6 +84,12 @@ pub struct Board {
     pub next: u32,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct PlanReceipt {
+    pub added: usize,
+    pub skipped: usize,
+}
+
 /// A change to the board, from a `TASK:` line or the app.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "lowercase")]
@@ -65,6 +99,8 @@ pub enum Op {
         title: String,
         #[serde(default)]
         owner: Option<String>,
+        #[serde(default)]
+        priority: Priority,
     },
     /// Take a task and start it; a title that matches nothing becomes a new task.
     Take {
@@ -89,6 +125,10 @@ pub enum Op {
     },
     Drop {
         task: String,
+    },
+    Priority {
+        task: String,
+        priority: Priority,
     },
 }
 
@@ -185,6 +225,59 @@ pub fn apply(
     )))
 }
 
+/// Stage an unassigned task list as one board update. Repeated imports skip existing titles.
+pub fn stage_plan(
+    conversations: &Path,
+    conversation: &str,
+    plan: &str,
+    priority: Priority,
+) -> Result<(PlanReceipt, Option<String>), String> {
+    if plan.len() > MAX_PLAN_BYTES {
+        return Err("The task plan is too long. Split it into smaller lists.".into());
+    }
+    let titles: Vec<_> = plan.lines().filter_map(plan_title).take(MAX_PLAN_TASKS + 1).collect();
+    if titles.is_empty() {
+        return Err("Enter at least one task, one per line.".into());
+    }
+    if titles.len() > MAX_PLAN_TASKS {
+        return Err(format!("Stage at most {MAX_PLAN_TASKS} tasks at a time."));
+    }
+
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut board = load(conversations, conversation);
+    let mut known: std::collections::HashSet<_> = board.tasks.iter().map(|task| task.title.to_lowercase()).collect();
+    let total = titles.len();
+    let new: Vec<_> = titles.into_iter().filter(|title| known.insert(title.to_lowercase())).collect();
+    if board.tasks.len().saturating_add(new.len()) > MAX_TASKS {
+        return Err(format!("The task board holds up to {MAX_TASKS} tasks. Remove finished tasks before staging more."));
+    }
+    let receipt = PlanReceipt { added: new.len(), skipped: total - new.len() };
+    if new.is_empty() {
+        return Ok((receipt, None));
+    }
+
+    let now = crate::store::now_ms();
+    for title in &new {
+        let index = board.add_clean(title.clone(), None, Status::Todo, "human", now)
+            .ok_or("The board could not allocate another task number.")?;
+        board.tasks[index].priority = priority;
+    }
+    save(conversations, conversation, &board)?;
+    let noun = if receipt.added == 1 { "task" } else { "tasks" };
+    let note = format!("Tasks: The human staged {} unassigned {noun}. {}", receipt.added, board.progress());
+    Ok((receipt, Some(note)))
+}
+
+fn plan_title(line: &str) -> Option<String> {
+    let line = line.trim();
+    let bullet = ["- ", "* ", "+ "].into_iter().find_map(|prefix| line.strip_prefix(prefix));
+    let numbered = line.split_once(['.', ')'])
+        .filter(|(number, _)| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|(_, title)| title.strip_prefix(' '));
+    let title = bullet.or(numbered).unwrap_or(line).trim_start();
+    clean(title.strip_prefix("[ ] ").unwrap_or(title))
+}
+
 impl Board {
     fn find(&self, reference: &str) -> Option<usize> {
         let r = reference.trim().trim_end_matches('.');
@@ -224,16 +317,22 @@ impl Board {
         who: &str,
         now: u64,
     ) -> Option<usize> {
-        let title = clean(title)?;
+        self.add_clean(clean(title)?, owner, status, who, now)
+    }
+
+    fn add_clean(
+        &mut self, title: String, owner: Option<String>, status: Status, who: &str, now: u64,
+    ) -> Option<usize> {
         self.next = self
             .next
             .max(self.tasks.iter().map(|t| t.id).max().unwrap_or(0))
-            + 1;
+            .checked_add(1)?;
         self.tasks.push(Task {
             id: self.next,
             title,
             owner,
             status,
+            priority: Priority::Normal,
             note: None,
             by: who.to_string(),
             updated: now,
@@ -264,24 +363,33 @@ impl Board {
             .map(|i| (i, true))
     }
 
+    fn can_update(&self, index: usize, who: &str) -> bool {
+        who == "human" || self.tasks[index].owner.as_deref().is_none_or(|owner| owner == who)
+    }
+
     /// Applies one change; returns what happened, worded for the chat note.
     fn apply(&mut self, who: &str, op: &Op, now: u64) -> Option<String> {
         let (i, verb) = match op {
-            Op::Add { title, owner } => {
+            Op::Add { title, owner, priority } => {
                 let owner = owner.clone().filter(|o| !o.is_empty());
                 let status = if owner.is_some() {
                     Status::Doing
                 } else {
                     Status::Todo
                 };
-                (self.add(title, owner, status, who, now)?, "added")
+                let i = self.add(title, owner, status, who, now)?;
+                self.tasks[i].priority = *priority;
+                (i, "added")
             }
             Op::Take { task } => {
                 let (i, new) = self.find_or_add(task, Status::Doing, who, now)?;
-                let t = &mut self.tasks[i];
-                if !new && t.status == Status::Doing && t.owner.as_deref() == Some(who) {
+                let task = &self.tasks[i];
+                let already_doing =
+                    !new && task.status == Status::Doing && task.owner.as_deref() == Some(who);
+                if !self.can_update(i, who) || already_doing {
                     return None;
                 }
+                let t = &mut self.tasks[i];
                 t.owner = Some(who.to_string());
                 t.status = Status::Doing;
                 t.note = None;
@@ -289,10 +397,10 @@ impl Board {
             }
             Op::Done { task } => {
                 let (i, new) = self.find_or_add(task, Status::Done, who, now)?;
-                let t = &mut self.tasks[i];
-                if !new && t.status == Status::Done {
+                if !self.can_update(i, who) || (!new && self.tasks[i].status == Status::Done) {
                     return None;
                 }
+                let t = &mut self.tasks[i];
                 t.status = Status::Done;
                 t.note = None;
                 t.owner.get_or_insert_with(|| who.to_string());
@@ -300,6 +408,9 @@ impl Board {
             }
             Op::Block { task, note } => {
                 let (i, _) = self.find_or_add(task, Status::Blocked, who, now)?;
+                if !self.can_update(i, who) {
+                    return None;
+                }
                 let t = &mut self.tasks[i];
                 t.status = Status::Blocked;
                 t.note = note.as_deref().and_then(clean);
@@ -312,6 +423,9 @@ impl Board {
                 if to.is_empty() {
                     return None;
                 }
+                if !self.can_update(i, who) {
+                    return None;
+                }
                 let t = &mut self.tasks[i];
                 t.owner = Some(to.clone());
                 t.status = Status::Doing;
@@ -322,6 +436,9 @@ impl Board {
             }
             Op::Reopen { task } => {
                 let i = self.find(task)?;
+                if !self.can_update(i, who) {
+                    return None;
+                }
                 let t = &mut self.tasks[i];
                 t.status = if t.owner.is_some() {
                     Status::Doing
@@ -333,8 +450,22 @@ impl Board {
             }
             Op::Drop { task } => {
                 let i = self.find(task)?;
+                if !self.can_update(i, who) {
+                    return None;
+                }
                 let t = self.tasks.remove(i);
                 return Some(format!("removed #{} {}", t.id, t.title));
+            }
+            Op::Priority { task, priority } => {
+                let i = self.find(task)?;
+                if !self.can_update(i, who) || self.tasks[i].priority == *priority {
+                    return None;
+                }
+                let t = &mut self.tasks[i];
+                t.priority = *priority;
+                t.by = who.to_string();
+                t.updated = now;
+                return Some(format!("set #{} {} to {} priority", t.id, t.title, priority.label()));
             }
         };
         let t = &mut self.tasks[i];
@@ -420,7 +551,7 @@ pub fn task_lines(text: &str) -> Vec<Op> {
             fenced = !fenced;
             continue;
         }
-        if fenced || t.len() < 5 || !t[..5].eq_ignore_ascii_case("TASK:") {
+        if fenced || !t.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("TASK:")) {
             continue;
         }
         let rest = t[5..].trim();
@@ -449,7 +580,18 @@ pub fn task_lines(text: &str) -> Vec<Op> {
             "add" | "todo" | "new" => Op::Add {
                 title: task,
                 owner: None,
+                priority: Priority::Normal,
             },
+            "priority" => {
+                let Some((task, level)) = arg.rsplit_once(char::is_whitespace) else { continue };
+                let priority = match level.to_ascii_lowercase().as_str() {
+                    "high" => Priority::High,
+                    "normal" => Priority::Normal,
+                    "low" => Priority::Low,
+                    _ => continue,
+                };
+                Op::Priority { task: task.trim().into(), priority }
+            }
             "reopen" | "undo" => Op::Reopen { task },
             "drop" | "remove" | "cancel" => Op::Drop { task },
             _ => continue,
@@ -470,7 +612,7 @@ pub fn title_line(text: &str) -> Option<String> {
             fenced = !fenced;
             continue;
         }
-        if !fenced && t.len() > 6 && t[..6].eq_ignore_ascii_case("TITLE:") {
+        if !fenced && t.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case("TITLE:")) {
             let title = t[6..].trim().trim_matches(|c| c == '"' || c == '`' || c == '*').trim();
             if !title.is_empty() {
                 found = Some(title.to_string());
@@ -490,12 +632,12 @@ fn split_reason(arg: &str) -> (String, Option<String>) {
 }
 
 /// The board and how to change it, for an AI's instructions.
-pub fn for_prompt(board: &Board) -> String {
+pub fn for_prompt(board: &Board, agent: &str, compact: bool) -> String {
     let mut s = String::from(
         "\n\nTASK BOARD (shared across computers; editable by the human). \
-Check ownership before work, claim once, wait for handoff on owned tasks, and mark done after commit and checks. \
+Before claiming a large task, divide it into independent tasks with affected files and a verification step. Within ready work, take high priority before normal or low. Only change your own or unassigned tasks. Claim once, coordinate shared edits through a handoff, and mark done after commit and checks. \
 Put each action on its own line: `TASK: take <title or #n>` (adds a new title), `TASK: done <title or #n>`, \
-`TASK: blocked <#n> - <why>`, `TASK: hand <#n> to @name`, `TASK: add <title>`, `TASK: drop <#n>`. \
+`TASK: blocked <#n> - <why>`, `TASK: hand <#n> to @name`, `TASK: add <title>`, `TASK: priority <#n> <high|normal|low>`, `TASK: drop <#n>`. \
 Task numbers are shared. An owner shown as \"<AI> (<computer>)\" is remote. \
 Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
     );
@@ -503,11 +645,28 @@ Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
         s.push_str("\nThe board is empty.");
         return s;
     }
-    let open: Vec<&Task> = board
+    let mut open: Vec<&Task> = board
         .tasks
         .iter()
         .filter(|t| t.status != Status::Done)
         .collect();
+    open.sort_by_key(|task| {
+        let blocked = task.status == Status::Blocked;
+        let priority = match task.owner.as_deref() {
+            Some(owner) if owner == agent && !blocked => 0,
+            None if !blocked => 1,
+            Some(owner) if owner == agent => 2,
+            _ => 3,
+        };
+        (priority, blocked, task.priority, task.id)
+    });
+    let omitted_open = if compact {
+        let omitted = open.len().saturating_sub(LOCAL_OPEN_IN_PROMPT);
+        open.truncate(LOCAL_OPEN_IN_PROMPT);
+        omitted
+    } else {
+        0
+    };
     let mut done: Vec<&Task> = board
         .tasks
         .iter()
@@ -533,9 +692,26 @@ Rename the conversation with `TITLE: <short new title>` (max 60 characters).",
         let note = t
             .note
             .as_deref()
-            .map(|n| format!(" ({n})"))
+            .map(|note| {
+                if !compact {
+                    return format!(" ({note})");
+                }
+                const LOCAL_NOTE_CHARS: usize = 160;
+                let mut chars = note.chars();
+                let excerpt: String = chars.by_ref().take(LOCAL_NOTE_CHARS).collect();
+                let suffix = if chars.next().is_some() { "..." } else { "" };
+                format!(" ({excerpt}{suffix})")
+            })
             .unwrap_or_default();
-        s.push_str(&format!("\n#{} [{state}] {}{note}", t.id, t.title));
+        let priority = match t.priority {
+            Priority::Normal => "",
+            Priority::High => " [high priority]",
+            Priority::Low => " [low priority]",
+        };
+        s.push_str(&format!("\n#{} [{state}]{priority} {}{note}", t.id, t.title));
+    }
+    if omitted_open > 0 {
+        s.push_str(&format!("\n({omitted_open} open tasks omitted. The task board in the app shows every task.)"));
     }
     if done.len() > DONE_IN_PROMPT {
         s.push_str(&format!(
@@ -563,6 +739,119 @@ mod tests {
     }
 
     #[test]
+    fn local_task_prompt_keeps_owned_work_and_limits_open_rows() {
+        let mut board = Board::default();
+        for id in 1..=30 {
+            board.tasks.push(Task {
+                id,
+                title: format!("Assigned task {id}"),
+                owner: Some(if id == 30 { "local" } else { "other" }.to_string()),
+                status: Status::Doing,
+                priority: Priority::Normal,
+                note: None,
+                by: "human".into(),
+                updated: 0,
+            });
+        }
+        board.tasks[0].status = Status::Blocked;
+        let prefix = "\u{00e9}".repeat(160);
+        board.tasks[29].note = Some(format!("{prefix}remaining details"));
+        let local = for_prompt(&board, "local", true);
+        assert_eq!(local.lines().filter(|line| line.starts_with('#')).count(), LOCAL_OPEN_IN_PROMPT);
+        assert!(local.contains("#30 [doing"));
+        assert!(!local.contains("#1 [blocked"));
+        assert!(!local.contains("#29 [doing"));
+        assert!(local.contains("6 open tasks omitted"));
+        assert!(local.contains(&format!("{prefix}...")));
+        assert!(!local.contains("remaining details"));
+        let hosted = for_prompt(&board, "claude", false);
+        assert!(hosted.contains("remaining details"));
+        assert_eq!(hosted.lines().filter(|line| line.starts_with('#')).count(), 30);
+    }
+
+    #[test]
+    fn active_and_available_tasks_precede_blockers_in_each_agents_prompt() {
+        let mut board = Board::default();
+        let setup = task_lines(
+            "TASK: take Waiting on credentials\nTASK: blocked #1 - needs approval\nTASK: take Review tests",
+        );
+        for op in &setup {
+            assert!(board.apply("claude", op, 1).is_some());
+        }
+        assert!(board.apply("gemini", &Op::Take { task: "Write docs".into() }, 2).is_some());
+        assert!(board.apply("human", &Op::Add { title: "Check screenshots".into(), owner: None, priority: Priority::Normal }, 3).is_some());
+
+        for (agent, expected) in [("claude", ["#2", "#4", "#1", "#3"]), ("gemini", ["#3", "#4", "#2", "#1"])] {
+            for compact in [true, false] {
+                let prompt = for_prompt(&board, agent, compact);
+                let order: Vec<_> = prompt.lines()
+                    .filter(|line| line.starts_with('#'))
+                    .filter_map(|line| line.split_whitespace().next())
+                    .collect();
+                assert_eq!(order, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn priority_defaults_for_existing_boards_and_orders_ready_work_in_both_prompts() {
+        let mut board: Board = serde_json::from_str(r#"{"tasks":[{"id":1,"title":"Existing task","status":"todo","by":"human","updated":0}],"next":1}"#).unwrap();
+        assert_eq!(board.tasks[0].priority, Priority::Normal);
+        for op in task_lines("TASK: add Test recovery\nTASK: priority #2 high\nTASK: take Check fixture") {
+            assert!(board.apply("claude", &op, 1).is_some());
+        }
+        let priority = Op::Priority { task: "#3".into(), priority: Priority::Low };
+        assert!(board.apply("gemini", &priority, 2).is_none());
+        assert!(board.apply("human", &priority, 3).is_some());
+        let saved = serde_json::to_string(&board).unwrap();
+        assert_eq!(serde_json::from_str::<Board>(&saved).unwrap(), board);
+        for compact in [true, false] {
+            let prompt = for_prompt(&board, "claude", compact);
+            assert!(prompt.contains("[high priority] Test recovery"));
+            assert!(prompt.find("#3 [").unwrap() < prompt.find("#2 [").unwrap());
+            assert!(prompt.find("#2 [").unwrap() < prompt.find("#1 [").unwrap());
+        }
+    }
+
+    #[test]
+    fn staging_a_plan_is_repeatable_and_keeps_tasks_unassigned() {
+        let root = std::env::temp_dir().join(format!("consilium-plan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let text = "1. Verify transport\r\n- [ ] Review tests\r\n\r\n* verify transport\r\n3) Write notes";
+        let (first, note) = stage_plan(&root, "c1", text, Priority::High).unwrap();
+        assert_eq!(first, PlanReceipt { added: 3, skipped: 1 });
+        let note = note.unwrap();
+        assert!(note.contains("staged 3 unassigned"));
+        assert!(!note.contains("Verify transport"));
+        let board = load(&root, "c1");
+        assert_eq!(board.tasks.iter().map(|task| task.title.as_str()).collect::<Vec<_>>(),
+            ["Verify transport", "Review tests", "Write notes"]);
+        assert!(board.tasks.iter().all(|task| task.priority == Priority::High && task.status == Status::Todo && task.owner.is_none()));
+        let (repeat, note) = stage_plan(&root, "c1", text, Priority::Low).unwrap();
+        assert_eq!(repeat, PlanReceipt { added: 0, skipped: 4 });
+        assert!(note.is_none());
+        assert_eq!(load(&root, "c1"), board);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn staging_over_cap_keeps_existing_board_intact() {
+        let root = std::env::temp_dir().join(format!("consilium-plan-limit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let range = |start, count| (start..start + count).map(|idx| format!("Task {idx}\n")).collect::<String>();
+        let oversized = range(0, MAX_PLAN_TASKS + 1);
+        assert!(stage_plan(&root, "c1", &oversized, Priority::Normal).unwrap_err().contains("100 tasks"));
+        for start in [0, MAX_PLAN_TASKS] {
+            stage_plan(&root, "c1", &range(start, MAX_PLAN_TASKS), Priority::Normal).unwrap();
+        }
+        let board = load(&root, "c1");
+        assert_eq!(board.tasks.len(), MAX_TASKS);
+        assert!(stage_plan(&root, "c1", "Task 0\nExtra task", Priority::Normal).unwrap_err().contains("200 tasks"));
+        assert_eq!(load(&root, "c1"), board);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn owners_are_named_as_seen_from_each_computer() {
         let mut b = Board::default();
         let now = 1;
@@ -580,7 +869,7 @@ mod tests {
     #[test]
     fn reads_task_lines_and_skips_code_blocks() {
         let ops = task_lines(
-            "Working on it.\nTASK: take Signal relay\ntask: done #2\nTASK: blocked #3 - needs disk space\nTASK: hand #4 to @gemini\n```text\nTASK: take example\n```\nTASK: nonsense here",
+            "正在处理。\nTASK: take Signal relay\ntask: done #2\nTASK: blocked #3 - needs disk space\nTASK: hand #4 to @gemini\n```text\nTASK: take example\n```\nTASK: nonsense here",
         );
         assert_eq!(
             ops,
@@ -599,6 +888,47 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn title_parser_accepts_unicode_replies() {
+        assert_eq!(title_line("✅ 已验证所有测试"), None);
+        assert_eq!(title_line("✅ 已验证所有测试\ntitle: 项目进度"), Some("项目进度".into()));
+    }
+
+    #[test]
+    fn a_second_agent_cannot_take_an_owned_task_without_a_handoff() {
+        let mut board = Board::default();
+        let take = Op::Take { task: "Review map".into() };
+        assert!(board.apply("claude", &take, 1).is_some());
+        assert!(board.apply("gemini", &take, 2).is_none());
+        assert!(board.apply("claude", &Op::Block { task: "#1".into(), note: Some("Waiting for data".into()) }, 3).is_some());
+        assert!(board.apply("gemini", &take, 4).is_none());
+        assert_eq!(board.tasks[0].owner.as_deref(), Some("claude"));
+        let handoff = Op::Hand { task: "#1".into(), to: "gemini".into() };
+        assert!(board.apply("gemini", &handoff, 5).is_none());
+        assert!(board.apply("claude", &handoff, 6).is_some());
+        assert_eq!(board.tasks[0].owner.as_deref(), Some("gemini"));
+        assert_eq!(board.tasks[0].status, Status::Doing);
+    }
+
+    #[test]
+    fn task_changes_require_the_owner_or_human() {
+        let mut board = Board::default();
+        assert!(board.apply("claude-win", &Op::Take { task: "Review map".into() }, 1).is_some());
+        let initial = board.clone();
+        let changes = task_lines(
+            "TASK: done #1\nTASK: blocked #1 - waiting\nTASK: reopen #1\nTASK: drop #1",
+        );
+        for op in &changes {
+            assert!(board.apply("claude-mac", op, 2).is_none());
+            assert_eq!(board, initial);
+        }
+        assert!(board.apply("claude-win", &changes[0], 3).is_some());
+        assert!(board.apply("claude-mac", &Op::Take { task: "#1".into() }, 4).is_none());
+        assert!(board.apply("human", &changes[2], 5).is_some());
+        assert!(board.apply("human", &changes[3], 6).is_some());
+        assert!(board.tasks.is_empty());
     }
 
     #[test]
@@ -649,7 +979,7 @@ mod tests {
 
         let board = load(&d, "c1");
         assert_eq!(board.tasks[1].owner.as_deref(), Some("claude"));
-        let p = for_prompt(&board);
+        let p = for_prompt(&board, "claude", false);
         assert!(p.contains("#2 [doing · Claude] Review link fixes"), "{p}");
         assert!(p.contains("#1 [done · Claude] Task board"), "{p}");
 

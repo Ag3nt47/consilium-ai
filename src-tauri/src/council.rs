@@ -32,6 +32,10 @@ pub type Reply = Pin<Box<dyn Future<Output = Result<AgentReply, String>> + Send>
 
 /// What a turn needs from the app; tests supply fake AIs.
 pub trait Host: Send + Sync + 'static {
+    fn resolve_agent(&self, id: &str) -> Option<&'static Agent> {
+        agents::by_id(id)
+    }
+
     /// Asks `agent` for its `answer`-th message of `rounds` in this turn, given the conversation.
     fn ask(&self, agent: &'static Agent, answer: u32, rounds: u32, events: Vec<Event>, cancel: CancellationToken) -> Reply;
     /// A new event was recorded.
@@ -433,7 +437,7 @@ fn worker(s: Arc<Shared>, id: String, last_seen: Option<u64>) -> Pin<Box<dyn Fut
 /// Answers until there is nothing new to react to; returns whether it couldn't answer (an error or
 /// out of usage), and the newest message it has read.
 async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool, Option<u64>) {
-    let agent = agents::by_id(&id).expect("known agent");
+    let agent = s.host.resolve_agent(&id).expect("known agent");
     if crate::switched::is_off(s.store.dir(), &s.turn.conversation, &id) {
         return (false, last_seen);
     }
@@ -658,7 +662,7 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
 }
 
 async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
-    let agent = agents::by_id(&id).expect("known agent");
+    let agent = s.host.resolve_agent(&id).expect("known agent");
     let mut generation = s.state.lock().unwrap().generation;
     loop {
         let (failed, seen) = answer(s.clone(), id.clone(), last_seen).await;
@@ -675,7 +679,7 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
             if failed && st.live.is_empty() && !st.paused && !s.cancel.is_cancelled() {
                 let now = now_ms();
                 // An AI switched off in this chat never stands in for one that couldn't answer.
-                let available = |a: &&'static agents::Agent| {
+                let available = |a: &'static agents::Agent| {
                     s.bench.until(a.id, now).is_none()
                         && s.host.installed(a)
                         && !crate::switched::is_off(s.store.dir(), &s.turn.conversation, a.id)
@@ -685,20 +689,21 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
                     .members
                     .iter()
                     .filter(|m| !st.joined.contains(*m))
-                    .filter_map(|m| agents::by_id(m))
+                    .filter_map(|m| s.host.resolve_agent(m))
                     .collect();
-                // Tier 1 (cloud flagship) models take priority as stand-ins; Tier 2 (local models) act as fallback.
-                let pick = unjoined
-                    .iter()
-                    .filter(|a| !agents::is_local(a))
-                    .find(|a| available(a))
-                    .or_else(|| unjoined.iter().filter(|a| agents::is_local(a)).find(|a| available(a)))
-                    .copied();
+                let pick = pick_stand_in(&unjoined, available);
                 if let Some(a) = pick {
                     st.live.insert(a.id.to_string());
                     st.joined.insert(a.id.to_string());
                     Some(Some(a))
-                } else if s.turn.members.iter().filter(|m| **m != id).filter_map(|m| agents::by_id(m)).any(|a| s.bench.until(a.id, now).is_none() && s.host.installed(a)) {
+                } else if s
+                    .turn
+                    .members
+                    .iter()
+                    .filter(|m| **m != id)
+                    .filter_map(|m| s.host.resolve_agent(m))
+                    .any(available)
+                {
                     // Others could answer; they have already taken part in this turn.
                     None
                 } else {
@@ -723,6 +728,19 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
     }
 }
 
+/// Cloud council members get one chance before an available local model takes over.
+fn pick_stand_in(
+    unjoined: &[&'static agents::Agent],
+    available: impl Fn(&'static agents::Agent) -> bool,
+) -> Option<&'static agents::Agent> {
+    unjoined
+        .iter()
+        .copied()
+        .filter(|a| !agents::is_local(a))
+        .find(|a| available(a))
+        .or_else(|| unjoined.iter().copied().filter(|a| agents::is_local(a)).find(|a| available(a)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,23 +752,42 @@ mod tests {
         script: Box<Script>,
         /// How long each AI takes to answer, in ms.
         delay: HashMap<&'static str, u64>,
+        wait_for_gpt: Option<Arc<tokio::sync::Notify>>,
         asked: Mutex<Vec<(String, u32)>>,
         installed: HashSet<&'static str>,
+        local: Option<&'static Agent>,
     }
 
     impl Host for Fake {
+        fn resolve_agent(&self, id: &str) -> Option<&'static Agent> {
+            self.local.filter(|agent| agent.id == id).or_else(|| agents::by_id(id))
+        }
+
         fn ask(&self, agent: &'static Agent, answer: u32, _rounds: u32, events: Vec<Event>, cancel: CancellationToken) -> Reply {
             self.asked.lock().unwrap().push((agent.id.to_string(), answer));
             let r = (self.script)(agent.id, answer, &events).map(|text| AgentReply { text, usage: None, model: None });
             let d = self.delay.get(agent.id).copied().unwrap_or(10);
+            let gate = self.wait_for_gpt.clone().filter(|_| agent.id == "claude");
             Box::pin(async move {
+                let ready = async {
+                    if let Some(gate) = gate {
+                        gate.notified().await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(d)).await;
+                };
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_millis(d)) => r,
+                    _ = ready => r,
                     _ = cancel.cancelled() => Err("stopped".into()),
                 }
             })
         }
-        fn event(&self, _e: &Event) {}
+        fn event(&self, e: &Event) {
+            if e.kind == "message" && e.sender == "gpt" {
+                if let Some(gate) = &self.wait_for_gpt {
+                    gate.notify_one();
+                }
+            }
+        }
         fn thinking(&self, _agents: Vec<String>, _round: u32) {}
         fn installed(&self, agent: &'static Agent) -> bool {
             self.installed.contains(agent.id)
@@ -764,8 +801,10 @@ mod tests {
         Fake {
             script: Box::new(script),
             delay: HashMap::new(),
+            wait_for_gpt: None,
             asked: Mutex::new(vec![]),
             installed: ["gpt", "claude", "gemini"].into_iter().collect(),
+            local: None,
         }
     }
 
@@ -782,7 +821,19 @@ mod tests {
     }
 
     async fn go(store: &Arc<Store>, c: &str, host: Arc<Fake>, targets: &[&str], rounds: u32, bench: Arc<Bench>) -> Vec<Event> {
-        let turn = Turn { conversation: c.into(), targets: ids(targets), rounds, members: ids(&["gpt", "claude", "gemini"]) };
+        go_with_members(store, c, host, targets, &["gpt", "claude", "gemini"], rounds, bench).await
+    }
+
+    async fn go_with_members(
+        store: &Arc<Store>,
+        c: &str,
+        host: Arc<Fake>,
+        targets: &[&str],
+        members: &[&str],
+        rounds: u32,
+        bench: Arc<Bench>,
+    ) -> Vec<Event> {
+        let turn = Turn { conversation: c.into(), targets: ids(targets), rounds, members: ids(members) };
         tokio::time::timeout(Duration::from_secs(10), run(turn, store.clone(), bench, host, CancellationToken::new()))
             .await
             .expect("the turn ends");
@@ -797,13 +848,10 @@ mod tests {
     async fn everyone_answers_at_once_without_waiting_for_each_other() {
         let (store, c) = setup();
         let mut f = fake(|id, _, _| Ok(format!("hi from {id}")));
-        // Claude is asked first but is slower; ChatGPT answers without waiting for it. One after
-        // the other would take 5 s; side by side, about 3 s.
-        f.delay.insert("claude", 3000);
-        f.delay.insert("gpt", 2000);
-        let started = std::time::Instant::now();
+        // Claude is asked first and can finish only after the GPT reply is published.
+        // A sequential council would time out in go() while waiting for Claude.
+        f.wait_for_gpt = Some(Arc::new(tokio::sync::Notify::new()));
         let ev = go(&store, &c, Arc::new(f), &["claude", "gpt"], 1, Arc::new(Bench::new())).await;
-        assert!(started.elapsed() < Duration::from_millis(4500), "answers ran in parallel: {:?}", started.elapsed());
         assert_eq!(said(&ev), vec![("gpt".into(), "hi from gpt".into()), ("claude".into(), "hi from claude".into())]);
     }
 
@@ -986,6 +1034,72 @@ mod tests {
         let ev = go(&store, &c, f, &["claude"], 1, Arc::new(Bench::new())).await;
         assert_eq!(said(&ev), vec![("gpt".into(), "gpt here".into())]);
         assert!(ev.iter().any(|e| e.text == "ChatGPT is taking Claude's turn."));
+    }
+
+    #[test]
+    fn exhausted_clouds_are_tried_once_before_one_local_stand_in_takes_over() {
+        let local = crate::customai::test_agent(crate::customai::CustomAi {
+            id: "localstandin".into(),
+            name: "Local Stand-in".into(),
+            base_url: "http://127.0.0.1:18080/v1".into(),
+            model: "test-local".into(),
+            local: true,
+        });
+        let candidates = [agents::by_id("gpt").unwrap(), agents::by_id("claude").unwrap(), local];
+        let mut exhausted = HashSet::new();
+
+        let first = pick_stand_in(&candidates, |a| !exhausted.contains(a.id)).unwrap();
+        assert_eq!(first.id, "gpt");
+        exhausted.insert(first.id);
+        let second = pick_stand_in(&candidates, |a| !exhausted.contains(a.id)).unwrap();
+        assert_eq!(second.id, "claude");
+        exhausted.insert(second.id);
+        let third = pick_stand_in(&candidates, |a| !exhausted.contains(a.id)).unwrap();
+        assert_eq!(third.id, "localstandin", "each cloud is tried once before the custom local provider");
+        assert!(agents::is_local(third));
+    }
+
+    #[tokio::test]
+    async fn local_stand_in_continues_the_same_turn_with_chat_context() {
+        let (store, conversation) = setup();
+        let local = crate::customai::test_agent(crate::customai::CustomAi {
+            id: "localcontext".into(),
+            name: "Local Context".into(),
+            base_url: "http://127.0.0.1:18080/v1".into(),
+            model: "test-local".into(),
+            local: true,
+        });
+        let mut host = fake(|id, _, events| match id {
+            "claude" | "gpt" => Err("quota exceeded".into()),
+            "localcontext" => {
+                assert!(events.iter().any(|e| e.sender == "human" && e.text == "hello"));
+                Ok("Continued locally".into())
+            }
+            _ => panic!("unexpected stand-in: {id}"),
+        });
+        host.installed.insert(local.id);
+        host.local = Some(local);
+        let host = Arc::new(host);
+        let events = go_with_members(
+            &store, &conversation, host.clone(), &["claude"], &["claude", "gpt", local.id],
+            1, Arc::new(Bench::new()),
+        ).await;
+        assert_eq!(said(&events), vec![(local.id.into(), "Continued locally".into())]);
+        let asked = host.asked.lock().unwrap();
+        assert_eq!(asked.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["claude", "gpt", local.id]);
+    }
+
+    #[tokio::test]
+    async fn switched_off_last_stand_in_reports_that_nobody_can_answer() {
+        let (store, c) = setup();
+        crate::switched::set(store.dir(), &c, "gpt", false).unwrap();
+        crate::switched::set(store.dir(), &c, "gemini", false).unwrap();
+        let host = Arc::new(fake(|id, _, _| match id {
+            "claude" => Err("quota exceeded".into()),
+            _ => panic!("switched-off stand-in was asked: {id}"),
+        }));
+        let ev = go(&store, &c, host, &["claude"], 1, Arc::new(Bench::new())).await;
+        assert!(ev.iter().any(|e| e.text.starts_with("No other AI in the council can answer")));
     }
 
     #[tokio::test]

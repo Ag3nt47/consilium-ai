@@ -40,11 +40,12 @@ import {
 import { canListen, canSpeak, isEcho, Listener, parseVoiceCommand, RESUME_AFTER_MS, Speaker, startsInterrupt, voiceOn } from "./voice";
 import { VoiceSettings } from "./voicesettings";
 import { AgentVoiceMeter, VoiceVisualizer } from "./visualizer";
-import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
+import { checkForUpdate, nextUpdateCheckDelay, RELEASES_URL, type UpdateInfo } from "./updates";
 import { installHoverTips } from "./tooltip";
 import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
 import { MessagingIndicator, MessagingSettings } from "./messaging";
 import { LinkIndicator, LinkSettings } from "./link";
+import type { BackdropMode, BackdropPrefs } from "./TelemetryBackdrop";
 import { SecurityScanSettings } from "./security";
 import { ToolsSettings } from "./tools";
 import { CiBadge, ProjectVersions } from "./projects";
@@ -55,6 +56,8 @@ import { CustomAiForm } from "./customai";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
 
 const UpgradeProgress = lazy(() => import("./UpgradeProgress"));
+const OfflineSkills = lazy(() => import("./OfflineSkills"));
+const EnvironmentAudit = lazy(() => import("./EnvironmentAudit"));
 
 const THEMES = [
   { id: "glass", name: "visionOS Glass", note: "Frosted translucent glass, ambient glow" },
@@ -80,18 +83,24 @@ const PROVIDER_PORTALS: Record<string, { account: string; accountLabel: string; 
 };
 
 const knownTheme = (id: string | null | undefined) => THEMES.some((t) => t.id === id);
+const TelemetryBackdrop = lazy(() => import("./TelemetryBackdrop"));
+const BackdropSettings = lazy(() => import("./TelemetryBackdrop").then((module) => ({ default: module.BackdropSettings })));
+const backdropModes = { rain: "Matrix code rain", static: "Static glass", stealth: "Stealth solid" };
+const defaultBackdrop: BackdropPrefs = { enabled: false, mode: "rain", filter: "all", opacity: 22, speed: 100, fps: 30 };
+const nextBackdrop = (mode: BackdropMode): BackdropMode => mode === "rain" ? "static" : mode === "static" ? "stealth" : "rain";
 
-type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean; dailyTokenWarning: number };
+type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean; dailyTokenWarning: number; backdrop: BackdropPrefs };
 const PREFS_KEY = "consilium.prefs";
 const REQUEST_FLOOR_KEY = "consilium.request-floor.v2";
 
 function loadPrefs(): Prefs {
   // New installs start in Netrunner; anyone who has already picked a theme keeps it.
-  const defaults: Prefs = { theme: "netrunner", effects: true, autoUpdate: true, bingWallpaper: true, dailyTokenWarning: 0 };
+  const defaults: Prefs = { theme: "netrunner", effects: true, autoUpdate: true, bingWallpaper: true, dailyTokenWarning: 0, backdrop: defaultBackdrop };
   // Demo mode (README screenshots) uses Netrunner unless ?theme= says otherwise.
   if (!IN_APP) return { ...defaults, theme: knownTheme(demoTheme) ? demoTheme! : "netrunner", autoUpdate: false };
   try {
-    const saved: Prefs = { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
+    const stored = JSON.parse(localStorage.getItem(PREFS_KEY) || "{}");
+    const saved: Prefs = { ...defaults, ...stored, backdrop: { ...defaultBackdrop, ...stored.backdrop } };
     // Themes that were removed (Consilium, Cyber, Slate, CRT) fall back to Netrunner.
     return knownTheme(saved.theme) ? saved : { ...saved, theme: defaults.theme };
   } catch {
@@ -149,6 +158,51 @@ async function copyText(text: string) {
 
 function time(ts: number) {
   return clock(ts);
+}
+
+function ConversationTitle({ title, rename }: { title: string; rename: (title: string) => void }) {
+  const [draft, setDraft] = useState<{ original: string; value: string } | null>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const returnFocus = useRef(false);
+  const editing = draft !== null;
+
+  useEffect(() => {
+    if (!editing && returnFocus.current) {
+      returnFocus.current = false;
+      button.current?.focus();
+    }
+  }, [editing]);
+
+  return draft !== null ? (
+    <input
+      className="title-edit"
+      autoFocus
+      value={draft.value}
+      maxLength={60}
+      aria-label="Conversation title"
+      onChange={(event) => setDraft({ ...draft, value: event.target.value })}
+      onFocus={(event) => event.target.select()}
+      onBlur={(event) => {
+        const next = event.currentTarget.value.trim();
+        setDraft(null);
+        if (next && next !== draft.original.trim() && next !== title) rename(next);
+      }}
+      onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing || (event.key !== "Enter" && event.key !== "Escape")) return;
+        event.preventDefault();
+        returnFocus.current = true;
+        if (event.key === "Enter") event.currentTarget.blur();
+        else setDraft(null);
+      }}
+    />
+  ) : (
+    <h1>
+      <button type="button" className="title-rename" ref={button} onClick={() => setDraft({ original: title, value: title })}
+        title="Rename this conversation" aria-label={`Rename conversation: ${title}`}>
+        {title}<span className="title-pencil" aria-hidden>✎</span>
+      </button>
+    </h1>
+  );
 }
 
 type SeenReceipt = { agent: string; ts: number };
@@ -808,46 +862,46 @@ function ApiKeyField({ agent, onSaved, onError }: { agent: AgentInfo; onSaved: (
   );
 }
 
+function usagePeriod(window: UsageWindow): "session" | "weekly" | "other" {
+  const label = window.label.toLowerCase().replace(/[-_]+/g, " ").trim();
+  if (/^(?:(?:current )?session|(?:5|five) hours?|5h)(?:$|\s)/.test(label)) return "session";
+  if (/^(?:weekly|(?:7|seven) days?)(?:$|\s)/.test(label)) return "weekly";
+  return "other";
+}
+
+function UsagePeriod({ agent, label, windows }: { agent: AgentInfo; label: string; windows: UsageWindow[] }) {
+  return windows.length ? (
+    <UsageBar label={label} percent={Math.min(...windows.map((window) => window.remaining_percent))}
+      windows={windows} aria={`${agent.name} ${label.toLowerCase()} usage remaining`} />
+  ) : (
+    <div className="usage-row" title={`${agent.tool} did not report this usage window`}>
+      <div className="usage-label">
+        <span className="usage-name">{label}</span>
+        <span className="usage-unavailable">Unavailable</span>
+      </div>
+    </div>
+  );
+}
+
 function UsageMeter({ agent, forecast, claudeResets }: { agent: AgentInfo; forecast?: ResetForecast | null; claudeResets?: ClaudeResetHistory | null }) {
   const usage = agent.usage;
-  if (!usage) {
-    return (
-      <div className="usage-meter">
-        {agent.available && (
-          <span className="usage-unavailable" title={`${agent.tool} did not report plan usage`}>
-            usage unavailable
-          </span>
-        )}
-        {forecast && (
-          <div className="usage-forecast" title={`Unofficial estimate${forecast.confidence ? `, ${forecast.confidence} confidence` : ""}. Not affiliated with OpenAI.`}>
-            {forecast.official
-              ? `Reset announced: ${forecast.official}`
-              : `Global reset: ${forecast.chance_24h ?? "?"}% chance in 24 h${forecast.chance_48h != null ? ` (${forecast.chance_48h}% in 48 h)` : ""}`}
-            {" · "}
-            <button title="Open codex-reset.com, the unofficial source of the reset forecast" className="link" onClick={() => openUrl(FORECAST_SITE)}>
-              codex-reset.com
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  }
-  const { model, overall } = usage;
+  const model = usage?.model;
+  const plan = usage?.overall?.windows ?? (model ? [] : usage?.windows ?? []);
   return (
     <div className="usage-meter" title="How much of this AI's plan allowance is left, and when each limit resets">
-      {model && (
+      <UsagePeriod agent={agent} label="Current session" windows={plan.filter((window) => usagePeriod(window) === "session")} />
+      <UsagePeriod agent={agent} label="Overall weekly" windows={plan.filter((window) => usagePeriod(window) === "weekly")} />
+      {plan.filter((window) => usagePeriod(window) === "other").map((window, index) => (
+        <UsageBar key={`${window.label}-${index}`} label={window.label} percent={window.remaining_percent}
+          windows={[window]} aria={`${agent.name} ${window.label} usage remaining`} />
+      ))}
+      {model && !model.shared && (
         <UsageBar
-          label={model.shared ? `${model.label} · shares overall` : model.label}
+          label={`${model.label} · model limit`}
           percent={model.remaining_percent}
           windows={model.windows}
           aria={`${model.label} usage remaining`}
-          note={model.shared ? `${model.label} has no separate limit; it uses ${agent.name}'s overall allowance.` : undefined}
         />
-      )}
-      {overall ? (
-        <UsageBar label={`${agent.name} overall`} percent={overall.remaining_percent} windows={overall.windows} aria={`${agent.name} overall usage remaining`} />
-      ) : (
-        !model && <UsageBar label="usage left" percent={usage.remaining_percent} windows={usage.windows} aria={`${agent.name} plan usage remaining`} />
       )}
       {forecast && (
         <div className="usage-forecast" title={`Unofficial estimate${forecast.confidence ? `, ${forecast.confidence} confidence` : ""}. Not affiliated with OpenAI.`}>
@@ -1204,8 +1258,26 @@ function saveCachedAgents(agents: AgentInfo[]) {
 
 export default function App() {
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
+  const [meshPeers, setMeshPeers] = useState(0);
+  const updateBackdrop = (change: Partial<BackdropPrefs>) =>
+    setPrefs((current) => ({ ...current, backdrop: { ...current.backdrop, ...change } }));
+  const cycleBackdrop = useCallback(() => setPrefs((current) => ({
+    ...current, backdrop: { ...current.backdrop, mode: nextBackdrop(current.backdrop.mode) },
+  })), []);
+  useEffect(() => {
+    if (!prefs.backdrop.enabled) return;
+    const hotkey = (event: KeyboardEvent) => {
+      if (!event.repeat && event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.code === "KeyM") {
+        event.preventDefault();
+        cycleBackdrop();
+      }
+    };
+    window.addEventListener("keydown", hotkey);
+    return () => window.removeEventListener("keydown", hotkey);
+  }, [prefs.backdrop.enabled, cycleBackdrop]);
   const [agents, setAgents] = useState<AgentInfo[]>(loadCachedAgents);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const conversationReads = useRef({ issued: 0, applied: 0, list: [] as Conversation[] });
   const [current, setCurrent] = useState<string | null>(null);
   const [events, setEvents] = useState<ChatEvent[]>([]);
   const [turn, setTurn] = useState<TurnState | null>(null);
@@ -1311,6 +1383,23 @@ export default function App() {
   const [requestingStatus, setRequestingStatus] = useState(false);
   const [requestingUpdate, setRequestingUpdate] = useState(false);
   const [downloadError, setDownloadError] = useState("");
+  const [requestingInstallers, setRequestingInstallers] = useState(false);
+  const [installerRequest, setInstallerRequest] = useState<{ message: string; url?: string } | null>(null);
+
+  async function buildInstallers() {
+    setRequestingInstallers(true);
+    setInstallerRequest(null);
+    try {
+      const url = await api.requestDraftInstallers();
+      setInstallerRequest(url
+        ? { message: "GitHub accepted the installer build request.", url }
+        : { message: "GitHub accepted the workflow request. Open Installer builds to follow it." });
+    } catch (error) {
+      setInstallerRequest({ message: `Couldn't request installer builds: ${String(error)}` });
+    } finally {
+      setRequestingInstallers(false);
+    }
+  }
   const markDownloadStarting = useCallback((version: string) => {
     setDownloadError("");
     setDownloadStatus({ active: true, version: version.replace(/^v/i, "") });
@@ -1513,7 +1602,12 @@ export default function App() {
   }, []);
 
   const refreshList = useCallback(async () => {
+    const reads = conversationReads.current;
+    const request = ++reads.issued;
     const list = await api.list();
+    if (request < reads.applied) return reads.list;
+    reads.applied = request;
+    reads.list = list;
     setConversations(list);
     return list;
   }, []);
@@ -1544,6 +1638,24 @@ export default function App() {
 
   // Startup: agents, conversations (creating a first one), live events, update check.
   useEffect(() => {
+    let disposed = false;
+    let readingForEvent = false;
+    let queuedRead = false;
+    async function refreshAfterEvent() {
+      if (disposed) return;
+      queuedRead = true;
+      if (readingForEvent) return;
+      readingForEvent = true;
+      try {
+        do {
+          queuedRead = false;
+          await refreshList().catch(() => undefined);
+        } while (queuedRead && !disposed);
+      } finally {
+        readingForEvent = false;
+      }
+    }
+
     refreshAgents();
     refreshList().then(async (list) => {
       const first = list[0] ?? (await api.create());
@@ -1558,7 +1670,7 @@ export default function App() {
           speakerRef.current?.say(e.sender, senderName(e.sender, agentsRef.current), e.text);
         }
       }
-      refreshList();
+      void refreshAfterEvent();
       // An AI saying an update is ready should light the button straight away.
       if (e.kind === "message" && e.sender !== "human") pollStaged();
       // A note from Consilium (an AI ran out of usage, or is back, or council on/off changed) changes the AIs' status.
@@ -1597,6 +1709,7 @@ export default function App() {
     };
     window.addEventListener("focus", onFocus);
     return () => {
+      disposed = true;
       un1.then((f) => f());
       un2.then((f) => f());
       un3.then((f) => f());
@@ -1608,10 +1721,37 @@ export default function App() {
   // with automatic install on (Settings → Updates) Consilium installs it and restarts by itself.
   useEffect(() => {
     if (!prefs.autoUpdate) return;
-    const check = () => checkForUpdate(false, markDownloadStarting, markDownloadFailed).then(setUpdate).catch(() => undefined);
+    let lastCheck = 0;
+    let checking = false;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = () => {
+      if (checking || disposed) return;
+      clearTimeout(timer);
+      checking = true;
+      lastCheck = Date.now();
+      void checkForUpdate(false, markDownloadStarting, markDownloadFailed)
+        .then((result) => { if (!disposed) setUpdate(result); })
+        .catch(() => undefined)
+        .finally(() => {
+          checking = false;
+          if (!disposed) timer = setTimeout(check, nextUpdateCheckDelay());
+        });
+    };
+    const onResume = () => {
+      if (document.visibilityState === "visible" && Date.now() - lastCheck >= 30_000) check();
+    };
     check();
-    const t = setInterval(check, 30 * 60 * 1000);
-    return () => clearInterval(t);
+    window.addEventListener("focus", onResume);
+    window.addEventListener("online", onResume);
+    document.addEventListener("visibilitychange", onResume);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      window.removeEventListener("focus", onResume);
+      window.removeEventListener("online", onResume);
+      document.removeEventListener("visibilitychange", onResume);
+    };
   }, [prefs.autoUpdate, markDownloadStarting, markDownloadFailed]);
 
   useEffect(() => {
@@ -2091,6 +2231,14 @@ export default function App() {
     if (!current) return;
     const conversation = current;
     try {
+      if (IN_APP) {
+        const attachment = await api.attachClipboardImage(conversation);
+        if (conversation === currentRef.current) {
+          setPending((previous) => [...previous, attachment]);
+          setError(null);
+        }
+        return;
+      }
       const items = await navigator.clipboard.read();
       const files: File[] = [];
       for (const item of items) {
@@ -2106,9 +2254,9 @@ export default function App() {
         return;
       }
       await attachPasted(files);
-    } catch {
+    } catch (error) {
       if (conversation === currentRef.current) {
-        setError("Couldn't read an image from the clipboard. Paste the copied image directly into the message box instead.");
+        setError(IN_APP ? String(error) : "Couldn't read an image from the clipboard. Paste the copied image directly into the message box instead.");
       }
     }
   }
@@ -2496,17 +2644,9 @@ export default function App() {
     }
   }
 
-  // Renaming happens in place: the title turns into a text box (prompt() shows nothing in the app window).
-  const [titleDraft, setTitleDraft] = useState<string | null>(null);
-  function renameCurrent() {
-    if (current && meta) setTitleDraft(meta.title);
-  }
-  async function saveTitle() {
-    const title = titleDraft?.trim();
-    setTitleDraft(null);
-    if (!current || !meta || !title || title === meta.title) return;
+  async function saveTitle(conversation: string, title: string) {
     try {
-      await api.rename(current, title);
+      await api.rename(conversation, title);
       refreshList();
     } catch (e) {
       setError(String(e));
@@ -2833,7 +2973,13 @@ export default function App() {
   }, [paletteCommands, paletteQuery]);
 
   return (
-    <div className="app">
+    <div className="app" data-backdrop={prefs.backdrop.enabled ? prefs.backdrop.mode : undefined}>
+      {prefs.backdrop.enabled && prefs.backdrop.mode !== "stealth" && (
+        <Suspense fallback={null}>
+          <TelemetryBackdrop prefs={prefs.backdrop} agents={agents} workers={thinkingIds} events={events} meshPeers={meshPeers}
+            memory={pressure?.memory_percent} paused={!prefs.effects || adaptiveMode === "eco"} />
+        </Suspense>
+      )}
       <div className="fx-scanlines" aria-hidden />
       <aside className="sidebar" ref={sidebarRef}>
         <div className="brand">
@@ -3109,6 +3255,10 @@ export default function App() {
         </div>
         <div className="sidebar-foot">
         <ResourcePressureGauge pressure={pressure} />
+        {prefs.backdrop.enabled && (
+          <button type="button" className="btn ghost small-btn" title="Cycle the performance backdrop (Ctrl+Shift+M)"
+            onClick={cycleBackdrop}>{backdropModes[prefs.backdrop.mode]}</button>
+        )}
         <div className="sidebar-actions">
           <button className="btn ghost" ref={addTrigger} onClick={() => setAddPanel("choose")} aria-haspopup="dialog" aria-label="Add an AI or device">
             Add <span aria-hidden="true">🤖 💻</span>
@@ -3132,7 +3282,7 @@ export default function App() {
       </aside>
 
       <main
-        className={`main ${wallpaper && prefs.bingWallpaper ? "has-wallpaper" : ""}`}
+        className={`main ${wallpaper && prefs.bingWallpaper && !prefs.backdrop.enabled ? "has-wallpaper" : ""}`}
         style={wallpaper && prefs.bingWallpaper ? ({ "--bing-wallpaper": `url(${wallpaper.data_url})` } as React.CSSProperties) : undefined}
       >
         {update && (
@@ -3148,27 +3298,9 @@ export default function App() {
         )}
         <header className="topbar">
           <div className="title-block">
-            {titleDraft !== null ? (
-              <input
-                className="title-edit"
-                autoFocus
-                value={titleDraft}
-                maxLength={60}
-                aria-label="Conversation title"
-                onChange={(e) => setTitleDraft(e.target.value)}
-                onFocus={(e) => e.target.select()}
-                onBlur={saveTitle}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") e.currentTarget.blur();
-                  if (e.key === "Escape") setTitleDraft(null);
-                }}
-              />
-            ) : (
-              <h1 onClick={renameCurrent} title="Click to rename this conversation. The AIs can rename it too.">
-                {meta?.title ?? "Consilium"}
-                {meta && <span className="title-pencil" aria-hidden>✎</span>}
-              </h1>
-            )}
+            {meta
+              ? <ConversationTitle key={meta.id} title={meta.title} rename={(title) => void saveTitle(meta.id, title)} />
+              : <h1>Consilium</h1>}
             <div className="workspace">
               {meta?.workspace ? (
                 <>
@@ -3197,7 +3329,7 @@ export default function App() {
           <div className="topbar-actions">
             <div className="topbar-status">
               <MessagingIndicator />
-              <LinkIndicator />
+              <LinkIndicator onConnectedCount={prefs.backdrop.enabled && prefs.backdrop.mode === "rain" ? setMeshPeers : undefined} />
               {wallpaper && prefs.bingWallpaper && wallpaper.title && (
                 <span
                   className="wallpaper-pill"
@@ -3306,6 +3438,7 @@ export default function App() {
         )}
         <div className="task-float-anchor">
           <TaskBoardPanel
+            key={current}
             conversation={current}
             changeKey={events.length}
             people={[{ id: "human", name: "You" }, ...members.map((m) => ({ id: m.id, name: m.name }))]}
@@ -3382,9 +3515,11 @@ export default function App() {
                   {e.usage && e.usage.total_tokens > 0 && (
                     <span
                       className="tokens-tag"
+                      aria-label={e.usage.output_rate_milli !== undefined ? `Provider-reported completion rate: ${(e.usage.output_rate_milli / 1000).toFixed(1)} tokens per second` : undefined}
                       title={`Turn usage:\n• Total: ${num(e.usage.total_tokens)}\n• Input: ${num(e.usage.input_tokens)}\n• Output: ${num(e.usage.output_tokens)}${e.usage.thinking_tokens ? `\n• Thinking: ${num(e.usage.thinking_tokens)}` : ""}${e.usage.cache_read_tokens ? `\n• Cache read: ${num(e.usage.cache_read_tokens)}` : ""}`}
                     >
                       {formatTokens(e.usage.total_tokens)} tokens
+                      {e.usage.output_rate_milli !== undefined && ` · ${(e.usage.output_rate_milli / 1000).toFixed(1)} tok/s`}
                     </span>
                   )}
                 </div>
@@ -3688,6 +3823,9 @@ export default function App() {
               ))}
             </div>
             <p className="theme-hint">You can create your own theme by asking the AIs.</p>
+            <Suspense fallback={null}>
+              <BackdropSettings prefs={prefs.backdrop} modes={backdropModes} update={updateBackdrop} />
+            </Suspense>
             <label className="toggle">
               <input type="checkbox" checked={prefs.effects} onChange={(e) => setPrefs({ ...prefs, effects: e.target.checked })} />
               Visual effects (scanlines, glow and animation in neon themes)
@@ -3866,6 +4004,10 @@ export default function App() {
               </ul>
             )}
             <div className="section-label">Tools</div>
+            <Suspense fallback={null}>
+              <OfflineSkills copyText={copyText} />
+              <EnvironmentAudit key={current ?? ""} conversation={current ?? undefined} />
+            </Suspense>
             <ToolsSettings
               ais={members.map((a) => ({ id: a.id, name: a.name }))}
               onSend={async (text, to) => {
@@ -3949,6 +4091,22 @@ export default function App() {
               </span>
             </div>
             {downloadError && <p className="error small" role="status">{downloadError}</p>}
+            <div className="row wrap">
+              <button className="btn ghost" disabled={requestingInstallers} onClick={() => void buildInstallers()}>
+                {requestingInstallers ? "Requesting installer builds…" : "Build draft installers"}
+              </button>
+              <button className="link" onClick={() => openUrl("https://github.com/Ag3nt47/consilium-ai/actions/workflows/release.yml")}>
+                Installer builds
+              </button>
+            </div>
+            {installerRequest && (
+              <p className="muted small" role="status">
+                {installerRequest.message}{" "}
+                {installerRequest.url && (
+                  <button className="link" onClick={() => openUrl(installerRequest.url!)}>Open this build</button>
+                )}
+              </p>
+            )}
             <p className="muted small">
               Consilium checks the downloaded installer against GitHub's fingerprint.
               {" "}{council?.auto_install_updates ?? true
@@ -4113,7 +4271,7 @@ export default function App() {
               );
             })}
             <CustomAiForm
-              availableGiB={pressure ? Math.max(0, pressure.total_memory_mb * (1 - pressure.memory_percent / 100) / 1024) : undefined}
+              availableGiB={pressure ? (pressure.available_memory_mb ?? pressure.total_memory_mb * (1 - pressure.memory_percent / 100)) / 1024 : undefined}
               onAdded={(id) => {
                 refreshAgents();
                 setToast(`Added @${id}. Press "Add" on its card to bring it into the council.`);

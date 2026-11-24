@@ -24,23 +24,27 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Notify};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
+
+#[path = "link_discovery.rs"]
+mod discovery;
 
 pub const PORT: u16 = 8470;
 const HEARTBEAT: Duration = Duration::from_millis(1500);
 const DEAD_AFTER_MS: u64 = 4_000;
+const SESSION_WRITE_IDLE: Duration = Duration::from_millis(DEAD_AFTER_MS);
 const RETRY_MIN: Duration = Duration::from_millis(1000);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -50,6 +54,89 @@ const PAIR_TTL_MS: u64 = 5 * 60 * 1000;
 const PAIR_ATTEMPTS: u32 = 3;
 const LINE_LIMIT: usize = 3 * 1024 * 1024;
 const OUTBOX_LIMIT: usize = 2000;
+const TRIAL_CHUNK_BYTES: usize = 8 * 1024;
+const TRIAL_CHUNKS: usize = 4;
+const TRIAL_INTERVAL: Duration = Duration::from_millis(75);
+
+#[derive(Deserialize)]
+pub struct TransferPath {
+    source: IpAddr,
+    endpoint: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TransferReceipt {
+    sha256: String,
+    bytes: usize,
+    receiver_ip: IpAddr,
+    #[serde(default)]
+    receiver_interface: Option<String>,
+    received_ms: u64,
+    clock_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferResult {
+    source: ProbeSource,
+    endpoint: String,
+    receipts: Vec<TransferReceipt>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferTrial {
+    paths: Vec<TransferResult>,
+    overlap_ms: Option<u64>,
+    distinct_receiver_interfaces: bool,
+}
+
+fn distinct_receiver_interfaces(paths: &[TransferResult]) -> bool {
+    let mut interfaces = std::collections::HashSet::new();
+    paths.len() >= 2 && paths.iter().all(|path| {
+        path.receipts.len() == TRIAL_CHUNKS
+            && path.receipts[0].receiver_interface.as_ref().is_some_and(|first| {
+                path.receipts.iter().all(|receipt| receipt.receiver_interface.as_ref() == Some(first))
+                    && interfaces.insert(first)
+            })
+    })
+}
+
+fn transfer_overlap(paths: &[TransferResult]) -> Option<u64> {
+    let clock_id = &paths.first()?.receipts.first()?.clock_id;
+    let mut latest_start = 0;
+    let mut earliest_end = u64::MAX;
+    for path in paths {
+        if path.receipts.len() != TRIAL_CHUNKS || path.receipts.iter().any(|receipt| receipt.clock_id != *clock_id) {
+            return None;
+        }
+        latest_start = latest_start.max(path.receipts.first()?.received_ms);
+        earliest_end = earliest_end.min(path.receipts.last()?.received_ms);
+    }
+    earliest_end.checked_sub(latest_start).filter(|ms| {
+        *ms > 0 && paths.len() >= 2 && paths.iter().all(|path| {
+            path.receipts.iter().any(|receipt| (latest_start..=earliest_end).contains(&receipt.received_ms))
+        })
+    })
+}
+
+fn transfer_receipt(payload: &str, receiver_ip: IpAddr) -> Result<TransferReceipt, String> {
+    if payload.len() != TRIAL_CHUNK_BYTES || !payload.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid transfer chunk".into());
+    }
+    static CLOCK: OnceLock<(Instant, String)> = OnceLock::new();
+    let (started, clock_id) = CLOCK.get_or_init(|| (Instant::now(), random_hex(16)));
+    let received_ms = started.elapsed().as_millis() as u64;
+    let receiver_interface = if_addrs::get_if_addrs().ok()
+        .and_then(|interfaces| interface_name(&interfaces, receiver_ip));
+    Ok(TransferReceipt {
+        sha256: hex(&Sha256::digest(payload.as_bytes())),
+        bytes: payload.len(),
+        receiver_ip,
+        receiver_interface,
+        received_ms,
+        clock_id: clock_id.clone(),
+    })
+}
 
 /// Whether this computer's Signal connection is running, shared with linked computers in each
 /// heartbeat so they can agree which one answers a phone message.
@@ -216,7 +303,9 @@ pub struct PeerView {
     pub node_id: String,
     pub name: String,
     pub connected: bool,
+    pub supports_lan_notes: bool,
     pub route: Option<String>,
+    pub local_interface: Option<String>,
     pub rtt_ms: Option<u64>,
     pub last_seen_ms: Option<u64>,
     pub queued: usize,
@@ -281,7 +370,17 @@ pub struct RouteTest {
     pub kind: String,
     pub reachable: bool,
     pub rtt_ms: Option<u64>,
+    /// Elapsed time from dial to authenticated reply on this endpoint.
+    pub authenticated_ms: Option<u64>,
+    pub local_ip: Option<std::net::IpAddr>,
+    pub local_interface: Option<String>,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeSource {
+    pub address: IpAddr,
+    pub interface: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,6 +392,7 @@ pub struct PeerTestReport {
     pub handshake_ok: bool,
     pub rtt_ms: Option<u64>,
     pub routes: Vec<RouteTest>,
+    pub source: Option<ProbeSource>,
     pub queued_outgoing: usize,
     pub summary: String,
 }
@@ -322,12 +422,16 @@ struct Pending {
 #[derive(Default)]
 struct PeerState {
     tx: Option<mpsc::UnboundedSender<String>>,
+    session_cancel: Option<CancellationToken>,
     generation: u64,
     route: Option<String>,
+    local_interface: Option<String>,
+    local_addr: Option<SocketAddr>,
     rtt_ms: Option<u64>,
     last_seen_ms: u64,
     down_since_ms: u64,
     outbox: VecDeque<PeerPacket>,
+    supports_lan_notes: bool,
     /// From the peer's latest heartbeat: Signal is running there, and when it was last used.
     signal_on: bool,
     active_ms: u64,
@@ -338,8 +442,22 @@ struct PeerState {
     /// Its council members ready to answer, and which of ours they have read: our AI -> theirs.
     council: Vec<String>,
     read_ours: std::collections::BTreeMap<String, Vec<String>>,
-    /// Packets received from it, so a route switched to in a stress test is proven by traffic.
+    ai_reports: u64,
+    /// Authenticated packets received on the current session, used to verify a route switch.
     packets_in: u64,
+    route_updates: u64,
+}
+
+impl PeerState {
+    /// Only the current socket can prove that its route is alive.
+    fn record_packet(&mut self, generation: u64, received_ms: u64) -> bool {
+        if self.generation != generation || self.tx.is_none() {
+            return false;
+        }
+        self.last_seen_ms = received_ms;
+        self.packets_in += 1;
+        true
+    }
 }
 
 struct Inner {
@@ -357,6 +475,8 @@ struct Inner {
     running: Mutex<Option<CancellationToken>>,
     error: Mutex<Option<String>>,
     wake_dial: Notify,
+    stress_test_lock: tokio::sync::Mutex<()>,
+    discovery: Mutex<Option<Arc<discovery::Discovery>>>,
 }
 
 #[derive(Clone)]
@@ -404,6 +524,8 @@ impl Link {
             running: Mutex::new(None),
             error: Mutex::new(None),
             wake_dial: Notify::new(),
+            stress_test_lock: tokio::sync::Mutex::new(()),
+            discovery: Mutex::new(None),
         })))
     }
 
@@ -450,6 +572,12 @@ impl Link {
                 let me = self.clone();
                 let t = token.clone();
                 tokio::spawn(async move { me.listen(listener, t).await });
+                if !cfg!(test) {
+                    let mut discovery = self.0.discovery.lock().unwrap();
+                    if !token.is_cancelled() {
+                        *discovery = discovery::Discovery::publish(self.0.port).ok().map(Arc::new);
+                    }
+                }
             }
             Err(e) => {
                 *self.0.error.lock().unwrap() = Some(format!("couldn't open port {}: {e}", self.0.port));
@@ -463,10 +591,37 @@ impl Link {
         if let Some(token) = self.0.running.lock().unwrap().take() {
             token.cancel();
         }
+        if let Some(discovery) = self.0.discovery.lock().unwrap().take() {
+            discovery.stop();
+        }
         for state in self.0.peers.lock().unwrap().values_mut() {
             state.tx = None;
+            state.session_cancel = None;
             state.generation += 1;
         }
+    }
+
+    /// Automatic alerts use service discovery. A manual scan also checks for older peers.
+    pub async fn discover(&self, include_legacy: bool) -> Result<Vec<String>, String> {
+        let discovery = self.0.discovery.lock().unwrap().clone();
+        let announced = async {
+            match discovery {
+                Some(discovery) => discovery.browse(self.0.port).await,
+                None => Vec::new(),
+            }
+        };
+        if !include_legacy {
+            return Ok(announced.await);
+        }
+        let (mut addresses, legacy) = tokio::join!(announced, discover_lan(self.0.port));
+        if !addresses.is_empty() {
+            addresses.extend(legacy.unwrap_or_default());
+        } else {
+            addresses = legacy?;
+        }
+        addresses.sort_unstable();
+        addresses.dedup();
+        Ok(addresses)
     }
 
     /// Whether this computer should answer the phone message that just arrived. True when the
@@ -484,6 +639,16 @@ impl Link {
             .map(|(id, s)| (id.as_str(), s.active_ms))
             .collect();
         answers_signal((cfg.node_id.as_str(), LOCAL_ACTIVE_MS.load(Ordering::SeqCst)), &others)
+    }
+
+    pub(crate) fn connected_peer_ids(&self) -> Vec<String> {
+        let cfg = self.0.cfg.lock().unwrap();
+        let states = self.0.peers.lock().unwrap();
+        cfg.peers
+            .iter()
+            .filter(|peer| states.get(&peer.node_id).is_some_and(|state| state.tx.is_some()))
+            .map(|peer| peer.node_id.clone())
+            .collect()
     }
 
     pub fn status(&self) -> LinkStatus {
@@ -511,8 +676,10 @@ impl Link {
                         node_id: p.node_id.clone(),
                         name: p.name.clone(),
                         connected: s.is_some_and(|s| s.tx.is_some()),
+                        supports_lan_notes: s.is_some_and(|s| s.tx.is_some() && s.supports_lan_notes),
                         route: s.and_then(|s| s.tx.as_ref().and(s.route.clone())),
-                        rtt_ms: s.and_then(|s| s.rtt_ms),
+                        local_interface: s.filter(|s| s.tx.is_some()).and_then(|s| s.local_interface.clone()),
+                        rtt_ms: s.filter(|s| s.tx.is_some()).and_then(|s| s.rtt_ms),
                         last_seen_ms: s.map(|s| s.last_seen_ms).filter(|&t| t > 0),
                         queued: s.map_or(0, |s| s.outbox.len()),
                         // Only while connected: an old heartbeat's activity would be stale.
@@ -655,71 +822,120 @@ impl Link {
     /// of its routes in turn (the others are left out, as if they had failed), proves each with a
     /// packet received over it, and finally returns the link to the fastest route. A route that
     /// doesn't connect, or carries nothing, fails and the test moves on.
-    pub async fn stress_test(&self) -> Result<Vec<StressReport>, String> {
+    pub async fn stress_test(&self, node_id: Option<&str>, sources: &[IpAddr]) -> Result<Vec<StressReport>, String> {
+        let _run = self.0.stress_test_lock.try_lock().map_err(|_| "A communication stress test is already running")?;
         let token = self.0.running.lock().unwrap().clone().ok_or("linking is off")?;
-        let peers = self.0.cfg.lock().unwrap().peers.clone();
+        if !sources.is_empty() {
+            let interfaces = if_addrs::get_if_addrs().map_err(|error| error.to_string())?;
+            for &source in sources {
+                validate_probe_source(&interfaces, source)?;
+            }
+        }
+        let peers = match node_id {
+            Some(id) => {
+                let peer = self.peer(id).ok_or("Linked computer not found")?;
+                if peer.addrs.is_empty() {
+                    return Err("The selected computer has no configured endpoints".into());
+                }
+                vec![peer]
+            }
+            None => self.0.cfg.lock().unwrap().peers.clone(),
+        };
         let mut out = Vec::new();
         for peer in peers.into_iter().filter(|p| !p.addrs.is_empty()) {
             let connected = self.0.peers.lock().unwrap().get(&peer.node_id).is_some_and(|s| s.tx.is_some());
             if !connected {
-                out.push(StressReport { computer: self.peer_name(&peer.node_id), routes: vec![], restored: None });
+                let computer = self.peer_name(&peer.node_id);
+                out.push(StressReport { node_id: peer.node_id, computer, routes: vec![], restored: None });
                 continue;
             }
+            let updates = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| s.route_updates);
+            // Wait briefly for the peer's next authenticated interface advertisement.
+            let deadline = tokio::time::Instant::now() + HEARTBEAT + Duration::from_millis(500);
+            while tokio::time::Instant::now() < deadline {
+                if self.0.peers.lock().unwrap().get(&peer.node_id)
+                    .is_none_or(|s| s.tx.is_none() || s.route_updates != updates)
+                {
+                    break;
+                }
+                tokio::select! {
+                    _ = token.cancelled() => return Err("The direct link was turned off".into()),
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+            }
+            let Some(peer) = self.peer(&peer.node_id) else { continue };
             let mut routes = Vec::new();
-            for addr in peer.addrs.iter().take(12) {
-                routes.push(self.switch_to(&peer, std::slice::from_ref(addr), &token).await);
+            if sources.is_empty() {
+                for addr in peer.addrs.iter().take(12) {
+                    routes.push(self.switch_to(&peer, std::slice::from_ref(addr), None, &token).await);
+                }
+            } else {
+                for &source in sources {
+                    routes.push(self.switch_to(&peer, &peer.addrs, Some(source), &token).await);
+                }
             }
             // Back to normal: the fastest route that answers.
-            let restored = self.switch_to(&peer, &peer.addrs, &token).await;
+            let restored = self.switch_to(&peer, &peer.addrs, None, &token).await;
             out.push(StressReport {
                 computer: self.peer_name(&peer.node_id),
+                node_id: peer.node_id,
                 routes,
-                restored: restored.ok.then_some(restored.addr),
+                restored: Some(restored),
             });
         }
         Ok(out)
     }
 
     /// Moves the live link with `peer` onto the fastest of `addrs`, and waits for a packet over it.
-    async fn switch_to(&self, peer: &Peer, addrs: &[String], token: &CancellationToken) -> RouteSwitch {
+    async fn switch_to(&self, peer: &Peer, addrs: &[String], source: Option<IpAddr>, token: &CancellationToken) -> RouteSwitch {
         let label = addrs.first().cloned().unwrap_or_default();
         let generation = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| s.generation);
         let started = std::time::Instant::now();
+        let attempt = token.child_token();
         let spawn_dial = || {
-            let (me, p, a, t) = (self.clone(), peer.clone(), addrs.to_vec(), token.clone());
-            tokio::spawn(async move { me.dial_on(p, &a, t).await })
+            let (me, p, a, t) = (self.clone(), peer.clone(), addrs.to_vec(), attempt.clone());
+            tokio::spawn(async move { me.dial_on(p, &a, source, t, None).await })
         };
         let mut dial = spawn_dial();
-        let mut switched_at: Option<(String, u64, u64)> = None;
-        let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, detail };
+        let mut switched_at: Option<(String, u64, u64, u64)> = None;
+        let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, requested_source: source, local_interface: None, local_addr: None, detail };
         while started.elapsed() < STRESS_SWITCH_TIMEOUT {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let (route, packets) = {
+            tokio::select! {
+                _ = attempt.cancelled() => return fail(label, "the direct link was turned off".into()),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+            let (route, packets, session_generation, interface, local_addr) = {
                 let states = self.0.peers.lock().unwrap();
                 let Some(s) = states.get(&peer.node_id) else { continue };
                 // Only a session over one of the routes under test counts. The other computer may
                 // dial in meanwhile, and that session's route is its own outgoing port: crediting
                 // it passed a dead route, or reported the working one under the wrong address.
-                if s.generation <= generation || s.tx.is_none() {
-                    (None, 0)
+                if s.generation <= generation || s.tx.is_none() ||
+                    source.is_some_and(|ip| s.local_addr.is_none_or(|addr| addr.ip().to_canonical() != ip.to_canonical())) {
+                    (None, 0, s.generation, None, None)
                 } else {
-                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in)
+                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in, s.generation, s.local_interface.clone(), s.local_addr)
                 }
             };
             if let Some(route) = route {
                 match &switched_at {
-                    None => switched_at = Some((route, packets, started.elapsed().as_millis() as u64)),
-                    Some((r, before, ms)) if packets > *before => {
+                    Some((r, before, ms, observed_generation)) if *observed_generation == session_generation && packets > *before => {
                         return RouteSwitch {
                             kind: route_kind(r).into(),
                             addr: r.clone(),
                             ok: true,
                             ms: Some(*ms),
+                            requested_source: source,
+                            local_interface: interface,
+                            local_addr,
                             detail: format!("switched in {ms} ms, traffic confirmed after {} ms", started.elapsed().as_millis()),
                         };
                     }
-                    _ => {}
+                    Some((_, _, _, observed_generation)) if *observed_generation == session_generation => {}
+                    _ => switched_at = Some((route, packets, started.elapsed().as_millis() as u64, session_generation)),
                 }
+            } else {
+                switched_at = None;
             }
             if dial.is_finished() && switched_at.is_none() {
                 match (&mut dial).await {
@@ -731,74 +947,188 @@ impl Link {
                 }
             }
         }
+        // A late test dial must not replace the route selected by the next attempt.
+        attempt.cancel();
         match switched_at {
-            Some((r, _, _)) => fail(r, "connected, but nothing came back over it".into()),
+            Some((r, _, _, _)) => fail(r, "connected, but nothing came back over it".into()),
             None => fail(label, "timed out".into()),
         }
     }
 
-    /// Tests connectivity, route latency, and sync alignment for a paired computer.
-    pub async fn test_peer(&self, node_id: &str) -> Result<PeerTestReport, String> {
-        let (peer, connected, active_route, rtt_ms, queued_outgoing) = {
-            let cfg = self.0.cfg.lock().unwrap();
-            let peer = cfg
-                .peers
-                .iter()
-                .find(|p| p.node_id == node_id)
-                .cloned()
-                .ok_or_else(|| format!("computer {node_id} not found"))?;
+    /// Rechecks the live peer's council and read receipts without sending an AI prompt.
+    pub async fn test_ai_handshake(&self, node_id: &str) -> Result<Vec<AiHandshake>, String> {
+        let peer = self.peer(node_id).ok_or("Linked computer not found")?;
+        let (_, mine) = self.me();
+        let (generation, reports) = {
             let states = self.0.peers.lock().unwrap();
-            let s = states.get(node_id);
-            let connected = s.is_some_and(|s| s.tx.is_some());
-            let active_route = s.and_then(|s| s.route.clone());
-            let rtt = s.and_then(|s| s.rtt_ms);
-            let queued = s.map_or(0, |s| s.outbox.len());
-            (peer, connected, active_route, rtt, queued)
+            let state = states.get(node_id).filter(|state| state.tx.is_some()).ok_or("The linked computer is offline")?;
+            (state.generation, state.ai_reports)
         };
-
-        let mut routes = Vec::new();
-        for addr in &peer.addrs {
-            let kind = route_kind(addr).to_string();
-
-            let started = std::time::Instant::now();
-            let timeout = Duration::from_millis(1000);
-            match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
-                Ok(Ok(_stream)) => {
-                    let elapsed = started.elapsed().as_millis() as u64;
-                    routes.push(RouteTest {
-                        addr: addr.clone(),
-                        kind,
-                        reachable: true,
-                        rtt_ms: Some(elapsed),
-                        status: format!("Reachable ({elapsed} ms)"),
-                    });
+        let deadline = tokio::time::Instant::now() + HEARTBEAT * 2 + Duration::from_millis(500);
+        loop {
+            {
+                let states = self.0.peers.lock().unwrap();
+                let state = states.get(node_id)
+                    .filter(|state| state.tx.is_some() && state.generation == generation)
+                    .ok_or("The connection changed during the AI handshake test. Try again.")?;
+                if state.ai_reports != reports {
+                    return Ok(handshake(node_id, &peer.name, &mine, Some(state)));
                 }
-                Ok(Err(_)) => {
-                    routes.push(RouteTest {
-                        addr: addr.clone(),
-                        kind,
-                        reachable: false,
-                        rtt_ms: None,
-                        status: "Refused or unreachable".to_string(),
-                    });
-                }
-                Err(_) => {
-                    routes.push(RouteTest {
-                        addr: addr.clone(),
-                        kind,
-                        reachable: false,
-                        rtt_ms: None,
-                        status: "Timed out".to_string(),
-                    });
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("No fresh AI handshake report arrived. Check that the linked computer supports AI status.".into());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Sends bounded authenticated data over separately selected local and remote addresses.
+    pub async fn transfer_trial(&self, node_id: &str, paths: Vec<TransferPath>) -> Result<TransferTrial, String> {
+        let _run = self.0.stress_test_lock.try_lock().map_err(|_| "A communication test is already running")?;
+        let token = self.0.running.lock().unwrap().clone().ok_or("linking is off")?;
+        let peer = self.peer(node_id).ok_or("Linked computer not found")?;
+        if !(2..=4).contains(&paths.len()) {
+            return Err("Choose two to four paths to the same linked computer".into());
+        }
+        let interfaces = if_addrs::get_if_addrs().map_err(|error| error.to_string())?;
+        let mut planned: Vec<(ProbeSource, String)> = Vec::with_capacity(paths.len());
+        let mut destinations = std::collections::HashSet::new();
+        for path in paths {
+            let source = validate_probe_source(&interfaces, path.source)?;
+            let endpoint: SocketAddr = path.endpoint.parse().map_err(|_| "Choose a saved IP endpoint")?;
+            if !peer.addrs.contains(&path.endpoint) {
+                return Err("Choose a saved endpoint for this linked computer".into());
+            }
+            if !destinations.insert(endpoint.ip().to_canonical())
+                || planned.iter().any(|(existing, _)| existing.interface == source.interface)
+            {
+                return Err("Each path needs a different local adapter and peer IP address".into());
+            }
+            planned.push((source, path.endpoint));
+        }
+
+        let key = peer_key(&peer)?;
+        let mut running = tokio::task::JoinSet::new();
+        for (index, (source, endpoint)) in planned.into_iter().enumerate() {
+            let (link, peer, key) = (self.clone(), peer.clone(), key.clone());
+            running.spawn(async move { (index, link.transfer_path(&peer, &key, source, endpoint).await) });
+        }
+        let mut results = Vec::new();
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => return Err("The direct link was turned off".into()),
+                result = running.join_next() => match result {
+                    Some(result) => results.push(result.map_err(|error| error.to_string())?),
+                    None => break,
                 }
             }
         }
+        results.sort_by_key(|(index, _)| *index);
+        let paths: Vec<_> = results.into_iter().map(|(_, result)| result).collect();
+        Ok(TransferTrial {
+            overlap_ms: transfer_overlap(&paths),
+            distinct_receiver_interfaces: distinct_receiver_interfaces(&paths),
+            paths,
+        })
+    }
+
+    async fn transfer_path(&self, peer: &Peer, key: &[u8], source: ProbeSource, endpoint: String) -> TransferResult {
+        let mut receipts: Vec<TransferReceipt> = Vec::with_capacity(TRIAL_CHUNKS);
+        let result: Result<(), String> = async {
+            for index in 0..TRIAL_CHUNKS {
+                if index > 0 {
+                    tokio::time::sleep(TRIAL_INTERVAL).await;
+                }
+                let receipt = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+                    let stream = connect_with_source(&endpoint, Some(source.address)).await
+                        .map_err(|error| format!("Could not connect to the peer endpoint: {error}"))?;
+                    let sender_ip = stream.local_addr().map_err(|error| error.to_string())?.ip().to_canonical();
+                    let remote_ip = stream.peer_addr().map_err(|error| error.to_string())?.ip().to_canonical();
+                    let chunk = random_hex(TRIAL_CHUNK_BYTES / 2);
+                    let reply = self.exchange_probe(peer, key, stream, Some(&chunk)).await?;
+                    let receipt: TransferReceipt = serde_json::from_value(reply["transfer_receipt"].clone())
+                        .map_err(|_| "The linked computer did not return a payload receipt. Update both computers.")?;
+                    if sender_ip != source.address.to_canonical() || receipt.receiver_ip != remote_ip
+                        || receipt.bytes != chunk.len() || receipt.sha256 != hex(&Sha256::digest(chunk.as_bytes()))
+                    {
+                        return Err("The payload receipt did not match the requested path or checksum".into());
+                    }
+                    Ok::<_, String>(receipt)
+                }).await
+                    .unwrap_or_else(|_| Err("Payload probe timed out".into()))
+                    .map_err(|error| format!("Sample {} of {TRIAL_CHUNKS}: {error}", index + 1))?;
+                if receipts.last().is_some_and(|prev| prev.clock_id != receipt.clock_id || prev.received_ms > receipt.received_ms) {
+                    return Err("The receiver clock changed during the test".into());
+                }
+                receipts.push(receipt);
+            }
+            Ok(())
+        }.await;
+        TransferResult { source, endpoint, receipts, error: result.err() }
+    }
+
+    /// Tests connectivity, route latency, and sync alignment for a paired computer.
+    pub async fn test_peer(&self, node_id: &str, source: Option<IpAddr>) -> Result<PeerTestReport, String> {
+        let peer = self.peer(node_id).ok_or_else(|| format!("computer {node_id} not found"))?;
+        let key = peer_key(&peer)?;
+        let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
+        let selected = source.map(|address| validate_probe_source(&interfaces, address)).transpose()?;
+        let mut probes = tokio::task::JoinSet::new();
+        for (index, addr) in peer.addrs.iter().take(12).cloned().enumerate() {
+            let link = self.clone();
+            let peer = peer.clone();
+            let key = key.clone();
+            probes.spawn(async move {
+                let kind = route_kind(&addr).to_string();
+                let started = std::time::Instant::now();
+                let timeout = Duration::from_secs(1);
+                let (rtt_ms, authenticated_ms, local_ip, status) = match tokio::time::timeout(timeout, connect_with_source(&addr, source)).await {
+                    Ok(Ok(stream)) => {
+                        let elapsed = started.elapsed().as_millis() as u64;
+                        let local_ip = stream.local_addr().ok().map(|address| address.ip());
+                        let result = tokio::time::timeout(timeout, link.probe_route(&peer, &key, stream)).await;
+                        let authenticated_ms = matches!(result, Ok(Ok(())))
+                            .then(|| started.elapsed().as_millis() as u64);
+                        let status = match authenticated_ms {
+                            Some(total) => format!("Authenticated probe passed in {total} ms"),
+                            None => format!("TCP connected in {elapsed} ms · peer authentication unconfirmed"),
+                        };
+                        (Some(elapsed), authenticated_ms, local_ip, status)
+                    }
+                    Ok(Err(_)) => (None, None, None, "Refused or unreachable".to_string()),
+                    Err(_) => (None, None, None, "Timed out".to_string()),
+                };
+                (index, RouteTest { addr, kind, reachable: rtt_ms.is_some(), rtt_ms, authenticated_ms, local_ip, local_interface: None, status })
+            });
+        }
+        let mut completed = Vec::new();
+        while let Some(result) = probes.join_next().await {
+            completed.push(result.map_err(|e| format!("Route check failed: {e}"))?);
+        }
+        completed.sort_by_key(|(index, _)| *index);
+        let routes: Vec<_> = completed.into_iter().map(|(_, mut route)| {
+            route.local_interface = route.local_ip.and_then(|ip| interface_name(&interfaces, ip));
+            route
+        }).collect();
+
+        // Use the current session after the probes, since failover might have occurred.
+        let (connected, active_route, rtt_ms, queued_outgoing) = {
+            let states = self.0.peers.lock().unwrap();
+            let state = states.get(node_id);
+            let session = state.filter(|state| state.tx.is_some());
+            (
+                session.is_some(),
+                session.and_then(|state| state.route.clone()),
+                session.and_then(|state| state.rtt_ms),
+                state.map_or(0, |state| state.outbox.len()),
+            )
+        };
 
         let handshake_ok = connected;
         let summary = if connected {
+            let latency = rtt_ms.map(|ms| format!(" · {ms} ms round trip")).unwrap_or_default();
             format!(
-                "✔ Handshake verified ({} ms via {}) · Chats aligned ({} queued)",
-                rtt_ms.unwrap_or(0),
+                "Authenticated session via {}{latency} · {} outgoing queued",
                 active_route.as_deref().unwrap_or("active link"),
                 queued_outgoing
             )
@@ -809,6 +1139,7 @@ impl Link {
         };
 
         Ok(PeerTestReport {
+            source: selected,
             node_id: peer.node_id,
             name: peer.name,
             connected,
@@ -824,9 +1155,36 @@ impl Link {
     /// Queues a packet for every paired computer; it is delivered now if connected, otherwise
     /// as soon as a route comes back. Returns the packet id.
     pub fn send(&self, kind: PacketKind, payload: Value) -> Result<String, String> {
+        self.send_packet(None, false, kind, payload)
+    }
+
+    /// Queues a packet for one paired computer using the same reliable delivery as a broadcast.
+    pub fn send_to(&self, node_id: &str, kind: PacketKind, payload: Value) -> Result<String, String> {
+        self.send_packet(Some(node_id), false, kind, payload)
+    }
+
+    /// Queues an on-demand request only for peers connected at admission.
+    pub fn send_connected(&self, kind: PacketKind, payload: Value) -> Result<String, String> {
+        self.send_packet(None, true, kind, payload)
+    }
+
+    pub(crate) fn send_lan_note(&self, node_id: &str, payload: Value) -> Result<String, String> {
+        let supported = self.0.peers.lock().unwrap().get(node_id)
+            .is_some_and(|state| state.tx.is_some() && state.supports_lan_notes);
+        if !supported {
+            return Err("Choose a connected computer that supports LAN notes.".into());
+        }
+        self.send_packet(Some(node_id), true, PacketKind::Chat, payload)
+    }
+
+    fn send_packet(&self, recipient: Option<&str>, connected_only: bool, kind: PacketKind, payload: Value) -> Result<String, String> {
         let (me, peers) = {
             let cfg = self.0.cfg.lock().unwrap();
-            (cfg.node_id.clone(), cfg.peers.clone())
+            let peers = cfg.peers.iter()
+                .filter(|peer| recipient.is_none_or(|id| peer.node_id == id))
+                .cloned()
+                .collect::<Vec<_>>();
+            (cfg.node_id.clone(), peers)
         };
         if peers.is_empty() {
             return Err("no paired computers".into());
@@ -839,8 +1197,11 @@ impl Link {
             let line = seal(&me, &key, &packet)?;
             prepared.push((peer.node_id.clone(), packet, line));
         }
-        let first_id = prepared.first().map(|(_, packet, _)| packet.id.clone()).unwrap_or_default();
         let mut states = self.0.peers.lock().unwrap();
+        if connected_only {
+            prepared.retain(|(id, _, _)| states.get(id).is_some_and(|state| state.tx.is_some()));
+        }
+        let first_id = prepared.first().ok_or("No paired computers are connected.")?.1.id.clone();
         if let Some((id, _)) = prepared.iter().find_map(|(id, _, _)| {
             let queued = states.get(id).map_or(0, |state| state.outbox.len());
             (queued >= OUTBOX_LIMIT).then_some((id, queued))
@@ -1002,6 +1363,25 @@ impl Link {
                 let key = peer_key(&peer)?;
                 let hello = open(&node, &key, &n, &c)?;
                 hello.validate(&peer.node_id, &key, now_ms())?;
+                if let Some(probe) = hello.payload.get("route_probe") {
+                    if probe.get("challenge").and_then(Value::as_str) != Some(nonce.as_str()) {
+                        return Err("stale route probe".into());
+                    }
+                    let probe_nonce = probe.get("nonce").and_then(Value::as_str)
+                        .filter(|nonce| nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                        .ok_or("invalid route probe nonce")?;
+                    let mut payload = json!({ "route_probe_ack": probe_nonce });
+                    if let Some(chunk) = probe.get("transfer_chunk") {
+                        let chunk = chunk.as_str().ok_or("invalid transfer chunk")?;
+                        let receiver_ip = w.local_addr().map_err(|error| error.to_string())?.ip().to_canonical();
+                        payload["transfer_receipt"] = json!(transfer_receipt(chunk, receiver_ip)?);
+                    }
+                    let reply = self.route_probe_frame(&key, payload)?;
+                    tokio::time::timeout(HANDSHAKE_TIMEOUT, w.write_all(reply.as_bytes())).await
+                        .map_err(|_| "route probe reply timed out".to_string())?
+                        .map_err(|err| err.to_string())?;
+                    return Ok(());
+                }
                 let h = hello.payload.get("hello").ok_or("expected hello")?;
                 if h.get("challenge").and_then(Value::as_str) != Some(nonce.as_str()) {
                     return Err("stale hello".into());
@@ -1187,6 +1567,7 @@ impl Link {
 
     async fn supervise(self, token: CancellationToken) {
         let mut backoff: HashMap<String, (Duration, u64)> = HashMap::new();
+        let mut pending_dials: HashMap<String, oneshot::Receiver<()>> = HashMap::new();
         loop {
             tokio::select! {
                 _ = token.cancelled() => return,
@@ -1197,6 +1578,9 @@ impl Link {
                 let cfg = self.0.cfg.lock().unwrap();
                 (cfg.node_id.clone(), cfg.peers.clone())
             };
+            pending_dials.retain(|_, dial| {
+                matches!(dial.try_recv(), Err(oneshot::error::TryRecvError::Empty))
+            });
             for peer in peers {
                 let now = now_ms();
                 let (connected, down_since) = {
@@ -1207,7 +1591,7 @@ impl Link {
                     }
                     (s.tx.is_some(), s.down_since_ms)
                 };
-                if connected || peer.addrs.is_empty() {
+                if connected || peer.addrs.is_empty() || pending_dials.contains_key(&peer.node_id) {
                     continue;
                 }
                 // Freshly dropped links immediately clear accumulated backoff for instant failover.
@@ -1224,10 +1608,13 @@ impl Link {
                     continue;
                 }
                 backoff.insert(peer.node_id.clone(), ((delay * 2).min(RETRY_MAX), now + delay.as_millis() as u64));
+                let (pending, done) = oneshot::channel();
+                pending_dials.insert(peer.node_id.clone(), done);
                 let me2 = self.clone();
                 let t = token.clone();
                 tokio::spawn(async move {
-                    let _ = me2.dial(peer, t).await;
+                    let addrs = peer.addrs.clone();
+                    let _ = me2.dial_on(peer, &addrs, None, t, Some(pending)).await;
                 });
             }
             // A working session resets that computer's back-off.
@@ -1236,34 +1623,115 @@ impl Link {
         }
     }
 
-    async fn dial(self, peer: Peer, token: CancellationToken) -> Result<(), String> {
-        let addrs = peer.addrs.clone();
-        self.dial_on(peer, &addrs, token).await
+    /// Connects to the peer and holds the automatic dial slot through authentication.
+    async fn dial_on(
+        self,
+        peer: Peer,
+        addrs: &[String],
+        source: Option<IpAddr>,
+        token: CancellationToken,
+        pending: Option<oneshot::Sender<()>>,
+    ) -> Result<(), String> {
+        let key = peer_key(&peer)?;
+        let mut remaining: Vec<_> = addrs.iter().take(12).cloned().collect();
+        let mut failure = "no route answered".to_string();
+        loop {
+            let result = tokio::select! {
+                _ = token.cancelled() => return Ok(()),
+                result = fastest_route(&remaining, source) => result,
+            };
+            let Some((stream, route, rtt)) = result else { return Err(failure) };
+            let _ = stream.set_nodelay(true);
+            let (r, mut w) = stream.into_split();
+            let mut r = BufReader::new(r);
+            let reply = tokio::select! {
+                _ = token.cancelled() => return Ok(()),
+                reply = self.authenticate_route(&peer, &key, &mut r, &mut w) => reply,
+            };
+            match reply {
+                Ok(reply) => {
+                    drop(pending);
+                    self.learn_addrs(&peer.node_id, &reply, route.parse().ok());
+                    self.session(peer, key, r, w, route, Some(rtt), token).await;
+                    return Ok(());
+                }
+                Err(error) => {
+                    failure = error;
+                    remaining.retain(|addr| addr != &route);
+                }
+            }
+        }
     }
 
-    /// Connects to `peer` over the fastest of `addrs` and runs the session until it ends.
-    async fn dial_on(self, peer: Peer, addrs: &[String], token: CancellationToken) -> Result<(), String> {
-        let (stream, route, rtt) = fastest_route(addrs).await.ok_or("no route answered")?;
+    /// A diagnostic handshake does not replace a live session. Older peers close the probe
+    /// before registering it because this first authenticated frame has no session hello.
+    async fn probe_route(&self, peer: &Peer, key: &[u8], stream: TcpStream) -> Result<(), String> {
+        self.exchange_probe(peer, key, stream, None).await.map(|_| ())
+    }
+
+    async fn exchange_probe(&self, peer: &Peer, key: &[u8], stream: TcpStream, chunk: Option<&str>) -> Result<Value, String> {
         let _ = stream.set_nodelay(true);
-        let key = peer_key(&peer)?;
         let (r, mut w) = stream.into_split();
         let mut r = BufReader::new(r);
+        let Wire::Challenge { nonce } = read_wire(&mut r).await
+            .map_err(|error| format!("Could not read the peer challenge: {error}"))? else {
+            return Err("expected challenge".into());
+        };
+        let mine = random_hex(16);
+        let mut payload = json!({ "route_probe": { "challenge": nonce, "nonce": mine } });
+        if let Some(chunk) = chunk {
+            payload["route_probe"]["transfer_chunk"] = json!(chunk);
+        }
+        let request = self.route_probe_frame(key, payload)?;
+        w.write_all(request.as_bytes()).await.map_err(|error| format!("Could not send the probe: {error}"))?;
+        let Wire::Sealed { from, n, c } = read_wire(&mut r).await
+            .map_err(|error| format!("Could not read the authenticated probe reply: {error}"))? else {
+            return Err("expected route probe reply".into());
+        };
+        if from != peer.node_id {
+            return Err("a different computer answered".into());
+        }
+        let reply = open(&from, key, &n, &c)?;
+        reply.validate(&peer.node_id, key, now_ms())?;
+        if reply.payload.get("route_probe_ack").and_then(Value::as_str) != Some(mine.as_str()) {
+            return Err("stale route probe reply".into());
+        }
+        Ok(reply.payload)
+    }
+
+    fn route_probe_frame(&self, key: &[u8], payload: Value) -> Result<String, String> {
         let (me, _) = self.me();
-        let reply = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-            let Wire::Challenge { nonce } = read_wire(&mut r).await? else {
+        let packet = PeerPacket::signed(
+            &me, now_ms(), PacketKind::Heartbeat, self.0.seq.fetch_add(1, Ordering::SeqCst), payload, key,
+        )?;
+        let mut line = seal(&me, key, &packet)?;
+        line.push('\n');
+        Ok(line)
+    }
+
+    async fn authenticate_route(
+        &self,
+        peer: &Peer,
+        key: &[u8],
+        r: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+        w: &mut tokio::net::tcp::OwnedWriteHalf,
+    ) -> Result<Value, String> {
+        let (me, _) = self.me();
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            let Wire::Challenge { nonce } = read_wire(r).await? else {
                 return Err("expected challenge".to_string());
             };
             let mine = random_hex(16);
-            let hello = self.hello(&me, &key, &nonce, &mine)?;
-            w.write_all(format!("{}\n", seal(&me, &key, &hello)?).as_bytes()).await.map_err(|e| e.to_string())?;
-            let Wire::Sealed { from, n, c } = read_wire(&mut r).await? else {
+            let hello = self.hello(&me, key, &nonce, &mine)?;
+            w.write_all(format!("{}\n", seal(&me, key, &hello)?).as_bytes()).await.map_err(|e| e.to_string())?;
+            let Wire::Sealed { from, n, c } = read_wire(r).await? else {
                 return Err("expected hello".to_string());
             };
             if from != peer.node_id {
                 return Err("a different computer answered".to_string());
             }
-            let reply = open(&from, &key, &n, &c)?;
-            reply.validate(&peer.node_id, &key, now_ms())?;
+            let reply = open(&from, key, &n, &c)?;
+            reply.validate(&peer.node_id, key, now_ms())?;
             let h = reply.payload.get("hello").cloned().ok_or("expected hello")?;
             if h.get("challenge").and_then(Value::as_str) != Some(mine.as_str()) {
                 return Err("stale hello".to_string());
@@ -1271,10 +1739,7 @@ impl Link {
             Ok(h)
         })
         .await
-        .map_err(|_| "handshake timed out".to_string())??;
-        self.learn_addrs(&peer.node_id, &reply, route.parse().ok());
-        self.session(peer, key, r, w, route, Some(rtt), token).await;
-        Ok(())
+        .map_err(|_| "handshake timed out".to_string())?
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1289,16 +1754,32 @@ impl Link {
         token: CancellationToken,
     ) {
         let (me, _) = self.me();
+        let local_addr = r.get_ref().local_addr().ok();
+        let local_interface = local_addr.and_then(|socket| {
+            let interfaces = if_addrs::get_if_addrs().ok()?;
+            interface_name(&interfaces, socket.ip())
+        });
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let token = token.child_token();
         let generation = {
             let mut states = self.0.peers.lock().unwrap();
+            if token.is_cancelled() {
+                return;
+            }
             let s = states.entry(peer.node_id.clone()).or_default();
+            if let Some(previous) = s.session_cancel.replace(token.clone()) {
+                previous.cancel();
+            }
             s.generation += 1;
             s.tx = Some(tx.clone());
             s.route = Some(route);
+            s.local_interface = local_interface;
+            s.local_addr = local_addr;
             s.rtt_ms = rtt_ms;
             s.last_seen_ms = now_ms();
             s.down_since_ms = 0;
+            s.packets_in = 0;
+            s.supports_lan_notes = false;
             // Re-send everything not yet acknowledged, re-stamped so it is still fresh.
             for p in &s.outbox {
                 if let Ok(line) = p.resigned(now_ms(), &key).and_then(|p| seal(&me, &key, &p)) {
@@ -1326,18 +1807,17 @@ impl Link {
                 _ = token.cancelled() => break,
                 line = rx.recv() => {
                     let Some(line) = line else { break };
-                    if w.write_all(format!("{line}\n").as_bytes()).await.is_err() { break; }
+                    if !write_session_frame(&mut w, line, &token, SESSION_WRITE_IDLE).await { break; }
                 }
                 frame = in_rx.recv() => {
                     let Some(Ok(Wire::Sealed { from, n, c })) = frame else { break };
                     if from != peer.node_id { break; }
                     let Ok(packet) = open(&from, &key, &n, &c) else { break };
                     if packet.validate(&peer.node_id, &key, now_ms()).is_err() { continue; }
-                    if let Some(s) = self.0.peers.lock().unwrap().get_mut(&peer.node_id) {
-                        s.last_seen_ms = now_ms();
-                        s.packets_in += 1;
-                    }
-                    self.receive(&me, &key, &peer.node_id, packet, &tx);
+                    let active = self.0.peers.lock().unwrap().get_mut(&peer.node_id)
+                        .is_some_and(|state| state.record_packet(generation, now_ms()));
+                    if !active { break; }
+                    self.receive(&me, &key, &peer.node_id, generation, packet, &tx);
                 }
                 _ = beat.tick() => {
                     if !current(self) { break; }
@@ -1355,6 +1835,7 @@ impl Link {
                             "working": local_activity(),
                             "git": GIT_SUMMARY.lock().unwrap().clone(),
                             "build": crate::build_id::Build::this(),
+                            "lan_notes": true,
                             "council": COUNCIL.lock().unwrap().clone(),
                             "read": read_for(&peer.node_id),
                             "addrs": local_addrs(self.0.port),
@@ -1362,16 +1843,18 @@ impl Link {
                         &key,
                     );
                     if let Ok(line) = ping.and_then(|p| seal(&me, &key, &p)) {
-                        if w.write_all(format!("{line}\n").as_bytes()).await.is_err() { break; }
+                        if !write_session_frame(&mut w, line, &token, SESSION_WRITE_IDLE).await { break; }
                     }
                 }
             }
         }
+        token.cancel();
         reader.abort();
         let mut states = self.0.peers.lock().unwrap();
         if let Some(s) = states.get_mut(&peer.node_id) {
             if s.generation == generation {
                 s.tx = None;
+                s.session_cancel = None;
                 s.down_since_ms = now_ms();
             }
         }
@@ -1379,16 +1862,17 @@ impl Link {
         self.0.wake_dial.notify_waiters();
     }
 
-    fn receive(&self, me: &str, key: &[u8], from: &str, packet: PeerPacket, tx: &mpsc::UnboundedSender<String>) {
+    fn receive(&self, me: &str, key: &[u8], from: &str, generation: u64, packet: PeerPacket, tx: &mpsc::UnboundedSender<String>) {
         match packet.kind {
             PacketKind::Heartbeat => {
                 if packet.payload.get("ping").is_some() {
-                    if let Some(s) = self.0.peers.lock().unwrap().get_mut(from) {
+                    if let Some(s) = self.0.peers.lock().unwrap().get_mut(from).filter(|state| state.generation == generation) {
                         s.signal_on = packet.payload.get("signal").and_then(Value::as_bool).unwrap_or(false);
                         s.active_ms = packet.payload.get("active").and_then(Value::as_u64).unwrap_or(0);
                         s.activity = read_activity(packet.payload.get("working"));
                         s.git = packet.payload.get("git").and_then(Value::as_str).map(clean_status).filter(|g| !g.is_empty());
                         s.build = packet.payload.get("build").and_then(crate::build_id::Build::from_peer);
+                        s.supports_lan_notes = packet.payload.get("lan_notes").and_then(Value::as_bool) == Some(true);
                         s.council = packet.payload.get("council").and_then(Value::as_array).map(|a| known_ais(a.iter())).unwrap_or_default();
                         s.read_ours = packet
                             .payload
@@ -1402,9 +1886,17 @@ impl Link {
                                     .collect()
                             })
                             .unwrap_or_default();
+                        if packet.payload.get("council").is_some_and(Value::is_array)
+                            && packet.payload.get("read").is_some_and(Value::is_object)
+                        {
+                            s.ai_reports = s.ai_reports.wrapping_add(1);
+                        }
                     }
                     if packet.payload.get("addrs").is_some() {
                         self.learn_addrs(from, &packet.payload, None);
+                        if let Some(state) = self.0.peers.lock().unwrap().get_mut(from) {
+                            state.route_updates = state.route_updates.wrapping_add(1);
+                        }
                     }
                 }
             }
@@ -1428,12 +1920,17 @@ impl Link {
                 };
                 // Stored durably before the ack; on failure the sender keeps it queued and retries.
                 // A crash between storing and committing stores it again, which `inbox` dedupes.
-                if deliver && (self.append_inbox(&packet).is_err() || self.0.ledger.commit(&packet).is_err()) {
-                    return;
-                }
                 if deliver {
-                    // Only a notification now: the packet is already safe in the inbox.
-                    let _ = (self.0.handler)(&packet);
+                    if self.append_inbox(&packet).is_err() {
+                        return;
+                    }
+                    match self.0.ledger.commit(&packet) {
+                        // Two active routes can both reserve the same packet before either commits.
+                        // The first successful commit owns the notification.
+                        Ok(true) => { let _ = (self.0.handler)(&packet); }
+                        Ok(false) => {}
+                        Err(_) => return,
+                    }
                 }
                 let ack = PeerPacket::signed(me, now_ms(), PacketKind::Acknowledgement, self.0.seq.fetch_add(1, Ordering::SeqCst), json!({ "ack": packet.id }), key);
                 if let Ok(line) = ack.and_then(|p| seal(me, key, &p)) {
@@ -1444,17 +1941,50 @@ impl Link {
     }
 }
 
-/// Tries every known address at once and keeps whichever connects first.
-/// What kind of connection an address is, for test results.
+async fn connect_with_source(endpoint: &str, source: Option<IpAddr>) -> std::io::Result<TcpStream> {
+    let Some(source) = source else { return TcpStream::connect(endpoint).await };
+    let target = tokio::net::lookup_host(endpoint).await?
+        .find(|target| target.is_ipv4() == source.is_ipv4())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no endpoint in the selected address family"))?;
+    let socket = if source.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
+    socket.bind(SocketAddr::new(source, 0))?;
+    socket.connect(target).await
+}
+
+fn validate_probe_source(interfaces: &[if_addrs::Interface], address: IpAddr) -> Result<ProbeSource, &'static str> {
+    interface_name(interfaces, address)
+        .filter(|_| route_ip_allowed(address))
+        .map(|interface| ProbeSource { address, interface })
+        .ok_or("The selected source address is not available on a unique local interface")
+}
+
+/// Usable source addresses with an unambiguous local interface, for the connection diagnostic.
+pub fn probe_sources() -> Result<Vec<ProbeSource>, String> {
+    let interfaces = if_addrs::get_if_addrs().map_err(|error| error.to_string())?;
+    let mut sources: Vec<_> = interfaces.iter().map(|interface| interface.ip().to_canonical())
+        .filter(|address| !address.is_loopback() && route_ip_allowed(*address))
+        .filter_map(|address| interface_name(&interfaces, address).map(|interface| ProbeSource { address, interface }))
+        .collect();
+    sources.sort_by(|a, b| (&a.interface, a.address).cmp(&(&b.interface, b.address)));
+    sources.dedup_by(|a, b| a.address == b.address);
+    Ok(sources)
+}
+
+fn interface_name(interfaces: &[if_addrs::Interface], ip: std::net::IpAddr) -> Option<String> {
+    let mut names = interfaces.iter()
+        .filter(|interface| interface.ip().to_canonical() == ip.to_canonical())
+        .map(|interface| &interface.name);
+    let first = names.next()?;
+    names.all(|name| name == first).then(|| first.clone())
+}
+
 fn route_kind(addr: &str) -> &'static str {
-    if addr.starts_with("169.254.") {
-        "Direct cable / Bluetooth (link-local)"
-    } else if addr.starts_with("100.") {
-        "Tailscale"
-    } else if addr.starts_with("127.") {
-        "Loopback"
-    } else {
-        "LAN (Ethernet or Wi-Fi)"
+    match addr.parse::<SocketAddr>().map(|socket| socket.ip().to_canonical()) {
+        Ok(ip) if ip.is_loopback() => "Loopback",
+        Ok(std::net::IpAddr::V4(ip)) if ip.is_link_local() => "Link-local",
+        Ok(std::net::IpAddr::V4(ip)) if ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64 => "Shared address space",
+        Ok(_) => "IP route",
+        Err(_) => "Unclassified endpoint",
     }
 }
 
@@ -1469,16 +1999,20 @@ pub struct RouteSwitch {
     pub ok: bool,
     /// How long the switch took.
     pub ms: Option<u64>,
+    pub requested_source: Option<IpAddr>,
+    pub local_interface: Option<String>,
+    pub local_addr: Option<SocketAddr>,
     pub detail: String,
 }
 
 /// The stress test with one linked computer: each route, and where the link ended up.
 #[derive(Debug, Clone, Serialize)]
 pub struct StressReport {
+    pub node_id: String,
     pub computer: String,
     pub routes: Vec<RouteSwitch>,
-    /// The route the link returned to afterwards; None if it isn't connected.
-    pub restored: Option<String>,
+    /// The final reconnect attempt, absent when no routes were tested.
+    pub restored: Option<RouteSwitch>,
 }
 
 impl StressReport {
@@ -1488,38 +2022,78 @@ impl StressReport {
             return format!("Communication stress test ({when}) with {}: not connected right now, so nothing was tested.", self.computer);
         }
         let ok = self.routes.iter().filter(|r| r.ok).count();
+        let subject = if self.routes.iter().any(|r| r.requested_source.is_some()) { "local sources" } else { "configured endpoints" };
         let mut s = format!(
-            "Communication stress test ({when}) with {}: {ok} of {} routes work. Each route was used on its own, with the others shut out, until a packet came back over it:",
+            "Communication stress test ({when}) with {}: {ok} of {} {subject} carried authenticated traffic during individual connection attempts.",
             self.computer,
             self.routes.len()
         );
         for r in &self.routes {
             s.push_str(&format!("\n{} {} {}: {}", if r.ok { "✓" } else { "✗" }, r.kind, r.addr, r.detail));
+            if let Some(address) = r.requested_source {
+                s.push_str(&format!(", requested source {address}"));
+            }
+            if let Some(interface) = &r.local_interface {
+                s.push_str(&format!(", local interface {interface}"));
+            }
         }
         match &self.restored {
-            Some(r) => s.push_str(&format!("\nThe link is back on the fastest route, {r}.")),
-            None => s.push_str("\nThe link didn't come back after the test; it keeps redialling every route."),
+            Some(r) if r.ok => {
+                s.push_str(&format!("\nReconnected through {}: {}", r.addr, r.detail));
+                if let Some(interface) = &r.local_interface {
+                    s.push_str(&format!(", local interface {interface}"));
+                }
+            }
+            Some(r) => s.push_str(&format!("\nReconnection unconfirmed: {}", r.detail)),
+            None => s.push_str("\nThe test did not confirm traffic after attempting to reconnect."),
         }
         s
     }
 }
 
-async fn fastest_route(addrs: &[String]) -> Option<(TcpStream, String, u64)> {
-    let (tx, mut rx) = mpsc::channel(addrs.len().max(1));
+async fn fastest_route(addrs: &[String], source: Option<IpAddr>) -> Option<(TcpStream, String, u64)> {
+    let mut probes = tokio::task::JoinSet::new();
     for addr in addrs.iter().take(12).cloned() {
-        let tx = tx.clone();
-        tokio::spawn(async move {
+        probes.spawn(async move {
             let started = std::time::Instant::now();
-            if let Ok(Ok(s)) = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr)).await {
-                let _ = tx.send((s, addr, started.elapsed().as_millis() as u64)).await;
-            }
+            let stream = tokio::time::timeout(CONNECT_TIMEOUT, connect_with_source(&addr, source)).await.ok()?.ok()?;
+            Some((stream, addr, started.elapsed().as_millis() as u64))
         });
     }
-    drop(tx);
-    rx.recv().await
+    while let Some(result) = probes.join_next().await {
+        if let Ok(Some(connected)) = result {
+            // Dropping the set cancels the remaining probes before route authentication.
+            return Some(connected);
+        }
+    }
+    None
 }
 
 // ---- framing, crypto and helpers --------------------------------------------------------------
+
+/// A stalled write must leave the session so pending messages can be resent after reconnect.
+async fn write_session_frame<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    mut line: String,
+    token: &CancellationToken,
+    idle: Duration,
+) -> bool {
+    line.push('\n');
+    let mut remaining = line.as_bytes();
+    while !remaining.is_empty() {
+        let written = tokio::select! {
+            biased;
+            _ = token.cancelled() => return false,
+            result = tokio::time::timeout(idle, writer.write(remaining)) => result,
+        };
+        match written {
+            Ok(Ok(count)) if count > 0 => remaining = &remaining[count..],
+            _ => return false,
+        }
+    }
+    true
+}
+
 
 async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R) -> Result<String, String> {
     let mut buf = Vec::new();
@@ -1669,14 +2243,80 @@ fn with_port(addr: &str, port: u16) -> String {
     }
 }
 
-/// This computer's reachable IPv4 addresses (cable, Wi-Fi, Tailscale), loopback excluded.
+/// Looks for the PeerLink greeting on directly attached private IPv4 networks.
+async fn discover_lan(port: u16) -> Result<Vec<String>, String> {
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    let interfaces = if_addrs::get_if_addrs().map_err(|error| error.to_string())?;
+    let own: std::collections::HashSet<_> = interfaces.iter().map(|interface| interface.ip()).collect();
+    let mut candidates = Vec::new();
+    for interface in interfaces {
+        let if_addrs::IfAddr::V4(address) = interface.addr else { continue };
+        if !(address.ip.is_private() || address.ip.is_link_local()) {
+            continue;
+        }
+        let ip = u32::from(address.ip);
+        let mask = u32::from(address.netmask);
+        // Bound each interface to the surrounding 256 addresses, even on a larger LAN.
+        let search_mask = mask | 0xffffff00;
+        for candidate in (ip & search_mask)..=(ip | !search_mask) {
+            if candidate == ip & mask || candidate == ip | !mask {
+                continue;
+            }
+            let candidate = Ipv4Addr::from(candidate);
+            if (candidate.is_private() || candidate.is_link_local()) && route_ip_allowed(candidate.into()) && !own.contains(&candidate.into()) {
+                candidates.push((address.ip, SocketAddrV4::new(candidate, port)));
+            }
+        }
+    }
+    Ok(verify_discovery_candidates(candidates).await)
+}
+
+async fn verify_discovery_candidates(mut candidates: Vec<(std::net::Ipv4Addr, std::net::SocketAddrV4)>) -> Vec<String> {
+    candidates.sort_unstable();
+    candidates.dedup();
+    let mut found = std::collections::BTreeSet::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut candidates = candidates.into_iter();
+    loop {
+        while tasks.len() < 48 {
+            let Some((source, target)) = candidates.next() else { break };
+            tasks.spawn(async move {
+                tokio::time::timeout(Duration::from_millis(350), async move {
+                    let socket = TcpSocket::new_v4().ok()?;
+                    socket.bind(SocketAddr::new(source.into(), 0)).ok()?;
+                    let stream = socket.connect(target.into()).await.ok()?;
+                    peerlink_greeting(stream).await.then_some(target)
+                }).await.ok().flatten()
+            });
+        }
+        let Some(result) = tasks.join_next().await else { break };
+        if let Ok(Some(target)) = result {
+            found.insert(target);
+        }
+    }
+    found.into_iter().map(|address| address.to_string()).collect()
+}
+
+async fn peerlink_greeting(stream: TcpStream) -> bool {
+    use tokio::io::AsyncReadExt;
+    let mut reader = BufReader::new(stream.take(256));
+    let mut line = String::new();
+    if reader.read_line(&mut line).await.is_err() || !line.ends_with('\n') {
+        return false;
+    }
+    matches!(serde_json::from_str::<Wire>(&line), Ok(Wire::Challenge { nonce })
+        if nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// Reachable IPv4 addresses. Tests advertise only loopback, matching their listeners.
 fn local_addrs(port: u16) -> Vec<String> {
     let mut out: Vec<String> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
-        .filter(|i| !i.is_loopback())
+        .filter(|i| i.is_loopback() == cfg!(test))
         .filter_map(|i| match i.ip() {
-            std::net::IpAddr::V4(v4) => Some(format!("{v4}:{port}")),
+            ip @ std::net::IpAddr::V4(_) if route_ip_allowed(ip) => Some(SocketAddr::new(ip, port).to_string()),
             _ => None,
         })
         .collect();
@@ -1724,7 +2364,7 @@ fn open_private(path: &Path, append: bool) -> Result<std::fs::File, String> {
 }
 
 /// Atomic, fsynced, 0600 write.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     let mut f = open_private(&tmp, false)?;
     f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
@@ -1791,7 +2431,7 @@ fn repair_partial_line(file: &mut std::fs::File) -> Result<(), String> {
 }
 
 /// Private LAN (10/8, 172.16/12, 192.168/16), Tailscale/CGNAT (100.64/10), IPv6 unique-local,
-/// or loopback. Public, link-local, multicast and unspecified addresses are refused.
+/// or loopback. Public, multicast and unspecified addresses are refused.
 fn route_ip_allowed(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
@@ -1807,6 +2447,21 @@ fn route_ip_allowed(ip: std::net::IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn discovery_distinguishes_peerlink_greetings_from_other_services() {
+        for (greeting, expected) in [
+            (serde_json::to_string(&Wire::Challenge { nonce: "a".repeat(32) }).unwrap(), true),
+            (serde_json::to_string(&Wire::Challenge { nonce: "b".repeat(300) }).unwrap(), false),
+            ("HTTP/1.1 200 OK".to_string(), false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let (mut server, _) = listener.accept().await.unwrap();
+            server.write_all(format!("{greeting}\n").as_bytes()).await.unwrap();
+            assert_eq!(peerlink_greeting(client).await, expected);
+        }
+    }
 
     #[test]
     fn computer_nicknames_are_unique_and_clean() {
@@ -1925,6 +2580,24 @@ mod tests {
         false
     }
 
+    #[test]
+    fn only_the_current_connected_session_can_prove_route_traffic() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = PeerState {
+            tx: Some(tx),
+            generation: 2,
+            last_seen_ms: 100,
+            ..PeerState::default()
+        };
+        assert!(!state.record_packet(1, 110));
+        assert_eq!((state.packets_in, state.last_seen_ms), (0, 100));
+        assert!(state.record_packet(2, 120));
+        assert_eq!((state.packets_in, state.last_seen_ms), (1, 120));
+        state.tx = None;
+        assert!(!state.record_packet(2, 130));
+        assert_eq!((state.packets_in, state.last_seen_ms), (1, 120));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn the_stress_test_switches_through_every_route_and_reports_each() {
         let dir = std::env::temp_dir().join(format!("link-stress-{}", uuid::Uuid::new_v4()));
@@ -1937,18 +2610,77 @@ mod tests {
         // One route that works and one that is down (nothing listens there).
         let dead = format!("127.0.0.1:{}", free_port());
         joiner.0.cfg.lock().unwrap().peers[0].addrs = vec![good.clone(), dead.clone()];
-        let reports = joiner.stress_test().await.unwrap();
+        // A startup test holding the guard blocks a second diagnostic on the same device.
+        let running = joiner.0.stress_test_lock.lock().await;
+        assert_eq!(
+            joiner.stress_test(None, &[]).await.unwrap_err(),
+            "A communication stress test is already running"
+        );
+        drop(running);
+        let host_id = host.status().node_id;
+        let previous_session = joiner.0.peers.lock().unwrap()[&host_id].session_cancel.clone().unwrap();
+        let reports = joiner.stress_test(None, &[]).await.unwrap();
+        assert!(previous_session.is_cancelled(), "the replaced session stops writing immediately");
         assert_eq!(reports.len(), 1);
         let r = &reports[0];
         assert_eq!(r.routes.len(), 2);
         assert!(r.routes[0].ok && r.routes[0].addr == good, "{:?}", r.routes[0]);
+        assert!(r.routes[0].detail.contains("traffic confirmed"));
+        assert!(r.routes[0].local_addr.unwrap().ip().is_loopback());
+        assert_eq!(r.routes[1].local_addr, None);
+        assert_eq!(r.routes[1].local_interface, None);
         assert!(!r.routes[1].ok && r.routes[1].addr == dead, "{:?}", r.routes[1]);
-        assert_eq!(r.restored.as_deref(), Some(good.as_str()), "back on the working route");
+        let restored = r.restored.as_ref().expect("reconnect attempted");
+        assert!(restored.ok, "{}", restored.detail);
+        assert_eq!(restored.addr, good, "back on the working route");
+        assert!(restored.ms.is_some(), "reconnect timing captured");
         assert!(wait_for(|| joiner.status().peers[0].connected).await);
         let note = r.summary("requested");
-        assert!(note.contains("1 of 2 routes work") && note.contains("✓ Loopback") && note.contains("✗ Loopback"), "{note}");
+        assert!(note.contains("1 of 2 configured endpoints carried authenticated traffic") && note.contains("✓ Loopback") && note.contains("✗ Loopback"), "{note}");
         host.stop();
         joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_scoped_stress_test_leaves_other_peers_on_their_sessions() {
+        let dir = std::env::temp_dir().join(format!("link-scoped-stress-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (selected, _) = node(&dir, "selected");
+        let (other, _) = node(&dir, "other");
+        let address = format!("127.0.0.1:{}", host.0.port);
+        for peer in [&selected, &other] {
+            let code = host.begin_pairing().unwrap();
+            peer.join(&address, &code.code).await.unwrap();
+        }
+        let selected_id = selected.status().node_id;
+        let other_id = other.status().node_id;
+        assert!(wait_for(|| host.connected_peer_ids().len() == 2).await);
+        let (selected_before, other_before) = {
+            let peers = host.0.peers.lock().unwrap();
+            (peers[&selected_id].generation, peers[&other_id].generation)
+        };
+        assert_eq!(host.stress_test(Some("missing"), &[]).await.unwrap_err(), "Linked computer not found");
+        let source: IpAddr = "127.0.0.1".parse().unwrap();
+        let reports = host.stress_test(Some(&selected_id), &[source]).await.unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].node_id, selected_id);
+        assert_eq!(reports[0].routes.len(), 1);
+        let route = &reports[0].routes[0];
+        assert!(route.ok, "{route:?}");
+        assert_eq!(route.requested_source, Some(source));
+        assert_eq!(route.local_addr.unwrap().ip(), source);
+        assert!(reports[0].restored.as_ref().is_some_and(|route| route.ok), "{reports:?}");
+        assert!(reports[0].restored.as_ref().unwrap().requested_source.is_none());
+        {
+            let peers = host.0.peers.lock().unwrap();
+            assert!(peers[&selected_id].generation > selected_before);
+            assert_eq!(peers[&other_id].generation, other_before);
+            assert!(peers[&other_id].tx.is_some());
+        }
+        host.stop();
+        selected.stop();
+        other.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1968,6 +2700,15 @@ mod tests {
         assert_eq!(host.0.cfg.lock().unwrap().peers[0].key, joiner.0.cfg.lock().unwrap().peers[0].key);
 
         assert!(wait_for(|| joiner.status().peers[0].connected && host.status().peers[0].connected).await, "session comes up");
+        let names: std::collections::HashSet<_> = if_addrs::get_if_addrs()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|interface| interface.ip().to_canonical() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+            .map(|interface| interface.name)
+            .collect();
+        let expected = (names.len() == 1).then(|| names.into_iter().next().unwrap());
+        assert_eq!(host.status().peers[0].local_interface, expected);
+        assert_eq!(joiner.status().peers[0].local_interface, expected);
         let id = joiner.send(PacketKind::Chat, json!({ "text": "hello from the PC" })).unwrap();
         assert!(wait_for(|| host_got.lock().unwrap().len() == 1).await);
         assert_eq!(host_got.lock().unwrap()[0].id, id);
@@ -1975,16 +2716,222 @@ mod tests {
         assert!(wait_for(|| joiner.status().peers[0].queued == 0).await, "acknowledged");
 
         // Drop the session; a re-sent duplicate is acknowledged but not delivered twice.
+        assert_eq!(host.connected_peer_ids(), vec![host.status().peers[0].node_id.clone()]);
         let dup = host_got.lock().unwrap()[0].clone();
         joiner.0.peers.lock().unwrap().get_mut(&view.node_id).unwrap().outbox.push_back(dup);
         joiner.stop();
         assert!(wait_for(|| !host.status().peers[0].connected).await, "host notices the drop");
+        assert!(host.connected_peer_ids().is_empty());
+        let disconnected = &host.status().peers[0];
+        assert_eq!(disconnected.local_interface, None);
+        assert_eq!(disconnected.rtt_ms, None);
+        let report = host.test_peer(&disconnected.node_id, None).await.unwrap();
+        assert!(!report.connected);
+        assert_eq!(report.active_route, None);
+        assert_eq!(report.rtt_ms, None);
         joiner.start();
         assert!(wait_for(|| joiner.status().peers[0].connected && joiner.status().peers[0].queued == 0).await, "reconnects and drains");
         assert_eq!(host_got.lock().unwrap().len(), 1);
         assert_eq!(host.inbox().len(), 1);
         host.stop();
         joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queued_chat_is_delivered_once_over_an_alternate_route() {
+        let dir = std::env::temp_dir().join(format!("link-alternate-{}", uuid::Uuid::new_v4()));
+        let (host, received) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        // Give the joiner the first dial so the host cannot bypass the test proxy.
+        {
+            let mut host_cfg = host.0.cfg.lock().unwrap();
+            let mut joiner_cfg = joiner.0.cfg.lock().unwrap();
+            if host_cfg.node_id < joiner_cfg.node_id {
+                std::mem::swap(&mut host_cfg.node_id, &mut joiner_cfg.node_id);
+            }
+        }
+        let direct = format!("127.0.0.1:{}", host.0.port);
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&direct, &code.code).await.unwrap();
+        assert!(wait_for(|| joiner.status().peers[0].connected).await);
+        // Keep the listener available for the proxy without a competing reverse dial.
+        host.0.cfg.lock().unwrap().peers[0].addrs.clear();
+        joiner.stop();
+        assert!(wait_for(|| !host.status().peers[0].connected).await);
+
+        let id = joiner.send(PacketKind::Chat, json!({ "text": "queued during route change" })).unwrap();
+        assert_eq!(joiner.status().peers[0].queued, 1);
+
+        // A second loopback endpoint forwards the same authenticated peer session.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let alternate = listener.local_addr().unwrap().to_string();
+        let proxy = tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                let Ok(mut outbound) = TcpStream::connect(&direct).await else { continue };
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+            }
+        });
+        let unavailable = tokio::net::TcpSocket::new_v4().unwrap();
+        unavailable.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        joiner.0.cfg.lock().unwrap().peers[0].addrs =
+            vec![unavailable.local_addr().unwrap().to_string(), alternate.clone()];
+        joiner.start();
+        assert!(wait_for(|| {
+            let status = joiner.status();
+            let peer = &status.peers[0];
+            peer.route.as_deref() == Some(alternate.as_str()) && peer.queued == 0
+        }).await, "the alternate route drains the queue");
+        assert_eq!(received.lock().unwrap().iter().map(|packet| packet.id.as_str()).collect::<Vec<_>>(), [id.as_str()]);
+        assert_eq!(host.inbox().len(), 1);
+
+        joiner.stop();
+        proxy.abort();
+        host.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_active_route_losses_redial_without_restarting_peerlink() {
+        let dir = std::env::temp_dir().join(format!("link-live-failover-{}", uuid::Uuid::new_v4()));
+        let (host, received) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        // Give the joiner the first dial so the host cannot bypass the test proxy.
+        {
+            let mut host_cfg = host.0.cfg.lock().unwrap();
+            let mut joiner_cfg = joiner.0.cfg.lock().unwrap();
+            if host_cfg.node_id < joiner_cfg.node_id {
+                std::mem::swap(&mut host_cfg.node_id, &mut joiner_cfg.node_id);
+            }
+        }
+        let direct = format!("127.0.0.1:{}", host.0.port);
+        let code = host.begin_pairing().unwrap();
+
+        // Three proxies give one peer independent TCP endpoints inside loopback.
+        let mut routes = Vec::new();
+        let mut proxies = Vec::new();
+        for _ in 0..3 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            routes.push(listener.local_addr().unwrap().to_string());
+            let direct = direct.clone();
+            proxies.push(tokio::spawn(async move {
+                while let Ok((mut incoming, _)) = listener.accept().await {
+                    let Ok(mut outgoing) = TcpStream::connect(&direct).await else { break };
+                    let _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await;
+                }
+            }));
+        }
+
+        joiner.join(&routes[0], &code.code).await.unwrap();
+        assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(routes[0].as_str())).await);
+        host.0.cfg.lock().unwrap().peers[0].addrs.clear();
+        let mut expected = Vec::new();
+        for (failed, backup) in routes.windows(2).enumerate() {
+            proxies[failed].abort();
+            assert!(wait_for(|| !joiner.status().peers[0].connected).await);
+
+            let id = joiner.send(PacketKind::Chat, json!({ "text": format!("during route loss {failed}") })).unwrap();
+            assert_eq!(joiner.status().peers[0].queued, 1);
+            expected.push(id);
+
+            // Introduce the next route with the test message already queued.
+            joiner.0.cfg.lock().unwrap().peers[0].addrs = routes[..=failed + 1].to_vec();
+            joiner.0.wake_dial.notify_one();
+            assert!(wait_for(|| {
+                let status = joiner.status();
+                let peer = &status.peers[0];
+                peer.route.as_deref() == Some(backup[1].as_str()) && peer.queued == 0
+            }).await, "route {} carries traffic after loss {failed}", backup[1]);
+            assert_eq!(
+                received.lock().unwrap().iter().map(|packet| packet.id.clone()).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(host.inbox().len(), expected.len());
+        }
+        joiner.stop();
+        host.stop();
+        proxies[2].abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn session_writes_finish_or_release_the_connection_when_stalled() {
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        let token = CancellationToken::new();
+        assert!(!write_session_frame(&mut writer, "frame".into(), &token, Duration::from_millis(40)).await);
+        token.cancel();
+        assert!(!write_session_frame(&mut writer, "frame".into(), &token, Duration::from_secs(1)).await);
+
+        let (mut writer, reader) = tokio::io::duplex(1);
+        let receive = tokio::spawn(async move { read_line(&mut BufReader::new(reader)).await });
+        assert!(write_session_frame(&mut writer, "frame".into(), &CancellationToken::new(), Duration::from_secs(1)).await);
+        assert_eq!(receive.await.unwrap().unwrap(), "frame");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redial_waits_for_the_pending_peer_handshake() {
+        let dir = std::env::temp_dir().join(format!("link-single-dial-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        let direct = format!("127.0.0.1:{}", host.0.port);
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&direct, &code.code).await.unwrap();
+        joiner.stop();
+        host.stop();
+        let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        joiner.0.cfg.lock().unwrap().peers[0].addrs = vec![stalled.local_addr().unwrap().to_string()];
+        joiner.start();
+
+        let (first, _) = tokio::time::timeout(Duration::from_secs(8), stalled.accept()).await.unwrap().unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(2), stalled.accept()).await.is_err());
+        drop(first);
+        assert!(tokio::time::timeout(Duration::from_secs(6), stalled.accept()).await.unwrap().is_ok());
+
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dial_tries_another_endpoint_after_a_failed_handshake() {
+        let dir = std::env::temp_dir().join(format!("link-auth-fallback-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        let direct = format!("127.0.0.1:{}", host.0.port);
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&direct, &code.code).await.unwrap();
+        joiner.stop();
+        assert!(wait_for(|| !host.status().peers[0].connected).await);
+        host.0.cfg.lock().unwrap().peers[0].addrs.clear();
+        let peer = joiner.0.cfg.lock().unwrap().peers[0].clone();
+
+        let broken = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first = broken.local_addr().unwrap().to_string();
+        let backup = tokio::net::TcpSocket::new_v4().unwrap();
+        backup.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let second = backup.local_addr().unwrap().to_string();
+        let proxy = tokio::spawn(async move {
+            let (untrusted, _) = broken.accept().await.unwrap();
+            // Only expose the backup after the first TCP connection had time to win.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let backup = backup.listen(4).unwrap();
+            drop(untrusted);
+            let (mut incoming, _) = backup.accept().await.unwrap();
+            let mut outgoing = TcpStream::connect(direct).await.unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await;
+        });
+
+        let token = CancellationToken::new();
+        let dial = {
+            let me = joiner.clone();
+            let token = token.clone();
+            let routes = [first, second.clone()];
+            tokio::spawn(async move { me.dial_on(peer, &routes, None, token, None).await })
+        };
+        assert!(wait_for(|| joiner.status().peers[0].route.as_deref() == Some(second.as_str())).await);
+        token.cancel();
+        dial.await.unwrap().unwrap();
+        proxy.abort();
+        host.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2045,6 +2992,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn targeted_packet_queues_only_for_its_recipient() {
+        let dir = std::env::temp_dir().join(format!("link-target-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let requester = "node-requester000000";
+        let bystander = "node-bystander000000";
+        for id in [requester, bystander] {
+            host.remember(Peer {
+                node_id: id.into(),
+                name: id.into(),
+                key: hex(&[42; 32]),
+                addrs: vec![],
+            }).unwrap();
+        }
+        host.send_to(requester, PacketKind::Chat, json!({ "kind": "resources" })).unwrap();
+        let status = host.status();
+        assert_eq!(status.peers.iter().find(|peer| peer.node_id == requester).unwrap().queued, 1);
+        assert_eq!(status.peers.iter().find(|peer| peer.node_id == bystander).unwrap().queued, 0);
+        let scan = json!({ "kind": "resources_request" });
+        assert!(host.send_connected(PacketKind::Chat, scan.clone()).is_err());
+        let (tx, mut receiver) = mpsc::unbounded_channel();
+        host.0.peers.lock().unwrap().get_mut(requester).unwrap().tx = Some(tx);
+        host.send_connected(PacketKind::Chat, scan).unwrap();
+        assert!(receiver.try_recv().is_ok(), "connected peer received the request");
+        let status = host.status();
+        assert_eq!(status.peers.iter().find(|peer| peer.node_id == requester).unwrap().queued, 2);
+        assert_eq!(status.peers.iter().find(|peer| peer.node_id == bystander).unwrap().queued, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn stalled_pairing_releases_the_code_and_queue_survives_restart() {
         let dir = std::env::temp_dir().join(format!("link-test-{}", uuid::Uuid::new_v4()));
@@ -2083,11 +3060,203 @@ mod tests {
         joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
 
         let joiner_id = joiner.0.cfg.lock().unwrap().node_id.clone();
-        let report = host.test_peer(&joiner_id).await.unwrap();
+        assert!(wait_for(|| host.status().peers[0].connected && joiner.status().peers[0].connected).await);
+        let unavailable = tokio::net::TcpSocket::new_v4().unwrap();
+        unavailable.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let unreachable = unavailable.local_addr().unwrap().to_string();
+        let reachable = format!("127.0.0.1:{}", joiner.0.port);
+        let other_service = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unauthenticated = other_service.local_addr().unwrap().to_string();
+        let listener = tokio::spawn(async move { drop(other_service.accept().await); });
+        host.0.cfg.lock().unwrap().peers[0].addrs = vec![unreachable.clone(), reachable.clone(), unauthenticated.clone()];
+        let host_session = host.0.peers.lock().unwrap()[&joiner_id].generation;
+        let host_id = host.status().node_id;
+        let joiner_session = joiner.0.peers.lock().unwrap()[&host_id].generation;
+        let loopback = "127.0.0.1".parse().unwrap();
+        let report = host.test_peer(&joiner_id, Some(loopback)).await.unwrap();
+        listener.abort();
         assert_eq!(report.name, joiner.0.cfg.lock().unwrap().name);
-        assert!(!report.routes.is_empty());
+        assert!(report.handshake_ok);
+        assert_eq!(report.routes.len(), 3);
+        // An authenticated heartbeat may put the peer's working address first.
+        let route = |addr: &str| report.routes.iter().find(|route| route.addr == addr).unwrap();
+        let unreachable = route(&unreachable);
+        let reachable = route(&reachable);
+        let unauthenticated = route(&unauthenticated);
+        assert!(!unreachable.reachable && reachable.reachable && unauthenticated.reachable);
+        assert_eq!(unreachable.authenticated_ms, None);
+        assert!(reachable.authenticated_ms.unwrap() >= reachable.rtt_ms.unwrap());
+        assert_eq!(unauthenticated.authenticated_ms, None);
+        assert!(unauthenticated.status.contains("peer authentication unconfirmed"));
+        assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, host_session);
+        assert_eq!(joiner.0.peers.lock().unwrap()[&host_id].generation, joiner_session);
+        assert_eq!(unreachable.local_ip, None);
+        assert_eq!(unreachable.local_interface, None);
+        let source = report.source.as_ref().unwrap();
+        assert_eq!(source.address, loopback);
+        assert_eq!(reachable.local_ip, Some(loopback));
+        assert_eq!(reachable.local_interface, interface_name(&if_addrs::get_if_addrs().unwrap_or_default(), loopback));
+        assert_eq!(reachable.local_interface.as_deref(), Some(source.interface.as_str()));
+        assert!(host.test_peer(&joiner_id, Some("198.51.100.1".parse().unwrap())).await.unwrap_err()
+            .contains("selected source address"));
 
         host.stop();
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn paired_computers_exchange_lan_notes_only_after_advertising_support() {
+        let dir = std::env::temp_dir().join(format!("link-lan-notes-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, received) = node(&dir, "joiner");
+        assert!(crate::peer_sync::send_lan_note(&host, "unknown", "note").is_err());
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
+        let recipient = joiner.status().node_id;
+        assert!(wait_for(|| host.status().peers.iter().any(|peer| peer.supports_lan_notes)).await);
+        assert!(crate::peer_sync::send_lan_note(&host, &recipient, &"x".repeat(1001)).is_err());
+        let id = crate::peer_sync::send_lan_note(&host, &recipient, "Coffee ready.").unwrap();
+        assert!(wait_for(|| received.lock().unwrap().iter().any(|packet| {
+            packet.id == id && packet.payload["kind"] == "lan_note" && packet.payload["text"] == "Coffee ready."
+        })).await);
+        host.stop();
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authenticated_payload_paths_report_overlap_without_replacing_session() {
+        let dir = std::env::temp_dir().join(format!("link-transfer-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
+        assert!(wait_for(|| host.status().peers[0].connected && joiner.status().peers[0].connected).await);
+        let joiner_id = joiner.status().node_id;
+        let generation = host.0.peers.lock().unwrap()[&joiner_id].generation;
+        let peer = host.peer(&joiner_id).unwrap();
+        let key = peer_key(&peer).unwrap();
+        let dest = format!("127.0.0.1:{}", joiner.0.port);
+        let address = "127.0.0.1".parse().unwrap();
+        let source = validate_probe_source(&if_addrs::get_if_addrs().unwrap(), address).unwrap();
+        // Run the wire protocol on loopback. The public trial requires distinct interfaces and IPs.
+        let (a, b, c) = tokio::join!(
+            host.transfer_path(&peer, &key, source.clone(), dest.clone()),
+            host.transfer_path(&peer, &key, source.clone(), dest.clone()),
+            host.transfer_path(&peer, &key, source, dest.clone()),
+        );
+        let mut paths = [a, b, c];
+        for path in &paths {
+            assert!(path.error.is_none(), "{:?}", path.error);
+            assert_eq!(path.receipts.iter().map(|receipt| receipt.bytes).sum::<usize>(), 32 * 1024);
+            assert!(path.receipts.iter().all(|receipt| receipt.receiver_ip == address && receipt.sha256.len() == 64));
+            assert!(path.receipts.iter().all(|receipt| receipt.receiver_interface.as_deref() == Some(path.source.interface.as_str())));
+        }
+        assert!(transfer_overlap(&paths).is_some());
+        assert!(!distinct_receiver_interfaces(&paths), "loopback samples share the same receiving adapter");
+        for (index, path) in paths.iter_mut().enumerate() {
+            for receipt in &mut path.receipts {
+                receipt.receiver_interface = Some(format!("adapter-{index}"));
+            }
+        }
+        assert!(distinct_receiver_interfaces(&paths));
+        paths[1].receipts[0].receiver_interface = None;
+        assert!(!distinct_receiver_interfaces(&paths));
+        paths[0].receipts.pop();
+        assert_eq!(transfer_overlap(&paths), None);
+        let duplicate = || TransferPath { source: address, endpoint: dest.clone() };
+        assert!(host.transfer_trial(&joiner_id, vec![duplicate(), duplicate()]).await.unwrap_err()
+            .contains("different local adapter"));
+        let stub = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stub_endpoint = stub.local_addr().unwrap().to_string();
+        let close = tokio::spawn(async move { drop(stub.accept().await.unwrap()); });
+        let unavailable = host.transfer_path(&peer, &key, paths[0].source.clone(), stub_endpoint).await;
+        close.await.unwrap();
+        assert!(unavailable.receipts.is_empty());
+        assert!(unavailable.error.as_deref().unwrap().starts_with("Sample 1 of 4: Could not read the peer challenge"));
+        assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, generation);
+        assert!(transfer_receipt("a", address).is_err());
+        assert!(transfer_receipt(&"g".repeat(TRIAL_CHUNK_BYTES), address).is_err());
+        host.stop();
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn three_endpoint_probes_overlap_without_replacing_the_peer_session() {
+        let dir = std::env::temp_dir().join(format!("link-probe-overlap-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, received) = node(&dir, "joiner");
+        let host_addr = format!("127.0.0.1:{}", host.0.port);
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&host_addr, &code.code).await.unwrap();
+        assert!(wait_for(|| host.status().peers[0].connected && joiner.status().peers[0].connected).await);
+
+        let joiner_addr = format!("127.0.0.1:{}", joiner.0.port);
+        let ready = Arc::new(tokio::sync::Barrier::new(3));
+        let mut routes = Vec::new();
+        let mut proxies = tokio::task::JoinSet::new();
+        for _ in 0..3 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            routes.push(listener.local_addr().unwrap().to_string());
+            let (ready, target) = (ready.clone(), joiner_addr.clone());
+            proxies.spawn(async move {
+                let (mut client, _) = listener.accept().await.unwrap();
+                let mut peer = TcpStream::connect(target).await.unwrap();
+                let mut from_peer = BufReader::new(&mut peer);
+                write_wire(&mut client, &read_wire(&mut from_peer).await.unwrap()).await.unwrap();
+                let request = read_wire(&mut BufReader::new(&mut client)).await.unwrap();
+                // Hold all three encrypted requests before forwarding any to the recipient.
+                ready.wait().await;
+                write_wire(from_peer.get_mut(), &request).await.unwrap();
+                let reply = read_wire(&mut from_peer).await.unwrap();
+                write_wire(&mut client, &reply).await.unwrap();
+            });
+        }
+        let joiner_id = joiner.status().node_id;
+        let generation = host.0.peers.lock().unwrap()[&joiner_id].generation;
+        let host_id = host.status().node_id;
+        let remote_generation = joiner.0.peers.lock().unwrap()[&host_id].generation;
+        host.0.cfg.lock().unwrap().peers[0].addrs = routes;
+        let report = host.test_peer(&joiner_id, None).await.unwrap();
+        assert_eq!(report.routes.len(), 3);
+        assert!(report.routes.iter().all(|route| route.authenticated_ms.is_some()), "{report:?}");
+        while let Some(result) = proxies.join_next().await {
+            result.unwrap();
+        }
+        assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, generation);
+        assert_eq!(joiner.0.peers.lock().unwrap()[&host_id].generation, remote_generation);
+        let packet = host.send(PacketKind::Chat, json!({ "text": "after the probes" })).unwrap();
+        assert!(wait_for(|| host.status().peers[0].queued == 0).await);
+        assert_eq!(received.lock().unwrap().iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), [packet.as_str()]);
+
+        host.stop();
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ai_handshake_test_waits_for_a_new_report_on_the_existing_session() {
+        let dir = std::env::temp_dir().join(format!("link-ai-check-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
+        let joiner_id = joiner.status().node_id;
+        assert!(wait_for(|| host.status().peers[0].connected && joiner.status().peers[0].connected).await);
+        let (generation, reports) = {
+            let states = host.0.peers.lock().unwrap();
+            (states[&joiner_id].generation, states[&joiner_id].ai_reports)
+        };
+        assert!(host.test_ai_handshake(&joiner_id).await.is_ok());
+        {
+            let states = host.0.peers.lock().unwrap();
+            assert_eq!(states[&joiner_id].generation, generation);
+            assert!(states[&joiner_id].ai_reports > reports);
+        }
+        host.stop();
+        assert_eq!(host.test_ai_handshake(&joiner_id).await.unwrap_err(), "The linked computer is offline");
         joiner.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }

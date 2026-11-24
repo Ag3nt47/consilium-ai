@@ -6,4 +6,5 @@ export function parseUpgradeProgress(ledger: string): Array<{
   active: number;
   excluded: number;
   percentage: number;
+  activePercentage: number;
 }>;

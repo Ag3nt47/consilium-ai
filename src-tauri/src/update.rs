@@ -14,6 +14,7 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Staged {
@@ -217,15 +218,33 @@ fn ps_quote(p: &Path) -> String {
 
 /// The macOS helper: wait for `pid` to exit (30 s, then force it), swap, relaunch. On a failed
 /// swap the old app is put back and reopened, so the human is never left without Consilium.
-pub fn helper_script(pid: u32, staged: &Path, target: &Path) -> String {
-    let (s, t) = (quote(staged), quote(target));
+pub fn helper_script(pid: u32, staged: &Path, target: &Path, log: &Path) -> String {
+    let (s, t, g) = (quote(staged), quote(target), quote(log));
     let old = quote(&target.with_extension("app.old"));
+    let failed = quote(&staged.with_extension("app.failed"));
     format!(
-        "for i in $(seq 1 60); do kill -0 {pid} 2>/dev/null || break; sleep 0.5; done\n\
+        "if ( : > {g} ); then exec > {g} 2>&1; fi\n\
+         log() {{ printf '%s %s\\n' \"$(date '+%Y-%m-%dT%H:%M:%S%z')\" \"$1\"; }}\n\
+         log 'update helper started for pid {pid}'\n\
+         for i in $(seq 1 60); do kill -0 {pid} 2>/dev/null || break; sleep 0.5; done\n\
          kill -9 {pid} 2>/dev/null; sleep 0.3\n\
+         if [ ! -e {t} ] && [ -e {old} ]; then\n\
+             log 'recovering previous bundle from interrupted update'\n\
+             if ! mv {old} {t}; then log 'could not restore previous bundle'; exit 1; fi\n\
+         fi\n\
          rm -rf {old}\n\
-         if mv {t} {old} && mv {s} {t}; then rm -rf {old}; else [ -e {t} ] || mv {old} {t}; fi\n\
-         open {t}\n"
+         if mv {t} {old} && mv {s} {t}; then\n\
+             log 'application bundle replaced'\n\
+             if open {t}; then\n\
+                 log 'Launch Services accepted relaunch'; rm -rf {old}; exit 0\n\
+             fi\n\
+             log 'relaunch failed; restoring previous bundle'\n\
+             if ! mv {t} {failed} || ! mv {old} {t}; then log 'could not restore previous bundle'; exit 1; fi\n\
+         else\n\
+             log 'application bundle replacement failed'\n\
+             if [ ! -e {t} ] && ! mv {old} {t}; then log 'could not restore previous bundle'; exit 1; fi\n\
+         fi\n\
+         if open {t}; then log 'Launch Services accepted relaunch'; else log 'relaunch failed'; exit 1; fi\n"
     )
 }
 
@@ -441,12 +460,18 @@ pub async fn stage_from_url(data: &Path, version: &str, url: &str, digest: &str)
     result
 }
 
+fn release_download_client(read_timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent("Consilium-Updater")
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(read_timeout)
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))
+}
+
 async fn stage_from_url_inner(data: &Path, version: &str, url: &str, want: &str) -> Result<(), String> {
     use sha2::{Digest, Sha256};
-    let client = reqwest::Client::builder()
-        .user_agent("Consilium-Updater")
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let client = release_download_client(Duration::from_secs(45))?;
     let resp = client.get(url).send().await.map_err(|e| format!("download failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("download returned HTTP {}", resp.status()));
@@ -768,7 +793,7 @@ pub fn start_install(data: &Path) -> Result<Staged, String> {
     if cfg!(target_os = "macos") {
         let target = running_bundle()?;
         cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg(helper_script(pid, &staged_app(data), &target));
+        cmd.arg("-c").arg(helper_script(pid, &staged_app(data), &target, &install_log(data)));
     } else {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let appimage = std::env::var_os("APPIMAGE").filter(|_| cfg!(target_os = "linux")).map(PathBuf::from);
@@ -987,12 +1012,96 @@ mod tests {
 
     #[test]
     fn helper_waits_swaps_and_restores_on_failure() {
-        let s = helper_script(42, Path::new("/d/update/Consilium.app"), Path::new("/Applications/Consilium.app"));
-        assert!(s.starts_with("for i in"));
+        let s = helper_script(
+            42,
+            Path::new("/d/update/Consilium.app"),
+            Path::new("/Applications/Consilium.app"),
+            Path::new("/d/update/install.log"),
+        );
+        assert!(s.contains("exec > '/d/update/install.log' 2>&1"));
+        assert!(s.contains("application bundle replacement failed"));
         assert!(s.contains("kill -0 42"));
         assert!(s.contains("mv '/Applications/Consilium.app' '/Applications/Consilium.app.old' && mv '/d/update/Consilium.app' '/Applications/Consilium.app'"));
         assert!(s.contains("mv '/Applications/Consilium.app.old' '/Applications/Consilium.app'"));
-        assert!(s.trim_end().ends_with("open '/Applications/Consilium.app'"));
+        assert!(s.contains("if open '/Applications/Consilium.app'"));
+        assert!(s.contains("Launch Services accepted relaunch"));
+        assert!(s.contains("relaunch failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mac_helper_reopens_the_previous_bundle_when_swap_fails() {
+        let data = std::env::temp_dir().join(format!("consilium mac helper {}", uuid::Uuid::new_v4()));
+        let target = data.join("Consilium.app");
+        let missing_stage = data.join("missing.app");
+        let log = data.join("install.log");
+        let reopened = data.join("reopened");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("version"), "old").unwrap();
+        // Run the real swap against a fixture. Stub process signals and Launch Services.
+        let script = format!(
+            "kill() {{ return 1; }}\nsleep() {{ :; }}\nopen() {{ cat \"$1/version\" > {}; }}\n{}",
+            quote(&reopened),
+            helper_script(42, &missing_stage, &target, &log)
+        );
+        let result = std::process::Command::new("/bin/sh").arg("-c").arg(script).status().unwrap();
+        let restored = std::fs::read_to_string(target.join("version")).unwrap();
+        let launched = std::fs::read_to_string(reopened).unwrap();
+        let log = std::fs::read_to_string(log).unwrap();
+        std::fs::remove_dir_all(&data).unwrap();
+        assert!(result.success());
+        assert_eq!(restored, "old");
+        assert_eq!(launched, "old");
+        assert!(log.contains("application bundle replacement failed"));
+        assert!(log.contains("Launch Services accepted relaunch"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mac_helper_restores_the_previous_bundle_if_launch_is_rejected() {
+        let data = std::env::temp_dir().join(format!("consilium mac relaunch {}", uuid::Uuid::new_v4()));
+        let target = data.join("Consilium.app");
+        let stage = data.join("update.app");
+        let log = data.join("install.log");
+        let reopened = data.join("reopened");
+        for (bundle, version) in [(&target, "old"), (&stage, "new")] {
+            std::fs::create_dir_all(bundle).unwrap();
+            std::fs::write(bundle.join("version"), version).unwrap();
+        }
+        let script = format!(
+            "kill() {{ return 1; }}\nsleep() {{ :; }}\nopen() {{ [ \"$(cat \"$1/version\")\" = old ] && cat \"$1/version\" > {}; }}\n{}",
+            quote(&reopened),
+            helper_script(42, &stage, &target, &log)
+        );
+        let result = std::process::Command::new("/bin/sh").arg("-c").arg(script).status().unwrap();
+        assert!(result.success());
+        assert_eq!(std::fs::read_to_string(target.join("version")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(reopened).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(stage.with_extension("app.failed").join("version")).unwrap(), "new");
+        assert!(std::fs::read_to_string(log).unwrap().contains("relaunch failed; restoring previous bundle"));
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mac_helper_recovers_an_interrupted_swap_without_a_new_stage() {
+        let data = std::env::temp_dir().join(format!("consilium mac interrupted {}", uuid::Uuid::new_v4()));
+        let target = data.join("Consilium.app");
+        let backup = target.with_extension("app.old");
+        let missing_stage = data.join("missing.app");
+        let log = data.join("install.log");
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("version"), "old").unwrap();
+        let script = format!(
+            "kill() {{ return 1; }}\nsleep() {{ :; }}\nopen() {{ [ \"$(cat \"$1/version\")\" = old ]; }}\n{}",
+            helper_script(42, &missing_stage, &target, &log)
+        );
+        let result = std::process::Command::new("/bin/sh").arg("-c").arg(script).status().unwrap();
+        assert!(result.success());
+        assert_eq!(std::fs::read_to_string(target.join("version")).unwrap(), "old");
+        assert!(!backup.exists());
+        assert!(std::fs::read_to_string(log).unwrap().contains("recovering previous bundle from interrupted update"));
+        std::fs::remove_dir_all(&data).unwrap();
     }
 
     #[test]
@@ -1062,6 +1171,31 @@ mod tests {
         assert!(setup.contains("DisplayIcon"));
         assert!(setup.contains("if ($null -ne $p -and $p.ExitCode -eq 0)"));
         assert!(setup.trim_end().ends_with("catch { Log ('reopen failed: ' + $_) }"));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_release_body_times_out() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if stream.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            stream.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n1").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = release_download_client(Duration::from_millis(300)).unwrap();
+        let response = client.get(url).send().await.unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(3), response.bytes()).await.unwrap().unwrap_err();
+        assert!(error.is_timeout(), "{error}");
+        server.abort();
     }
 
     #[test]

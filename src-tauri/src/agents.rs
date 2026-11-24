@@ -76,6 +76,7 @@ pub struct AgentInfo {
     pub company: String,
     /// Always "local-cli" for now; API-backed agents will say "api".
     pub transport: String,
+    pub local_model: bool,
     /// An AI the person added themselves (it can be deleted).
     pub custom: bool,
     pub tool: String,
@@ -611,9 +612,9 @@ fn claude_usage_from_output(output: &str, model: Option<String>) -> Option<Usage
                 }
             }
         }
-        // Older CLIs have the named windows but not the unified limits array.
-        if overall.is_empty() {
-            for (key, label) in [("five_hour", "5-hour limit"), ("seven_day", "Weekly limit")] {
+        // Fill each missing period independently. Some CLIs provide a partial limits array.
+        for (key, label) in [("five_hour", "5-hour limit"), ("seven_day", "Weekly limit")] {
+            if !overall.iter().any(|window| window.label == label) {
                 if let Some(used) = limits[key]["utilization"].as_f64() {
                     overall.extend(window_from_used(label, used, limits[key]["resets_at"].as_str().and_then(iso_ms)));
                 }
@@ -800,6 +801,7 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
         name: agent.name.into(),
         company: agent.company.into(),
         transport: "local-cli".into(),
+        local_model: false,
         custom: false,
         tool: tool.into(),
         member,
@@ -845,6 +847,7 @@ async fn api_status(agent: &Agent, provider: &crate::apiagent::Provider, member:
         name: agent.name.into(),
         company: agent.company.into(),
         transport: "api".into(),
+        local_model: provider.local,
         custom: matches!(agent.kind, Kind::CustomApi),
         tool: format!("{} API", agent.company),
         member,
@@ -1165,7 +1168,11 @@ pub async fn run_with_files(
     files: &crate::attach::Files,
     cancel: &CancellationToken,
 ) -> Result<AgentReply, String> {
-    run_with_files_observed(agent, access, workspace, system, prompt, files, cancel, None, Vec::new(), None).await
+    let window = match provider_of(agent) {
+        Some(provider) => crate::apiagent::local_window(provider).await,
+        None => None,
+    };
+    run_with_files_observed(agent, access, workspace, system, prompt, files, cancel, None, Vec::new(), None, window).await
 }
 
 /// `run_with_files`, reporting provider-native activity as structured output arrives.
@@ -1181,6 +1188,7 @@ pub async fn run_with_files_observed(
     activity: Option<ActivitySink>,
     elevated_commands: Vec<String>,
     model: Option<&str>,
+    local_window: Option<usize>,
 ) -> Result<AgentReply, String> {
     if let Some(provider) = provider_of(agent) {
         // Attached files aren't sent: the API agents see only the conversation text.
@@ -1192,7 +1200,7 @@ pub async fn run_with_files_observed(
             });
         }
         let (text, usage, model) =
-            crate::apiagent::run(agent.id, agent.name, provider, system, prompt, cancel, RUN_TIMEOUT).await?;
+            crate::apiagent::run(agent.id, agent.name, provider, system, prompt, cancel, RUN_TIMEOUT, local_window).await?;
         return Ok(AgentReply { text, usage, model: Some(model) });
     }
     let kind = effective_kind(agent);
@@ -2286,8 +2294,10 @@ fn antigravity_reply(stdout: &str) -> Result<String, String> {
     if text.trim().is_empty() {
         if let Some(denied) = r["denied_actions"].as_array().filter(|d| !d.is_empty()) {
             let names: Vec<&str> = denied.iter().filter_map(|d| d["display_name"].as_str()).collect();
-            return Err(format!(
-                "Gemini tried to use a tool its access doesn't allow ({}) and wrote no reply. Ask again, or raise its access in Settings.",
+            // A refused tool is not a failed turn (#37): say so in the reply, so the council sees it
+            // and Gemini posts a command box next time, without the "couldn't answer" alarm.
+            return Ok(format!(
+                "[Antigravity refused Gemini's tool call ({}), so this turn has no text. Gemini: post commands in a command box instead of running them yourself.]",
                 names.join(", ")
             ));
         }
@@ -2399,6 +2409,16 @@ mod plan_tests {
     }
 
     #[test]
+    fn claude_keeps_the_reported_session_and_fills_a_missing_weekly_window() {
+        let output = r#"{"response":{"response":{"rate_limits_available":true,"rate_limits":{"limits":[{"kind":"session","percent":22,"scope":null}],"five_hour":{"utilization":90},"seven_day":{"utilization":59}}}}}"#;
+        let usage = claude_usage_from_output(output, None).unwrap();
+        let windows = usage.overall.unwrap().windows;
+        assert_eq!(windows.len(), 2);
+        assert_eq!((windows[0].label.as_str(), windows[0].remaining_percent), ("5-hour limit", 78));
+        assert_eq!((windows[1].label.as_str(), windows[1].remaining_percent), ("Weekly limit", 41));
+    }
+
+    #[test]
     fn reset_times_are_read_in_each_providers_format() {
         assert_eq!(iso_ms("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(iso_ms("2026-11-17T19:00:00.389055+00:00"), Some(1_794_942_000_389));
@@ -2426,11 +2446,15 @@ mod plan_tests {
 
     #[test]
     fn antigravity_usage_is_the_gemini_group_and_ignores_the_third_party_pool() {
-        let output = r#"{"command":{"data":{"groups":[{"name":"Gemini Models","description":"Models within this group: Gemini 3.8 Flash","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.61},{"name":"Five Hour Limit Remaining","remaining_fraction":0.83}]},{"name":"Claude and GPT models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.1}]}]}}}"#;
+        let output = r#"{"command":{"data":{"groups":[{"name":"Gemini Models","description":"Models within this group: Gemini 3.8 Flash","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.61,"reset_time":"2026-11-30T05:30:00Z"},{"name":"Five Hour Limit Remaining","remaining_fraction":0.83,"reset_time":"2026-11-24T03:30:00Z"}]},{"name":"Claude and GPT models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.1}]}]}}}"#;
         let usage = antigravity_usage_from_output(output).unwrap();
         assert_eq!(usage.remaining_percent, 61);
         assert_eq!(usage.windows.len(), 2);
         assert_eq!(usage.windows[0].label, "Weekly Limit");
+        assert_eq!(usage.windows[0].resets_at, iso_ms("2026-11-30T05:30:00Z"));
+        assert_eq!(usage.windows[1].label, "Five Hour Limit");
+        assert_eq!(usage.windows[1].remaining_percent, 83);
+        assert_eq!(usage.windows[1].resets_at, iso_ms("2026-11-24T03:30:00Z"));
         assert_eq!(pct(&usage.overall), ("Gemini".into(), 61, false));
         assert_eq!(pct(&usage.model), ("Gemini 3.8 Flash".into(), 61, true));
     }
@@ -2698,10 +2722,16 @@ mod plan_tests {
 {"event":"result","result":{"status":"SUCCESS","response":""}}"#;
         assert_eq!(antigravity_reply(streamed).unwrap(), "Hello council");
         let blocked = r#"{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}}"#;
-        let e = antigravity_reply(blocked).unwrap_err();
-        assert!(e.contains("Bash") && e.contains("access"), "{e}");
+        let note = antigravity_reply(blocked).expect("a refused tool is not a failed turn");
+        assert!(note.contains("Bash") && note.contains("command box"), "{note}");
+        let partial = r#"{"event":"step_update","step_update":{"text_delta":"Checking"}}
+{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}}"#;
+        assert_eq!(antigravity_reply(partial).unwrap(), "Checking", "text written before a refusal is kept");
         let failed = r#"{"event":"result","result":{"status":"ERROR","response":"","error":"authentication failed or timed out"}}"#;
         assert_eq!(antigravity_reply(failed).unwrap_err(), "authentication failed or timed out (ERROR)");
+        let failed_after_text = r#"{"event":"step_update","step_update":{"text_delta":"Partial"}}
+{"event":"result","result":{"status":"ERROR","response":"","error":"model overloaded"}}"#;
+        assert_eq!(antigravity_reply(failed_after_text).unwrap_err(), "model overloaded (ERROR)", "streamed text never hides a real error");
     }
 
     #[test]

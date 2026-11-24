@@ -147,7 +147,7 @@ pub fn exhausted_until(s: &crate::usage::Snapshot, agent: &str, now: u64) -> Opt
 /// If `error` says the AI is out of usage, when it resets (ms since the epoch); otherwise None.
 pub fn usage_limit(error: &str, now: u64) -> Option<u64> {
     let lower = error.to_lowercase();
-    const SIGNS: [&str; 16] = [
+    const SIGNS: [&str; 17] = [
         "usage limit",
         "rate limit",
         "rate_limit",
@@ -158,6 +158,7 @@ pub fn usage_limit(error: &str, now: u64) -> Option<u64> {
         "resource exhausted",
         "too many requests",
         "hit your limit",
+        "hit your 5-hour limit",
         "limit reached",
         "limit exceeded",
         "out of credits",
@@ -240,6 +241,7 @@ mod tests {
             "RESOURCE_EXHAUSTED (ERROR)",
             "HTTP 429 Too Many Requests",
             "status: 429",
+            "You've hit your 5-hour limit; resets 10:40pm",
             "5-hour limit reached ∙ resets 3pm",
         ] {
             assert!(usage_limit(e, NOW).is_some(), "{e}");
