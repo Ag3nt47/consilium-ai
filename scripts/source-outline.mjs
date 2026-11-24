@@ -33,6 +33,15 @@ function outline(source, statements, filter) {
   };
   function visit(node, prefix = "") {
     const addSymbol = (kind, name, declaration = node) => add(declaration, kind, prefix + name);
+    function addBindings(declaration) {
+      if (ts.isIdentifier(declaration.name)) {
+        addSymbol("binding", declaration.name.text, declaration);
+      } else {
+        for (const entry of declaration.name.elements) {
+          if (ts.isBindingElement(entry)) addBindings(entry);
+        }
+      }
+    }
     if (ts.isModuleDeclaration(node)) {
       const name = node.name.getText(source);
       addSymbol(ts.isStringLiteral(node.name) ? "module" : "namespace", name);
@@ -49,15 +58,18 @@ function outline(source, statements, filter) {
       const name = node.name?.text ?? "(anonymous)";
       addSymbol(ts.isClassDeclaration(node) ? "class" : "interface", name);
       for (const member of node.members) {
-        if (member.name) addSymbol("member", `${name}.${member.name.getText(source)}`, member);
+        if (member.name) {
+          const computed = ts.isComputedPropertyName(member.name);
+          const literal = computed && (ts.isStringLiteral(member.name.expression) || ts.isNumericLiteral(member.name.expression));
+          const memberName = computed && !literal ? "[computed]" : member.name.getText(source);
+          addSymbol("member", `${name}.${memberName}`, member);
+        }
         else if (ts.isConstructorDeclaration(member)) addSymbol("constructor", name, member);
       }
     } else if (ts.isTypeAliasDeclaration(node) || ts.isEnumDeclaration(node)) {
       addSymbol(ts.isTypeAliasDeclaration(node) ? "type" : "enum", node.name.text);
     } else if (ts.isVariableStatement(node)) {
-      for (const declaration of node.declarationList.declarations) {
-        addSymbol("binding", declaration.name.getText(source), declaration);
-      }
+      for (const declaration of node.declarationList.declarations) addBindings(declaration);
     }
   }
   for (const node of statements) visit(node);

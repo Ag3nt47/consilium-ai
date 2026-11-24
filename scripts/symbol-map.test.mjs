@@ -4,6 +4,23 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { outlineSourceText } from "./source-outline.mjs";
+
+test("outlines show binding identifiers and omit initializer and computed-name expressions", () => {
+  const source = [
+    'const { original: renamed = "OMIT_DEFAULT", nested: [first, , ...rest] } = obj;',
+    'class Entry { [makeName("OMIT_EXPRESSION")]() {} ["fixed"]() {} }',
+  ].join("\n");
+  const { rows } = outlineSourceText("example.ts", source);
+  assert.deepEqual(rows, [
+    "1 binding renamed",
+    "1 binding first",
+    "1 binding rest",
+    "2 class Entry",
+    "2 member Entry.[computed]",
+    '2 member Entry.["fixed"]',
+  ]);
+});
 
 test("qualified TypeScript outlines include nested declarations and bound output", () => {
   const dir = mkdtempSync(join(tmpdir(), "consilium-symbol-map-"));
