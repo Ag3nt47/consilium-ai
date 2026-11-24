@@ -1,9 +1,7 @@
-import ts from "typescript-ast";
-
 export const SOURCE_LIMIT = 1024 * 1024;
 export const supportedSourceExtensions = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"]);
 
-export function parseSourceText(file, text) {
+export function parseSourceText(ts, file, text) {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
   const diagnostic = source.parseDiagnostics[0];
   if (diagnostic) {
@@ -20,7 +18,7 @@ const clip = (text) => {
   return line.length > 140 ? line.slice(0, 139) + "…" : line;
 };
 
-function outline(source, statements, filter) {
+function outline(ts, source, statements, filter) {
   let total = 0;
   const rows = [];
   const add = (node, kind, name) => {
@@ -76,14 +74,14 @@ function outline(source, statements, filter) {
   return { rows, omitted: total - rows.length };
 }
 
-export function outlineSource(source, functionName, filter) {
+export function outlineSource(ts, source, functionName, filter) {
   const scope = functionName
     ? source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === functionName && node.body)
     : undefined;
   if (functionName && !scope) throw new Error("Top-level function with a body not found.");
-  return outline(source, scope?.body.statements ?? source.statements, filter?.toLowerCase());
+  return outline(ts, source, scope?.body.statements ?? source.statements, filter?.toLowerCase());
 }
 
-export function outlineSourceText(file, text, functionName, filter) {
-  return outlineSource(parseSourceText(file, text), functionName, filter);
+export function outlineSourceText(ts, file, text, functionName, filter) {
+  return outlineSource(ts, parseSourceText(ts, file, text), functionName, filter);
 }

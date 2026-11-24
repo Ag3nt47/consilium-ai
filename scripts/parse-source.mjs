@@ -1,6 +1,12 @@
 import { constants, openSync, closeSync, fstatSync, readSync } from "node:fs";
+import { createRequire } from "node:module";
 import { parseSourceText, SOURCE_LIMIT } from "./source-outline.mjs";
 export { supportedSourceExtensions } from "./source-outline.mjs";
+const require = createRequire(import.meta.url);
+
+export function sourceParser() {
+  return require("typescript-ast");
+}
 
 function readSource(file) {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -22,5 +28,5 @@ function readSource(file) {
 }
 
 export function parseSource(file) {
-  return parseSourceText(file, readSource(file));
+  return parseSourceText(sourceParser(), file, readSource(file));
 }

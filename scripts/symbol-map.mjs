@@ -1,5 +1,5 @@
 import { extname } from "node:path";
-import { parseSource, supportedSourceExtensions } from "./parse-source.mjs";
+import { parseSource, sourceParser, supportedSourceExtensions } from "./parse-source.mjs";
 import { outlineSource } from "./source-outline.mjs";
 
 try {
@@ -10,7 +10,7 @@ try {
   }
   const functionName = filterOnly ? undefined : scopeArg;
   const source = parseSource(file);
-  const { rows, omitted } = outlineSource(source, functionName, filter);
+  const { rows, omitted } = outlineSource(sourceParser(), source, functionName, filter);
   console.log(`${JSON.stringify(file)} — ${rows.length} rows`);
   for (const row of rows) console.log(row);
   if (omitted) console.log(`${omitted} additional rows omitted.`);
