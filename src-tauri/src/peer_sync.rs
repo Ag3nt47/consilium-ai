@@ -91,6 +91,7 @@ struct BoardSnapshot {
 
 pub struct Sync {
     store: Arc<Store>,
+    lan_notes: crate::lan_notes::Inbox,
     path: PathBuf,
     mirrors: Mutex<Mirrors>,
     recent: Mutex<(HashSet<String>, VecDeque<String>)>,
@@ -179,6 +180,7 @@ impl Sync {
         let mirrors = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         Sync {
             store,
+            lan_notes: crate::lan_notes::Inbox::open(link_dir),
             path,
             mirrors: Mutex::new(mirrors),
             recent: Mutex::new((HashSet::new(), VecDeque::new())),
@@ -802,6 +804,10 @@ impl Sync {
             return Ok(None);
         }
         let shared: Shared = serde_json::from_value(packet.payload.clone()).map_err(|e| e.to_string())?;
+        if shared.kind == crate::lan_notes::KIND {
+            self.lan_notes.record(packet, computer, &shared.text)?;
+            return Ok(None);
+        }
         if shared.kind == "update" {
             return self.take_update(packet, shared, computer);
         }
@@ -1211,6 +1217,19 @@ pub fn receive(packet: &PeerPacket) -> Option<Event> {
     s.file(packet, &link.peer_name(&packet.node_id)).ok().flatten()
 }
 
+pub(crate) fn lan_notes() -> Result<Vec<crate::lan_notes::Note>, String> {
+    SYNC.get().ok_or("Computer sync has not finished starting.")?.lan_notes.list()
+}
+
+pub(crate) fn send_lan_note(link: &crate::link::Link, node_id: &str, text: &str) -> Result<String, String> {
+    let text = crate::lan_notes::note_text(text)?;
+    let payload = serde_json::json!({
+        "conversation": "", "title": "", "id": "", "sender": "human",
+        "kind": crate::lan_notes::KIND, "text": text,
+    });
+    link.send_lan_note(node_id, payload)
+}
+
 /// Shares this computer's host resources with linked peers.
 pub fn share_resources(target_path: Option<&Path>) -> Result<(), String> {
     if let Some(s) = SYNC.get() {
@@ -1244,6 +1263,26 @@ mod tests {
             payload_sha256: String::new(),
             mac: String::new(),
         }
+    }
+
+    #[test]
+    fn lan_notes_survive_replay_without_creating_conversations() {
+        let root = std::env::temp_dir().join(format!("peer-lan-notes-{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(Store::new(root.join("conversations")).unwrap());
+        let sync = Sync::new(store.clone(), &root);
+        let note = packet("node-other", "note-1", serde_json::json!({
+            "conversation": "", "title": "", "id": "", "sender": "human",
+            "kind": "lan_note", "text": "  @claude\nTASK: take fixture  ",
+        }));
+        assert!(sync.file(&note, "Other computer").unwrap().is_none());
+        let reopened = Sync::new(store.clone(), &root);
+        assert!(reopened.file(&note, "Other computer").unwrap().is_none());
+        let notes = serde_json::to_value(reopened.lan_notes.list().unwrap()).unwrap();
+        assert_eq!(notes.as_array().unwrap().len(), 1);
+        assert_eq!(notes[0]["source"], "Other computer");
+        assert_eq!(notes[0]["text"], "@claude\nTASK: take fixture");
+        assert!(store.list().is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

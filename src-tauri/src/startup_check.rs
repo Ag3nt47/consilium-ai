@@ -277,6 +277,7 @@ mod tests {
             node_id: format!("node-{name}"),
             name: name.into(),
             connected,
+            supports_lan_notes: false,
             route: connected.then(|| "192.168.1.157:8470".into()),
             local_interface: None,
             rtt_ms: connected.then_some(3),

@@ -2885,6 +2885,8 @@ button.attachment {
   max-height: 85vh;
   overflow-y: auto;
 }
+.link-notes { max-height: 240px; overflow: auto; overflow-wrap: anywhere; }
+.link-notes p { white-space: pre-wrap; }
 .link-card {
   padding: 12px 14px;
   border: 1px solid var(--border);

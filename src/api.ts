@@ -348,6 +348,7 @@ export type LinkPeer = {
   node_id: string;
   name: string;
   connected: boolean;
+  supports_lan_notes?: boolean;
   /** The address in use, e.g. "192.168.1.20:8470"; the fastest answering route wins. */
   route: string | null;
   local_interface?: string | null;
@@ -366,6 +367,8 @@ export type LinkPeer = {
   /** Known candidate routes (wired Ethernet, Wi-Fi, direct cable) for failover. */
   addrs: string[];
 };
+
+export type LanNote = { id: string; source: string; text: string; sent_at: number };
 
 export type RouteTest = {
   addr: string;
@@ -533,6 +536,8 @@ const appApi = {
     invoke<string[]>("link_refresh_routes", { nodeId }),
   linkInbox: () => invoke<unknown[]>("link_inbox"),
   linkSend: (payload: unknown) => invoke<string>("link_send", { payload }),
+  linkLanNotes: () => invoke<LanNote[]>("link_lan_notes"),
+  linkSendLanNote: (nodeId: string, text: string) => invoke<string>("link_send_lan_note", { nodeId, text }),
   runCommand: (id: string, eventId: string, index: number) => invoke<ChatEvent>("run_command", { id, eventId, index }),
   /** Shows the system file picker; returns the chosen files. */
   pickFiles: async (): Promise<string[]> => {

@@ -152,6 +152,10 @@ the remaining detail on the shared board.
 The checklist also stages a pasted task list in one operation. Tasks remain unassigned,
 duplicates are skipped, and the chat gets one progress note for the batch.
 
+Multi-computer sync provides a separate LAN notes inbox. Notes use the authenticated
+PeerLink queue, go to one selected computer, and remain outside AI conversations. A
+two-computer installed-app trial remains open.
+
 ## Document 5: Off-line AI development.docx
 
 | Item | Status | Acceptance and dependencies |

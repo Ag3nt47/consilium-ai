@@ -303,6 +303,7 @@ pub struct PeerView {
     pub node_id: String,
     pub name: String,
     pub connected: bool,
+    pub supports_lan_notes: bool,
     pub route: Option<String>,
     pub local_interface: Option<String>,
     pub rtt_ms: Option<u64>,
@@ -430,6 +431,7 @@ struct PeerState {
     last_seen_ms: u64,
     down_since_ms: u64,
     outbox: VecDeque<PeerPacket>,
+    supports_lan_notes: bool,
     /// From the peer's latest heartbeat: Signal is running there, and when it was last used.
     signal_on: bool,
     active_ms: u64,
@@ -674,6 +676,7 @@ impl Link {
                         node_id: p.node_id.clone(),
                         name: p.name.clone(),
                         connected: s.is_some_and(|s| s.tx.is_some()),
+                        supports_lan_notes: s.is_some_and(|s| s.tx.is_some() && s.supports_lan_notes),
                         route: s.and_then(|s| s.tx.as_ref().and(s.route.clone())),
                         local_interface: s.filter(|s| s.tx.is_some()).and_then(|s| s.local_interface.clone()),
                         rtt_ms: s.filter(|s| s.tx.is_some()).and_then(|s| s.rtt_ms),
@@ -1163,6 +1166,15 @@ impl Link {
     /// Queues an on-demand request only for peers connected at admission.
     pub fn send_connected(&self, kind: PacketKind, payload: Value) -> Result<String, String> {
         self.send_packet(None, true, kind, payload)
+    }
+
+    pub(crate) fn send_lan_note(&self, node_id: &str, payload: Value) -> Result<String, String> {
+        let supported = self.0.peers.lock().unwrap().get(node_id)
+            .is_some_and(|state| state.tx.is_some() && state.supports_lan_notes);
+        if !supported {
+            return Err("Choose a connected computer that supports LAN notes.".into());
+        }
+        self.send_packet(Some(node_id), true, PacketKind::Chat, payload)
     }
 
     fn send_packet(&self, recipient: Option<&str>, connected_only: bool, kind: PacketKind, payload: Value) -> Result<String, String> {
@@ -1767,6 +1779,7 @@ impl Link {
             s.last_seen_ms = now_ms();
             s.down_since_ms = 0;
             s.packets_in = 0;
+            s.supports_lan_notes = false;
             // Re-send everything not yet acknowledged, re-stamped so it is still fresh.
             for p in &s.outbox {
                 if let Ok(line) = p.resigned(now_ms(), &key).and_then(|p| seal(&me, &key, &p)) {
@@ -1822,6 +1835,7 @@ impl Link {
                             "working": local_activity(),
                             "git": GIT_SUMMARY.lock().unwrap().clone(),
                             "build": crate::build_id::Build::this(),
+                            "lan_notes": true,
                             "council": COUNCIL.lock().unwrap().clone(),
                             "read": read_for(&peer.node_id),
                             "addrs": local_addrs(self.0.port),
@@ -1858,6 +1872,7 @@ impl Link {
                         s.activity = read_activity(packet.payload.get("working"));
                         s.git = packet.payload.get("git").and_then(Value::as_str).map(clean_status).filter(|g| !g.is_empty());
                         s.build = packet.payload.get("build").and_then(crate::build_id::Build::from_peer);
+                        s.supports_lan_notes = packet.payload.get("lan_notes").and_then(Value::as_bool) == Some(true);
                         s.council = packet.payload.get("council").and_then(Value::as_array).map(|a| known_ais(a.iter())).unwrap_or_default();
                         s.read_ours = packet
                             .payload
@@ -2349,7 +2364,7 @@ fn open_private(path: &Path, append: bool) -> Result<std::fs::File, String> {
 }
 
 /// Atomic, fsynced, 0600 write.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     let mut f = open_private(&tmp, false)?;
     f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
@@ -3088,6 +3103,26 @@ mod tests {
         host.stop();
         joiner.stop();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn paired_computers_exchange_lan_notes_only_after_advertising_support() {
+        let dir = std::env::temp_dir().join(format!("link-lan-notes-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, received) = node(&dir, "joiner");
+        assert!(crate::peer_sync::send_lan_note(&host, "unknown", "note").is_err());
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
+        let recipient = joiner.status().node_id;
+        assert!(wait_for(|| host.status().peers.iter().any(|peer| peer.supports_lan_notes)).await);
+        assert!(crate::peer_sync::send_lan_note(&host, &recipient, &"x".repeat(1001)).is_err());
+        let id = crate::peer_sync::send_lan_note(&host, &recipient, "Coffee ready.").unwrap();
+        assert!(wait_for(|| received.lock().unwrap().iter().any(|packet| {
+            packet.id == id && packet.payload["kind"] == "lan_note" && packet.payload["text"] == "Coffee ready."
+        })).await);
+        host.stop();
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]
