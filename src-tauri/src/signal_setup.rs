@@ -237,10 +237,11 @@ fn background_failure(run: u64, detail: String) {
 
 /// UI readiness is separate from the raw daemon probe used during setup/startup.
 pub fn connector_status(cfg: &BridgeConfig, timeout: Duration) -> bridge::ConnectorStatus {
-    setup_connector_status(cfg, bridge::probe_signal(cfg, timeout), &state())
+    let status = bridge::probe_signal(cfg, timeout);
+    setup_connector_status(cfg, status, &state(), crate::link::signal_on())
 }
 
-fn setup_connector_status(cfg: &BridgeConfig, mut status: bridge::ConnectorStatus, setup: &SetupState) -> bridge::ConnectorStatus {
+fn setup_connector_status(cfg: &BridgeConfig, mut status: bridge::ConnectorStatus, setup: &SetupState, receiving: bool) -> bridge::ConnectorStatus {
     if !cfg.enabled {
         return status;
     }
@@ -248,6 +249,9 @@ fn setup_connector_status(cfg: &BridgeConfig, mut status: bridge::ConnectorStatu
         if cfg.allowed_acis.is_empty() {
             status.state = "down";
             status.detail = "Signal's daemon is running, but phone verification is not complete. Open messaging setup and finish Note to Self verification.".into();
+        } else if !receiving {
+            status.state = "down";
+            status.detail = "Signal's daemon is responding. Consilium is reconnecting its message listener; your phone link is still saved.".into();
         }
     } else if setup.phase == "failed" && [LINK_REQUIRED, CHECK_UNAVAILABLE, CHECK_TIMED_OUT, INVALID_ACCOUNTS].contains(&setup.detail.as_str()) {
         status.state = "down";

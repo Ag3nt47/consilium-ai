@@ -44,7 +44,7 @@ function useSignalStatus(initial?: ConnectorStatus[] | null) {
         if (!alive) return;
         setRelay(report);
         setExpiresAt(relayExpiry(report, started));
-        if (report.local_direct_active && wasDirectActive === false) void check();
+        if (wasDirectActive !== null && report.local_direct_active !== wasDirectActive) void check();
         wasDirectActive = report.local_direct_active;
       } catch {
         if (alive) { setRelay(null); setExpiresAt(0); }
