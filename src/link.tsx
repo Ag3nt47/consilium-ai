@@ -5,6 +5,7 @@ import { api, buildCompare, buildLabel, type Build, type LinkPeer, type LinkStat
 import { LocalModelFit } from "./LocalModelFit";
 import { LinkTransferTrial } from "./LinkTransferTrial";
 import { LanNotes } from "./LanNotes";
+import { NativeBluetooth } from "./NativeBluetooth";
 
 /** Topbar status light and button for multi-computer sync (Mac & Windows).
  *  Displays connection health, fastest active route, and opens the sync setup modal on click. */
@@ -200,6 +201,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
   const [stressing, setStressing] = useState(false);
   const [stress, setStress] = useState<StressReport[] | null>(null);
   const [stressPeer, setStressPeer] = useState("");
+  const [stressTransport, setStressTransport] = useState<"all" | "bluetooth">("all");
   const [stressSources, setStressSources] = useState<ProbeSource[]>([]);
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [readingSources, setReadingSources] = useState(false);
@@ -207,9 +209,11 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
   const [adapterChecks, setAdapterChecks] = useState<{ source: ProbeSource; detail: string; ok: boolean }[]>([]);
   const testingRoutes = stressing || checkingAdapters;
   const stressPeers = status?.peers ?? [];
+  const bluetoothStressRoutes = stressPeers.find((peer) => peer.node_id === stressPeer)?.addrs.filter((address) => address.startsWith("rfcomm://")) ?? [];
   const availableSources = selectedSources.flatMap((address) => stressSources.filter((source) => source.address === address));
   const missingSources = availableSources.length !== selectedSources.length;
   const canStress = !testingRoutes && !readingSources && !missingSources
+    && (stressTransport !== "bluetooth" || bluetoothStressRoutes.length > 0)
     && stressPeers.some((peer) => peer.connected && (!stressPeer || stressPeer === peer.node_id));
   const canCheckAdapters = canStress && !!stressPeer
     && new Set(availableSources.map((source) => source.interface)).size >= 2;
@@ -258,7 +262,8 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
     setStress(null);
     setError(null);
     try {
-      setStress(await api.stressTestLink(stressPeer || undefined, selectedSources));
+      setStress(await api.stressTestLink(stressPeer || undefined, selectedSources,
+        stressTransport === "bluetooth" ? bluetoothStressRoutes : undefined));
     } catch (e) {
       setError(`Stress test failed: ${e}`);
     } finally {
@@ -489,6 +494,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                   Test target
                   <select value={stressPeer} disabled={testingRoutes} onChange={(event) => {
                     setStressPeer(event.target.value);
+                    setStressTransport("all");
                     setStress(null);
                     setAdapterChecks([]);
                   }}>
@@ -504,7 +510,19 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                   </select>
                 </label>
               )}
-              <details className="small" onToggle={(event) => { if (event.currentTarget.open) void refreshStressSources(); }}>
+              <label className="row gap-sm small">
+                Routes to test
+                <select value={stressTransport} disabled={testingRoutes} onChange={(event) => {
+                  setStressTransport(event.target.value as "all" | "bluetooth");
+                  setSelectedSources([]);
+                  setStress(null);
+                  setAdapterChecks([]);
+                }}>
+                  <option value="all">All saved endpoints</option>
+                  <option value="bluetooth" disabled={!bluetoothStressRoutes.length}>Native Bluetooth</option>
+                </select>
+              </label>
+              {stressTransport !== "bluetooth" && <details className="small" onToggle={(event) => { if (event.currentTarget.open) void refreshStressSources(); }}>
                 <summary>Try local source addresses</summary>
                   <p className="muted">Select up to four addresses to try them in order during the stress test. Leave them clear to test each saved endpoint. To check handshakes in parallel, select one computer and addresses on at least two adapters.</p>
                   <button type="button" className="btn small ghost" disabled={testingRoutes || readingSources}
@@ -538,7 +556,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                       ))}
                     </div>
                   )}
-              </details>
+              </details>}
               <button
                 className="btn small"
                 onClick={runStress}
@@ -616,6 +634,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
         )}
       </div>
 
+      <NativeBluetooth directEnabled={status.enabled} />
       {status.enabled && (
         <>
           <div className="section-label" style={{ marginTop: "16px" }}>
@@ -630,7 +649,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                 <li>On the first computer, choose <strong>Show Pairing Code</strong>. Generate a code and copy one of its local addresses above.</li>
                 <li>On the second computer, choose <strong>Join Another Computer</strong>. Enter the address and code from the first computer, then pair. Auto-Find on LAN can suggest addresses.</li>
                 <li>On the linked computer card, choose <strong>Test Connection</strong>. Look for an authenticated active session and check each endpoint separately. An amber result means the address answered on TCP but did not confirm the paired computer. If an endpoint fails, verify the address, confirm Consilium is running on that computer, and check that its firewall allows Consilium on the trusted network.</li>
-                <li>For a backup path, connect another interface on both computers. Keep Ethernet connected while joining Wi-Fi. For Bluetooth, first establish a Bluetooth network connection in the operating system. Add the other computer’s address on the backup path if it is missing.</li>
+                <li>For a backup path, connect another interface on both computers. Keep Ethernet connected while joining Wi-Fi. For native Bluetooth, pair the computers in their Bluetooth settings and enable Native Bluetooth in Consilium on both. The Mac announces its Bluetooth route to the paired Windows PC over the existing link.</li>
                 <li>Run <strong>Communication stress test</strong> above and check that authenticated traffic used two distinct local interfaces. With access to both computers, disconnect the active path, check that the alternate interface becomes active, then restore the first path.</li>
               </ol>
             </details>
@@ -641,7 +660,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                 <li>Check whether one computer offers Bluetooth network sharing. In Windows 11, open <strong>Bluetooth &amp; devices → Devices</strong>, expand the paired computer, and choose <strong>Join</strong> next to <strong>Personal Area Network</strong> if offered. On a Mac, check <strong>System Settings → Network</strong> for a Bluetooth network service.</li>
                 <li>Confirm that both Bluetooth network adapters have IP addresses. Add the peer’s PAN address in Consilium if it is missing. On its peer card, open <strong>Test from a local adapter</strong>, refresh the sources, and select your PAN address before running <strong>Test Connection</strong>.</li>
               </ol>
-              <p className="muted">A paired device needs a working Bluetooth network service before Consilium can send traffic over it.</p>
+              <p className="muted">PAN is an optional IP network path. Native Bluetooth above also works on Macs that do not expose a PAN service.</p>
               <div className="row wrap gap-sm">
                 <button type="button" className="link" onClick={() => void openUrl("https://support.microsoft.com/en-gb/windows/hardware/bluetooth/connect-to-a-bluetooth-network-in-windows").catch((error) => setError(String(error)))}>
                   Microsoft PAN setup
@@ -800,6 +819,8 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
   const [testReport, setTestReport] = useState<PeerTestReport | null>(null);
   const [probeSources, setProbeSources] = useState<ProbeSource[]>([]);
   const [probeSource, setProbeSource] = useState("");
+  const [testEndpoint, setTestEndpoint] = useState("");
+  const unavailableEndpoint = !!testEndpoint && !peer.addrs.includes(testEndpoint);
   const [probeSourcesError, setProbeSourcesError] = useState("");
   const [probeSourcesLoading, setProbeSourcesLoading] = useState(false);
   const unavailableSource = !!probeSource && !probeSources.some(({ address }) => address === probeSource);
@@ -845,7 +866,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
     setTesting(true);
     setTestReport(null);
     try {
-      const res = await api.linkTestPeer(peer.node_id, probeSource || undefined);
+      const res = await api.linkTestPeer(peer.node_id, probeSource || undefined, testEndpoint ? [testEndpoint] : undefined);
       setTestReport(res);
     } catch (e) {
       setTestReport({
@@ -882,11 +903,18 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
     setTestingHandshake(true);
     setHandshakeResult(null);
     try {
-      const report = await api.linkTestAiHandshake(peer.node_id);
+      const selected = testEndpoint ? await api.linkTestAiHandshakeSelected(peer.node_id, testEndpoint) : null;
+      const report = selected ? selected.handshake : await api.linkTestAiHandshake(peer.node_id);
       const confirmed = report.filter((ai) => ai.reads && ai.read).length;
-      setHandshakeResult(report.some((ai) => ai.side === "there")
+      const result = report.some((ai) => ai.side === "there")
         ? `Fresh AI status received. ${confirmed} of ${report.length} AIs have confirmations in both directions.`
-        : "Fresh AI status received. The linked computer reported no active AIs.");
+        : "Fresh AI status received. The linked computer reported no active AIs.";
+      const route = selected?.route_evidence?.kind === "bluetooth_rfcomm"
+        ? ` Verified over native Bluetooth, channel ${selected.route_evidence.channel}.`
+        : selected ? ` Verified over ${selected.route}.` : "";
+      const restored = selected?.restored ? (selected.restored.ok
+        ? " Default routing restored." : " Default route restoration was unconfirmed.") : "";
+      setHandshakeResult(result + route + restored);
     } catch (error) {
       setHandshakeResult(String(error));
     } finally {
@@ -913,7 +941,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
           <button
             className="btn small"
             onClick={runTest}
-            disabled={testing || unavailableSource}
+            disabled={testing || unavailableSource || unavailableEndpoint}
             title="Check PeerLink endpoint reachability and authentication"
           >
             {testing ? "Testing Link…" : "Test Connection"}
@@ -1059,7 +1087,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         <summary>Test from a local adapter</summary>
         <label className="row gap-sm">
           Local source
-          <select disabled={testing || probeSourcesLoading} value={probeSource} onChange={(event) => {
+          <select disabled={testing || probeSourcesLoading || !!testEndpoint} value={probeSource} onChange={(event) => {
             setProbeSource(event.target.value);
             setTestReport(null);
           }}>
@@ -1080,11 +1108,29 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         <p className="muted">Choose a source address, then run Test Connection. The live session stays in place.</p>
       </details>
 
+      {peer.addrs.some((address) => address.startsWith("rfcomm://")) && (
+        <label className="row gap-sm small">
+          Connection and AI handshake route
+          <select value={testEndpoint} disabled={testing || testingHandshake} onChange={(event) => {
+            setTestEndpoint(event.target.value);
+            setProbeSource("");
+            setTestReport(null);
+            setHandshakeResult(null);
+          }}>
+            <option value="">All saved endpoints / active AI session</option>
+            {unavailableEndpoint && <option value={testEndpoint} disabled>Previous Bluetooth route is unavailable</option>}
+            {peer.addrs.filter((address) => address.startsWith("rfcomm://")).map((address) =>
+              <option key={address} value={address}>Native Bluetooth · {address}</option>)}
+          </select>
+        </label>
+      )}
       {testReport && (
         <div className="peer-test-report">
           <div className="row between align-center test-header">
             <span className="test-summary-title">
-              {testReport.handshake_ok ? "✔ Active session authenticated" : "⚠️ No authenticated active session"}
+              {testEndpoint
+                ? testReport.handshake_ok ? "✔ Selected route authenticated" : "⚠️ Selected route authentication unconfirmed"
+                : testReport.handshake_ok ? "✔ Active session authenticated" : "⚠️ No authenticated active session"}
             </span>
             <button className="btn small ghost" onClick={() => setTestReport(null)}>
               Dismiss
@@ -1096,7 +1142,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
           )}
           {testReport.routes.length > 0 && (
             <div className="test-routes-list">
-              <span className="muted small">TCP reachability and peer authentication by endpoint</span>
+              <span className="muted small">Transport reachability and peer authentication by endpoint</span>
               <span className="small">{testReport.routes.filter((route) => route.authenticated_ms != null).length} of {testReport.routes.length} endpoints authenticated</span>
               {testReport.routes.map((r) => (
                 <div key={r.addr} className="test-route-row">
@@ -1105,6 +1151,9 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
                     <span className="route-kind-badge">{r.kind}</span>
                     {r.local_ip && (
                       <span className="muted small">via {r.local_interface ? `${r.local_interface} (${r.local_ip})` : r.local_ip}</span>
+                    )}
+                    {r.route_evidence?.kind === "bluetooth_rfcomm" && (
+                      <span className="muted small">via native Bluetooth · channel {r.route_evidence.channel}</span>
                     )}
                   </div>
                   <span className={`test-route-status ${r.authenticated_ms != null ? "authenticated" : r.reachable ? "unconfirmed" : "unreachable"}`}>
