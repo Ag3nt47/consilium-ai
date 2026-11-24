@@ -2,7 +2,7 @@
   "local-preflight": {
     "summary": "Check a selected file scope before escalating an edit.",
     "command": "node scripts/local-preflight.mjs <file>",
-    "guidance": "Run from the Git worktree with up to 16 changed files. This checks patch whitespace and JavaScript or TypeScript syntax. Include the short failure diagnostic in your handoff."
+    "guidance": "Run from the Git worktree with up to 16 files. In an isolated worktree, use --changed to discover changed JavaScript and TypeScript files automatically. This checks patch whitespace and syntax. Include the short failure diagnostic in your handoff."
   },
   "typescript-symbols": {
     "summary": "Find declarations in a JavaScript or TypeScript file.",
