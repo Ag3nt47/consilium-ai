@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
 import rawSkills from "../docs/offline-skills.json?raw";
+import SourceOutline from "./SourceOutline";
 
 interface Skill {
   summary: string;
@@ -71,6 +72,7 @@ export default function OfflineSkills({ copyText }: { copyText: (text: string) =
     <details className="small">
       <summary>Offline skills</summary>
       <p className="muted small">Open a skill to see its instructions. Run the examples from a Consilium source checkout.</p>
+      <SourceOutline copyText={copyText} />
       {Object.entries(skills).map(([id, skill]) => (
         <div className="offline-skill-row" key={id}>
           <input type="checkbox" aria-label={`Include ${id} in handoff`}
