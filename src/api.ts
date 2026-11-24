@@ -29,12 +29,15 @@ export interface OllamaModel {
 
 export const IN_APP = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+export type TaskPriority = "high" | "normal" | "low";
+
 /** One item on the conversation's shared task checklist. */
 export interface TaskItem {
   id: number;
   title: string;
   owner?: string | null;
   status: "todo" | "doing" | "blocked" | "done";
+  priority?: TaskPriority;
   note?: string | null;
   by: string;
   updated: number;
@@ -46,12 +49,13 @@ export interface TaskBoard {
 }
 
 export type TaskOp =
-  | { op: "add"; title: string; owner?: string }
+  | { op: "add"; title: string; owner?: string; priority?: TaskPriority }
   | { op: "take"; task: string }
   | { op: "done"; task: string }
   | { op: "block"; task: string; note?: string }
   | { op: "hand"; task: string; to: string }
   | { op: "reopen"; task: string }
+  | { op: "priority"; task: string; priority: TaskPriority }
   | { op: "drop"; task: string };
 
 export type Sender = "human" | "gpt" | "claude" | string;

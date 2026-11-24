@@ -35,6 +35,7 @@ pub const AUTO_RUN_DELAY_SECS: u64 = 5;
 pub const AUTO_RUN_MAX_ROUNDS: usize = 25;
 /// While a command box holds rounds back, how often auto-continue looks again.
 pub const RECHECK_SECS: u64 = 30;
+const TASKS_IN_CONTINUE_NOTE: usize = 5;
 
 /// The wait before the next automatic round.
 pub fn delay_secs(auto_run: bool) -> u64 {
@@ -144,7 +145,7 @@ pub fn decide(events: &[Event], board: &Board, auto_run: bool) -> Decision {
 
 /// `decide`, knowing whether a command box is still due to report back (`pending_boxes`).
 pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pending: bool) -> Decision {
-    let open: Vec<_> = board.tasks.iter().filter(|t| matches!(t.status, Status::Todo | Status::Doing)).collect();
+    let mut open: Vec<_> = board.tasks.iter().filter(|t| matches!(t.status, Status::Todo | Status::Doing)).collect();
     let since_human = events
         .iter()
         .rposition(is_human_message)
@@ -199,7 +200,13 @@ pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pendin
             open.len()
         ));
     }
-    let list = open.iter().map(|t| format!("#{} {}", t.id, t.title)).collect::<Vec<_>>().join("; ");
+    open.sort_by_key(|task| (task.status != Status::Doing, task.priority, task.id));
+    let mut list = open.iter().take(TASKS_IN_CONTINUE_NOTE)
+        .map(|t| format!("#{} {}", t.id, t.title)).collect::<Vec<_>>().join("; ");
+    let omitted = open.len().saturating_sub(TASKS_IN_CONTINUE_NOTE);
+    if omitted > 0 {
+        list.push_str(&format!("; {omitted} more on the task board"));
+    }
     Decision::Continue(format!(
         "{PREFIX} (round {} of {max_rounds}): {} task(s) still open: {list}. Carry on with the task you own, or take an \
          open one nobody owns. Don't repeat work another AI reports done. If you are only waiting on something \
@@ -231,12 +238,32 @@ mod tests {
                 title: "Sync".into(),
                 owner: Some("claude".into()),
                 status,
+                priority: crate::tasks::Priority::Normal,
                 note: None,
                 by: "claude".into(),
                 updated,
             }],
             next: 2,
         }
+    }
+
+    #[test]
+    fn continuation_lists_at_most_five_active_and_prioritized_items() {
+        let mut b = board(Status::Doing, 1);
+        for id in 2..=12 {
+            let mut task = b.tasks[0].clone();
+            task.id = id;
+            task.title = format!("Pending item {id}");
+            task.status = Status::Todo;
+            task.owner = None;
+            b.tasks.push(task);
+        }
+        b.tasks.last_mut().unwrap().priority = crate::tasks::Priority::High;
+        let Decision::Continue(note) = decide(&[], &b, false) else { panic!("continue open work") };
+        assert!(note.starts_with("Auto-continue (round 1 of 8): 12 task(s) still open: #1 Sync; #12 Pending item 12; #2"));
+        assert!(note.contains("7 more on the task board"));
+        assert!(!note.contains("#6 "));
+        assert!(!note.contains("#11 "));
     }
 
     fn auto(seq: u64, ts: u64) -> Event {
