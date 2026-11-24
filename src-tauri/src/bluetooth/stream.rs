@@ -271,7 +271,9 @@ mod tests {
         let (mut stream, pump, _, waker) = setup();
         let mut cx = Context::from_waker(&waker);
         assert!(matches!(Pin::new(&mut stream).poll_write(&mut cx, b"end"), Poll::Ready(Ok(3))));
+        assert!(!pump.shutdown_requested());
         assert!(Pin::new(&mut stream).poll_shutdown(&mut cx).is_pending());
+        assert!(pump.shutdown_requested());
         assert!(!pump.shutdown_ready());
         pump.complete_shutdown();
         assert!(Pin::new(&mut stream).poll_shutdown(&mut cx).is_pending());

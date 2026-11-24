@@ -38,7 +38,9 @@ impl Drop for ListenerLease {
 
 pub(super) type ListenerReady = Box<dyn FnOnce() + Send + 'static>;
 
+#[cfg(any(windows, test))]
 pub(super) struct ActiveEpoch {
+    #[cfg(test)]
     pub(super) id: u64,
     pub(super) token: CancellationToken,
 }
@@ -72,10 +74,15 @@ impl Controller {
 
     pub(super) fn is_enabled(&self) -> bool { self.lock().enabled }
 
+    #[cfg(any(windows, test))]
     pub(super) fn active_epoch(&self) -> Option<ActiveEpoch> {
         let state = self.lock();
         // The opt-in check and child acquisition share the transition lock.
-        state.enabled.then(|| ActiveEpoch { id: state.id, token: state.token.child_token() })
+        state.enabled.then(|| ActiveEpoch {
+            #[cfg(test)]
+            id: state.id,
+            token: state.token.child_token(),
+        })
     }
 
     pub(super) fn set_enabled(&self, enabled: bool, persist: impl FnOnce() -> Result<(), String>) -> Result<u64, String> {
