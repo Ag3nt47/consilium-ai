@@ -637,7 +637,6 @@ code {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  cursor: text;
   text-shadow: var(--glow);
   min-width: 0;
 }
@@ -3417,9 +3416,10 @@ button.attachment {
 .task-error { color: #e5534b; font-size: 11px; }
 
 /* Click-to-rename conversation title. */
-.topbar h1 { cursor: text; }
+.title-rename { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0; border: 0; color: inherit; font: inherit; text-shadow: inherit; background: transparent; cursor: pointer; }
+.title-rename:focus-visible { outline-offset: -2px; }
 .title-pencil { font-size: 11px; opacity: 0; margin-left: 5px; transition: opacity 0.15s; }
-.topbar h1:hover .title-pencil { opacity: 0.6; }
+.title-rename:is(:hover, :focus-visible) .title-pencil { opacity: 0.6; }
 .title-edit { font: inherit; font-size: 14px; font-weight: 600; min-width: 120px; max-width: min(30vw, 280px); flex: 0 1 auto; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--accent); background: transparent; color: inherit; }
 
 /* Sidebar: the conversation list keeps a usable share of the panel and scrolls on its own;
