@@ -137,6 +137,14 @@ the production front-end build, and 11 browser checks for preferences, shortcuts
 pointer interaction, pause/accessibility behavior, and the three-million-pixel
 canvas budget. Installed-app verification and pushed-main CI are separate steps.
 
+Signal registration follow-up: startup and recovery now check the bounded JSON
+registered-account list before starting a daemon. Missing links get a phone QR
+instruction; failed or unreadable checks preserve the existing account data.
+Timed-out probes end their owned process trees, and fresh daemon recovery clears
+stale status errors. Eight offline registration fixtures and the front-end checks
+passed. A real Windows Note to Self send/reply round trip was verified; council
+chat routing and phone Approve/Deny remain separate live checks.
+
 | Item | Status | Acceptance and dependencies |
 |---|---|---|
 | Concise engineering mode and compact handoffs | 🔨 | The shared editable-workspace prompt now assigns file scope once and asks for a compact handoff. The prompt tests passed on Windows, macOS and Linux. In task prompts, both local and cloud agents see their active tasks and ready unassigned work ahead of blockers and other owners' tasks. Windows, macOS and Ubuntu tests cover that ordering ([PR #261](https://github.com/Ag3nt47/consilium-ai/pull/261)). Comparing actual replies with fixed task fixtures and verifying routing behavior remain open. |

@@ -1235,7 +1235,7 @@ async fn messaging_status() -> Vec<bridge::ConnectorStatus> {
     tauri::async_runtime::spawn_blocking(|| {
         let cfg = bridge::BridgeConfig::load(&bridge::config_path(None));
         vec![match cfg {
-            Ok(c) => bridge::probe_signal(&c, std::time::Duration::from_secs(2)),
+            Ok(c) => signal_setup::connector_status(&c, std::time::Duration::from_secs(2)),
             Err(_) => bridge::ConnectorStatus {
                 id: "signal",
                 name: "Signal",
