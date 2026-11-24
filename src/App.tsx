@@ -1231,6 +1231,7 @@ export default function App() {
   }, [prefs.backdrop.enabled, cycleBackdrop]);
   const [agents, setAgents] = useState<AgentInfo[]>(loadCachedAgents);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const conversationReads = useRef({ issued: 0, applied: 0, list: [] as Conversation[] });
   const [current, setCurrent] = useState<string | null>(null);
   const [events, setEvents] = useState<ChatEvent[]>([]);
   const [turn, setTurn] = useState<TurnState | null>(null);
@@ -1555,7 +1556,12 @@ export default function App() {
   }, []);
 
   const refreshList = useCallback(async () => {
+    const reads = conversationReads.current;
+    const request = ++reads.issued;
     const list = await api.list();
+    if (request < reads.applied) return reads.list;
+    reads.applied = request;
+    reads.list = list;
     setConversations(list);
     return list;
   }, []);
@@ -1586,6 +1592,24 @@ export default function App() {
 
   // Startup: agents, conversations (creating a first one), live events, update check.
   useEffect(() => {
+    let disposed = false;
+    let readingForEvent = false;
+    let queuedRead = false;
+    async function refreshAfterEvent() {
+      if (disposed) return;
+      queuedRead = true;
+      if (readingForEvent) return;
+      readingForEvent = true;
+      try {
+        do {
+          queuedRead = false;
+          await refreshList().catch(() => undefined);
+        } while (queuedRead && !disposed);
+      } finally {
+        readingForEvent = false;
+      }
+    }
+
     refreshAgents();
     refreshList().then(async (list) => {
       const first = list[0] ?? (await api.create());
@@ -1600,7 +1624,7 @@ export default function App() {
           speakerRef.current?.say(e.sender, senderName(e.sender, agentsRef.current), e.text);
         }
       }
-      refreshList();
+      void refreshAfterEvent();
       // An AI saying an update is ready should light the button straight away.
       if (e.kind === "message" && e.sender !== "human") pollStaged();
       // A note from Consilium (an AI ran out of usage, or is back, or council on/off changed) changes the AIs' status.
@@ -1639,6 +1663,7 @@ export default function App() {
     };
     window.addEventListener("focus", onFocus);
     return () => {
+      disposed = true;
       un1.then((f) => f());
       un2.then((f) => f());
       un3.then((f) => f());
