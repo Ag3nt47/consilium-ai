@@ -359,6 +359,7 @@ export type LinkPeer = {
   supports_lan_notes?: boolean;
   /** The address in use, e.g. "192.168.1.20:8470"; the fastest answering route wins. */
   route: string | null;
+  route_evidence?: RouteEvidence | null;
   local_interface?: string | null;
   rtt_ms: number | null;
   last_seen_ms: number | null;
@@ -378,6 +379,11 @@ export type LinkPeer = {
 
 export type LanNote = { id: string; source: string; text: string; sent_at: number };
 
+export type RouteEvidence =
+  | { kind: "tcp"; local_addr: string; remote_addr: string; local_interface: string | null }
+  | { kind: "bluetooth_rfcomm"; local_adapter: string; remote_device: string; service_uuid: string; channel: number };
+export type BluetoothStatus = { supported: boolean; enabled: boolean; endpoint: string | null; detail: string };
+
 export type RouteTest = {
   addr: string;
   kind: string;
@@ -386,6 +392,7 @@ export type RouteTest = {
   authenticated_ms?: number | null;
   local_ip?: string | null;
   local_interface?: string | null;
+  route_evidence?: RouteEvidence | null;
   status: string;
 };
 
@@ -407,14 +414,15 @@ export type EnvironmentAudit = {
   ollama_models: string[];
   ollama_note: string | null;
 };
-export type TransferPath = { source: string; endpoint: string };
+export type TransferPath = { source: string | null; endpoint: string };
 export type TransferTrial = {
   overlap_ms: number | null;
   distinct_receiver_interfaces: boolean;
   paths: {
-    source: ProbeSource;
+    source: ProbeSource | null;
+    route_evidence?: RouteEvidence | null;
     endpoint: string;
-    receipts: { bytes: number; sha256: string; receiver_ip: string; receiver_interface?: string | null; received_ms: number }[];
+    receipts: { bytes: number; sha256: string; receiver_ip: string | null; receiver_interface?: string | null; route_evidence?: RouteEvidence | null; received_ms: number }[];
     error: string | null;
   }[];
 };
@@ -451,7 +459,7 @@ export type LinkStatus = {
 export type StressReport = {
   node_id: string;
   computer: string;
-  routes: { addr: string; kind: string; ok: boolean; ms: number | null; requested_source?: string | null; local_interface?: string | null; local_addr?: string | null; detail: string }[];
+  routes: { addr: string; kind: string; ok: boolean; ms: number | null; requested_source?: string | null; local_interface?: string | null; local_addr?: string | null; route_evidence?: RouteEvidence | null; detail: string }[];
   restored: StressReport["routes"][number] | null;
 };
 
@@ -465,6 +473,13 @@ export type AiHandshake = {
   reads: boolean;
   /** An AI on the other computer has read one of its messages and answered. */
   read: boolean;
+};
+
+export type AiHandshakeTestReport = {
+  handshake: AiHandshake[];
+  route: string;
+  route_evidence: RouteEvidence | null;
+  restored: StressReport["routes"][number] | null;
 };
 
 /** A Consilium build (src-tauri/src/build_id.rs): two builds of one version differ in `number`. */
@@ -528,6 +543,8 @@ const appApi = {
   /** Runs command box `index` of AI message `eventId` once; its output goes to that AI as your message. */
   linkDiscoverLan: (includeLegacy = true) => invoke<string[]>("link_discover_lan", { includeLegacy }),
   linkStatus: () => invoke<LinkStatus>("link_status"),
+  bluetoothStatus: () => invoke<BluetoothStatus>("bluetooth_status"),
+  bluetoothSetEnabled: (enabled: boolean) => invoke<BluetoothStatus>("bluetooth_set_enabled", { enabled }),
   linkSetEnabled: (on: boolean) => invoke<LinkStatus>("link_set_enabled", { on }),
   /** Shows a one-time 6-digit code (valid 5 minutes, 3 tries) and turns the link on. */
   linkPairHost: () => invoke<{ code: string; expires_ms: number }>("link_pair_host"),
@@ -535,9 +552,10 @@ const appApi = {
   linkPairJoin: (address: string, code: string) => invoke<LinkPeer>("link_pair_join", { address, code }),
   linkUnpair: (nodeId: string) => invoke<LinkStatus>("link_unpair", { nodeId }),
   linkProbeSources: () => invoke<ProbeSource[]>("link_probe_sources"),
-  linkTestPeer: (nodeId: string, source?: string) => invoke<PeerTestReport>("link_test_peer", { nodeId, source }),
+  linkTestPeer: (nodeId: string, source?: string, endpoints?: string[]) => invoke<PeerTestReport>("link_test_peer", { nodeId, source, endpoints }),
   linkTransferTrial: (nodeId: string, paths: TransferPath[]) => invoke<TransferTrial>("link_transfer_trial", { nodeId, paths }),
   linkTestAiHandshake: (nodeId: string) => invoke<AiHandshake[]>("link_test_ai_handshake", { nodeId }),
+  linkTestAiHandshakeSelected: (nodeId: string, endpoint: string) => invoke<AiHandshakeTestReport>("link_test_ai_handshake_selected", { nodeId, endpoint }),
   linkAddPeerRoute: (nodeId: string, address: string) =>
     invoke<string[]>("link_add_peer_route", { nodeId, address }),
   linkRefreshRoutes: (nodeId: string) =>
@@ -571,7 +589,7 @@ const appApi = {
   /** Restarts Consilium on this computer, targeted linked computers, or all computers. */
   restartApp: (targets: string[]) => invoke<void>("restart_app", { targets }),
   /** Moves the link onto each route in turn, verifies it, and posts the results in the chat. */
-  stressTestLink: (nodeId?: string, sources?: string[]) => invoke<StressReport[]>("stress_test_link", { nodeId, sources }),
+  stressTestLink: (nodeId?: string, sources?: string[], endpoints?: string[]) => invoke<StressReport[]>("stress_test_link", { nodeId, sources, endpoints }),
   agentBranches: (conversation?: string) => invoke<AgentBranch[]>("agent_branches", { conversation }),
   readEnvironmentAudit: (conversation?: string) => invoke<EnvironmentAudit>("read_environment_audit", { conversation }),
   mergeAgentBranch: (repo: string, agent: string, conversation?: string) =>

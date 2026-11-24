@@ -13,9 +13,11 @@ export function LinkTransferTrial({ peers, disabled }: { peers: LinkPeer[]; disa
   const [error, setError] = useState("");
   const peer = peers.find((entry) => entry.node_id === peerId && entry.connected);
   const locked = disabled || running || loading;
-  const interfaces = paths.map(({ source }) => sources.find(({ address }) => address === source)?.interface);
+  const interfaces = paths.map(({ source, endpoint }) => source === null
+    ? (endpoint.startsWith("rfcomm://") ? "native-bluetooth" : undefined)
+    : sources.find(({ address }) => address === source)?.interface);
   const valid = !!peer && interfaces.every(Boolean) && new Set(interfaces).size === paths.length
-    && paths.every(({ endpoint }) => peer.addrs.includes(endpoint))
+    && paths.every(({ source, endpoint }) => peer.addrs.includes(endpoint) && (source === null) === endpoint.startsWith("rfcomm://"))
     && new Set(paths.map(({ endpoint }) => endpoint)).size === paths.length;
 
   const refresh = async () => {
@@ -46,7 +48,9 @@ export function LinkTransferTrial({ peers, disabled }: { peers: LinkPeer[]; disa
     }
   };
   const edit = (index: number, key: keyof TransferPath, value: string) => {
-    setPaths((current) => current.map((path, row) => row === index ? { ...path, [key]: value } : path));
+    setPaths((current) => current.map((path, row) => row === index
+      ? key === "source" ? { source: value === "__rfcomm__" ? null : value, endpoint: "" } : { ...path, endpoint: value }
+      : path));
     setReport(null);
   };
 
@@ -75,8 +79,11 @@ export function LinkTransferTrial({ peers, disabled }: { peers: LinkPeer[]; disa
         <div className="row wrap gap-sm" key={index}>
           <label className="row gap-sm">
             Path {index + 1} local adapter
-            <select value={source} disabled={locked} onChange={(event) => edit(index, "source", event.target.value)}>
+            <select value={source ?? "__rfcomm__"} disabled={locked} onChange={(event) => edit(index, "source", event.target.value)}>
               <option value="">Choose an adapter</option>
+              {peer?.addrs.some((address) => address.startsWith("rfcomm://")) && (
+                <option value="__rfcomm__" disabled={paths.some((path, row) => row !== index && path.source === null)}>Native Bluetooth</option>
+              )}
               {source && !interfaces[index] && <option value={source} disabled>{source} (unavailable)</option>}
               {sources.map(({ address, interface: adapter }) => (
                 <option key={address} value={address} disabled={interfaces.some((name, row) => row !== index && name === adapter)}>
@@ -90,7 +97,7 @@ export function LinkTransferTrial({ peers, disabled }: { peers: LinkPeer[]; disa
             <select value={endpoint} disabled={locked || !peer} onChange={(event) => edit(index, "endpoint", event.target.value)}>
               <option value="">Choose an endpoint</option>
               {endpoint && !peer?.addrs.includes(endpoint) && <option value={endpoint} disabled>{endpoint} (unavailable)</option>}
-              {peer?.addrs.map((address) => (
+              {peer?.addrs.filter((address) => (source === null) === address.startsWith("rfcomm://")).map((address) => (
                 <option key={address} value={address} disabled={paths.some((path, row) => row !== index && path.endpoint === address)}>{address}</option>
               ))}
             </select>
@@ -115,14 +122,14 @@ export function LinkTransferTrial({ peers, disabled }: { peers: LinkPeer[]; disa
         <div className="stress-report" role="status">
           <p>{report.overlap_ms == null ? "Overlap across all selected paths was unconfirmed." : `Receiver observed overlapping receipt windows for ${report.overlap_ms} ms.`}</p>
           <p className="muted">{report.distinct_receiver_interfaces
-            ? "Each receiving IP mapped to a different adapter on the other computer."
+            ? "Each receiving path mapped to a different adapter on the other computer."
             : "Distinct receiving adapters could not be confirmed."}</p>
-          {report.paths.map(({ source, endpoint, receipts, error: failure }) => (
-            <div className={`handshake-item ${failure ? "pending" : "acknowledged"}`} key={source.address}>
-              {source.interface} <code>{source.address}</code> → <code>{endpoint}</code>
+          {report.paths.map(({ source, endpoint, receipts, route_evidence: evidence, error: failure }) => (
+            <div className={`handshake-item ${failure ? "pending" : "acknowledged"}`} key={`${source?.address ?? "bluetooth"}-${endpoint}`}>
+              {source ? <>{source.interface} <code>{source.address}</code></> : <>Native Bluetooth{evidence?.kind === "bluetooth_rfcomm" && ` · channel ${evidence.channel}`}</>} → <code>{endpoint}</code>
               {" · "}{receipts.reduce((bytes, receipt) => bytes + receipt.bytes, 0).toLocaleString()} bytes checksum-verified
               {receipts.length > 0 && (
-                <>{" · Receiver "}<code>{receipts[0].receiver_ip}</code>
+                <>{" · Receiver "}<code>{receipts[0].receiver_ip ?? "Bluetooth"}</code>
                   {" · "}{[...new Set(receipts.map((receipt) => receipt.receiver_interface || "Adapter unavailable"))].join(", ")}
                   {" · "}{receipts[receipts.length - 1].received_ms - receipts[0].received_ms} ms between first and last receipt</>
               )}

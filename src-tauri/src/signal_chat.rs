@@ -2,13 +2,13 @@
 //!
 //! Consilium creates Signal groups on the linked account: "Consilium" for the whole council and
 //! "Consilium · <AI>" for each member, so the human can message one AI on its own. What the human
-//! types in those groups (or in Note to Self) on their phone becomes their message in the newest
+//! types in those groups on their phone becomes their message in the newest
 //! conversation; "Approve" or "Deny" answers a single pending REQUEST. Each AI's message is sent
 //! back to the group it was asked from, and Consilium's own notes go to the council group.
 //!
 //! Only messages from the linked account itself are accepted (Signal delivers what the human
 //! sends from their phone to this linked device as a "sync" message), and only in Consilium's own
-//! groups or Note to Self. Other groups and other people are ignored.
+//! groups. Other chats and other people are ignored.
 
 use crate::bridge::{self, BridgeConfig, ResolvedSignalAction};
 use crate::engine::Engine;
@@ -19,7 +19,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[path = "signal_subscriber.rs"]
+mod subscriber;
 
 /// Longest text sent in one Signal message; longer replies are cut with a pointer to Consilium.
 const MAX_OUT: usize = 3500;
@@ -50,7 +53,7 @@ pub mod notice {
 /// Where a phone message came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
-    /// The council group or Note to Self.
+    /// The Consilium council group.
     Council,
     /// One AI's own group.
     Agent(String),
@@ -64,8 +67,8 @@ pub struct Incoming {
     pub timestamp: u64,
     /// Files sent with the message (pictures, documents), still on Signal's side.
     pub files: Vec<RemoteFile>,
-    /// The Signal group it was sent in; None for Note to Self.
-    pub group: Option<String>,
+    /// The configured Signal group it was sent in.
+    pub group: String,
 }
 
 /// A file attached to a phone message, fetched from signal-cli with `getAttachment`.
@@ -126,13 +129,8 @@ fn decode_base64(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Downloads one attachment of a phone message from signal-cli.
-fn fetch_file(cfg: &BridgeConfig, group: Option<&str>, f: &RemoteFile) -> Result<Vec<u8>, String> {
-    let mut params = json!({"id": f.id});
-    match group {
-        Some(g) => params["groupId"] = json!(g),
-        None => params["recipient"] = json!(cfg.account),
-    }
-    let r = call(cfg, "getAttachment", params)?;
+fn fetch_file(cfg: &BridgeConfig, group: &str, f: &RemoteFile) -> Result<Vec<u8>, String> {
+    let r = call(cfg, "getAttachment", json!({"id": f.id, "groupId": group}))?;
     let data = r.get("data").and_then(Value::as_str).or_else(|| r.as_str()).ok_or("no data")?;
     if data.len() as u64 > crate::attach::MAX_BYTES * 4 / 3 + 16 {
         return Err("too large".into());
@@ -152,7 +150,7 @@ pub fn receive_envelope(v: &Value) -> Option<&Value> {
 }
 
 /// Reads a daemon `receive` notification. Returns the human's own message when it was sent into
-/// one of Consilium's groups or to Note to Self; everything else is None.
+/// one of Consilium's groups; everything else is None.
 pub fn parse_incoming(v: &Value, account: &str, groups: &bridge::SignalGroups) -> Option<Incoming> {
     let env = receive_envelope(v)?;
     let from_self = env.get("sourceNumber").and_then(Value::as_str) == Some(account)
@@ -179,20 +177,13 @@ pub fn parse_incoming(v: &Value, account: &str, groups: &bridge::SignalGroups) -
         return None;
     }
     let timestamp = sent.get("timestamp").and_then(Value::as_u64).unwrap_or(0);
-    let group = sent.pointer("/groupInfo/groupId").and_then(Value::as_str).map(String::from);
-    let origin = match group.as_deref() {
-        Some(g) if !groups.main.is_empty() && g == groups.main => Origin::Council,
-        Some(g) => Origin::Agent(groups.agents.iter().find(|(_, id)| id.as_str() == g)?.0.clone()),
-        None => {
-            let to_self = sent.get("destinationNumber").and_then(Value::as_str) == Some(account)
-                || sent.get("destination").and_then(Value::as_str) == Some(account);
-            if !to_self {
-                return None;
-            }
-            Origin::Council
-        }
+    let group = sent.pointer("/groupInfo/groupId").and_then(Value::as_str).filter(|g| !g.is_empty())?;
+    let origin = if group == groups.main {
+        Origin::Council
+    } else {
+        Origin::Agent(groups.agents.iter().find(|(_, id)| id.as_str() == group)?.0.clone())
     };
-    Some(Incoming { origin, text: text.chars().take(8000).collect(), timestamp, files, group })
+    Some(Incoming { origin, text: text.chars().take(8000).collect(), timestamp, files, group: group.into() })
 }
 
 /// REQUESTs in `events` not yet answered with "Approved:", "Denied:" or "Response to request:",
@@ -271,6 +262,7 @@ fn addr(cfg: &BridgeConfig) -> Result<SocketAddr, String> {
 fn call(cfg: &BridgeConfig, method: &str, params: Value) -> Result<Value, String> {
     let s = TcpStream::connect_timeout(&addr(cfg)?, Duration::from_secs(5)).map_err(|e| e.to_string())?;
     s.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
+    s.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
     let id = format!("consilium-{}", uuid::Uuid::new_v4());
     let req = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
     (&s).write_all(format!("{req}\n").as_bytes()).map_err(|e| e.to_string())?;
@@ -290,10 +282,10 @@ fn call(cfg: &BridgeConfig, method: &str, params: Value) -> Result<Value, String
 }
 
 fn send_group(cfg: &BridgeConfig, group: &str, text: &str) -> Result<(), String> {
-    call(cfg, "send", json!({"groupId": group, "message": text})).map(|_| ())
+    send_group_files(cfg, group, text, &[])
 }
 
-/// Sends a Consilium report to the phone's Note to Self, when Signal is set up and connected.
+/// Sends a Consilium report to the council group when the phone link is active.
 pub fn send_to_phone(text: &str) -> Result<(), String> {
     let cfg = BridgeConfig::load(&bridge::config_path(None))?;
     if !cfg.enabled || !bridge::valid_account(&cfg.account) || cfg.allowed_acis.is_empty() {
@@ -306,31 +298,45 @@ pub fn send_to_phone(text: &str) -> Result<(), String> {
     if msg.chars().count() > MAX_OUT {
         msg = msg.chars().take(MAX_OUT).collect::<String>() + notice::CUT;
     }
-    send_self(&cfg, &msg)
+    send_group(&cfg, &cfg.groups.main, &msg)
 }
 
-/// Sends to the account's own Note to Self. Consilium runs as a linked device of the human's own
-/// number, so its groups have no other member and a group send reaches nobody; Note to Self is
-/// the one chat Signal delivers to the human's phone.
-fn send_self(cfg: &BridgeConfig, text: &str) -> Result<(), String> {
-    send_self_files(cfg, text, &[])
-}
-
-/// Sends to Note to Self with files (pictures, documents) attached from Consilium's own copies.
-fn send_self_files(cfg: &BridgeConfig, text: &str, files: &[String]) -> Result<(), String> {
-    let mut params = json!({"recipient": [cfg.account.clone()], "message": text});
+/// Include the account itself even when the person's phone is the group's only member.
+pub(crate) fn group_send_params(group: &str, text: &str, files: &[String]) -> Value {
+    let mut params = json!({ "groupId": group, "notifySelf": true, "message": text });
     if !files.is_empty() {
         params["attachments"] = json!(files);
     }
-    call(cfg, "send", params).map(|_| ())
+    params
 }
 
-/// The Note to Self text for a reply, naming the private group when it answers one.
-pub fn self_text(text: &str, private_to: Option<&str>) -> String {
-    match private_to {
-        Some(name) => format!("(Consilium · {name}, private)\n{text}"),
-        None => text.to_string(),
+pub(crate) fn group_send_accepted(cfg: Option<&BridgeConfig>, group: &str, result: &Value) -> bool {
+    result.get("results").and_then(Value::as_array).is_some_and(|recipients| {
+        recipients.iter().any(|entry| {
+            if entry.get("type").and_then(Value::as_str) != Some("SUCCESS")
+                || entry.get("groupId").and_then(Value::as_str) != Some(group)
+            {
+                return false;
+            }
+            cfg.is_none_or(|cfg| {
+                let number = entry.pointer("/recipientAddress/number").and_then(Value::as_str);
+                let uuid = entry.pointer("/recipientAddress/uuid").and_then(Value::as_str);
+                number == Some(cfg.account.as_str())
+                    || uuid.is_some_and(|uuid| cfg.allowed_acis.iter().any(|aci| aci.eq_ignore_ascii_case(uuid)))
+            })
+        })
+    })
+}
+
+fn send_group_files(cfg: &BridgeConfig, group: &str, text: &str, files: &[String]) -> Result<(), String> {
+    if group.is_empty() {
+        return Err("The Consilium Signal group has not been set up".into());
     }
+    let result = call(cfg, "send", group_send_params(group, text, files))?;
+    if !group_send_accepted(Some(cfg), group, &result) {
+        return Err("Signal did not accept this group message for your account".into());
+    }
+    Ok(())
 }
 
 fn create_group(cfg: &BridgeConfig, name: &str, description: &str) -> Result<String, String> {
@@ -385,7 +391,7 @@ pub fn ensure_groups(cfg_path: &std::path::Path, members: &[String]) -> Result<B
 /// Runs for the life of the app: links Signal and the newest conversation in both directions
 /// while Signal is switched on and verified.
 /// Asks signal-cli (in manual receive mode) to start passing messages to this connection.
-pub const SUBSCRIBE: &str = "{\"jsonrpc\":\"2.0\",\"id\":\"consilium-subscribe\",\"method\":\"subscribeReceive\"}\n";
+pub const SUBSCRIBE: &str = subscriber::SUBSCRIBE_REQUEST;
 
 /// Reads one whole line from signal-cli. A read timeout part-way through a line keeps what has
 /// arrived in `buf` for the next call, so a long message (a photo, a long text) that arrives in
@@ -418,11 +424,19 @@ pub fn run(engine: Arc<Engine>, cfg_path: PathBuf) {
     });
 }
 
+#[derive(Default)]
 struct Outbox {
     /// Cursors for active conversations: conversation ID -> highest seq mirrored.
     cursors: HashMap<String, u64>,
+    retry_after: HashMap<String, Instant>,
     /// Human events Consilium created from phone messages, and where each came from.
     origins: HashMap<String, Origin>,
+}
+
+fn same_receiver_config(now: &BridgeConfig, expected: &BridgeConfig) -> bool {
+    now.enabled && now.account == expected.account && now.endpoint == expected.endpoint
+        && now.groups == expected.groups && now.allowed_acis == expected.allowed_acis
+        && !now.allowed_acis.is_empty()
 }
 
 fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), String> {
@@ -432,7 +446,7 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
         // Saved but never verified: say so once (not every 5 s), so it isn't mistaken for a dead bridge.
         static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("signal chat: number saved but not verified (no allowed sender yet); waiting for the Note to Self code from Settings > Signal");
+            eprintln!("signal chat: number saved but not verified (no allowed sender yet); waiting for the Consilium group code from Settings > Signal");
         }
     }
     if !cfg.enabled || !bridge::valid_account(&cfg.account) || cfg.allowed_acis.is_empty() {
@@ -448,56 +462,57 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
             return Err(e);
         }
     };
-    let s = match TcpStream::connect_timeout(&addr(&cfg)?, Duration::from_secs(5)) {
-        Ok(s) => s,
-        Err(e) => {
-            crate::signal_setup::revive(&cfg);
-            return Err(e.to_string());
+    let mut out = Outbox::default();
+    // Seed the cursors before receiving: an immediate reply to the first phone message
+    // must not be mistaken for old desktop history.
+    forward(engine, &cfg, &mut out);
+    let expected = cfg.clone();
+    let current_path = cfg_path.to_path_buf();
+    let decode_cfg = cfg.clone();
+    let subscription = subscriber::start(addr(&cfg)?, move || {
+        BridgeConfig::load(&current_path).map(|now| same_receiver_config(&now, &expected))
+    }, move |value| {
+        let msg = parse_incoming(value, &decode_cfg.account, &decode_cfg.groups)?;
+        // The setup code is consumed by the verifier, not sent to the council.
+        if crate::signal_setup::is_verification_reply(&msg.group, msg.timestamp, &msg.text, &decode_cfg.groups.main) {
+            return None;
         }
-    };
-    // Short, so AI replies go out to the phone within a quarter of a second.
-    s.set_read_timeout(Some(Duration::from_millis(250))).map_err(|e| e.to_string())?;
-    // signal-cli runs in manual receive mode: it takes messages off Signal's servers only while
-    // this connection is subscribed, so messages sent while Consilium is closed wait there.
-    (&s).write_all(SUBSCRIBE.as_bytes()).map_err(|e| e.to_string())?;
-    let mut reader = BufReader::new(s);
-    crate::link::set_signal_on(true);
-    // Whatever way the session ends, linked computers stop counting on this one.
-    struct Off;
-    impl Drop for Off {
-        fn drop(&mut self) {
-            crate::link::set_signal_on(false);
-        }
-    }
-    let _off = Off;
+        Some(msg)
+    }, crate::link::set_signal_on)?;
+    let mut revive_after = Instant::now();
     let mut seen: VecDeque<u64> = VecDeque::new();
     let mut seen_set: HashSet<u64> = HashSet::new();
-    let mut out = Outbox { cursors: HashMap::new(), origins: HashMap::new() };
-    let mut buf: Vec<u8> = Vec::new();
     static ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        let _ = send_self(&cfg, notice::BACK_ONLINE);
-    }
     loop {
         // Stop if Signal was switched off or re-set up; the outer loop starts again.
-        let now = BridgeConfig::load(cfg_path)?;
-        if !now.enabled || now.account != cfg.account || now.groups != cfg.groups {
-            return Ok(());
-        }
+        let now = match BridgeConfig::load(cfg_path) {
+            Ok(now) => now,
+            // A short config-write gap pauses both dispatch and the socket;
+            // accepted messages stay in this configuration's bounded channel.
+            Err(_) => { std::thread::sleep(Duration::from_millis(250)); continue; }
+        };
+        if !same_receiver_config(&now, &cfg) { return Ok(()); }
         if engine.config.get().members.iter().any(|m| !cfg.groups.agents.contains_key(m)) {
             return Ok(()); // a new member needs its own group
         }
-        forward(engine, &cfg, &mut out);
-        let Some(line) = read_whole_line(&mut reader, &mut buf)? else { continue };
-        if line.len() > 512 * 1024 {
-            continue;
+        if subscription.take_connect_failure() && Instant::now() >= revive_after {
+            crate::signal_setup::revive(&cfg);
+            revive_after = Instant::now() + Duration::from_secs(5);
         }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-        let Some(msg) = parse_incoming(&v, &cfg.account, &cfg.groups) else { continue };
-        // The setup's own test reply in Note to Self isn't a message for the council.
-        if msg.origin == Origin::Council && crate::signal_setup::state().phase == "verifying" {
-            continue;
-        }
+        let msg = match subscription.recv_timeout(Duration::from_millis(250)) {
+            Ok(message) => message,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if subscription.is_ready() {
+                    if ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        forward(engine, &cfg, &mut out);
+                    } else {
+                        let _ = send_group(&cfg, &cfg.groups.main, notice::BACK_ONLINE);
+                    }
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err("Signal subscriber stopped".into()),
+        };
         if msg.timestamp != 0 {
             if !seen_set.insert(msg.timestamp) {
                 continue;
@@ -515,13 +530,8 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
         }
         let group_id = msg.group.clone();
         let reply = deliver(engine, &cfg, &mut out, msg);
-        if let Err(e) = send_self(&cfg, &reply) {
-            eprintln!("signal chat: couldn't acknowledge the phone message to Note to Self: {e}");
-        }
-        if let Some(ref g) = group_id {
-            if let Err(e) = send_group(&cfg, g, &reply) {
-                eprintln!("signal chat: couldn't acknowledge the phone message to group: {e}");
-            }
+        if let Err(e) = send_group(&cfg, &group_id, &reply) {
+            eprintln!("signal chat: couldn't acknowledge the phone message to its group: {e}");
         }
     }
 }
@@ -535,6 +545,7 @@ fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Inco
     };
     let members = engine.config.get().members;
     let events = engine.store.load(&conv.id).unwrap_or_default();
+    out.cursors.entry(conv.id.clone()).or_insert_with(|| events.last().map_or(0, |e| e.seq));
     let recent = &events[events.len().saturating_sub(400)..];
     let pending = pending_requests(recent);
     let auto = BridgeConfig::load(&bridge::config_path(None)).map(|c| c.auto_forward_decisions).unwrap_or(true);
@@ -565,7 +576,7 @@ fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Inco
     let mut attachments = Vec::new();
     let mut failed = 0;
     for f in &msg.files {
-        match fetch_file(cfg, msg.group.as_deref(), f).and_then(|b| engine.attach_bytes(&conv.id, &f.name, &b)) {
+        match fetch_file(cfg, &msg.group, f).and_then(|b| engine.attach_bytes(&conv.id, &f.name, &b)) {
             Ok(a) => attachments.push(a),
             Err(e) => {
                 eprintln!("signal chat: couldn't take {} from Signal: {e}", f.name);
@@ -629,7 +640,7 @@ pub fn formatted_receipt(nobody_can_answer: bool, decision: bool, targets: &[Str
     }
 }
 
-/// Sends new messages (AI replies, in-app human messages, Consilium notes) across active conversations to Signal.
+/// Send at most one new message before giving phone intake another turn.
 fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
     let convs = engine.store.list();
     if convs.is_empty() {
@@ -637,6 +648,9 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
     }
     let answers = crate::link_answers_signal();
     for conv in convs.into_iter().filter(|c| answers || !crate::peer_sync::is_mirror(&c.id)).take(10) {
+        if out.retry_after.get(&conv.id).is_some_and(|until| Instant::now() < *until) {
+            continue;
+        }
         let events = engine.store.load(&conv.id).unwrap_or_default();
         let newest = events.last().map_or(0, |e| e.seq);
         let cursor = match out.cursors.get(&conv.id) {
@@ -648,8 +662,10 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
             }
         };
         if newest <= cursor {
+            out.retry_after.remove(&conv.id);
             continue;
         }
+        let mut through = cursor;
         let mut last_human: Option<&Event> = events.iter().rev().find(|e| e.seq <= cursor && e.sender == "human");
         for e in events.iter().filter(|e| e.seq > cursor) {
             if e.sender == "human" {
@@ -672,39 +688,40 @@ fn forward(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox) {
             let text = match outbound_text(e) {
                 Some(t) => t,
                 None if !files.is_empty() && e.sender == "human" => format!("You: (sent {} file(s))", files.len()),
-                None => continue,
+                None => {
+                    through = e.seq;
+                    continue;
+                }
             };
-            // An AI answering a message sent from its own group answers there.
-            let asked_privately = last_human
-                .and_then(|h| out.origins.get(&h.id))
-                .is_some_and(|o| *o == Origin::Agent(e.sender.clone()));
-            let private_to = asked_privately
-                .then(|| crate::agents::by_id(&e.sender).map_or(e.sender.clone(), |a| a.name.to_string()));
-            let formatted = self_text(&text, private_to.as_deref());
-            if let Err(err) = send_self_files(cfg, &formatted, &files) {
-                eprintln!("signal chat: couldn't send to Signal: {err}");
-            }
-            let mut target_groups: Vec<&str> = Vec::new();
-            if asked_privately {
-                if let Some(g) = cfg.groups.agents.get(&e.sender) {
-                    target_groups.push(g.as_str());
+            // Keep replies in the group that asked. The council group is the default for
+            // desktop messages and for mirrored conversations with no local origin record.
+            let origin = last_human.and_then(|h| out.origins.get(&h.id));
+            if let Some(group) = outbound_group(&cfg.groups, origin) {
+                match send_group_files(cfg, group, &text, &files) {
+                    Ok(()) => {
+                        out.cursors.insert(conv.id.clone(), e.seq);
+                        out.retry_after.remove(&conv.id);
+                    }
+                    Err(err) => {
+                        eprintln!("signal chat: couldn't send to the Signal group: {err}");
+                        out.cursors.insert(conv.id.clone(), through);
+                        out.retry_after.insert(conv.id, Instant::now() + Duration::from_secs(10));
+                    }
                 }
-            } else if let Some(Origin::Agent(ref a)) = last_human.and_then(|h| out.origins.get(&h.id)) {
-                if let Some(g) = cfg.groups.agents.get(a) {
-                    target_groups.push(g.as_str());
-                }
-                if !cfg.groups.main.is_empty() {
-                    target_groups.push(cfg.groups.main.as_str());
-                }
-            } else if !cfg.groups.main.is_empty() {
-                target_groups.push(cfg.groups.main.as_str());
+                return;
             }
-            for group in target_groups {
-                let _ = send_group(cfg, group, &text);
-            }
+            through = e.seq;
         }
         out.cursors.insert(conv.id, newest);
     }
+}
+
+fn outbound_group<'a>(groups: &'a bridge::SignalGroups, origin: Option<&Origin>) -> Option<&'a str> {
+    let group = match origin {
+        Some(Origin::Agent(agent)) => groups.agents.get(agent)?,
+        _ => &groups.main,
+    };
+    (!group.is_empty()).then_some(group.as_str())
 }
 
 #[cfg(test)]
@@ -734,24 +751,24 @@ mod tests {
                 text: "hi all".into(),
                 timestamp: 7,
                 files: vec![],
-                group: Some("MAIN=".into())
+                group: "MAIN=".into()
             })
         );
         let own = sync(ACC, json!({"message": "just you", "timestamp": 8, "groupInfo": {"groupId": "CLAUDE="}}));
         assert_eq!(parse_incoming(&own, ACC, &g).unwrap().origin, Origin::Agent("claude".into()));
         let note = sync(ACC, json!({"message": "note", "destinationNumber": ACC}));
-        assert_eq!(parse_incoming(&note, ACC, &g).unwrap().origin, Origin::Council);
+        assert!(parse_incoming(&note, ACC, &g).is_none());
     }
 
     #[test]
     fn takes_files_sent_from_the_phone() {
         let g = groups();
-        let pic = sync(ACC, json!({"timestamp": 9, "destinationNumber": ACC,
+        let pic = sync(ACC, json!({"timestamp": 9, "groupInfo": {"groupId": "MAIN="},
             "attachments": [{"id": "abc123XYZ.jpg", "contentType": "image/jpeg"},
                             {"id": "q2", "contentType": "application/pdf", "filename": "plan.pdf"}]}));
         let m = parse_incoming(&pic, ACC, &g).expect("a picture with no text is still a message");
         assert_eq!(m.text, "");
-        assert_eq!(m.group, None);
+        assert_eq!(m.group, "MAIN=");
         assert_eq!(m.files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["signal-abc123XY.jpg", "plan.pdf"]);
         assert_eq!(decode_base64("aGVsbG8gd29ybGQ=").unwrap(), b"hello world");
         assert_eq!(decode_base64("aGk").unwrap(), b"hi");
@@ -782,8 +799,8 @@ mod tests {
             json!({"jsonrpc": "2.0", "method": "receive",
                 "params": {"subscription": 0, "result": {"account": ACC, "envelope": env}}})
         };
-        let note = wrap(sync(ACC, json!({"message": "hello", "destinationNumber": ACC, "timestamp": 7})));
-        let got = parse_incoming(&note, ACC, &g).expect("Note to Self in the subscribed shape is read");
+        let main = wrap(sync(ACC, json!({"message": "hello", "groupInfo": {"groupId": "MAIN="}, "timestamp": 7})));
+        let got = parse_incoming(&main, ACC, &g).expect("the council group in the subscribed shape is read");
         assert_eq!(got.text, "hello");
         assert_eq!(got.timestamp, 7);
         let stranger = wrap(sync("+15559999999", json!({"message": "x", "groupInfo": {"groupId": "MAIN="}})));
@@ -828,7 +845,7 @@ mod tests {
 
     #[test]
     fn a_message_split_by_a_read_timeout_arrives_whole() {
-        let msg = sync("+15551234567", json!({"message": "héllo", "destinationNumber": "+15551234567"})).to_string();
+        let msg = sync(ACC, json!({"message": "héllo", "groupInfo": {"groupId": "MAIN="}})).to_string();
         let bytes = format!("{msg}\n").into_bytes();
         // Split inside the two-byte "é" as well, and between lines.
         let cut = msg.find('é').unwrap() + 1;
@@ -880,9 +897,22 @@ mod tests {
     }
 
     #[test]
-    fn private_replies_name_their_group() {
-        assert_eq!(self_text("[Claude] hi", None), "[Claude] hi");
-        assert_eq!(self_text("[Claude] hi", Some("Claude")), "(Consilium · Claude, private)\n[Claude] hi");
+    fn replies_use_one_group_and_include_the_owner_as_a_recipient() {
+        let g = groups();
+        assert_eq!(outbound_group(&g, None), Some("MAIN="));
+        assert_eq!(outbound_group(&g, Some(&Origin::Council)), Some("MAIN="));
+        assert_eq!(outbound_group(&g, Some(&Origin::Agent("claude".into()))), Some("CLAUDE="));
+        assert_eq!(outbound_group(&g, Some(&Origin::Agent("unknown".into()))), None);
+
+        let params = group_send_params("MAIN=", "reply", &["phone-report.pdf".into()]);
+        assert_eq!(params, json!({"groupId":"MAIN=", "message":"reply", "notifySelf":true, "attachments":["phone-report.pdf"]}));
+
+        let cfg = BridgeConfig { account: ACC.into(), ..Default::default() };
+        let success = |group, number| json!({"results":[{"groupId":group, "type":"SUCCESS", "recipientAddress":{"number":number}}]});
+        assert!(group_send_accepted(Some(&cfg), "MAIN=", &success("MAIN=", ACC)));
+        assert!(!group_send_accepted(Some(&cfg), "MAIN=", &success("MAIN=", "+15550000000")));
+        assert!(!group_send_accepted(Some(&cfg), "MAIN=", &success("WRONG=", ACC)));
+        assert!(!group_send_accepted(Some(&cfg), "MAIN=", &json!({"timestamp":42, "results":[]})));
     }
 
     #[test]

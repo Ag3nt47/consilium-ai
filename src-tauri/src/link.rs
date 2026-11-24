@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
@@ -58,10 +58,77 @@ const OUTBOX_LIMIT: usize = 2000;
 const TRIAL_CHUNK_BYTES: usize = 8 * 1024;
 const TRIAL_CHUNKS: usize = 4;
 const TRIAL_INTERVAL: Duration = Duration::from_millis(75);
+const BLUETOOTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The authenticated protocol consumes bytes independently of the physical transport.
+pub trait LinkIo: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> LinkIo for T {}
+pub type LinkStream = Box<dyn LinkIo>;
+type LinkReadHalf = tokio::io::ReadHalf<LinkStream>;
+type LinkWriteHalf = tokio::io::WriteHalf<LinkStream>;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RouteEvidence {
+    Tcp { local_addr: SocketAddr, remote_addr: SocketAddr, local_interface: Option<String> },
+    BluetoothRfcomm { local_adapter: String, remote_device: String, service_uuid: String, channel: u8 },
+}
+
+pub struct LinkConnection {
+    pub stream: LinkStream,
+    pub evidence: RouteEvidence,
+}
+
+impl LinkConnection {
+    fn tcp(stream: TcpStream) -> Result<Self, String> {
+        let _ = stream.set_nodelay(true);
+        let local_addr = stream.local_addr().map_err(|error| error.to_string())?;
+        let remote_addr = stream.peer_addr().map_err(|error| error.to_string())?;
+        let local_interface = if_addrs::get_if_addrs().ok().and_then(|interfaces| interface_name(&interfaces, local_addr.ip()));
+        Ok(Self { stream: Box::new(stream), evidence: RouteEvidence::Tcp { local_addr, remote_addr, local_interface } })
+    }
+}
+
+impl RouteEvidence {
+    fn local_addr(&self) -> Option<SocketAddr> {
+        match self { Self::Tcp { local_addr, .. } => Some(*local_addr), Self::BluetoothRfcomm { .. } => None }
+    }
+
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        match self { Self::Tcp { remote_addr, .. } => Some(*remote_addr), Self::BluetoothRfcomm { .. } => None }
+    }
+
+    fn local_interface(&self) -> Option<String> {
+        match self {
+            Self::Tcp { local_interface, .. } => local_interface.clone(),
+            Self::BluetoothRfcomm { local_adapter, .. } => Some(format!("Bluetooth RFCOMM ({local_adapter})")),
+        }
+    }
+
+    fn local_identity(&self) -> Option<String> {
+        match self {
+            Self::Tcp { local_interface, .. } => local_interface.as_ref().map(|name| format!("tcp:{name}")),
+            Self::BluetoothRfcomm { local_adapter, .. } => Some(format!("rfcomm:{local_adapter}")),
+        }
+    }
+
+    fn remote_endpoint(&self) -> String {
+        match self {
+            Self::Tcp { remote_addr, .. } => remote_addr.to_string(),
+            Self::BluetoothRfcomm { remote_device, .. } => format!("rfcomm://{}", remote_device.to_ascii_uppercase()),
+        }
+    }
+}
+
+/// Fixed service, strict address, and no persisted RFCOMM channel numbers.
+pub(crate) fn bluetooth_address(endpoint: &str) -> Option<String> {
+    crate::bluetooth::device_address(endpoint)
+}
 
 #[derive(Deserialize)]
 pub struct TransferPath {
-    source: IpAddr,
+    #[serde(default)]
+    source: Option<IpAddr>,
     endpoint: String,
 }
 
@@ -69,17 +136,21 @@ pub struct TransferPath {
 struct TransferReceipt {
     sha256: String,
     bytes: usize,
-    receiver_ip: IpAddr,
+    #[serde(default)]
+    receiver_ip: Option<IpAddr>,
     #[serde(default)]
     receiver_interface: Option<String>,
+    #[serde(default)]
+    route_evidence: Option<RouteEvidence>,
     received_ms: u64,
     clock_id: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TransferResult {
-    source: ProbeSource,
+    source: Option<ProbeSource>,
     endpoint: String,
+    route_evidence: Option<RouteEvidence>,
     receipts: Vec<TransferReceipt>,
     error: Option<String>,
 }
@@ -95,8 +166,8 @@ fn distinct_receiver_interfaces(paths: &[TransferResult]) -> bool {
     let mut interfaces = std::collections::HashSet::new();
     paths.len() >= 2 && paths.iter().all(|path| {
         path.receipts.len() == TRIAL_CHUNKS
-            && path.receipts[0].receiver_interface.as_ref().is_some_and(|first| {
-                path.receipts.iter().all(|receipt| receipt.receiver_interface.as_ref() == Some(first))
+            && receipt_interface(&path.receipts[0]).is_some_and(|first| {
+                path.receipts.iter().all(|receipt| receipt_interface(receipt).as_ref() == Some(&first))
                     && interfaces.insert(first)
             })
     })
@@ -120,23 +191,60 @@ fn transfer_overlap(paths: &[TransferResult]) -> Option<u64> {
     })
 }
 
-fn transfer_receipt(payload: &str, receiver_ip: IpAddr) -> Result<TransferReceipt, String> {
+fn receipt_interface(receipt: &TransferReceipt) -> Option<String> {
+    receipt.route_evidence.as_ref().and_then(RouteEvidence::local_identity)
+        .or_else(|| receipt.receiver_interface.as_ref().map(|name| format!("tcp:{name}")))
+}
+
+fn transfer_receipt(payload: &str, evidence: &RouteEvidence) -> Result<TransferReceipt, String> {
     if payload.len() != TRIAL_CHUNK_BYTES || !payload.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid transfer chunk".into());
     }
     static CLOCK: OnceLock<(Instant, String)> = OnceLock::new();
     let (started, clock_id) = CLOCK.get_or_init(|| (Instant::now(), random_hex(16)));
     let received_ms = started.elapsed().as_millis() as u64;
-    let receiver_interface = if_addrs::get_if_addrs().ok()
-        .and_then(|interfaces| interface_name(&interfaces, receiver_ip));
+    let receiver_ip = evidence.local_addr().map(|address| address.ip().to_canonical());
+    let receiver_interface = evidence.local_interface();
     Ok(TransferReceipt {
         sha256: hex(&Sha256::digest(payload.as_bytes())),
         bytes: payload.len(),
         receiver_ip,
         receiver_interface,
+        route_evidence: Some(evidence.clone()),
         received_ms,
         clock_id: clock_id.clone(),
     })
+}
+
+fn receipt_matches_path(receipt: &TransferReceipt, evidence: &RouteEvidence, source: Option<&ProbeSource>) -> bool {
+    match evidence {
+        RouteEvidence::Tcp { local_addr, remote_addr, .. } => {
+            source.is_some_and(|source| source.address.to_canonical() == local_addr.ip().to_canonical())
+                && receipt.receiver_ip == Some(remote_addr.ip().to_canonical())
+                && receipt.route_evidence.as_ref().is_none_or(|receiver| match receiver {
+                    RouteEvidence::Tcp { local_addr, .. } => local_addr.ip().to_canonical() == remote_addr.ip().to_canonical(),
+                    _ => false,
+                })
+        }
+        RouteEvidence::BluetoothRfcomm { local_adapter: sender_adapter, remote_device: receiver_device, service_uuid, channel } => {
+            source.is_none() && receipt.receiver_ip.is_none()
+                && service_uuid.eq_ignore_ascii_case(crate::bluetooth::SERVICE_UUID)
+                && receipt.route_evidence.as_ref().is_some_and(|receiver| match receiver {
+                    RouteEvidence::BluetoothRfcomm { local_adapter, remote_device, service_uuid: receiver_uuid, channel: receiver_channel } => {
+                        local_adapter.eq_ignore_ascii_case(receiver_device) && remote_device.eq_ignore_ascii_case(sender_adapter)
+                            && receiver_uuid.eq_ignore_ascii_case(service_uuid) && receiver_channel == channel
+                    }
+                    _ => false,
+                })
+        }
+    }
+}
+
+fn selected_endpoints(peer: &Peer, endpoints: &[String]) -> Result<Vec<String>, String> {
+    if endpoints.len() > 12 || endpoints.iter().any(|endpoint| !peer.addrs.contains(endpoint)) {
+        return Err("Choose saved endpoints for this linked computer".into());
+    }
+    Ok(peer.addrs.iter().filter(|endpoint| endpoints.is_empty() || endpoints.contains(endpoint)).take(12).cloned().collect())
 }
 
 /// Whether this computer's Signal connection is running, shared with linked computers in each
@@ -307,6 +415,7 @@ pub struct PeerView {
     pub supports_lan_notes: bool,
     pub route: Option<String>,
     pub local_interface: Option<String>,
+    pub route_evidence: Option<RouteEvidence>,
     pub rtt_ms: Option<u64>,
     pub last_seen_ms: Option<u64>,
     pub queued: usize,
@@ -375,6 +484,8 @@ pub struct RouteTest {
     pub authenticated_ms: Option<u64>,
     pub local_ip: Option<std::net::IpAddr>,
     pub local_interface: Option<String>,
+    #[serde(default)]
+    pub route_evidence: Option<RouteEvidence>,
     pub status: String,
 }
 
@@ -396,6 +507,14 @@ pub struct PeerTestReport {
     pub source: Option<ProbeSource>,
     pub queued_outgoing: usize,
     pub summary: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AiHandshakeTestReport {
+    pub handshake: Vec<AiHandshake>,
+    pub route: String,
+    pub route_evidence: Option<RouteEvidence>,
+    pub restored: Option<RouteSwitch>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -428,6 +547,7 @@ struct PeerState {
     route: Option<String>,
     local_interface: Option<String>,
     local_addr: Option<SocketAddr>,
+    route_evidence: Option<RouteEvidence>,
     rtt_ms: Option<u64>,
     last_seen_ms: u64,
     down_since_ms: u64,
@@ -437,6 +557,8 @@ struct PeerState {
     signal_on: bool,
     /// A separate clock: unrelated authenticated traffic cannot renew Signal readiness.
     signal_report: Option<SignalReport>,
+    /// Only an automatic startup diagnostic may own this child. Native publication preempts it.
+    startup_stress: Option<Arc<CancellationToken>>,
     active_ms: u64,
     activity: Vec<String>,
     git: Option<String>,
@@ -499,6 +621,27 @@ pub struct SignalRelayStatus {
     local_direct_active: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignalRelayReadiness<'a> {
+    Unavailable,
+    Available(&'a str),
+    Multiple,
+}
+
+impl SignalRelayStatus {
+    /// Consume immediately: the remaining report lease is measured when the snapshot is queried.
+    pub(crate) fn readiness(&self) -> SignalRelayReadiness<'_> {
+        if self.valid_for_ms == 0 {
+            return SignalRelayReadiness::Unavailable;
+        }
+        match (self.state, self.peer.as_ref()) {
+            ("available", Some(peer)) => SignalRelayReadiness::Available(&peer.name),
+            ("multiple", _) => SignalRelayReadiness::Multiple,
+            _ => SignalRelayReadiness::Unavailable,
+        }
+    }
+}
+
 struct Inner {
     cfg_path: PathBuf,
     outbox_path: PathBuf,
@@ -514,12 +657,59 @@ struct Inner {
     running: Mutex<Option<CancellationToken>>,
     error: Mutex<Option<String>>,
     wake_dial: Notify,
-    stress_test_lock: tokio::sync::Mutex<()>,
+    stress_test_lock: Arc<tokio::sync::Mutex<()>>,
     discovery: Mutex<Option<Arc<discovery::Discovery>>>,
 }
 
 #[derive(Clone)]
 pub struct Link(Arc<Inner>);
+
+/// Manual controls may select every transport; unattended checks stay on IP.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StressOrigin { Manual, StartupIpOnly }
+
+impl StressOrigin {
+    fn eligible_routes(self, routes: &[String]) -> Vec<String> {
+        routes.iter().filter(|address| self == Self::Manual || bluetooth_address(address).is_none()).cloned().collect()
+    }
+}
+
+struct StartupStressScope { link: Link, node_id: String, stop: Arc<CancellationToken> }
+
+impl Drop for StartupStressScope {
+    fn drop(&mut self) {
+        let mut states = self.link.0.peers.lock().unwrap();
+        let Some(state) = states.get_mut(&self.node_id) else { return };
+        if state.startup_stress.as_ref().is_some_and(|current| Arc::ptr_eq(current, &self.stop)) {
+            // The restored TCP session may still use this child. Dropping
+            // the diagnostic registration must not cancel that session.
+            state.startup_stress = None;
+        }
+    }
+}
+
+/// A dropped UI request must release the selected route and keep diagnostics
+/// exclusive until the asynchronous restoration attempt has finished.
+struct RestoreDefaultRoute {
+    link: Link,
+    peer: Peer,
+    token: CancellationToken,
+    run: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for RestoreDefaultRoute {
+    fn drop(&mut self) {
+        let Some(run) = self.run.take() else { return };
+        if self.token.is_cancelled() { return; }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let (link, peer, token) = (self.link.clone(), self.peer.clone(), self.token.clone());
+            runtime.spawn(async move {
+                let _run = run;
+                let _ = link.switch_to(&peer, &peer.addrs, None, &token).await;
+            });
+        }
+    }
+}
 
 impl Link {
     /// Opens (creating if needed) the link state in `dir`. Nothing listens until `start`.
@@ -563,7 +753,7 @@ impl Link {
             running: Mutex::new(None),
             error: Mutex::new(None),
             wake_dial: Notify::new(),
-            stress_test_lock: tokio::sync::Mutex::new(()),
+            stress_test_lock: Arc::new(tokio::sync::Mutex::new(())),
             discovery: Mutex::new(None),
         })))
     }
@@ -621,6 +811,23 @@ impl Link {
             Err(e) => {
                 *self.0.error.lock().unwrap() = Some(format!("couldn't open port {}: {e}", self.0.port));
             }
+        }
+        if !cfg!(test) {
+            let (accepted, mut incoming) = mpsc::channel(8);
+            let listener_token = token.clone();
+            tokio::spawn(async move { let _ = crate::bluetooth::listen(accepted, listener_token).await; });
+            let me = self.clone();
+            let listener_token = token.clone();
+            tokio::spawn(async move {
+                loop {
+                    let connection = tokio::select! {
+                        _ = listener_token.cancelled() => break,
+                        connection = incoming.recv() => match connection { Some(connection) => connection, None => break },
+                    };
+                    let (me, token) = (me.clone(), listener_token.clone());
+                    tokio::spawn(async move { let _ = me.accept_connection(connection, token).await; });
+                }
+            });
         }
         let me = self.clone();
         tokio::spawn(async move { me.supervise(token).await });
@@ -761,6 +968,7 @@ impl Link {
                         supports_lan_notes: s.is_some_and(|s| s.tx.is_some() && s.supports_lan_notes),
                         route: s.and_then(|s| s.tx.as_ref().and(s.route.clone())),
                         local_interface: s.filter(|s| s.tx.is_some()).and_then(|s| s.local_interface.clone()),
+                        route_evidence: s.filter(|s| s.tx.is_some()).and_then(|s| s.route_evidence.clone()),
                         rtt_ms: s.filter(|s| s.tx.is_some()).and_then(|s| s.rtt_ms),
                         last_seen_ms: s.map(|s| s.last_seen_ms).filter(|&t| t > 0),
                         queued: s.map_or(0, |s| s.outbox.len()),
@@ -826,13 +1034,19 @@ impl Link {
         self.persist_outbox(&states)
     }
 
-    /// Manually registers an additional failover route (IP:port) for a paired computer.
+    /// Registers an IP endpoint or the fixed native RFCOMM service for a paired computer.
     pub fn add_peer_route(&self, node_id: &str, address: &str) -> Result<Vec<String>, String> {
-        let addr = with_port(address.trim(), PORT);
-        let parsed = addr.parse::<SocketAddr>().map_err(|e| format!("invalid address: {e}"))?;
-        if !route_ip_allowed(parsed.ip()) {
-            return Err("only local LAN, direct cable/Bluetooth, or Tailscale addresses are allowed".into());
-        }
+        let address = address.trim();
+        let addr = if let Some(address) = bluetooth_address(address) {
+            format!("rfcomm://{address}")
+        } else {
+            let addr = with_port(address, PORT);
+            let parsed = addr.parse::<SocketAddr>().map_err(|e| format!("invalid address: {e}"))?;
+            if !route_ip_allowed(parsed.ip()) {
+                return Err("only local LAN, direct cable/Bluetooth, or Tailscale addresses are allowed".into());
+            }
+            addr
+        };
         let mut cfg = self.0.cfg.lock().unwrap();
         let peer = cfg
             .peers
@@ -905,6 +1119,30 @@ impl Link {
     /// packet received over it, and finally returns the link to the fastest route. A route that
     /// doesn't connect, or carries nothing, fails and the test moves on.
     pub async fn stress_test(&self, node_id: Option<&str>, sources: &[IpAddr]) -> Result<Vec<StressReport>, String> {
+        self.stress_test_selected(node_id, sources, &[]).await
+    }
+
+    pub async fn stress_test_selected(&self, node_id: Option<&str>, sources: &[IpAddr], endpoints: &[String]) -> Result<Vec<StressReport>, String> {
+        self.stress_test_with_origin(node_id, sources, endpoints, StressOrigin::Manual).await
+    }
+
+    pub(crate) async fn startup_stress_test(&self) -> Result<Vec<StressReport>, String> {
+        self.stress_test_with_origin(None, &[], &[], StressOrigin::StartupIpOnly).await
+    }
+
+    fn startup_stress_scope(&self, node_id: &str, parent: &CancellationToken) -> Option<StartupStressScope> {
+        let mut states = self.0.peers.lock().unwrap();
+        let state = states.get_mut(node_id)?;
+        if parent.is_cancelled() || state.tx.as_ref().is_none_or(mpsc::UnboundedSender::is_closed)
+            || matches!(state.route_evidence.as_ref(), Some(RouteEvidence::BluetoothRfcomm { .. })) {
+            return None;
+        }
+        let stop = Arc::new(parent.child_token());
+        state.startup_stress = Some(stop.clone());
+        Some(StartupStressScope { link: self.clone(), node_id: node_id.into(), stop })
+    }
+
+    async fn stress_test_with_origin(&self, node_id: Option<&str>, sources: &[IpAddr], endpoints: &[String], origin: StressOrigin) -> Result<Vec<StressReport>, String> {
         let _run = self.0.stress_test_lock.try_lock().map_err(|_| "A communication stress test is already running")?;
         let token = self.0.running.lock().unwrap().clone().ok_or("linking is off")?;
         if !sources.is_empty() {
@@ -924,13 +1162,18 @@ impl Link {
             None => self.0.cfg.lock().unwrap().peers.clone(),
         };
         let mut out = Vec::new();
-        for peer in peers.into_iter().filter(|p| !p.addrs.is_empty()) {
+        'peer: for peer in peers.into_iter().filter(|p| !p.addrs.is_empty()) {
             let connected = self.0.peers.lock().unwrap().get(&peer.node_id).is_some_and(|s| s.tx.is_some());
             if !connected {
                 let computer = self.peer_name(&peer.node_id);
                 out.push(StressReport { node_id: peer.node_id, computer, routes: vec![], restored: None });
                 continue;
             }
+            let scope = if origin == StressOrigin::StartupIpOnly {
+                let Some(scope) = self.startup_stress_scope(&peer.node_id, &token) else { continue };
+                Some(scope)
+            } else { None };
+            let operation = scope.as_ref().map_or_else(|| token.clone(), |scope| scope.stop.as_ref().clone());
             let updates = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| s.route_updates);
             // Wait briefly for the peer's next authenticated interface advertisement.
             let deadline = tokio::time::Instant::now() + HEARTBEAT + Duration::from_millis(500);
@@ -941,23 +1184,33 @@ impl Link {
                     break;
                 }
                 tokio::select! {
-                    _ = token.cancelled() => return Err("The direct link was turned off".into()),
+                    _ = operation.cancelled() => {
+                        if origin == StressOrigin::StartupIpOnly { continue 'peer; }
+                        return Err("The direct link was turned off".into());
+                    },
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                 }
             }
             let Some(peer) = self.peer(&peer.node_id) else { continue };
+            let selected = origin.eligible_routes(&selected_endpoints(&peer, endpoints)?);
+            let restore_routes = origin.eligible_routes(&peer.addrs);
+            if origin == StressOrigin::StartupIpOnly && (selected.is_empty() || restore_routes.is_empty()) { continue; }
             let mut routes = Vec::new();
             if sources.is_empty() {
-                for addr in peer.addrs.iter().take(12) {
-                    routes.push(self.switch_to(&peer, std::slice::from_ref(addr), None, &token).await);
+                for addr in &selected {
+                    if origin == StressOrigin::StartupIpOnly && operation.is_cancelled() { continue 'peer; }
+                    routes.push(self.switch_to(&peer, std::slice::from_ref(addr), None, &operation).await);
                 }
             } else {
                 for &source in sources {
-                    routes.push(self.switch_to(&peer, &peer.addrs, Some(source), &token).await);
+                    routes.push(self.switch_to(&peer, &selected, Some(source), &operation).await);
                 }
             }
-            // Back to normal: the fastest route that answers.
-            let restored = self.switch_to(&peer, &peer.addrs, None, &token).await;
+            // A native session that arrived meanwhile owns the live route;
+            // neither the pending IP attempt nor restoration may replace it.
+            if origin == StressOrigin::StartupIpOnly && operation.is_cancelled() { continue; }
+            let restored = self.switch_to(&peer, &restore_routes, None, &operation).await;
+            if origin == StressOrigin::StartupIpOnly && operation.is_cancelled() { continue; }
             out.push(StressReport {
                 computer: self.peer_name(&peer.node_id),
                 node_id: peer.node_id,
@@ -973,20 +1226,24 @@ impl Link {
         let label = addrs.first().cloned().unwrap_or_default();
         let generation = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| s.generation);
         let started = std::time::Instant::now();
+        let switch_timeout = if addrs.iter().any(|address| bluetooth_address(address).is_some()) {
+            BLUETOOTH_CONNECT_TIMEOUT + HANDSHAKE_TIMEOUT + HEARTBEAT + Duration::from_secs(2)
+        } else { STRESS_SWITCH_TIMEOUT };
         let attempt = token.child_token();
+        let cleanup = attempt.clone().drop_guard();
         let spawn_dial = || {
             let (me, p, a, t) = (self.clone(), peer.clone(), addrs.to_vec(), attempt.clone());
             tokio::spawn(async move { me.dial_on(p, &a, source, t, None).await })
         };
         let mut dial = spawn_dial();
         let mut switched_at: Option<(String, u64, u64, u64)> = None;
-        let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, requested_source: source, local_interface: None, local_addr: None, detail };
-        while started.elapsed() < STRESS_SWITCH_TIMEOUT {
+        let fail = |addr: String, detail: String| RouteSwitch { kind: route_kind(&addr).into(), addr, ok: false, ms: None, requested_source: source, local_interface: None, local_addr: None, route_evidence: None, detail };
+        while started.elapsed() < switch_timeout {
             tokio::select! {
                 _ = attempt.cancelled() => return fail(label, "the direct link was turned off".into()),
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {}
             }
-            let (route, packets, session_generation, interface, local_addr) = {
+            let (route, packets, session_generation, interface, local_addr, route_evidence) = {
                 let states = self.0.peers.lock().unwrap();
                 let Some(s) = states.get(&peer.node_id) else { continue };
                 // Only a session over one of the routes under test counts. The other computer may
@@ -994,14 +1251,15 @@ impl Link {
                 // it passed a dead route, or reported the working one under the wrong address.
                 if s.generation <= generation || s.tx.is_none() ||
                     source.is_some_and(|ip| s.local_addr.is_none_or(|addr| addr.ip().to_canonical() != ip.to_canonical())) {
-                    (None, 0, s.generation, None, None)
+                    (None, 0, s.generation, None, None, None)
                 } else {
-                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in, s.generation, s.local_interface.clone(), s.local_addr)
+                    (s.route.clone().filter(|r| addrs.contains(r)), s.packets_in, s.generation, s.local_interface.clone(), s.local_addr, s.route_evidence.clone())
                 }
             };
             if let Some(route) = route {
                 match &switched_at {
                     Some((r, before, ms, observed_generation)) if *observed_generation == session_generation && packets > *before => {
+                        let _ = cleanup.disarm();
                         return RouteSwitch {
                             kind: route_kind(r).into(),
                             addr: r.clone(),
@@ -1010,6 +1268,7 @@ impl Link {
                             requested_source: source,
                             local_interface: interface,
                             local_addr,
+                            route_evidence,
                             detail: format!("switched in {ms} ms, traffic confirmed after {} ms", started.elapsed().as_millis()),
                         };
                     }
@@ -1064,6 +1323,43 @@ impl Link {
         }
     }
 
+    pub async fn test_ai_handshake_selected(&self, node_id: &str, endpoint: Option<&str>) -> Result<AiHandshakeTestReport, String> {
+        let run = self.0.stress_test_lock.clone().try_lock_owned().map_err(|_| "A communication test is already running")?;
+        let peer = self.peer(node_id).ok_or("Linked computer not found")?;
+        let token = self.0.running.lock().unwrap().clone().ok_or("linking is off")?;
+        let endpoints = endpoint.map(|endpoint| selected_endpoints(&peer, &[endpoint.to_string()])).transpose()?;
+        let mut run = Some(run);
+        let mut restore = endpoint.map(|_| RestoreDefaultRoute { link: self.clone(), peer: peer.clone(), token: token.clone(), run: run.take() });
+        let selected = if let Some(endpoint) = endpoint {
+            let switched = self.switch_to(&peer, endpoints.as_ref().expect("selected endpoint validated"), None, &token).await;
+            if !switched.ok {
+                return Err(format!("The selected route did not confirm traffic: {}", switched.detail));
+            }
+            Some(endpoint)
+        } else { None };
+        let (generation, route, route_evidence) = {
+            let states = self.0.peers.lock().unwrap();
+            let state = states.get(node_id).filter(|state| state.tx.is_some()).ok_or("The linked computer is offline")?;
+            let route = state.route.clone().ok_or("The active route is unavailable")?;
+            if selected.is_some_and(|selected| selected != route) {
+                return Err("The selected route changed before the AI handshake test".into());
+            }
+            (state.generation, route, state.route_evidence.clone())
+        };
+        let mut outcome = self.test_ai_handshake(node_id).await;
+        if outcome.is_ok() && self.0.peers.lock().unwrap().get(node_id)
+            .is_none_or(|state| state.tx.is_none() || state.generation != generation || state.route.as_deref() != Some(route.as_str())) {
+            outcome = Err("The connection changed during the AI handshake test. Try again.".into());
+        }
+        let restored = if let Some(restore) = restore.as_mut() {
+            let restored = self.switch_to(&peer, &peer.addrs, None, &token).await;
+            // The explicit attempt finished; Drop must not start a second dial.
+            let _ = restore.run.take();
+            Some(restored)
+        } else { None };
+        Ok(AiHandshakeTestReport { handshake: outcome?, route, route_evidence, restored })
+    }
+
     /// Sends bounded authenticated data over separately selected local and remote addresses.
     pub async fn transfer_trial(&self, node_id: &str, paths: Vec<TransferPath>) -> Result<TransferTrial, String> {
         let _run = self.0.stress_test_lock.try_lock().map_err(|_| "A communication test is already running")?;
@@ -1073,18 +1369,30 @@ impl Link {
             return Err("Choose two to four paths to the same linked computer".into());
         }
         let interfaces = if_addrs::get_if_addrs().map_err(|error| error.to_string())?;
-        let mut planned: Vec<(ProbeSource, String)> = Vec::with_capacity(paths.len());
+        let mut planned: Vec<(Option<ProbeSource>, String)> = Vec::with_capacity(paths.len());
         let mut destinations = std::collections::HashSet::new();
         for path in paths {
-            let source = validate_probe_source(&interfaces, path.source)?;
-            let endpoint: SocketAddr = path.endpoint.parse().map_err(|_| "Choose a saved IP endpoint")?;
+            let source = path.source.map(|address| validate_probe_source(&interfaces, address)).transpose()?;
+            let bluetooth = bluetooth_address(&path.endpoint);
+            let destination = if let Some(address) = bluetooth {
+                if source.is_some() { return Err("A native Bluetooth path has no IP source address".into()); }
+                format!("rfcomm:{address}")
+            } else {
+                if source.is_none() { return Err("Choose a local IP source for each TCP path".into()); }
+                let endpoint: SocketAddr = path.endpoint.parse().map_err(|_| "Choose a saved IP or native Bluetooth endpoint")?;
+                format!("tcp:{}", endpoint.ip().to_canonical())
+            };
             if !peer.addrs.contains(&path.endpoint) {
                 return Err("Choose a saved endpoint for this linked computer".into());
             }
-            if !destinations.insert(endpoint.ip().to_canonical())
-                || planned.iter().any(|(existing, _)| existing.interface == source.interface)
+            if !destinations.insert(destination)
+                || planned.iter().any(|(existing, _)| match (existing, &source) {
+                    (Some(existing), Some(source)) => existing.interface == source.interface,
+                    (None, None) => true,
+                    _ => false,
+                })
             {
-                return Err("Each path needs a different local adapter and peer IP address".into());
+                return Err("Each path needs a different local adapter and peer endpoint".into());
             }
             planned.push((source, path.endpoint));
         }
@@ -1114,23 +1422,25 @@ impl Link {
         })
     }
 
-    async fn transfer_path(&self, peer: &Peer, key: &[u8], source: ProbeSource, endpoint: String) -> TransferResult {
+    async fn transfer_path(&self, peer: &Peer, key: &[u8], source: Option<ProbeSource>, endpoint: String) -> TransferResult {
         let mut receipts: Vec<TransferReceipt> = Vec::with_capacity(TRIAL_CHUNKS);
+        let mut route_evidence = None;
         let result: Result<(), String> = async {
             for index in 0..TRIAL_CHUNKS {
                 if index > 0 {
                     tokio::time::sleep(TRIAL_INTERVAL).await;
                 }
-                let receipt = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-                    let stream = connect_with_source(&endpoint, Some(source.address)).await
+                let budget = if bluetooth_address(&endpoint).is_some() { BLUETOOTH_CONNECT_TIMEOUT + HANDSHAKE_TIMEOUT } else { HANDSHAKE_TIMEOUT };
+                let receipt = tokio::time::timeout(budget, async {
+                    let connection = connect_endpoint(&endpoint, source.as_ref().map(|source| source.address)).await
                         .map_err(|error| format!("Could not connect to the peer endpoint: {error}"))?;
-                    let sender_ip = stream.local_addr().map_err(|error| error.to_string())?.ip().to_canonical();
-                    let remote_ip = stream.peer_addr().map_err(|error| error.to_string())?.ip().to_canonical();
+                    let evidence = connection.evidence.clone();
+                    route_evidence = Some(evidence.clone());
                     let chunk = random_hex(TRIAL_CHUNK_BYTES / 2);
-                    let reply = self.exchange_probe(peer, key, stream, Some(&chunk)).await?;
+                    let reply = self.exchange_probe(peer, key, connection, Some(&chunk)).await?;
                     let receipt: TransferReceipt = serde_json::from_value(reply["transfer_receipt"].clone())
                         .map_err(|_| "The linked computer did not return a payload receipt. Update both computers.")?;
-                    if sender_ip != source.address.to_canonical() || receipt.receiver_ip != remote_ip
+                    if !receipt_matches_path(&receipt, &evidence, source.as_ref())
                         || receipt.bytes != chunk.len() || receipt.sha256 != hex(&Sha256::digest(chunk.as_bytes()))
                     {
                         return Err("The payload receipt did not match the requested path or checksum".into());
@@ -1146,41 +1456,47 @@ impl Link {
             }
             Ok(())
         }.await;
-        TransferResult { source, endpoint, receipts, error: result.err() }
+        TransferResult { source, endpoint, route_evidence, receipts, error: result.err() }
     }
 
     /// Tests connectivity, route latency, and sync alignment for a paired computer.
     pub async fn test_peer(&self, node_id: &str, source: Option<IpAddr>) -> Result<PeerTestReport, String> {
+        self.test_peer_selected(node_id, source, &[]).await
+    }
+
+    pub async fn test_peer_selected(&self, node_id: &str, source: Option<IpAddr>, endpoints: &[String]) -> Result<PeerTestReport, String> {
         let peer = self.peer(node_id).ok_or_else(|| format!("computer {node_id} not found"))?;
         let key = peer_key(&peer)?;
         let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
         let selected = source.map(|address| validate_probe_source(&interfaces, address)).transpose()?;
         let mut probes = tokio::task::JoinSet::new();
-        for (index, addr) in peer.addrs.iter().take(12).cloned().enumerate() {
+        for (index, addr) in selected_endpoints(&peer, endpoints)?.into_iter()
+            .filter(|address| source.is_none() || bluetooth_address(address).is_none()).enumerate() {
             let link = self.clone();
             let peer = peer.clone();
             let key = key.clone();
             probes.spawn(async move {
                 let kind = route_kind(&addr).to_string();
                 let started = std::time::Instant::now();
-                let timeout = Duration::from_secs(1);
-                let (rtt_ms, authenticated_ms, local_ip, status) = match tokio::time::timeout(timeout, connect_with_source(&addr, source)).await {
-                    Ok(Ok(stream)) => {
+                let timeout = if bluetooth_address(&addr).is_some() { BLUETOOTH_CONNECT_TIMEOUT } else { Duration::from_secs(1) };
+                let (rtt_ms, authenticated_ms, local_ip, route_evidence, status) = match tokio::time::timeout(timeout, connect_endpoint(&addr, source)).await {
+                    Ok(Ok(connection)) => {
                         let elapsed = started.elapsed().as_millis() as u64;
-                        let local_ip = stream.local_addr().ok().map(|address| address.ip());
-                        let result = tokio::time::timeout(timeout, link.probe_route(&peer, &key, stream)).await;
+                        let evidence = connection.evidence.clone();
+                        let local_ip = evidence.local_addr().map(|address| address.ip());
+                        let result = tokio::time::timeout(timeout, link.probe_route(&peer, &key, connection)).await;
                         let authenticated_ms = matches!(result, Ok(Ok(())))
                             .then(|| started.elapsed().as_millis() as u64);
                         let status = match authenticated_ms {
                             Some(total) => format!("Authenticated probe passed in {total} ms"),
-                            None => format!("TCP connected in {elapsed} ms · peer authentication unconfirmed"),
+                            None => format!("{} connected in {elapsed} ms · peer authentication unconfirmed", if local_ip.is_some() { "TCP" } else { "RFCOMM" }),
                         };
-                        (Some(elapsed), authenticated_ms, local_ip, status)
+                        (Some(elapsed), authenticated_ms, local_ip, Some(evidence), status)
                     }
-                    Ok(Err(_)) => (None, None, None, "Refused or unreachable".to_string()),
-                    Err(_) => (None, None, None, "Timed out".to_string()),
+                    Ok(Err(_)) => (None, None, None, None, "Refused or unreachable".to_string()),
+                    Err(_) => (None, None, None, None, "Timed out".to_string()),
                 };
-                (index, RouteTest { addr, kind, reachable: rtt_ms.is_some(), rtt_ms, authenticated_ms, local_ip, local_interface: None, status })
+                (index, RouteTest { addr, kind, reachable: rtt_ms.is_some(), rtt_ms, authenticated_ms, local_ip, local_interface: route_evidence.as_ref().and_then(RouteEvidence::local_interface), route_evidence, status })
             });
         }
         let mut completed = Vec::new();
@@ -1189,7 +1505,7 @@ impl Link {
         }
         completed.sort_by_key(|(index, _)| *index);
         let routes: Vec<_> = completed.into_iter().map(|(_, mut route)| {
-            route.local_interface = route.local_ip.and_then(|ip| interface_name(&interfaces, ip));
+            if route.local_interface.is_none() { route.local_interface = route.local_ip.and_then(|ip| interface_name(&interfaces, ip)); }
             route
         }).collect();
 
@@ -1206,8 +1522,12 @@ impl Link {
             )
         };
 
-        let handshake_ok = connected;
-        let summary = if connected {
+        let handshake_ok = if endpoints.is_empty() { connected }
+            else { !routes.is_empty() && routes.iter().all(|route| route.authenticated_ms.is_some()) };
+        let summary = if !endpoints.is_empty() {
+            if handshake_ok { "The selected routes returned authenticated replies. The live session was left in place.".into() }
+            else { "The selected routes did not all authenticate. An existing session on another route does not verify them.".into() }
+        } else if connected {
             let latency = rtt_ms.map(|ms| format!(" · {ms} ms round trip")).unwrap_or_default();
             format!(
                 "Authenticated session via {}{latency} · {} outgoing queued",
@@ -1428,8 +1748,16 @@ impl Link {
     }
 
     async fn accept(self, stream: TcpStream, from: SocketAddr, token: CancellationToken) -> Result<(), String> {
-        let _ = stream.set_nodelay(true);
-        let (r, mut w) = stream.into_split();
+        let mut connection = LinkConnection::tcp(stream)?;
+        if let RouteEvidence::Tcp { remote_addr, .. } = &mut connection.evidence { *remote_addr = from; }
+        self.accept_connection(connection, token).await
+    }
+
+    async fn accept_connection(self, connection: LinkConnection, token: CancellationToken) -> Result<(), String> {
+        let LinkConnection { stream, evidence } = connection;
+        let from = evidence.remote_addr();
+        let route = evidence.remote_endpoint();
+        let (r, mut w) = tokio::io::split(stream);
         let mut r = BufReader::new(r);
         let nonce = random_hex(16);
         write_wire(&mut w, &Wire::Challenge { nonce: nonce.clone() }).await?;
@@ -1438,6 +1766,7 @@ impl Link {
             .map_err(|_| "handshake timed out".to_string())??;
         match first {
             Wire::PairStart { node_id, name, port, spake } => {
+                let from = from.ok_or("Pair this computer through its existing trusted IP connection before adding Bluetooth")?;
                 self.pair_as_host(r, w, from, node_id, name, port, spake).await
             }
             Wire::Sealed { from: node, n, c } => {
@@ -1455,11 +1784,13 @@ impl Link {
                     let mut payload = json!({ "route_probe_ack": probe_nonce });
                     if let Some(chunk) = probe.get("transfer_chunk") {
                         let chunk = chunk.as_str().ok_or("invalid transfer chunk")?;
-                        let receiver_ip = w.local_addr().map_err(|error| error.to_string())?.ip().to_canonical();
-                        payload["transfer_receipt"] = json!(transfer_receipt(chunk, receiver_ip)?);
+                        payload["transfer_receipt"] = json!(transfer_receipt(chunk, &evidence)?);
                     }
                     let reply = self.route_probe_frame(&key, payload)?;
-                    tokio::time::timeout(HANDSHAKE_TIMEOUT, w.write_all(reply.as_bytes())).await
+                    tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+                        w.write_all(reply.as_bytes()).await?;
+                        w.flush().await
+                    }).await
                         .map_err(|_| "route probe reply timed out".to_string())?
                         .map_err(|err| err.to_string())?;
                     return Ok(());
@@ -1469,13 +1800,13 @@ impl Link {
                     return Err("stale hello".into());
                 }
                 let their_nonce = h.get("nonce").and_then(Value::as_str).unwrap_or_default().to_string();
-                self.learn_addrs(&peer.node_id, h, Some(from));
+                self.learn_addrs(&peer.node_id, h, from);
                 let (me, _) = self.me();
                 let mine = random_hex(16);
                 let reply = self.hello(&me, &key, &their_nonce, &mine)?;
                 let line = seal(&me, &key, &reply)?;
                 w.write_all(format!("{line}\n").as_bytes()).await.map_err(|e| e.to_string())?;
-                self.session(peer, key, r, w, from.to_string(), None, token).await;
+                self.session(peer, key, r, w, route, evidence, None, token).await;
                 Ok(())
             }
             _ => Err("unexpected first frame".into()),
@@ -1485,8 +1816,8 @@ impl Link {
     #[allow(clippy::too_many_arguments)]
     async fn pair_as_host(
         &self,
-        mut r: BufReader<tokio::net::tcp::OwnedReadHalf>,
-        mut w: tokio::net::tcp::OwnedWriteHalf,
+        mut r: BufReader<LinkReadHalf>,
+        mut w: LinkWriteHalf,
         from: SocketAddr,
         their_id: String,
         their_name: String,
@@ -1563,7 +1894,8 @@ impl Link {
     }
 
     async fn pair_as_joiner(&self, stream: TcpStream, code: &str) -> Result<Peer, String> {
-        let (r, mut w) = stream.into_split();
+        let stream: LinkStream = Box::new(stream);
+        let (r, mut w) = tokio::io::split(stream);
         let mut r = BufReader::new(r);
         let Wire::Challenge { .. } = read_wire(&mut r).await? else {
             return Err("that address isn't a Consilium link".into());
@@ -1621,7 +1953,10 @@ impl Link {
         let mut addrs: Vec<String> = hello
             .get("addrs")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).filter_map(|s| s.parse::<SocketAddr>().ok()).filter(|a| ok(a)).map(|s| s.to_string()).take(8).collect())
+            .map(|a| a.iter().filter_map(Value::as_str).filter_map(|s| {
+                bluetooth_address(s).map(|address| format!("rfcomm://{address}"))
+                    .or_else(|| s.parse::<SocketAddr>().ok().filter(&ok).map(|address| address.to_string()))
+            }).take(8).collect())
             .unwrap_or_default();
         if let (Some(obs), Some(first)) = (observed, addrs.first().and_then(|a| a.parse::<SocketAddr>().ok())) {
             let seen = SocketAddr::new(obs.ip(), first.port());
@@ -1722,9 +2057,9 @@ impl Link {
                 _ = token.cancelled() => return Ok(()),
                 result = fastest_route(&remaining, source) => result,
             };
-            let Some((stream, route, rtt)) = result else { return Err(failure) };
-            let _ = stream.set_nodelay(true);
-            let (r, mut w) = stream.into_split();
+            let Some((connection, route, rtt)) = result else { return Err(failure) };
+            let LinkConnection { stream, evidence } = connection;
+            let (r, mut w) = tokio::io::split(stream);
             let mut r = BufReader::new(r);
             let reply = tokio::select! {
                 _ = token.cancelled() => return Ok(()),
@@ -1734,7 +2069,7 @@ impl Link {
                 Ok(reply) => {
                     drop(pending);
                     self.learn_addrs(&peer.node_id, &reply, route.parse().ok());
-                    self.session(peer, key, r, w, route, Some(rtt), token).await;
+                    self.session(peer, key, r, w, route, evidence, Some(rtt), token).await;
                     return Ok(());
                 }
                 Err(error) => {
@@ -1747,13 +2082,12 @@ impl Link {
 
     /// A diagnostic handshake does not replace a live session. Older peers close the probe
     /// before registering it because this first authenticated frame has no session hello.
-    async fn probe_route(&self, peer: &Peer, key: &[u8], stream: TcpStream) -> Result<(), String> {
-        self.exchange_probe(peer, key, stream, None).await.map(|_| ())
+    async fn probe_route(&self, peer: &Peer, key: &[u8], connection: LinkConnection) -> Result<(), String> {
+        self.exchange_probe(peer, key, connection, None).await.map(|_| ())
     }
 
-    async fn exchange_probe(&self, peer: &Peer, key: &[u8], stream: TcpStream, chunk: Option<&str>) -> Result<Value, String> {
-        let _ = stream.set_nodelay(true);
-        let (r, mut w) = stream.into_split();
+    async fn exchange_probe(&self, peer: &Peer, key: &[u8], connection: LinkConnection, chunk: Option<&str>) -> Result<Value, String> {
+        let (r, mut w) = tokio::io::split(connection.stream);
         let mut r = BufReader::new(r);
         let Wire::Challenge { nonce } = read_wire(&mut r).await
             .map_err(|error| format!("Could not read the peer challenge: {error}"))? else {
@@ -1795,8 +2129,8 @@ impl Link {
         &self,
         peer: &Peer,
         key: &[u8],
-        r: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
-        w: &mut tokio::net::tcp::OwnedWriteHalf,
+        r: &mut BufReader<LinkReadHalf>,
+        w: &mut LinkWriteHalf,
     ) -> Result<Value, String> {
         let (me, _) = self.me();
         tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
@@ -1829,18 +2163,20 @@ impl Link {
         &self,
         peer: Peer,
         key: Vec<u8>,
-        mut r: BufReader<tokio::net::tcp::OwnedReadHalf>,
-        mut w: tokio::net::tcp::OwnedWriteHalf,
+        mut r: BufReader<LinkReadHalf>,
+        mut w: LinkWriteHalf,
         route: String,
+        evidence: RouteEvidence,
         rtt_ms: Option<u64>,
         token: CancellationToken,
     ) {
         let (me, _) = self.me();
-        let local_addr = r.get_ref().local_addr().ok();
-        let local_interface = local_addr.and_then(|socket| {
-            let interfaces = if_addrs::get_if_addrs().ok()?;
-            interface_name(&interfaces, socket.ip())
-        });
+        let local_addr = evidence.local_addr();
+        let local_interface = evidence.local_interface();
+        // Byte activity only keeps a native frame's idle watchdog alive. It
+        // never updates authenticated packet timestamps or diagnostic counters.
+        let read_progress = matches!(&evidence, RouteEvidence::BluetoothRfcomm { .. })
+            .then(|| Arc::new(NativeReadProgress::new(Instant::now())));
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let token = token.child_token();
         let generation = {
@@ -1849,6 +2185,11 @@ impl Link {
                 return;
             }
             let s = states.entry(peer.node_id.clone()).or_default();
+            if matches!(&evidence, RouteEvidence::BluetoothRfcomm { .. }) {
+                // Under the publication lock: a late startup TCP session must
+                // observe cancellation before it can replace this native one.
+                if let Some(startup) = s.startup_stress.take() { startup.cancel(); }
+            }
             if let Some(previous) = s.session_cancel.replace(token.clone()) {
                 previous.cancel();
             }
@@ -1857,6 +2198,7 @@ impl Link {
             s.route = Some(route);
             s.local_interface = local_interface;
             s.local_addr = local_addr;
+            s.route_evidence = Some(evidence);
             s.rtt_ms = rtt_ms;
             s.last_seen_ms = now_ms();
             s.down_since_ms = 0;
@@ -1875,9 +2217,12 @@ impl Link {
             link.0.peers.lock().unwrap().get(&peer.node_id).is_some_and(|s| s.generation == generation && s.tx.is_some())
         };
         let (in_tx, mut in_rx) = mpsc::channel::<Result<Wire, String>>(64);
+        let reader_progress = read_progress.clone();
         let reader = tokio::spawn(async move {
             loop {
-                let frame = read_wire(&mut r).await;
+                let frame = if let Some(progress) = &reader_progress {
+                    read_native_wire(&mut r, progress).await
+                } else { read_wire(&mut r).await };
                 let stop = frame.is_err();
                 if in_tx.send(frame).await.is_err() || stop {
                     return;
@@ -1905,7 +2250,12 @@ impl Link {
                 _ = beat.tick() => {
                     if !current(self) { break; }
                     let silent = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| now_ms().saturating_sub(s.last_seen_ms));
-                    if silent > DEAD_AFTER_MS { break; }
+                    // A bounded queue may already hold frames received while
+                    // a large outgoing write was in progress. Validate them
+                    // before declaring the native reader silent.
+                    let native_active = read_progress.as_ref().is_some_and(|progress|
+                        progress.recent(Instant::now()) || !in_rx.is_empty());
+                    if silent > DEAD_AFTER_MS && !native_active { break; }
                     let ping = PeerPacket::signed(
                         &me,
                         now_ms(),
@@ -1933,6 +2283,7 @@ impl Link {
         }
         token.cancel();
         reader.abort();
+        let _ = reader.await;
         let mut states = self.0.peers.lock().unwrap();
         if let Some(s) = states.get_mut(&peer.node_id) {
             if s.generation == generation {
@@ -2037,6 +2388,25 @@ async fn connect_with_source(endpoint: &str, source: Option<IpAddr>) -> std::io:
     socket.connect(target).await
 }
 
+fn connect_timeout(endpoint: &str) -> Duration {
+    if bluetooth_address(endpoint).is_some() { BLUETOOTH_CONNECT_TIMEOUT } else { CONNECT_TIMEOUT }
+}
+
+async fn connect_endpoint(endpoint: &str, source: Option<IpAddr>) -> Result<LinkConnection, String> {
+    if let Some(address) = bluetooth_address(endpoint) {
+        if source.is_some() { return Err("Native Bluetooth has no IP source address".into()); }
+        let token = CancellationToken::new();
+        // Aborting a losing route race must cancel native connection attempts too.
+        let guard = token.clone().drop_guard();
+        let result = crate::bluetooth::connect(&address, token).await;
+        if result.is_ok() { let _ = guard.disarm(); }
+        result
+    } else {
+        let stream = connect_with_source(endpoint, source).await.map_err(|error| error.to_string())?;
+        LinkConnection::tcp(stream)
+    }
+}
+
 fn validate_probe_source(interfaces: &[if_addrs::Interface], address: IpAddr) -> Result<ProbeSource, &'static str> {
     interface_name(interfaces, address)
         .filter(|_| route_ip_allowed(address))
@@ -2065,6 +2435,7 @@ fn interface_name(interfaces: &[if_addrs::Interface], ip: std::net::IpAddr) -> O
 }
 
 fn route_kind(addr: &str) -> &'static str {
+    if bluetooth_address(addr).is_some() { return "Bluetooth RFCOMM"; }
     match addr.parse::<SocketAddr>().map(|socket| socket.ip().to_canonical()) {
         Ok(ip) if ip.is_loopback() => "Loopback",
         Ok(std::net::IpAddr::V4(ip)) if ip.is_link_local() => "Link-local",
@@ -2088,6 +2459,7 @@ pub struct RouteSwitch {
     pub requested_source: Option<IpAddr>,
     pub local_interface: Option<String>,
     pub local_addr: Option<SocketAddr>,
+    pub route_evidence: Option<RouteEvidence>,
     pub detail: String,
 }
 
@@ -2137,13 +2509,13 @@ impl StressReport {
     }
 }
 
-async fn fastest_route(addrs: &[String], source: Option<IpAddr>) -> Option<(TcpStream, String, u64)> {
+async fn fastest_route(addrs: &[String], source: Option<IpAddr>) -> Option<(LinkConnection, String, u64)> {
     let mut probes = tokio::task::JoinSet::new();
     for addr in addrs.iter().take(12).cloned() {
         probes.spawn(async move {
             let started = std::time::Instant::now();
-            let stream = tokio::time::timeout(CONNECT_TIMEOUT, connect_with_source(&addr, source)).await.ok()?.ok()?;
-            Some((stream, addr, started.elapsed().as_millis() as u64))
+            let connection = tokio::time::timeout(connect_timeout(&addr), connect_endpoint(&addr, source)).await.ok()?.ok()?;
+            Some((connection, addr, started.elapsed().as_millis() as u64))
         });
     }
     while let Some(result) = probes.join_next().await {
@@ -2181,12 +2553,61 @@ async fn write_session_frame<W: AsyncWriteExt + Unpin>(
 }
 
 
+#[derive(Clone, Copy)]
+struct NativeFrameBudget { idle: Duration, absolute: Duration }
+const NATIVE_FRAME_BUDGET: NativeFrameBudget = NativeFrameBudget {
+    idle: Duration::from_millis(DEAD_AFTER_MS), absolute: Duration::from_secs(180),
+};
+
+struct NativeReadProgress { last_byte: Mutex<Instant> }
+impl NativeReadProgress {
+    fn new(now: Instant) -> Self { Self { last_byte: Mutex::new(now) } }
+    fn record(&self, now: Instant) { *self.last_byte.lock().unwrap_or_else(|e| e.into_inner()) = now; }
+    fn recent(&self, now: Instant) -> bool {
+        now.saturating_duration_since(*self.last_byte.lock().unwrap_or_else(|e| e.into_inner())) < NATIVE_FRAME_BUDGET.idle
+    }
+}
+
+struct NativeFrameDeadline { started: Instant, last_byte: Instant, budget: NativeFrameBudget }
+impl NativeFrameDeadline {
+    fn new(now: Instant, budget: NativeFrameBudget) -> Self { Self { started: now, last_byte: now, budget } }
+    fn remaining(&self, now: Instant) -> Result<Duration, String> {
+        let elapsed = now.saturating_duration_since(self.started);
+        let idle = now.saturating_duration_since(self.last_byte);
+        if elapsed >= self.budget.absolute { return Err("Bluetooth frame exceeded its absolute deadline".into()); }
+        if idle >= self.budget.idle { return Err("Bluetooth frame stopped receiving data".into()); }
+        Ok((self.budget.absolute - elapsed).min(self.budget.idle - idle))
+    }
+    fn record(&mut self, now: Instant) -> Result<(), String> {
+        self.remaining(now)?;
+        self.last_byte = now;
+        Ok(())
+    }
+}
+
 async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R) -> Result<String, String> {
+    read_line_clocked(r, None, Instant::now).await
+}
+
+async fn read_line_clocked<R: AsyncBufRead + Unpin>(
+    r: &mut R, native: Option<(&NativeReadProgress, NativeFrameBudget)>, now: impl Fn() -> Instant,
+) -> Result<String, String> {
+    let mut watchdog = native.map(|(_, budget)| NativeFrameDeadline::new(now(), budget));
     let mut buf = Vec::new();
     loop {
-        let avail = r.fill_buf().await.map_err(|e| e.to_string())?;
+        let avail = if let Some(watchdog) = &watchdog {
+            let wait = watchdog.remaining(now())?;
+            tokio::time::timeout(wait, r.fill_buf()).await
+                .map_err(|_| watchdog.remaining(now()).err().unwrap_or_else(|| "Bluetooth frame read timed out".into()))?
+                .map_err(|error| error.to_string())?
+        } else { r.fill_buf().await.map_err(|error| error.to_string())? };
         if avail.is_empty() {
             return Err("connection closed".into());
+        }
+        if let Some(watchdog) = &mut watchdog {
+            let now = now();
+            watchdog.record(now)?;
+            if let Some((progress, _)) = native { progress.record(now); }
         }
         if let Some(i) = avail.iter().position(|&b| b == b'\n') {
             buf.extend_from_slice(&avail[..i]);
@@ -2208,6 +2629,11 @@ async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R) -> Result<String, String>
 
 async fn read_wire<R: AsyncBufRead + Unpin>(r: &mut R) -> Result<Wire, String> {
     serde_json::from_str(&read_line(r).await?).map_err(|_| "malformed frame".into())
+}
+
+async fn read_native_wire<R: AsyncBufRead + Unpin>(r: &mut R, progress: &NativeReadProgress) -> Result<Wire, String> {
+    serde_json::from_str(&read_line_clocked(r, Some((progress, NATIVE_FRAME_BUDGET)), Instant::now).await?)
+        .map_err(|_| "malformed frame".into())
 }
 
 async fn write_wire<W: AsyncWriteExt + Unpin>(w: &mut W, wire: &Wire) -> Result<(), String> {
@@ -2408,6 +2834,9 @@ fn local_addrs(port: u16) -> Vec<String> {
         .collect();
     out.sort();
     out.dedup();
+    if let Some(endpoint) = crate::bluetooth::local_endpoint().filter(|endpoint| bluetooth_address(endpoint).is_some()) {
+        out.insert(0, endpoint);
+    }
     out.truncate(8);
     out
 }
@@ -2626,6 +3055,299 @@ mod tests {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
+    /// Fragment arrival advances a monotonic test clock without making CI wait
+    /// for real seconds or depending on overloaded-worker timer precision.
+    struct ClockedFragments {
+        chunks: Vec<Vec<u8>>, index: usize, offset: usize, fresh: bool,
+        clock: Arc<Mutex<Instant>>, step: Duration,
+    }
+    impl ClockedFragments {
+        fn new(input: &[u8], chunk: usize, step: Duration, now: Instant) -> Self {
+            Self { chunks: input.chunks(chunk).map(<[u8]>::to_vec).collect(), index: 0, offset: 0,
+                fresh: true, clock: Arc::new(Mutex::new(now)), step }
+        }
+    }
+    impl AsyncBufRead for ClockedFragments {
+        fn poll_fill_buf(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<&[u8]>> {
+            let this = self.get_mut();
+            if this.index == this.chunks.len() { return std::task::Poll::Ready(Ok(&[])); }
+            if this.fresh { *this.clock.lock().unwrap() += this.step; this.fresh = false; }
+            std::task::Poll::Ready(Ok(&this.chunks[this.index][this.offset..]))
+        }
+        fn consume(self: std::pin::Pin<&mut Self>, amount: usize) {
+            let this = self.get_mut();
+            this.offset += amount;
+            if this.index < this.chunks.len() && this.offset == this.chunks[this.index].len() {
+                this.index += 1; this.offset = 0; this.fresh = true;
+            }
+        }
+    }
+    impl AsyncRead for ClockedFragments {
+        fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, output: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+            let input = std::task::ready!(self.as_mut().poll_fill_buf(cx))?;
+            let count = input.len().min(output.remaining());
+            output.put_slice(&input[..count]);
+            self.consume(count);
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_native_frame_can_arrive_slowly_while_each_fragment_makes_progress() {
+        let now = Instant::now();
+        let mut input = serde_json::to_string(&Wire::Challenge { nonce: "a".repeat(32) }).unwrap();
+        input.push('\n');
+        let mut reader = ClockedFragments::new(input.as_bytes(), 8, Duration::from_secs(3), now);
+        let clock = reader.clock.clone();
+        let progress = NativeReadProgress::new(now);
+        let line = read_line_clocked(&mut reader, Some((&progress, NATIVE_FRAME_BUDGET)), || *clock.lock().unwrap()).await.unwrap();
+        assert_eq!(line, input.trim_end());
+        let finished = *clock.lock().unwrap();
+        assert!(finished.duration_since(now) > Duration::from_millis(DEAD_AFTER_MS));
+        assert!(progress.recent(finished));
+    }
+
+    #[tokio::test]
+    async fn a_native_frame_with_no_incoming_bytes_hits_its_idle_deadline() {
+        let (stream, _held_open) = tokio::io::duplex(17);
+        let mut reader = BufReader::new(stream);
+        let progress = NativeReadProgress::new(Instant::now());
+        let budget = NativeFrameBudget { idle: Duration::from_millis(5), absolute: Duration::from_secs(180) };
+        let error = read_line_clocked(&mut reader, Some((&progress, budget)), Instant::now).await.unwrap_err();
+        assert!(error.contains("stopped receiving data"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn continuous_native_progress_cannot_extend_a_frames_absolute_deadline() {
+        let now = Instant::now();
+        let mut reader = ClockedFragments::new(b"{\"t\":\"challenge\",\"nonce\":\"still arriving\"}\n", 4, Duration::from_secs(3), now);
+        let clock = reader.clock.clone();
+        let progress = NativeReadProgress::new(now);
+        let budget = NativeFrameBudget { idle: Duration::from_secs(4), absolute: Duration::from_secs(10) };
+        let error = read_line_clocked(&mut reader, Some((&progress, budget)), || *clock.lock().unwrap()).await.unwrap_err();
+        assert!(error.contains("absolute deadline"), "{error}");
+        assert!(progress.recent(*clock.lock().unwrap()), "The absolute limit must win even though the last fragment is recent");
+    }
+
+    #[tokio::test]
+    async fn a_native_frame_still_obeys_the_existing_three_megabyte_limit() {
+        let now = Instant::now();
+        let input = vec![b'a'; LINE_LIMIT + 1];
+        let mut reader = ClockedFragments::new(&input, 64 * 1024, Duration::ZERO, now);
+        let clock = reader.clock.clone();
+        let progress = NativeReadProgress::new(now);
+        let error = read_line_clocked(&mut reader, Some((&progress, NATIVE_FRAME_BUDGET)), || *clock.lock().unwrap()).await.unwrap_err();
+        assert_eq!(error, "frame too large");
+    }
+
+    fn memory_evidence(local: &str, remote: &str) -> RouteEvidence {
+        RouteEvidence::BluetoothRfcomm {
+            local_adapter: local.into(), remote_device: remote.into(),
+            service_uuid: crate::bluetooth::SERVICE_UUID.into(), channel: 7,
+        }
+    }
+
+    fn trust_memory_pair(host: &Link, client: &Link) {
+        for (here, there) in [(host, client), (client, host)] {
+            let (node_id, name) = there.me();
+            here.remember(Peer { node_id, name, key: "42".repeat(32), addrs: vec![] }).unwrap();
+        }
+    }
+
+    /// Native writes can be queued before completion. Hold the final probe
+    /// response until flush so dropping the stream cannot accidentally pass.
+    struct FlushFinalReply {
+        inner: tokio::io::DuplexStream,
+        challenge_sent: bool,
+        pending: Vec<u8>,
+    }
+    impl AsyncRead for FlushFinalReply {
+        fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, output: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_read(cx, output)
+        }
+    }
+    impl AsyncWrite for FlushFinalReply {
+        fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, input: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+            if self.challenge_sent {
+                if self.pending.len() + input.len() > 64 * 1024 { return std::task::Poll::Ready(Err(std::io::ErrorKind::OutOfMemory.into())); }
+                self.pending.extend_from_slice(input);
+                return std::task::Poll::Ready(Ok(input.len()));
+            }
+            let result = std::pin::Pin::new(&mut self.inner).poll_write(cx, input);
+            if let std::task::Poll::Ready(Ok(count)) = result {
+                self.challenge_sent |= input[..count].contains(&b'\n');
+            }
+            result
+        }
+        fn poll_flush(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            while !this.pending.is_empty() {
+                match std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.pending) {
+                    std::task::Poll::Ready(Ok(count)) if count > 0 => { this.pending.drain(..count); }
+                    std::task::Poll::Ready(Ok(_)) => return std::task::Poll::Ready(Err(std::io::ErrorKind::WriteZero.into())),
+                    std::task::Poll::Ready(Err(error)) => return std::task::Poll::Ready(Err(error)),
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                }
+            }
+            std::pin::Pin::new(&mut this.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> { self.poll_flush(cx) }
+    }
+
+    /// In-memory bytes exercise non-IP transport framing; this is not a hardware Bluetooth result.
+    async fn memory_session(host: &Link, client: &Link, token: CancellationToken) ->
+        (tokio::task::JoinHandle<Result<(), String>>, tokio::task::JoinHandle<()>) {
+        let (server, stream) = tokio::io::duplex(17);
+        let receiver = host.clone();
+        let server_token = token.clone();
+        let receiving = tokio::spawn(async move {
+            receiver.accept_connection(LinkConnection {
+                stream: Box::new(server), evidence: memory_evidence("020000000001", "020000000002"),
+            }, server_token).await
+        });
+        let peer = client.peer(&host.me().0).unwrap();
+        let key = peer_key(&peer).unwrap();
+        let evidence = memory_evidence("020000000002", "020000000001");
+        let stream: LinkStream = Box::new(stream);
+        let (read, mut write) = tokio::io::split(stream);
+        let mut read = BufReader::new(read);
+        client.authenticate_route(&peer, &key, &mut read, &mut write).await.unwrap();
+        let sender = client.clone();
+        let sending = tokio::spawn(async move {
+            sender.session(peer, key, read, write, evidence.remote_endpoint(), evidence, None, token).await;
+        });
+        (receiving, sending)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_ip_streams_authenticate_payload_receipts_without_creating_ip_evidence() {
+        let dir = std::env::temp_dir().join(format!("link-native-probe-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (client, _) = node(&dir, "client");
+        trust_memory_pair(&host, &client);
+        let peer = client.peer(&host.me().0).unwrap();
+        let key = peer_key(&peer).unwrap();
+        let (server, stream) = tokio::io::duplex(17);
+        let token = CancellationToken::new();
+        let receiver = host.clone();
+        let receiving = tokio::spawn(async move {
+            receiver.accept_connection(LinkConnection {
+                stream: Box::new(FlushFinalReply { inner: server, challenge_sent: false, pending: Vec::new() }),
+                evidence: memory_evidence("020000000001", "020000000002"),
+            }, token).await
+        });
+        let evidence = memory_evidence("020000000002", "020000000001");
+        let chunk = random_hex(TRIAL_CHUNK_BYTES / 2);
+        let reply = tokio::time::timeout(Duration::from_secs(5), client.exchange_probe(&peer, &key, LinkConnection {
+            stream: Box::new(stream), evidence: evidence.clone(),
+        }, Some(&chunk))).await.unwrap().unwrap();
+        receiving.await.unwrap().unwrap();
+        let mut receipt: TransferReceipt = serde_json::from_value(reply["transfer_receipt"].clone()).unwrap();
+        assert_eq!(receipt.bytes, TRIAL_CHUNK_BYTES);
+        assert_eq!(receipt.sha256, hex(&Sha256::digest(chunk.as_bytes())));
+        assert!(receipt_matches_path(&receipt, &evidence, None));
+        assert_eq!(receipt.receiver_ip, None);
+        assert_eq!(evidence.local_addr(), None);
+        receipt.route_evidence = None;
+        assert!(!receipt_matches_path(&receipt, &evidence, None), "An IP-era receipt cannot prove native Bluetooth");
+        assert!(!host.status().peers[0].connected, "A probe must not replace a live session");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_non_ip_stream_cannot_bypass_the_existing_peer_key() {
+        let dir = std::env::temp_dir().join(format!("link-native-untrusted-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (client, _) = node(&dir, "client");
+        trust_memory_pair(&host, &client);
+        let mut peer = client.peer(&host.me().0).unwrap();
+        peer.key = "43".repeat(32);
+        let key = peer_key(&peer).unwrap();
+        let (server, stream) = tokio::io::duplex(17);
+        let receiver = host.clone();
+        let receiving = tokio::spawn(async move {
+            receiver.accept_connection(LinkConnection {
+                stream: Box::new(server), evidence: memory_evidence("020000000001", "020000000002"),
+            }, CancellationToken::new()).await
+        });
+        let result = client.exchange_probe(&peer, &key, LinkConnection {
+            stream: Box::new(stream), evidence: memory_evidence("020000000002", "020000000001"),
+        }, None).await;
+        assert!(result.is_err());
+        assert!(receiving.await.unwrap().is_err());
+        assert!(!host.status().peers[0].connected);
+        assert!(host.inbox().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn native_routes_require_saved_canonical_endpoints_and_can_be_selected_without_ip_routes() {
+        let dir = std::env::temp_dir().join(format!("link-native-endpoint-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (client, _) = node(&dir, "client");
+        trust_memory_pair(&host, &client);
+        let client_id = client.me().0;
+        host.add_peer_route(&client_id, "192.168.1.2:8470").unwrap();
+        host.add_peer_route(&client_id, "rfcomm://a1b2c3d4e5f6").unwrap();
+        for endpoint in ["rfcomm://A1B2C3D4E5F6/7", "rfcomm://000000000000", "rfcomm://FFFFFFFFFFFF"] {
+            assert!(host.add_peer_route(&client_id, endpoint).is_err());
+        }
+        let peer = host.peer(&client_id).unwrap();
+        let native = "rfcomm://A1B2C3D4E5F6".to_string();
+        assert_eq!(selected_endpoints(&peer, std::slice::from_ref(&native)).unwrap(), vec![native.clone()]);
+        assert_eq!(route_kind(&native), "Bluetooth RFCOMM");
+        assert!(selected_endpoints(&peer, &["rfcomm://020000000099".into()]).is_err());
+        assert!(peer.addrs.contains(&"192.168.1.2:8470".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn native_receipts_bind_both_radios_and_do_not_accept_ip_evidence() {
+        let evidence = memory_evidence("020000000002", "020000000001");
+        let mut receipt = transfer_receipt(&"a".repeat(TRIAL_CHUNK_BYTES), &memory_evidence("020000000001", "020000000002")).unwrap();
+        assert!(receipt_matches_path(&receipt, &evidence, None));
+        receipt.route_evidence = Some(memory_evidence("020000000099", "020000000002"));
+        assert!(!receipt_matches_path(&receipt, &evidence, None));
+        receipt.route_evidence = Some(memory_evidence("020000000001", "020000000099"));
+        assert!(!receipt_matches_path(&receipt, &evidence, None));
+        receipt.route_evidence = Some(memory_evidence("020000000001", "020000000002"));
+        receipt.receiver_ip = Some("127.0.0.1".parse().unwrap());
+        assert!(!receipt_matches_path(&receipt, &evidence, None));
+        let path: TransferPath = serde_json::from_value(json!({"source": null, "endpoint": "rfcomm://020000000001"})).unwrap();
+        assert!(path.source.is_none());
+        let path: TransferPath = serde_json::from_value(json!({"source": "192.168.1.2", "endpoint": "192.168.1.3:8470"})).unwrap();
+        assert_eq!(path.source, Some("192.168.1.2".parse().unwrap()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_ip_sessions_preserve_queued_delivery_acknowledgments_and_replay_suppression() {
+        let dir = std::env::temp_dir().join(format!("link-native-session-{}", uuid::Uuid::new_v4()));
+        let (host, received) = node(&dir, "host");
+        let (client, _) = node(&dir, "client");
+        trust_memory_pair(&host, &client);
+        let id = client.send(PacketKind::Chat, json!({"text": "queued before a native connection"})).unwrap();
+        let token = CancellationToken::new();
+        let (receiving, sending) = memory_session(&host, &client, token.clone()).await;
+        assert!(wait_for(|| received.lock().unwrap().len() == 1 && client.status().peers[0].queued == 0).await);
+        assert_eq!(received.lock().unwrap()[0].id, id);
+        assert!(matches!(client.status().peers[0].route_evidence, Some(RouteEvidence::BluetoothRfcomm { .. })));
+        assert!(client.0.peers.lock().unwrap().values().all(|state| state.local_addr.is_none()));
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(5), receiving).await.unwrap().unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), sending).await.unwrap().unwrap();
+        let duplicate = received.lock().unwrap()[0].clone();
+        client.0.peers.lock().unwrap().get_mut(&host.me().0).unwrap().outbox.push_back(duplicate);
+        let token = CancellationToken::new();
+        let (receiving, sending) = memory_session(&host, &client, token.clone()).await;
+        assert!(wait_for(|| client.status().peers[0].queued == 0).await);
+        assert_eq!(received.lock().unwrap().len(), 1);
+        assert_eq!(host.inbox().len(), 1);
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(5), receiving).await.unwrap().unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), sending).await.unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn retain_inbox_drops_filed_packets() {
         let dir = std::env::temp_dir().join(format!("link-retain-{}", uuid::Uuid::new_v4()));
@@ -2730,6 +3452,74 @@ mod tests {
         host.stop();
         joiner.stop();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn startup_stress_stays_on_ip_and_cannot_replace_a_native_session() {
+        let dir = std::env::temp_dir().join(format!("link-startup-stress-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (client, _) = node(&dir, "client");
+        let code = host.begin_pairing().unwrap();
+        let ip = format!("127.0.0.1:{}", host.0.port);
+        client.join(&ip, &code.code).await.unwrap();
+        let host_id = host.me().0;
+        assert!(wait_for(|| client.status().peers[0].connected).await);
+        let native = "rfcomm://020000000001".to_string();
+        client.0.cfg.lock().unwrap().peers[0].addrs = vec![native.clone(), ip.clone()];
+        let addresses = client.peer(&host_id).unwrap().addrs;
+        assert_eq!(StressOrigin::StartupIpOnly.eligible_routes(&addresses), vec![ip.clone()]);
+        assert!(StressOrigin::Manual.eligible_routes(&addresses).contains(&native));
+
+        // The actual unattended path tests and restores TCP even though a
+        // native endpoint is saved. No Bluetooth API is needed by this fixture.
+        let reports = client.startup_stress_test().await.unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].routes.len(), 1);
+        assert!(reports[0].routes[0].ok, "{reports:?}");
+        assert_eq!(reports[0].routes[0].addr, ip);
+        assert!(reports[0].restored.as_ref().is_some_and(|route| route.ok && route.addr == ip));
+
+        let running = client.0.running.lock().unwrap().clone().unwrap();
+        let startup = client.startup_stress_scope(&host_id, &running).unwrap();
+        let startup_token = startup.stop.as_ref().clone();
+        // Pause a TCP session just before publication, as if its startup
+        // authentication completed while a native route was becoming active.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let held = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let LinkConnection { stream, evidence } = LinkConnection::tcp(socket).unwrap();
+        let route = evidence.remote_endpoint();
+        let (read, write) = tokio::io::split(stream);
+        let peer = client.peer(&host_id).unwrap();
+        let key = peer_key(&peer).unwrap();
+        let owner = client.clone();
+        let (release, paused) = oneshot::channel();
+        let queued_tcp = tokio::spawn(async move {
+            paused.await.unwrap();
+            owner.session(peer, key, BufReader::new(read), write, route, evidence, None, startup_token).await;
+        });
+        let native_token = running.child_token();
+        let (receiving, sending) = memory_session(&host, &client, native_token.clone()).await;
+        assert!(wait_for(|| client.status().peers[0].route_evidence.as_ref()
+            .is_some_and(|evidence| matches!(evidence, RouteEvidence::BluetoothRfcomm { .. }))).await);
+        assert!(startup.stop.is_cancelled(), "Native publication preempts only the startup child");
+        let (generation, native_session) = {
+            let peers = client.0.peers.lock().unwrap();
+            (peers[&host_id].generation, peers[&host_id].session_cancel.clone().unwrap())
+        };
+        assert!(client.startup_stress_test().await.unwrap().is_empty(), "A live native route is left alone");
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), queued_tcp).await.unwrap().unwrap();
+        drop(startup);
+        assert_eq!(client.0.peers.lock().unwrap()[&host_id].generation, generation);
+        assert!(!native_session.is_cancelled(), "Neither late TCP publication nor startup restoration replaces native");
+        native_token.cancel();
+        tokio::time::timeout(Duration::from_secs(2), sending).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), receiving).await.unwrap().unwrap().unwrap();
+        drop(held);
+        client.stop();
+        host.stop();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3232,22 +4022,23 @@ mod tests {
         let source = validate_probe_source(&if_addrs::get_if_addrs().unwrap(), address).unwrap();
         // Run the wire protocol on loopback. The public trial requires distinct interfaces and IPs.
         let (a, b, c) = tokio::join!(
-            host.transfer_path(&peer, &key, source.clone(), dest.clone()),
-            host.transfer_path(&peer, &key, source.clone(), dest.clone()),
-            host.transfer_path(&peer, &key, source, dest.clone()),
+            host.transfer_path(&peer, &key, Some(source.clone()), dest.clone()),
+            host.transfer_path(&peer, &key, Some(source.clone()), dest.clone()),
+            host.transfer_path(&peer, &key, Some(source), dest.clone()),
         );
         let mut paths = [a, b, c];
         for path in &paths {
             assert!(path.error.is_none(), "{:?}", path.error);
             assert_eq!(path.receipts.iter().map(|receipt| receipt.bytes).sum::<usize>(), 32 * 1024);
-            assert!(path.receipts.iter().all(|receipt| receipt.receiver_ip == address && receipt.sha256.len() == 64));
-            assert!(path.receipts.iter().all(|receipt| receipt.receiver_interface.as_deref() == Some(path.source.interface.as_str())));
+            assert!(path.receipts.iter().all(|receipt| receipt.receiver_ip == Some(address) && receipt.sha256.len() == 64));
+            assert!(path.receipts.iter().all(|receipt| receipt.receiver_interface.as_deref() == Some(path.source.as_ref().unwrap().interface.as_str())));
         }
         assert!(transfer_overlap(&paths).is_some());
         assert!(!distinct_receiver_interfaces(&paths), "loopback samples share the same receiving adapter");
         for (index, path) in paths.iter_mut().enumerate() {
             for receipt in &mut path.receipts {
                 receipt.receiver_interface = Some(format!("adapter-{index}"));
+                receipt.route_evidence = None; // Older peers supplied names without typed transport evidence.
             }
         }
         assert!(distinct_receiver_interfaces(&paths));
@@ -3255,7 +4046,7 @@ mod tests {
         assert!(!distinct_receiver_interfaces(&paths));
         paths[0].receipts.pop();
         assert_eq!(transfer_overlap(&paths), None);
-        let duplicate = || TransferPath { source: address, endpoint: dest.clone() };
+        let duplicate = || TransferPath { source: Some(address), endpoint: dest.clone() };
         assert!(host.transfer_trial(&joiner_id, vec![duplicate(), duplicate()]).await.unwrap_err()
             .contains("different local adapter"));
         let stub = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3266,8 +4057,9 @@ mod tests {
         assert!(unavailable.receipts.is_empty());
         assert!(unavailable.error.as_deref().unwrap().starts_with("Sample 1 of 4: Could not read the peer challenge"));
         assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, generation);
-        assert!(transfer_receipt("a", address).is_err());
-        assert!(transfer_receipt(&"g".repeat(TRIAL_CHUNK_BYTES), address).is_err());
+        let evidence = paths[0].route_evidence.as_ref().unwrap();
+        assert!(transfer_receipt("a", evidence).is_err());
+        assert!(transfer_receipt(&"g".repeat(TRIAL_CHUNK_BYTES), evidence).is_err());
         host.stop();
         joiner.stop();
         let _ = std::fs::remove_dir_all(&dir);
@@ -3345,6 +4137,12 @@ mod tests {
             assert_eq!(states[&joiner_id].generation, generation);
             assert!(states[&joiner_id].ai_reports > reports);
         }
+        let endpoint = format!("127.0.0.1:{}", joiner.0.port);
+        let selected = host.test_ai_handshake_selected(&joiner_id, Some(&endpoint)).await.unwrap();
+        assert_eq!(selected.route, endpoint);
+        assert!(matches!(selected.route_evidence, Some(RouteEvidence::Tcp { .. })));
+        assert!(selected.restored.as_ref().is_some_and(|route| route.ok), "{selected:?}");
+        assert!(host.test_ai_handshake_selected(&joiner_id, Some("rfcomm://020000000099")).await.is_err());
         host.stop();
         assert_eq!(host.test_ai_handshake(&joiner_id).await.unwrap_err(), "The linked computer is offline");
         joiner.stop();

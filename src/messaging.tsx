@@ -44,7 +44,7 @@ function useSignalStatus(initial?: ConnectorStatus[] | null) {
         if (!alive) return;
         setRelay(report);
         setExpiresAt(relayExpiry(report, started));
-        if (report.local_direct_active && wasDirectActive === false) void check();
+        if (wasDirectActive !== null && report.local_direct_active !== wasDirectActive) void check();
         wasDirectActive = report.local_direct_active;
       } catch {
         if (alive) { setRelay(null); setExpiresAt(0); }
@@ -199,7 +199,7 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
     }
   };
 
-  // In-app link: QR code, background start, then a Note to Self round trip.
+  // In-app link: QR code, background start, then a round trip in the Consilium group.
   const beginLink = async () => {
     try {
       setLink(await api.signalSetupBegin());
@@ -279,7 +279,7 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
   const installed = !!cfg?.signal_cli;
   const directHealthy = live?.find((connector) => connector.id === "signal")?.state === "ok";
   const hasNumber = !!cfg?.account_hint;
-  // Linked isn't enough: until the Note to Self code comes back, no sender is allowed and replies are ignored.
+  // Wait for the verification code from the phone in the Consilium group.
   const verified = (cfg?.allowed_acis.length ?? 0) > 0;
 
   return (
@@ -294,7 +294,7 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
         </button>
       </div>
       <p className="muted small">
-        Get notifications on your phone and answer REQUESTs with Approve or Deny.
+        Send messages, see replies, and answer requests with Approve or Deny in the Consilium group on your phone.
         {signal.mode === "relay" ? " Signal is available through your linked computer over encrypted PeerSync; no phone linking is needed here." :
           " A linked computer can provide Signal over encrypted PeerSync. Direct setup below uses signal-cli on this computer."}
       </p>
@@ -360,7 +360,7 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
               {link && link.phase !== "idle"
                 ? link.detail
                 : installed && hasNumber && !verified
-                  ? "Phone linking and verification are not complete. Select Show QR code to continue, then reply to the code in Note to Self. Existing Signal account data is kept."
+                  ? "Phone linking and verification are not complete. Select Show QR code to continue, then send the code in the Consilium group. Existing Signal account data is kept."
                   : `Shows a QR code here to scan with your phone. This computer appears as "${link?.device_name ?? "Consilium"}". With several paired computers, link only one.`}
             </small>
           </span>
@@ -387,7 +387,7 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
           {link?.phase === "starting" && <div className="msg-qr-note">Starting Signal…</div>}
           {link?.phase === "verifying" && link.code && (
             <div className="msg-qr-note">
-              Open <b>Note to Self</b> in Signal on your phone and send <span className="msg-code">{link.code}</span>
+              Open the <b>Consilium</b> group in Signal on your phone and send <span className="msg-code">{link.code}</span>
             </div>
           )}
         </li>

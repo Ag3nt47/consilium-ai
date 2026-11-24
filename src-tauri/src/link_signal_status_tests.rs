@@ -87,19 +87,33 @@ fn several_ready_peers_are_reported_without_selecting_an_account() {
     assert!(status.peer.is_none());
 }
 
+#[test]
+fn typed_readiness_accessor_rejects_expired_snapshots_and_exposes_ambiguity() {
+    let (_dir, link, _receiver) = fixture();
+    let received = Instant::now();
+    link.0.peers.lock().unwrap().get_mut("registered-pc").unwrap()
+        .record_signal_report(3, &json!({"ping": 1, "signal": true}), received);
+    assert_eq!(link.signal_relay_status_at(received).readiness(), SignalRelayReadiness::Available("Computer registered-pc"));
+    assert_eq!(link.signal_relay_status_at(received + SIGNAL_REPORT_TTL).readiness(), SignalRelayReadiness::Unavailable);
+    let _second = add_peer(&link, "second-pc", received);
+    assert_eq!(link.signal_relay_status_at(received).readiness(), SignalRelayReadiness::Multiple);
+}
+
 #[tokio::test]
 async fn reconnect_clears_prior_signal_readiness_before_the_first_report() {
     let (_dir, link, _receiver) = fixture();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
     let (socket, _) = listener.accept().await.unwrap();
-    let (read, write) = socket.into_split();
+    let LinkConnection { stream, evidence } = LinkConnection::tcp(socket).unwrap();
+    let route = evidence.remote_endpoint();
+    let (read, write) = tokio::io::split(stream);
     let peer = link.0.cfg.lock().unwrap().peers[0].clone();
     let token = CancellationToken::new();
     let session_link = link.clone();
     let session_token = token.clone();
     let task = tokio::spawn(async move {
-        session_link.session(peer, vec![7; 32], BufReader::new(read), write, "127.0.0.1:1".into(), None, session_token).await;
+        session_link.session(peer, vec![7; 32], BufReader::new(read), write, route, evidence, None, session_token).await;
     });
     tokio::time::timeout(Duration::from_secs(1), async {
         while link.0.peers.lock().unwrap()["registered-pc"].generation == 3 {
