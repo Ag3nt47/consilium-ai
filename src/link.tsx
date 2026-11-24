@@ -900,6 +900,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
   }
 
   const testAiHandshake = async () => {
+    if (testingHandshake || unavailableEndpoint) return;
     setTestingHandshake(true);
     setHandshakeResult(null);
     try {
@@ -997,7 +998,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         <div className="handshake-section">
           <div className="row between align-center wrap">
             <span className="failover-title">AI handshake:</span>
-            <button className="btn small ghost" disabled={testingHandshake} onClick={testAiHandshake}
+            <button className="btn small ghost" disabled={testingHandshake || unavailableEndpoint} onClick={testAiHandshake}
               title="Check the linked computer's latest AI status and confirmations without sending prompts">
               {testingHandshake ? "Checking AI handshake…" : "Test AI handshake"}
             </button>
@@ -1108,7 +1109,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         <p className="muted">Choose a source address, then run Test Connection. The live session stays in place.</p>
       </details>
 
-      {peer.addrs.some((address) => address.startsWith("rfcomm://")) && (
+      {(unavailableEndpoint || peer.addrs.some((address) => address.startsWith("rfcomm://"))) && (
         <label className="row gap-sm small">
           Connection and AI handshake route
           <select value={testEndpoint} disabled={testing || testingHandshake} onChange={(event) => {

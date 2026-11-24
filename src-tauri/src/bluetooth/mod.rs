@@ -103,7 +103,7 @@ pub fn device_address(endpoint: &str) -> Option<String> {
 }
 
 pub fn local_endpoint() -> Option<String> {
-    if !is_enabled() { return None; }
+    if !is_enabled() || !control().listener_ready() { return None; }
     #[cfg(target_os = "macos")]
     return macos::local_endpoint().filter(|endpoint| device_address(endpoint).is_some());
     #[cfg(not(target_os = "macos"))]
@@ -111,13 +111,13 @@ pub fn local_endpoint() -> Option<String> {
 }
 
 pub async fn listen(accepted: mpsc::Sender<LinkConnection>, token: CancellationToken) -> Result<(), String> {
-    controller::run_listener(control(), token, move |stop| {
+    controller::run_listener(control(), token, move |stop, ready| {
         let accepted = accepted.clone();
         async move {
             #[cfg(target_os = "macos")]
-            { macos::listen(accepted, stop).await }
+            { macos::listen(accepted, stop, ready).await }
             #[cfg(not(target_os = "macos"))]
-            { let _ = accepted; stop.cancelled().await; Ok(()) }
+            { let _ = (accepted, ready); stop.cancelled().await; Ok(()) }
         }
     }).await
 }

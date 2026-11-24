@@ -5,6 +5,9 @@
 //! the byte stream before it can carry any application messages.
 use super::stream::{channel as byte_channel, NativePump};
 use super::SERVICE_UUID;
+#[path = "macos_lifecycle.rs"]
+mod lifecycle;
+use lifecycle::ListenerGenerations;
 use crate::link::{LinkConnection, RouteEvidence};
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
@@ -17,7 +20,6 @@ use objc2_io_bluetooth::{
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -30,7 +32,7 @@ const MAX_NATIVE_OWNERS: usize = 16;
 const MAX_RECEIVE_CALLBACK: usize = 64 * 1024;
 
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
-static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+static GENERATIONS: ListenerGenerations = ListenerGenerations::new();
 static ENDPOINT: Mutex<Option<(u64, String)>> = Mutex::new(None);
 
 thread_local! {
@@ -62,22 +64,24 @@ impl Drop for ListenerGuard {
     }
 }
 
-pub async fn listen(accepted: mpsc::Sender<LinkConnection>, token: CancellationToken) -> Result<(), String> {
+pub async fn listen(accepted: mpsc::Sender<LinkConnection>, token: CancellationToken, ready: impl FnOnce() + Send + 'static) -> Result<(), String> {
     let app = APP.get().ok_or("Bluetooth main-thread dispatcher is not initialized")?.clone();
     let token = token.child_token();
-    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let generation = GENERATIONS.issue();
     let _guard = ListenerGuard { app: app.clone(), generation, token: token.clone() };
     let runtime = tokio::runtime::Handle::try_current().map_err(|_| "Bluetooth requires the application async runtime")?;
-    let (ready, result) = oneshot::channel();
+    let (acknowledge, result) = oneshot::channel();
     let native_token = token.clone();
     app.run_on_main_thread(move || {
-        let result = if native_token.is_cancelled() { Ok(()) } else { start(generation, accepted, runtime, native_token) };
-        let _ = ready.send(result);
+        let result = start(generation, accepted, runtime, native_token);
+        let _ = acknowledge.send(result);
     }).map_err(|e| format!("Dispatch Bluetooth listener: {e}"))?;
-    tokio::select! {
+    let published = tokio::select! {
         _ = token.cancelled() => return Ok(()),
         started = result => started.map_err(|_| "Bluetooth initialization was interrupted")??,
-    }
+    };
+    if !published { return Ok(()); }
+    ready();
     token.cancelled().await;
     Ok(())
 }
@@ -213,9 +217,33 @@ fn service_dictionary() -> Result<Retained<NSDictionary<NSString, NSObject>>, St
     ))
 }
 
-fn start(generation: u64, accepted: mpsc::Sender<LinkConnection>, runtime: tokio::runtime::Handle, token: CancellationToken) -> Result<(), String> {
+/// Only the newest invocation may replace/publish a native service. Drop guards
+/// from an older Link listener remain scoped to their old server generation.
+fn start(generation: u64, accepted: mpsc::Sender<LinkConnection>, runtime: tokio::runtime::Handle, token: CancellationToken) -> Result<bool, String> {
+    GENERATIONS.replace(generation, || token.is_cancelled(),
+        || SERVER.with(|state| state.borrow().as_ref().map(|server| server.generation)), stop,
+        || build_server(generation, accepted, runtime, token.clone()),
+        |mut prepared| {
+            let server = prepared.server.take().expect("Prepared listener owns its unpublished server");
+            let endpoint = format!("rfcomm://{}", server.local_adapter);
+            SERVER.with(|state| *state.borrow_mut() = Some(server));
+            *ENDPOINT.lock().unwrap_or_else(|e| e.into_inner()) = Some((generation, endpoint));
+        })
+}
+
+struct PreparedServer { server: Option<Server> }
+impl Drop for PreparedServer {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            // Publication may finish after a newer request or cancellation.
+            // It has never accepted connections or announced an endpoint.
+            unsafe { server.notification.unregister(); server.record.removeServiceRecord(); }
+        }
+    }
+}
+
+fn build_server(generation: u64, accepted: mpsc::Sender<LinkConnection>, runtime: tokio::runtime::Handle, token: CancellationToken) -> Result<PreparedServer, String> {
     let mtm = MainThreadMarker::new().ok_or("Bluetooth listener requires the main thread")?;
-    if SERVER.with(|state| state.borrow().is_some()) { return Err("Bluetooth listener is already active".into()); }
     if RETIRED.with(|state| state.borrow().len() >= MAX_NATIVE_OWNERS) {
         return Err("Bluetooth is waiting for previous native writes to finish".into());
     }
@@ -247,18 +275,16 @@ fn start(generation: u64, accepted: mpsc::Sender<LinkConnection>, runtime: tokio
         unsafe { record.removeServiceRecord(); }
         return Err("Register Bluetooth incoming channel notifications".into());
     };
-    SERVER.with(|state| *state.borrow_mut() = Some(Server {
+    Ok(PreparedServer { server: Some(Server {
         generation, record, notification, delegate, local_adapter: local_adapter.clone(),
         channel, accepted, runtime, token, connections: HashMap::new(),
-    }));
-    *ENDPOINT.lock().unwrap_or_else(|e| e.into_inner()) = Some((generation, format!("rfcomm://{local_adapter}")));
-    Ok(())
+    }) })
 }
 
 fn stop(generation: u64) {
     let server = SERVER.with(|state| {
         let mut state = state.borrow_mut();
-        if state.as_ref().is_some_and(|s| s.generation == generation) { state.take() } else { None }
+        if ListenerGenerations::owns(state.as_ref().map(|server| server.generation), generation) { state.take() } else { None }
     });
     let Some(server) = server else { return };
     let mut endpoint = ENDPOINT.lock().unwrap_or_else(|e| e.into_inner());
