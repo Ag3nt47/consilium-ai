@@ -787,9 +787,9 @@ fn start_auto_install(app: AppHandle, engine: Arc<Engine>) {
 
 /// Runs the communication stress test with the requested linked computer(s) and posts the results in the
 /// newest conversation as a status note. `when` says what started it.
-async fn stress_test_and_post(engine: &Arc<Engine>, when: &str, node_id: Option<&str>) -> Result<Vec<link::StressReport>, String> {
+async fn stress_test_and_post(engine: &Arc<Engine>, when: &str, node_id: Option<&str>, sources: &[std::net::IpAddr]) -> Result<Vec<link::StressReport>, String> {
     let link = link_handle().ok_or("linking isn't running")?;
-    let reports = link.stress_test(node_id).await?;
+    let reports = link.stress_test(node_id, sources).await?;
     if let Some(id) = engine.store.list().into_iter().find(|c| !peer_sync::is_mirror(&c.id)).map(|c| c.id) {
         for r in &reports {
             let _ = engine.note(&id, &r.summary(when));
@@ -800,9 +800,9 @@ async fn stress_test_and_post(engine: &Arc<Engine>, when: &str, node_id: Option<
 
 /// The Communication stress test button (Settings → Multi-Computer Sync).
 #[tauri::command]
-async fn stress_test_link(state: State<'_, AppState>, node_id: Option<String>) -> Result<Vec<link::StressReport>, String> {
+async fn stress_test_link(state: State<'_, AppState>, node_id: Option<String>, sources: Option<Vec<std::net::IpAddr>>) -> Result<Vec<link::StressReport>, String> {
     let engine = state.engine.clone();
-    stress_test_and_post(&engine, "requested", node_id.as_deref()).await
+    stress_test_and_post(&engine, "requested", node_id.as_deref(), sources.as_deref().unwrap_or_default()).await
 }
 
 /// After every start, once a linked computer is connected, runs the stress test and posts it.
@@ -817,7 +817,7 @@ fn stress_test_after_start(engine: Arc<Engine>) {
             if link.status().peers.iter().any(|p| p.connected) {
                 // A moment for the AIs' resumed work and the catch-up to settle first.
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                let _ = stress_test_and_post(&engine, "after restart", None).await;
+                let _ = stress_test_and_post(&engine, "after restart", None, &[]).await;
                 return;
             }
         }
