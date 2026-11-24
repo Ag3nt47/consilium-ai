@@ -1220,16 +1220,88 @@ pub async fn run_with_files_observed(
         model,
     )
     .await;
+    // Antigravity can briefly advertise a new default model before Google's generation endpoint
+    // serves it. The CLI then reports a provider 404 even though established Gemini models still
+    // work. When the person did not choose a model, refresh the offered models and retry once with
+    // a concrete fallback. Never override an explicit choice.
+    let mut retry_model = model.map(str::to_string);
+    let first = match first {
+        Err(e)
+            if kind == Kind::Antigravity
+                && model.is_none()
+                && is_missing_antigravity_model(&e)
+                && !cancel.is_cancelled() =>
+        {
+            match probe(&path, &["models"])
+                .await
+                .and_then(|out| antigravity_fallback_model(&out))
+            {
+                Some(fallback) => {
+                    retry_model = Some(fallback);
+                    run_at_with_usage(
+                        &path,
+                        kind,
+                        access,
+                        workspace,
+                        system,
+                        prompt,
+                        files,
+                        cancel,
+                        RUN_TIMEOUT,
+                        activity.clone(),
+                        elevated_commands.clone(),
+                        retry_model.as_deref(),
+                    )
+                    .await
+                }
+                None => Err(e),
+            }
+        }
+        other => other,
+    };
     // Antigravity ends a turn with no reply at all when the one tool it reached for was refused,
     // which leaves the council without its answer. Ask once more, saying so, for a text answer
     // (anything that needs running goes in a command box), instead of failing the turn.
     match first {
         Err(e) if kind == Kind::Antigravity && is_refused_tool(&e) && !cancel.is_cancelled() => {
             let retry = format!("{system}\n\n{}", refused_tool_note(&e));
-            run_at_with_usage(&path, kind, access, workspace, &retry, prompt, files, cancel, RUN_TIMEOUT, activity, elevated_commands, model).await
+            run_at_with_usage(
+                &path,
+                kind,
+                access,
+                workspace,
+                &retry,
+                prompt,
+                files,
+                cancel,
+                RUN_TIMEOUT,
+                activity,
+                elevated_commands,
+                retry_model.as_deref(),
+            )
+            .await
         }
         other => other,
     }
+}
+
+fn is_missing_antigravity_model(error: &str) -> bool {
+    error.contains("NOT_FOUND")
+        && error.contains("code 404")
+        && error.contains("Requested entity was not found")
+}
+
+fn antigravity_fallback_model(output: &str) -> Option<String> {
+    let models = parse_agy_models(output);
+    // Flash is the established generally available Gemini family. Do not retry an arbitrary
+    // first model: it may be the same stale auto-selected default that just returned a 404.
+    models
+        .iter()
+        .find(|m| {
+            let id = m.id.to_ascii_lowercase();
+            id.contains("-flash-") || id.ends_with("-flash")
+        })
+        .map(|m| m.id.clone())
 }
 
 fn is_refused_tool(error: &str) -> bool {
@@ -2659,6 +2731,32 @@ mod plan_tests {
         let k = |d: &str| spare_key(Path::new("agy"), Path::new(d), &["--mode".into(), "plan".into()]);
         assert_eq!(k("/a"), k("/a"));
         assert_ne!(k("/a"), k("/b"), "a spare is only for the same folder and arguments");
+    }
+
+    #[test]
+    fn a_missing_antigravity_default_falls_back_to_a_live_flash_model() {
+        let error = "NOT_FOUND (code 404): Requested entity was not found. (ERROR)";
+        assert!(is_missing_antigravity_model(error));
+        assert!(!is_missing_antigravity_model("authentication failed (code 404)"));
+        let models = "Fetching available models...\n\
+gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\n\
+gemini-3.8-flash\tGemini 3.8 Flash\n\
+claude-sonnet-4-6\tClaude Sonnet 4.6";
+        assert_eq!(
+            antigravity_fallback_model(models).as_deref(),
+            Some("gemini-3.8-flash")
+        );
+        assert_eq!(
+            antigravity_fallback_model(
+                "gemini-3.8-flash-high\tGemini 3.8 Flash (High)"
+            )
+            .as_deref(),
+            Some("gemini-3.8-flash-high")
+        );
+        assert_eq!(
+            antigravity_fallback_model("gemini-4-pro-high\tGemini 4 Pro (High)").as_deref(),
+            None
+        );
     }
 
     #[test]
