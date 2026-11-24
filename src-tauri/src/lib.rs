@@ -1290,7 +1290,7 @@ fn messaging_setup(action: String) -> Result<String, String> {
     Ok(title.to_string())
 }
 
-/// Starts the in-app Signal setup: QR code, background daemon, then a Note to Self round trip.
+/// Starts Signal setup: QR code, background daemon, then a round trip in the Consilium group.
 #[tauri::command]
 fn signal_setup_begin() -> Result<signal_setup::SetupState, String> {
     signal_setup::begin(bridge::config_path(None))

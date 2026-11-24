@@ -1,6 +1,6 @@
 //! The startup check: each time Consilium starts, it checks every connection it depends on
 //! (Signal, linked computers, each council AI, the internet and GitHub's checks), posts the result
-//! as a Consilium note in the newest conversation and sends it to the phone's Note to Self.
+//! as a Consilium note in the newest conversation and sends it to the Consilium Signal group.
 //! It waits for Signal and linked computers to come up first, so something that is merely still
 //! starting isn't reported as broken.
 
@@ -69,7 +69,7 @@ pub fn render(device: &str, version: &str, lines: &[Line]) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalState {
     NotSetUp,
-    /// Number saved, but the setup's Note to Self code never came back, so phone messages are ignored.
+    /// Number saved, but the setup code hasn't been returned from the Consilium group.
     Unverified,
     Off,
     Connected,
@@ -95,7 +95,7 @@ pub fn signal_line(s: SignalState) -> Line {
         SignalState::NotSetUp => line(Mark::Info, "Signal: not set up (Settings → Signal)."),
         SignalState::Unverified => line(
             Mark::Warn,
-            "Signal: number saved but not verified, so replies from your phone are ignored. Settings → Signal → Link again, then send the code to Note to Self.",
+            "Signal: number saved but not verified. Open Settings → Signal, then send the code in the Consilium group.",
         ),
         SignalState::Off => line(Mark::Info, "Signal: switched off in Settings."),
         SignalState::Connected => line(Mark::Ok, "Signal: connected to signal-cli on this computer; its receive session is active."),
