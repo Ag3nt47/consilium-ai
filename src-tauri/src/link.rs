@@ -38,6 +38,9 @@ use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
+#[path = "link_discovery.rs"]
+mod discovery;
+
 pub const PORT: u16 = 8470;
 const HEARTBEAT: Duration = Duration::from_millis(1500);
 const DEAD_AFTER_MS: u64 = 4_000;
@@ -453,6 +456,7 @@ struct Inner {
     error: Mutex<Option<String>>,
     wake_dial: Notify,
     stress_test_lock: tokio::sync::Mutex<()>,
+    discovery: Mutex<Option<Arc<discovery::Discovery>>>,
 }
 
 #[derive(Clone)]
@@ -501,6 +505,7 @@ impl Link {
             error: Mutex::new(None),
             wake_dial: Notify::new(),
             stress_test_lock: tokio::sync::Mutex::new(()),
+            discovery: Mutex::new(None),
         })))
     }
 
@@ -547,6 +552,12 @@ impl Link {
                 let me = self.clone();
                 let t = token.clone();
                 tokio::spawn(async move { me.listen(listener, t).await });
+                if !cfg!(test) {
+                    let mut discovery = self.0.discovery.lock().unwrap();
+                    if !token.is_cancelled() {
+                        *discovery = discovery::Discovery::publish(self.0.port).ok().map(Arc::new);
+                    }
+                }
             }
             Err(e) => {
                 *self.0.error.lock().unwrap() = Some(format!("couldn't open port {}: {e}", self.0.port));
@@ -560,11 +571,37 @@ impl Link {
         if let Some(token) = self.0.running.lock().unwrap().take() {
             token.cancel();
         }
+        if let Some(discovery) = self.0.discovery.lock().unwrap().take() {
+            discovery.stop();
+        }
         for state in self.0.peers.lock().unwrap().values_mut() {
             state.tx = None;
             state.session_cancel = None;
             state.generation += 1;
         }
+    }
+
+    /// Automatic alerts use service discovery. A manual scan also checks for older peers.
+    pub async fn discover(&self, include_legacy: bool) -> Result<Vec<String>, String> {
+        let discovery = self.0.discovery.lock().unwrap().clone();
+        let announced = async {
+            match discovery {
+                Some(discovery) => discovery.browse(self.0.port).await,
+                None => Vec::new(),
+            }
+        };
+        if !include_legacy {
+            return Ok(announced.await);
+        }
+        let (mut addresses, legacy) = tokio::join!(announced, discover_lan(self.0.port));
+        if !addresses.is_empty() {
+            addresses.extend(legacy.unwrap_or_default());
+        } else {
+            addresses = legacy?;
+        }
+        addresses.sort_unstable();
+        addresses.dedup();
+        Ok(addresses)
     }
 
     /// Whether this computer should answer the phone message that just arrived. True when the
@@ -2166,9 +2203,8 @@ fn with_port(addr: &str, port: u16) -> String {
 }
 
 /// Looks for the PeerLink greeting on directly attached private IPv4 networks.
-pub async fn discover_lan(port: u16) -> Result<Vec<String>, String> {
+async fn discover_lan(port: u16) -> Result<Vec<String>, String> {
     use std::net::{Ipv4Addr, SocketAddrV4};
-    use tokio::net::TcpSocket;
 
     let interfaces = if_addrs::get_if_addrs().map_err(|error| error.to_string())?;
     let own: std::collections::HashSet<_> = interfaces.iter().map(|interface| interface.ip()).collect();
@@ -2192,9 +2228,12 @@ pub async fn discover_lan(port: u16) -> Result<Vec<String>, String> {
             }
         }
     }
+    Ok(verify_discovery_candidates(candidates).await)
+}
+
+async fn verify_discovery_candidates(mut candidates: Vec<(std::net::Ipv4Addr, std::net::SocketAddrV4)>) -> Vec<String> {
     candidates.sort_unstable();
     candidates.dedup();
-
     let mut found = std::collections::BTreeSet::new();
     let mut tasks = tokio::task::JoinSet::new();
     let mut candidates = candidates.into_iter();
@@ -2204,7 +2243,7 @@ pub async fn discover_lan(port: u16) -> Result<Vec<String>, String> {
             tasks.spawn(async move {
                 tokio::time::timeout(Duration::from_millis(350), async move {
                     let socket = TcpSocket::new_v4().ok()?;
-                    socket.bind(SocketAddrV4::new(source, 0).into()).ok()?;
+                    socket.bind(SocketAddr::new(source.into(), 0)).ok()?;
                     let stream = socket.connect(target.into()).await.ok()?;
                     peerlink_greeting(stream).await.then_some(target)
                 }).await.ok().flatten()
@@ -2215,7 +2254,7 @@ pub async fn discover_lan(port: u16) -> Result<Vec<String>, String> {
             found.insert(target);
         }
     }
-    Ok(found.into_iter().map(|address| address.to_string()).collect())
+    found.into_iter().map(|address| address.to_string()).collect()
 }
 
 async fn peerlink_greeting(stream: TcpStream) -> bool {

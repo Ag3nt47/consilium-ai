@@ -29,6 +29,7 @@ sha2 = "0.10"
 spake2 = "0.4"
 chacha20poly1305 = "0.10"
 if-addrs = "0.13"
+mdns-sd = { version = "0.22", default-features = false, features = ["async"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tauri-plugin-dialog = "2"
 sysinfo = "0.37"

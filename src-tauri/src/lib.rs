@@ -1350,8 +1350,8 @@ async fn link_status() -> Result<link::LinkStatus, String> {
 }
 
 #[tauri::command]
-async fn link_discover_lan() -> Result<Vec<String>, String> {
-    link::discover_lan(link::PORT).await
+async fn link_discover_lan(include_legacy: Option<bool>) -> Result<Vec<String>, String> {
+    the_link()?.discover(include_legacy.unwrap_or(true)).await
 }
 
 #[tauri::command]
