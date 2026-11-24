@@ -153,7 +153,7 @@ code {
 }
 .app[data-backdrop] > :is(.sidebar, .main) {
   position: relative;
-  background: rgba(14, 19, 28, .78);
+  background: rgba(14, 19, 28, .48);
 }
 .app[data-backdrop] :is(.topbar, .composer) {
   background: rgba(14, 19, 28, .78);

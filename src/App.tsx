@@ -85,7 +85,7 @@ const PROVIDER_PORTALS: Record<string, { account: string; accountLabel: string; 
 const knownTheme = (id: string | null | undefined) => THEMES.some((t) => t.id === id);
 const TelemetryBackdrop = lazy(() => import("./TelemetryBackdrop"));
 const BackdropSettings = lazy(() => import("./TelemetryBackdrop").then((module) => ({ default: module.BackdropSettings })));
-const backdropModes = { rain: "Telemetry rain", static: "Static glass", stealth: "Stealth solid" };
+const backdropModes = { rain: "Matrix code rain", static: "Static glass", stealth: "Stealth solid" };
 const defaultBackdrop: BackdropPrefs = { enabled: false, mode: "rain", filter: "all", opacity: 22, speed: 100, fps: 30 };
 const nextBackdrop = (mode: BackdropMode): BackdropMode => mode === "rain" ? "static" : mode === "static" ? "stealth" : "rain";
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { AgentInfo, ChatEvent } from "./api";
+import { COMPLETION_TTL_MS, isRecentCompletion, RainClock } from "./telemetry-rain.mjs";
 
 export type BackdropMode = "rain" | "static" | "stealth";
 export type BackdropPrefs = {
@@ -13,15 +14,15 @@ export type BackdropPrefs = {
 
 type BackdropSample = { kind: "local" | "cloud" | "mesh" | "alert" | "host"; text: string; active?: boolean };
 type CompletionSample = { sample: BackdropSample; until: number; rate: number };
-const COMPLETION_TTL_MS = 8_000;
 const inks = {
-  local: ["#00F0FF", "rgba(0, 240, 255, .22)"],
-  cloud: ["#A78BFA", "rgba(138, 92, 246, .22)"],
-  mesh: ["#00FF9D", "rgba(0, 230, 140, .20)"],
-  alert: ["#FFAA00", "rgba(255, 170, 0, .35)"],
-  host: ["#A1BBCF", "rgba(161, 187, 207, .15)"],
+  local: ["#00F0FF", "rgba(0, 240, 255, .55)"],
+  cloud: ["#A78BFA", "rgba(138, 92, 246, .55)"],
+  mesh: ["#00FF9D", "rgba(0, 230, 140, .50)"],
+  alert: ["#FFAA00", "rgba(255, 170, 0, .55)"],
+  host: ["#A1BBCF", "rgba(161, 187, 207, .45)"],
 };
-const idle: BackdropSample = { kind: "host", text: "· : ·" };
+// Decorative glyphs contain no source code, prompts or simulated telemetry.
+const idle: BackdropSample = { kind: "host", text: "01ABCDEFGHIJKLMNOPQRSTUVWXYZ<>/{}[]=+" };
 
 export default function TelemetryBackdrop({ prefs, agents, workers, events, meshPeers, memory, paused }: {
   prefs: BackdropPrefs; agents: AgentInfo[]; workers: string[]; events: ChatEvent[];
@@ -53,9 +54,9 @@ export default function TelemetryBackdrop({ prefs, agents, workers, events, mesh
     completion.current = null;
     if (prefs.filter === "mesh") return;
     const now = Date.now();
-    for (let index = events.length - 1; index >= 0; index--) {
+    for (let index = events.length - 1, floor = Math.max(0, events.length - 300); index >= floor; index--) {
       const event = events[index];
-      if (event.ts + COMPLETION_TTL_MS <= now) break;
+      if (!isRecentCompletion(event.ts, now)) continue;
       const measured = event.usage?.output_rate_milli;
       if (event.kind !== "message" || event.via || measured === undefined || !Number.isFinite(measured) || measured <= 0) continue;
       const agent = agents.find((candidate) => candidate.id === event.sender);
@@ -83,14 +84,14 @@ export default function TelemetryBackdrop({ prefs, agents, workers, events, mesh
     let height = 0;
     let positions = new Float32Array(0);
     let frame = 0;
-    let last = 0;
+    const clock = new RainClock();
 
     function resize() {
       width = element!.clientWidth;
       height = element!.clientHeight;
       const ratio = Math.min(devicePixelRatio || 1, 2, Math.sqrt(3_000_000 / Math.max(1, width * height)));
-      element!.width = Math.ceil(width * ratio);
-      element!.height = Math.ceil(height * ratio);
+      element!.width = Math.max(1, Math.floor(width * ratio));
+      element!.height = Math.max(1, Math.floor(height * ratio));
       brush!.setTransform(ratio, 0, 0, ratio, 0, 0);
       brush!.font = "12px ui-monospace, Consolas, monospace";
       positions = new Float32Array(Math.min(96, Math.floor(width / (cell * 2))));
@@ -100,15 +101,15 @@ export default function TelemetryBackdrop({ prefs, agents, workers, events, mesh
     function draw(now: number) {
       frame = requestAnimationFrame(draw);
       const { fps, opacity, speed } = settings.current;
-      if (now - last < 1000 / fps) return;
-      const elapsed = last ? Math.min(now - last, 80) / 1000 : 0;
-      last = now;
+      const elapsed = clock.advance(now, fps);
+      if (elapsed === null) return;
       const entries = snapshot.current;
       const lastCompletion = completion.current;
-      const recentCompletion = lastCompletion && lastCompletion.until > Date.now() ? lastCompletion : null;
+      const recentCompletion = lastCompletion && isRecentCompletion(lastCompletion.until - COMPLETION_TTL_MS, Date.now())
+        ? lastCompletion : null;
       let active = 0;
       for (const sample of entries) if (sample.active) active++;
-      const stride = active ? 2 : 5;
+      const stride = active ? 1 : 2;
       brush!.clearRect(0, 0, width, height);
       for (let column = 0; column < positions.length; column++) {
         const measured = column === 0 ? recentCompletion : null;
@@ -119,10 +120,13 @@ export default function TelemetryBackdrop({ prefs, agents, workers, events, mesh
         const [head, trail] = inks[sample.kind];
         const row = Math.floor(positions[column] / cell);
         const x = column * cell * 2 + 8;
-        brush!.globalAlpha = Math.min(active || sample.kind === "alert" ? .35 : .13, opacity / 100);
-        if (sample.kind === "alert") brush!.globalAlpha *= .78 + .22 * Math.sin(now / 450);
-        for (let depth = 5; depth >= 0; depth--) {
-          const glyph = sample.text[(row + column * 7 + depth) % sample.text.length];
+        const alpha = Math.min(.35, Math.max(.05, opacity / 100));
+        const pulse = sample.kind === "alert" ? .78 + .22 * Math.sin(now / 450) : 1;
+        const length = 10 + column % 5;
+        for (let depth = length; depth >= 0; depth--) {
+          const alphabet = depth ? idle.text : sample.text;
+          const glyph = alphabet[(row + column * 7 + depth * 11) % alphabet.length];
+          brush!.globalAlpha = alpha * pulse * (1 - depth / (length + 1));
           brush!.fillStyle = depth ? trail : head;
           brush!.fillText(glyph, x, (row - depth) * cell);
         }
@@ -131,7 +135,7 @@ export default function TelemetryBackdrop({ prefs, agents, workers, events, mesh
 
     function sync() {
       cancelAnimationFrame(frame);
-      last = 0;
+      clock.reset();
       if (!document.hidden && !reducedMotion.matches) frame = requestAnimationFrame(draw);
       else brush!.clearRect(0, 0, width, height);
     }

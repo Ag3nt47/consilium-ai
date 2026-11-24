@@ -129,6 +129,14 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 
 ## Document 4: Consilium app improvements.docx
 
+Matrix rain follow-up: decorative code trails remain visible through the glass
+surfaces, frame pacing preserves the selected 15/30/60 FPS cadence, and completion
+telemetry rejects future timestamps and expires after eight seconds. Local
+verification passed 48 Node tests (including 16 retained timing/freshness checks),
+the production front-end build, and 11 browser checks for preferences, shortcuts,
+pointer interaction, pause/accessibility behavior, and the three-million-pixel
+canvas budget. Installed-app verification and pushed-main CI are separate steps.
+
 | Item | Status | Acceptance and dependencies |
 |---|---|---|
 | Concise engineering mode and compact handoffs | 🔨 | The shared editable-workspace prompt now assigns file scope once and asks for a compact handoff. The prompt tests passed on Windows, macOS and Linux. In task prompts, both local and cloud agents see their active tasks and ready unassigned work ahead of blockers and other owners' tasks. Windows, macOS and Ubuntu tests cover that ordering ([PR #261](https://github.com/Ag3nt47/consilium-ai/pull/261)). Comparing actual replies with fixed task fixtures and verifying routing behavior remain open. |
