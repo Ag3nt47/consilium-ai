@@ -1297,7 +1297,10 @@ fn antigravity_fallback_model(output: &str) -> Option<String> {
     // default was a newly advertised preview/codename; otherwise use the first live Gemini model.
     models
         .iter()
-        .find(|m| m.id.to_ascii_lowercase().contains("-flash-"))
+        .find(|m| {
+            let id = m.id.to_ascii_lowercase();
+            id.contains("-flash-") || id.ends_with("-flash")
+        })
         .or_else(|| models.first())
         .map(|m| m.id.clone())
 }
@@ -2738,11 +2741,11 @@ mod plan_tests {
         assert!(!is_missing_antigravity_model("authentication failed (code 404)"));
         let models = "Fetching available models...\n\
 gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\n\
-gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n\
+gemini-3.8-flash\tGemini 3.8 Flash\n\
 claude-sonnet-4-6\tClaude Sonnet 4.6";
         assert_eq!(
             antigravity_fallback_model(models).as_deref(),
-            Some("gemini-3.8-flash-high")
+            Some("gemini-3.8-flash")
         );
         assert_eq!(
             antigravity_fallback_model("gemini-4-pro-high\tGemini 4 Pro (High)").as_deref(),
