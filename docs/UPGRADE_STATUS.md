@@ -142,6 +142,9 @@ Unix subprocess fixtures remain hosted-runtime checks. The observed Mac hang
 has not been captured in a live thread sample; hosted
 platform checks and installed Mac window/send verification remain deployment
 steps. Native Bluetooth work is isolated from this repair.
+The Mac CI/build jobs use GitHub's standard `macos-15-intel` runner after repeated
+Apple Silicon runner allocation stalls. The release still installs both Rust
+targets and builds the universal Intel/Apple Silicon installer.
 
 Matrix rain follow-up: decorative code trails remain visible through the glass
 surfaces, frame pacing preserves the selected 15/30/60 FPS cadence, and completion
