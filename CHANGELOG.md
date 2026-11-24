@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.3.57
+
+- Keep Windows project-version and GitHub checks in the background without opening terminal windows or credential prompts.
+- Make Matrix code rain visible through glass surfaces, retain the selected frame rate, and discard expired or future-dated telemetry.
+- Detect missing Signal registration before starting a daemon, preserve account data on failed checks, and explain the phone linking and verification steps.
+- Stop timed-out Signal probes together with their owned children, and clear stale registration errors after genuine recovery.
+- Publish matching Windows, macOS, and Linux installers so paired computers can receive these fixes through the normal updater.
+
 ## 0.3.56
 
 - Recheck for updates after reconnecting, returning to the app, or when cached release metadata expires. Use cached installers when GitHub metadata is unavailable and time out stalled metadata requests.
