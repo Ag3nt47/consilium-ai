@@ -1,10 +1,6 @@
 import { constants, openSync, closeSync, fstatSync, readSync } from "node:fs";
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
-
-const SOURCE_LIMIT = 1024 * 1024;
-export const supportedSourceExtensions = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"]);
+import { parseSourceText, SOURCE_LIMIT } from "./source-outline.mjs";
+export { supportedSourceExtensions } from "./source-outline.mjs";
 
 function readSource(file) {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -26,14 +22,5 @@ function readSource(file) {
 }
 
 export function parseSource(file) {
-  const ts = require("typescript-ast");
-  const text = readSource(file);
-  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
-  const diagnostic = source.parseDiagnostics[0];
-  if (diagnostic) {
-    const { line, character } = source.getLineAndCharacterOfPosition(diagnostic.start ?? 0);
-    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, " ");
-    throw new Error(`Parse error at ${line + 1}:${character + 1}: ${message}`);
-  }
-  return source;
+  return parseSourceText(file, readSource(file));
 }
