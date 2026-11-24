@@ -1,6 +1,6 @@
 [package]
 name = "consilium"
-version = "0.3.51"
+version = "0.3.56"
 description = "A council of minds: several AIs and a human in one conversation"
 license = "MIT"
 edition = "2021"
@@ -29,10 +29,14 @@ sha2 = "0.10"
 spake2 = "0.4"
 chacha20poly1305 = "0.10"
 if-addrs = "0.13"
+mdns-sd = { version = "0.22", default-features = false, features = ["async"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tauri-plugin-dialog = "2"
 sysinfo = "0.37"
 tauri-plugin-window-state = "2"
+tauri-plugin-global-shortcut = "=2.3.2"
+tauri-plugin-clipboard-manager = "=2.3.2"
+png = "0.18"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

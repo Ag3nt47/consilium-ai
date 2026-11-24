@@ -68,6 +68,8 @@ pub fn render(device: &str, version: &str, lines: &[Line]) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalState {
     NotSetUp,
+    /// Number saved, but the setup's Note to Self code never came back, so phone messages are ignored.
+    Unverified,
     Off,
     Connected,
     NotConnected,
@@ -75,8 +77,11 @@ pub enum SignalState {
 
 fn signal_state() -> SignalState {
     let Ok(cfg) = BridgeConfig::load(&bridge::config_path(None)) else { return SignalState::NotSetUp };
-    if !bridge::valid_account(&cfg.account) || cfg.allowed_acis.is_empty() {
+    if !bridge::valid_account(&cfg.account) {
         return SignalState::NotSetUp;
+    }
+    if cfg.allowed_acis.is_empty() {
+        return SignalState::Unverified;
     }
     if !cfg.enabled {
         return SignalState::Off;
@@ -87,6 +92,10 @@ fn signal_state() -> SignalState {
 pub fn signal_line(s: SignalState) -> Line {
     match s {
         SignalState::NotSetUp => line(Mark::Info, "Signal: not set up (Settings → Signal)."),
+        SignalState::Unverified => line(
+            Mark::Warn,
+            "Signal: number saved but not verified, so replies from your phone are ignored. Settings → Signal → Link again, then send the code to Note to Self.",
+        ),
         SignalState::Off => line(Mark::Info, "Signal: switched off in Settings."),
         SignalState::Connected => line(Mark::Ok, "Signal: connected; phone messages reach the council."),
         SignalState::NotConnected => line(
@@ -268,7 +277,9 @@ mod tests {
             node_id: format!("node-{name}"),
             name: name.into(),
             connected,
+            supports_lan_notes: false,
             route: connected.then(|| "192.168.1.157:8470".into()),
+            local_interface: None,
             rtt_ms: connected.then_some(3),
             last_seen_ms: Some(1_000),
             queued,
@@ -346,5 +357,7 @@ mod tests {
         assert_eq!(signal_line(SignalState::Connected).mark, Mark::Ok);
         assert_eq!(signal_line(SignalState::NotConnected).mark, Mark::Bad);
         assert_eq!(signal_line(SignalState::NotSetUp).mark, Mark::Info);
+        assert_eq!(signal_line(SignalState::Unverified).mark, Mark::Warn);
+        assert!(signal_line(SignalState::Unverified).text.contains("not verified"));
     }
 }

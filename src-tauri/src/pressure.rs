@@ -19,6 +19,7 @@ pub struct SystemPressure {
     /// Installed physical memory, rounded down to MiB. Exposed so the UI can explain why it
     /// selected a conservative profile without needing an OS-specific probe of its own.
     pub total_memory_mb: u64,
+    pub available_memory_mb: u64,
     pub label: String,
     /// Baseline chosen from portable CPU/RAM facts: "conservative", "balanced" or "performance".
     pub hardware_profile: String,
@@ -55,6 +56,7 @@ pub fn sample() -> SystemPressure {
     let cores = host.cpus().len().max(1);
     let total_memory_mb = host.total_memory() / (1024 * 1024);
     let mut p = from_parts(percent, cpu_percent, memory_percent, cores, total_memory_mb);
+    p.available_memory_mb = host.available_memory() / (1024 * 1024);
     p.agents = per_agent(&host, cores);
     p
 }
@@ -163,6 +165,7 @@ fn from_parts(percent: u8, cpu_percent: u8, memory_percent: u8, cores: usize, to
         memory_percent,
         cores,
         total_memory_mb,
+        available_memory_mb: 0,
         label: label.to_string(),
         hardware_profile: hardware_profile.to_string(),
         adaptive_mode: adaptive_mode.to_string(),

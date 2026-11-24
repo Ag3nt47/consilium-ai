@@ -76,6 +76,7 @@ pub struct AgentInfo {
     pub company: String,
     /// Always "local-cli" for now; API-backed agents will say "api".
     pub transport: String,
+    pub local_model: bool,
     /// An AI the person added themselves (it can be deleted).
     pub custom: bool,
     pub tool: String,
@@ -611,9 +612,9 @@ fn claude_usage_from_output(output: &str, model: Option<String>) -> Option<Usage
                 }
             }
         }
-        // Older CLIs have the named windows but not the unified limits array.
-        if overall.is_empty() {
-            for (key, label) in [("five_hour", "5-hour limit"), ("seven_day", "Weekly limit")] {
+        // Fill each missing period independently. Some CLIs provide a partial limits array.
+        for (key, label) in [("five_hour", "5-hour limit"), ("seven_day", "Weekly limit")] {
+            if !overall.iter().any(|window| window.label == label) {
                 if let Some(used) = limits[key]["utilization"].as_f64() {
                     overall.extend(window_from_used(label, used, limits[key]["resets_at"].as_str().and_then(iso_ms)));
                 }
@@ -800,6 +801,7 @@ pub async fn status(agent: &Agent, member: bool, access: Access) -> AgentInfo {
         name: agent.name.into(),
         company: agent.company.into(),
         transport: "local-cli".into(),
+        local_model: false,
         custom: false,
         tool: tool.into(),
         member,
@@ -845,6 +847,7 @@ async fn api_status(agent: &Agent, provider: &crate::apiagent::Provider, member:
         name: agent.name.into(),
         company: agent.company.into(),
         transport: "api".into(),
+        local_model: provider.local,
         custom: matches!(agent.kind, Kind::CustomApi),
         tool: format!("{} API", agent.company),
         member,
@@ -1165,7 +1168,11 @@ pub async fn run_with_files(
     files: &crate::attach::Files,
     cancel: &CancellationToken,
 ) -> Result<AgentReply, String> {
-    run_with_files_observed(agent, access, workspace, system, prompt, files, cancel, None, Vec::new(), None).await
+    let window = match provider_of(agent) {
+        Some(provider) => crate::apiagent::local_window(provider).await,
+        None => None,
+    };
+    run_with_files_observed(agent, access, workspace, system, prompt, files, cancel, None, Vec::new(), None, window).await
 }
 
 /// `run_with_files`, reporting provider-native activity as structured output arrives.
@@ -1181,6 +1188,7 @@ pub async fn run_with_files_observed(
     activity: Option<ActivitySink>,
     elevated_commands: Vec<String>,
     model: Option<&str>,
+    local_window: Option<usize>,
 ) -> Result<AgentReply, String> {
     if let Some(provider) = provider_of(agent) {
         // Attached files aren't sent: the API agents see only the conversation text.
@@ -1192,7 +1200,7 @@ pub async fn run_with_files_observed(
             });
         }
         let (text, usage, model) =
-            crate::apiagent::run(agent.id, agent.name, provider, system, prompt, cancel, RUN_TIMEOUT).await?;
+            crate::apiagent::run(agent.id, agent.name, provider, system, prompt, cancel, RUN_TIMEOUT, local_window).await?;
         return Ok(AgentReply { text, usage, model: Some(model) });
     }
     let kind = effective_kind(agent);
@@ -1614,6 +1622,18 @@ async fn execute(
         Kind::Antigravity => antigravity_reply(&stdout)?,
         Kind::XaiApi | Kind::DeepSeekApi | Kind::CustomApi => String::new(),
     };
+    if matches!(kind, Kind::ClaudeCode) && claude_result(&stdout).is_none() {
+        // The stream ended without a result line. Pass on the provider's own error if it sent one,
+        // word for word, so a usage limit is still recognised; otherwise say so in a line, never
+        // the raw stream (its first line alone lists every tool and runs to kilobytes).
+        if let Some(e) = claude_stream_error(&stdout) {
+            return Err(e);
+        }
+        let code = status.code().map_or_else(|| "killed".to_string(), |c| format!("exit {c}"));
+        let err = stderr.trim();
+        let why = if err.is_empty() { String::new() } else { format!(": {}", clip_middle(err, ERROR_TAIL_CHARS)) };
+        return Err(format!("Claude CLI ended before reporting a final result ({code}){why}"));
+    }
     if !status.success() || reply.trim().is_empty() {
         let detail = if stderr.trim().is_empty() { stdout } else { stderr };
         return Err(format!("exit {}: {}", status.code().unwrap_or(-1), tail(&detail)));
@@ -1651,6 +1671,51 @@ fn claude_result(stdout: &str) -> Option<serde_json::Value> {
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .rfind(|v| v["type"] == "result")
+}
+
+/// Most of a stderr tail quoted in an error, in characters.
+const ERROR_TAIL_CHARS: usize = 400;
+
+/// The last `n` characters of `s` (never splitting a character).
+fn last_chars(s: &str, n: usize) -> String {
+    let skip = s.chars().count().saturating_sub(n);
+    s.chars().skip(skip).collect()
+}
+
+/// `s` cut to at most about `n` characters by dropping its middle, so both the error kind at the
+/// start ("rate_limit: ") and a reset time at the end ("|<secs>") still reach `bench::usage_limit`.
+fn clip_middle(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    if count <= n {
+        return s.to_string();
+    }
+    let head = n / 4;
+    let head_text: String = s.chars().take(head).collect();
+    format!("{head_text} … {}", last_chars(s, n - head))
+}
+
+/// The newest error Claude Code's stream reported (an `error` line, or an assistant message
+/// flagged with `error`, as a usage limit is), as its text.
+fn claude_stream_error(stdout: &str) -> Option<String> {
+    stdout.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).rev().find_map(|v| {
+        let err = &v["error"];
+        if v["type"] != "error" && (err.is_null() || err == false) {
+            return None;
+        }
+        let text: String = v["message"]["content"]
+            .as_array()
+            .map(|parts| parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+        let msg = [err["message"].as_str(), v["message"].as_str(), Some(text.as_str()), err.as_str()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|m| !m.is_empty())?
+            .to_string();
+        // Keep the error kind beside the text (e.g. "rate_limit") so the usage check sees it too.
+        let kind = err.as_str().or(err["type"].as_str()).filter(|k| !msg.contains(k));
+        Some(clip_middle(&kind.map_or(msg.clone(), |k| format!("{k}: {msg}")), ERROR_TAIL_CHARS))
+    })
 }
 
 fn json_u64(value: &serde_json::Value, key: &str) -> u64 {
@@ -2229,8 +2294,10 @@ fn antigravity_reply(stdout: &str) -> Result<String, String> {
     if text.trim().is_empty() {
         if let Some(denied) = r["denied_actions"].as_array().filter(|d| !d.is_empty()) {
             let names: Vec<&str> = denied.iter().filter_map(|d| d["display_name"].as_str()).collect();
-            return Err(format!(
-                "Gemini tried to use a tool its access doesn't allow ({}) and wrote no reply. Ask again, or raise its access in Settings.",
+            // A refused tool is not a failed turn (#37): say so in the reply, so the council sees it
+            // and Gemini posts a command box next time, without the "couldn't answer" alarm.
+            return Ok(format!(
+                "[Antigravity refused Gemini's tool call ({}), so this turn has no text. Gemini: post commands in a command box instead of running them yourself.]",
                 names.join(", ")
             ));
         }
@@ -2342,6 +2409,16 @@ mod plan_tests {
     }
 
     #[test]
+    fn claude_keeps_the_reported_session_and_fills_a_missing_weekly_window() {
+        let output = r#"{"response":{"response":{"rate_limits_available":true,"rate_limits":{"limits":[{"kind":"session","percent":22,"scope":null}],"five_hour":{"utilization":90},"seven_day":{"utilization":59}}}}}"#;
+        let usage = claude_usage_from_output(output, None).unwrap();
+        let windows = usage.overall.unwrap().windows;
+        assert_eq!(windows.len(), 2);
+        assert_eq!((windows[0].label.as_str(), windows[0].remaining_percent), ("5-hour limit", 78));
+        assert_eq!((windows[1].label.as_str(), windows[1].remaining_percent), ("Weekly limit", 41));
+    }
+
+    #[test]
     fn reset_times_are_read_in_each_providers_format() {
         assert_eq!(iso_ms("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(iso_ms("2026-11-17T19:00:00.389055+00:00"), Some(1_794_942_000_389));
@@ -2369,11 +2446,15 @@ mod plan_tests {
 
     #[test]
     fn antigravity_usage_is_the_gemini_group_and_ignores_the_third_party_pool() {
-        let output = r#"{"command":{"data":{"groups":[{"name":"Gemini Models","description":"Models within this group: Gemini 3.8 Flash","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.61},{"name":"Five Hour Limit Remaining","remaining_fraction":0.83}]},{"name":"Claude and GPT models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.1}]}]}}}"#;
+        let output = r#"{"command":{"data":{"groups":[{"name":"Gemini Models","description":"Models within this group: Gemini 3.8 Flash","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.61,"reset_time":"2026-11-30T05:30:00Z"},{"name":"Five Hour Limit Remaining","remaining_fraction":0.83,"reset_time":"2026-11-24T03:30:00Z"}]},{"name":"Claude and GPT models","buckets":[{"name":"Weekly Limit Remaining","remaining_fraction":0.1}]}]}}}"#;
         let usage = antigravity_usage_from_output(output).unwrap();
         assert_eq!(usage.remaining_percent, 61);
         assert_eq!(usage.windows.len(), 2);
         assert_eq!(usage.windows[0].label, "Weekly Limit");
+        assert_eq!(usage.windows[0].resets_at, iso_ms("2026-11-30T05:30:00Z"));
+        assert_eq!(usage.windows[1].label, "Five Hour Limit");
+        assert_eq!(usage.windows[1].remaining_percent, 83);
+        assert_eq!(usage.windows[1].resets_at, iso_ms("2026-11-24T03:30:00Z"));
         assert_eq!(pct(&usage.overall), ("Gemini".into(), 61, false));
         assert_eq!(pct(&usage.model), ("Gemini 3.8 Flash".into(), 61, true));
     }
@@ -2641,10 +2722,16 @@ mod plan_tests {
 {"event":"result","result":{"status":"SUCCESS","response":""}}"#;
         assert_eq!(antigravity_reply(streamed).unwrap(), "Hello council");
         let blocked = r#"{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}}"#;
-        let e = antigravity_reply(blocked).unwrap_err();
-        assert!(e.contains("Bash") && e.contains("access"), "{e}");
+        let note = antigravity_reply(blocked).expect("a refused tool is not a failed turn");
+        assert!(note.contains("Bash") && note.contains("command box"), "{note}");
+        let partial = r#"{"event":"step_update","step_update":{"text_delta":"Checking"}}
+{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}}"#;
+        assert_eq!(antigravity_reply(partial).unwrap(), "Checking", "text written before a refusal is kept");
         let failed = r#"{"event":"result","result":{"status":"ERROR","response":"","error":"authentication failed or timed out"}}"#;
         assert_eq!(antigravity_reply(failed).unwrap_err(), "authentication failed or timed out (ERROR)");
+        let failed_after_text = r#"{"event":"step_update","step_update":{"text_delta":"Partial"}}
+{"event":"result","result":{"status":"ERROR","response":"","error":"model overloaded"}}"#;
+        assert_eq!(antigravity_reply(failed_after_text).unwrap_err(), "model overloaded (ERROR)", "streamed text never hides a real error");
     }
 
     #[test]
@@ -2717,6 +2804,15 @@ mod tests {
     }
 
     async fn go(p: &Path, kind: Kind, access: Access, ws: Option<&Path>, system: &str) -> Result<String, String> {
+        // Linux: a test on another thread can fork while `fake` still has the script open for
+        // writing, and the child keeps that handle until it execs, so starting the script fails
+        // with "Text file busy" (ETXTBSY) for a moment. Retry that start error only.
+        for _ in 0..20 {
+            match run_at(p, kind, access, ws, system, "convo", &CancellationToken::new(), RUN_TIMEOUT).await {
+                Err(e) if e.contains("Text file busy") => tokio::time::sleep(Duration::from_millis(50)).await,
+                r => return r,
+            }
+        }
         run_at(p, kind, access, ws, system, "convo", &CancellationToken::new(), RUN_TIMEOUT).await
     }
 
@@ -2857,6 +2953,53 @@ printf 'done' > "$out""#
         assert_eq!(go(&p, Kind::Codex, Access::Edit, Some(&ws), "s").await.unwrap(), "README.md");
         assert!(go(&p, Kind::Codex, Access::Chat, Some(&ws), "s").await.is_err(), "chat access must not see the project");
         std::fs::remove_dir_all(ws).unwrap();
+    }
+
+    #[tokio::test]
+    async fn claude_ending_without_a_result_gives_a_short_plain_error() {
+        // A huge stream line and no result: one short line, not the raw stream.
+        let big = "x".repeat(5000);
+        let p = fake(&format!(r#"cat >/dev/null; printf '{{"type":"system","tools":"{big}"}}\n'; exit 1"#));
+        let e = go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err();
+        assert_eq!(e, "Claude CLI ended before reporting a final result (exit 1)");
+        let p = fake(r#"cat >/dev/null; printf '{"type":"system"}\n'; exit 0"#);
+        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err(), "Claude CLI ended before reporting a final result (exit 0)");
+        // A long non-ASCII stderr is cut to its last characters, whole.
+        let p = fake(r#"cat >/dev/null; i=0; while [ $i -lt 1000 ]; do printf 'é漢字'; i=$((i+1)); done >&2; exit 1"#);
+        let e = go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err();
+        assert!(e.starts_with("Claude CLI ended before reporting a final result (exit 1): "), "{e}");
+        assert!(e.chars().count() < 500, "{} chars", e.chars().count());
+        // A usage limit at the start of a long stderr survives the cut, so it still benches.
+        let p = fake(r#"cat >/dev/null; printf 'Claude AI usage limit reached|1800003600 ' >&2; i=0; while [ $i -lt 1000 ]; do printf 'x' >&2; i=$((i+1)); done; exit 1"#);
+        let e = go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err();
+        assert!(e.contains("usage limit reached"), "{e}");
+        assert!(crate::bench::usage_limit(&e, 1_800_000_000_000).is_some(), "{e}");
+    }
+
+    #[test]
+    fn a_long_stream_error_keeps_its_kind_and_reset_time() {
+        let filler = "z".repeat(1000);
+        let line = format!(
+            r#"{{"type":"assistant","error":"rate_limit","message":{{"content":[{{"type":"text","text":"{filler} |1800003600"}}]}}}}"#
+        );
+        let e = claude_stream_error(&line).unwrap();
+        assert!(e.chars().count() <= ERROR_TAIL_CHARS + 3, "{} chars", e.chars().count());
+        assert!(e.starts_with("rate_limit: ") && e.ends_with("|1800003600"), "{e}");
+        assert_eq!(crate::bench::usage_limit(&e, 1_800_003_540_000), Some(1_800_003_600_000));
+        let top = claude_stream_error(r#"{"type":"error","message":"quota exceeded"}"#).unwrap();
+        assert!(crate::bench::usage_limit(&top, 0).is_some(), "{top}");
+    }
+
+    #[tokio::test]
+    async fn a_usage_limit_in_the_stream_without_a_result_still_benches() {
+        let p = fake(
+            r#"cat >/dev/null; printf '{"type":"assistant","error":"rate_limit","message":{"content":[{"type":"text","text":"Claude AI usage limit reached|1800003600"}]}}\n'; exit 1"#,
+        );
+        let e = go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err();
+        assert_eq!(e, "rate_limit: Claude AI usage limit reached|1800003600");
+        assert_eq!(crate::bench::usage_limit(&e, 1_800_000_000_000), Some(1_800_003_600_000));
+        let p = fake(r#"cat >/dev/null; printf '{"type":"error","error":{"type":"api_error","message":"Overloaded"}}\n'; exit 1"#);
+        assert_eq!(go(&p, Kind::ClaudeCode, Access::Chat, None, "s").await.unwrap_err(), "api_error: Overloaded");
     }
 
     #[tokio::test]

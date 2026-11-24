@@ -1,7 +1,7 @@
 {
   "name": "consilium",
   "private": true,
-  "version": "0.3.51",
+  "version": "0.3.56",
   "description": "A council of minds: a desktop app where several AIs and a human work in one conversation.",
   "license": "MIT",
   "type": "module",
@@ -34,6 +34,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
     "typescript": "^7.0.2",
+    "typescript-ast": "npm:typescript@5.9.3",
     "vite": "^8.3.8"
   }
 }

@@ -56,13 +56,41 @@ fn gh() -> Option<PathBuf> {
     crate::bridge::find_tool("gh")
 }
 
+pub fn request_draft_installers(data: &Path) -> Result<Option<String>, String> {
+    let program = gh().ok_or("Install and sign in to the GitHub CLI to build installers.")?;
+    let output = run(&program, data, &[
+        "workflow", "run", "release.yml", "--repo", "Ag3nt47/consilium-ai",
+        "--ref", "main", "--raw-field", "draft_only=true",
+    ])?;
+    Ok(installer_run_url(&output))
+}
+
+fn installer_run_url(output: &str) -> Option<String> {
+    const PREFIX: &str = "https://github.com/Ag3nt47/consilium-ai/actions/runs/";
+    output.lines().map(str::trim).find_map(|line| {
+        let id = line.strip_prefix(PREFIX)?;
+        (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())).then(|| line.to_string())
+    })
+}
+
 /// Runs a command in `dir` with a hard timeout, returning stdout when it succeeds.
 fn run(program: &Path, dir: &Path, args: &[&str]) -> Result<String, String> {
-    let mut child = Command::new(program)
+    run_with_timeout(program, dir, args, GH_TIMEOUT)
+}
+
+fn run_with_timeout(program: &Path, dir: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let mut child = command
         .current_dir(dir)
         .args(args)
         .env("GH_PROMPT_DISABLED", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -73,7 +101,7 @@ fn run(program: &Path, dir: &Path, args: &[&str]) -> Result<String, String> {
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() > GH_TIMEOUT => {
+            Ok(None) if start.elapsed() > timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("GitHub didn't answer in time".into());
@@ -484,5 +512,73 @@ mod live {
         let s = super::fetch(&repo);
         println!("{s:?}");
         assert!(s.state != "error", "{:?}", s.detail);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod quiet_background_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    const MODE: &str = "CONSILIUM_QUIET_BACKGROUND_FIXTURE_MODE";
+    const FIXTURE: &str = "ci::quiet_background_tests::console_fixture";
+
+    /// A harmless owned console executable: the current test binary, running
+    /// only this fixture. The exact child arguments keep the parent test pass
+    /// from interpreting the temporary environment flag as an exit request.
+    #[test]
+    fn console_fixture() {
+        let args: Vec<_> = std::env::args().collect();
+        if !args.windows(2).any(|pair| pair[0] == "--exact" && pair[1] == FIXTURE) {
+            return;
+        }
+        let Ok(mode) = std::env::var(MODE) else { return };
+        let window = unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() };
+        println!("fixture-console-window={}", window as usize);
+        println!("fixture-output=ready");
+        println!("fixture-gcm={}", std::env::var("GCM_INTERACTIVE").unwrap_or_default());
+        match mode.as_str() {
+            "error" => {
+                eprintln!("owned fixture failure");
+                std::process::exit(23);
+            }
+            "timeout" => std::thread::sleep(Duration::from_secs(5)),
+            _ => {}
+        }
+    }
+
+    struct RestoreMode(Option<OsString>);
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.0 {
+                std::env::set_var(MODE, previous);
+            } else {
+                std::env::remove_var(MODE);
+            }
+        }
+    }
+
+    #[test]
+    fn background_child_has_no_console_and_preserves_output_errors_and_timeout() {
+        let _restore = RestoreMode(std::env::var_os(MODE));
+        let program = std::env::current_exe().unwrap();
+        let dir = std::env::temp_dir();
+        let args = ["--exact", FIXTURE, "--nocapture"];
+
+        std::env::set_var(MODE, "success");
+        let output = run(&program, &dir, &args).unwrap();
+        assert!(output.lines().any(|line| line.ends_with("fixture-console-window=0")), "{output}");
+        assert!(output.contains("fixture-output=ready"));
+        assert!(output.contains("fixture-gcm=never"));
+
+        std::env::set_var(MODE, "error");
+        assert_eq!(run(&program, &dir, &args).unwrap_err(), "owned fixture failure");
+
+        std::env::set_var(MODE, "timeout");
+        let started = Instant::now();
+        let result = run_with_timeout(&program, &dir, &args, Duration::from_millis(200));
+        assert_eq!(result.unwrap_err(), "GitHub didn't answer in time");
+        assert!(started.elapsed() < Duration::from_secs(4), "the owned child was not stopped promptly");
     }
 }

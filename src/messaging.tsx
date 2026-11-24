@@ -238,6 +238,8 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
   const mark = signal?.state === "ok" ? "✓" : signal?.state === "down" ? "✗" : "○";
   const installed = !!cfg?.signal_cli;
   const hasNumber = !!cfg?.account_hint;
+  // Linked isn't enough: until the Note to Self code comes back, no sender is allowed and replies are ignored.
+  const verified = (cfg?.allowed_acis.length ?? 0) > 0;
 
   return (
     <div className="msg-setup">
@@ -307,13 +309,15 @@ export function MessagingSettings({ status, onChanged }: { status?: ConnectorSta
             </button>
           )}
         </li>
-        <li className={link?.phase === "verified" || (signal?.state === "ok" && !active) ? "done" : ""}>
+        <li className={link?.phase === "verified" || (verified && signal?.state === "ok" && !active) ? "done" : ""}>
           <span>
             <b>Link this computer</b>
             <small>
               {link && link.phase !== "idle"
                 ? link.detail
-                : `Shows a QR code here to scan with your phone. This computer appears as "${link?.device_name ?? "Consilium"}". With several paired computers, link only one.`}
+                : installed && hasNumber && !verified
+                  ? "Phone linking and verification are not complete. Select Show QR code to continue, then reply to the code in Note to Self. Existing Signal account data is kept."
+                  : `Shows a QR code here to scan with your phone. This computer appears as "${link?.device_name ?? "Consilium"}". With several paired computers, link only one.`}
             </small>
           </span>
           {!active && (

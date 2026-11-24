@@ -27,6 +27,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// The newest council-memory characters a local model is shown.
+const LOCAL_MEMORY_CHARS: usize = 1_500;
+
 /// Upper bound on discussion rounds, whatever the UI asks for, so agents can't loop indefinitely.
 pub const MAX_ROUNDS: u32 = 8;
 
@@ -156,6 +159,7 @@ pub struct Engine {
     pub journal: Arc<Journal>,
     pub memory: Arc<Memory>,
     pub bench: Arc<Bench>,
+    pub(crate) usage_refresh: tokio::sync::Mutex<Option<crate::usage::Snapshot>>,
     pub ui: Arc<dyn Ui>,
     spawn: Box<Spawn>,
     make_host: Box<MakeHost>,
@@ -180,6 +184,7 @@ impl Engine {
             journal: Arc::new(Journal::load(data.join("turns.json"))),
             memory: Arc::new(Memory::new(data.join("memory.md"))),
             bench: Arc::new(Bench::with_usage(data.to_path_buf())),
+            usage_refresh: tokio::sync::Mutex::new(None),
             ui,
             spawn,
             make_host: Box::new(|engine, pending| Arc::new(RealHost::new(engine, pending))),
@@ -275,9 +280,15 @@ impl Engine {
             targets
         };
         let rounds = rounds.clamp(1, MAX_ROUNDS);
-        let mut running = self.running.lock().unwrap();
-        let event = self.store.append_with_attachments_via(id, targets.clone(), text, attachments, via)?;
-        self.mine.lock().unwrap().insert(event.id.clone());
+        // The turn table is held only to file the message and look up the turn; the window, notes,
+        // linked computers and the council are told after it's let go (see #14: a freeze guard
+        // restart while the table stayed taken).
+        let event = {
+            let _running = self.running.lock().unwrap();
+            let event = self.store.append_with_attachments_via(id, targets.clone(), text, attachments, via)?;
+            self.mine.lock().unwrap().insert(event.id.clone());
+            event
+        };
         self.ui.event(&event);
         if !stopped.is_empty() {
             let names: Vec<String> = stopped.iter().map(|s| format!("@{s}")).collect();
@@ -286,31 +297,41 @@ impl Engine {
                 names.join(" and ")
             ));
         }
-        let lock = match running.get(id) {
-            Some(r) => {
-                if r.council.join(&event, &targets) {
-                    self.journal.join(id, &r.turn, &targets);
-                    return Ok(event);
+        let mut tried: Option<String> = None;
+        loop {
+            let mut running = self.running.lock().unwrap();
+            let lock = match running.get(id) {
+                // A turn is running that hasn't turned this message down yet: join it, unlocked.
+                Some(r) if tried.as_deref() != Some(r.turn.as_str()) => {
+                    let (council, turn) = (r.council.clone(), r.turn.clone());
+                    drop(running);
+                    if council.join(&event, &targets) {
+                        self.journal.join(id, &turn, &targets);
+                        return Ok(event);
+                    }
+                    // That turn has just ended; look again, since another may have replaced it.
+                    tried = Some(turn);
+                    continue;
                 }
-                // That turn has just ended; this message starts a new one, under the same lock.
-                r.lock.clone()
+                // The turn that just ended is still listed; this message starts a new one, under the same lock.
+                Some(r) => r.lock.clone(),
+                None => {
+                    if targets.is_empty() {
+                        return Ok(event);
+                    }
+                    match self.store.try_turn_lock(id) {
+                        Some(l) => Arc::new(l),
+                        // The other process is running this conversation's AIs; it reads this message.
+                        None => return Ok(event),
+                    }
+                }
+            };
+            if targets.is_empty() {
+                return Ok(event);
             }
-            None => {
-                if targets.is_empty() {
-                    return Ok(event);
-                }
-                match self.store.try_turn_lock(id) {
-                    Some(l) => Arc::new(l),
-                    // The other process is running this conversation's AIs; it reads this message.
-                    None => return Ok(event),
-                }
-            }
-        };
-        if targets.is_empty() {
+            self.begin(&mut running, Pending::new(id, targets, rounds), lock, event.seq);
             return Ok(event);
         }
-        self.begin(&mut running, Pending::new(id, targets, rounds), lock, event.seq);
-        Ok(event)
     }
 
     /// Starts a background task on this process's async runtime.
@@ -362,45 +383,65 @@ impl Engine {
     /// `join` and an AI's as `heard`. Otherwise this computer's council members answer it in a
     /// turn of their own, if `may_start` allows (it limits how often AIs alone can start one).
     pub fn from_linked(self: &Arc<Self>, id: &str, event: &Event, may_start: &dyn Fn() -> bool) {
-        let members = self.config.get().members;
+        let members: Vec<String> = self
+            .config
+            .get()
+            .members
+            .into_iter()
+            .filter(|m| !crate::switched::is_off(self.store.dir(), id, m))
+            .collect();
         // Another computer's AI may address AIs here by handle, e.g. "@claude-<this computer>".
         let addressed: Vec<String> = if event.sender == "human" {
             vec![]
         } else {
-            prompt::mentioned_here(&event.text).into_iter().filter(|m| members.contains(m)).collect()
+            prompt::mentioned_here(&event.text)
+                .into_iter()
+                .filter(|m| members.contains(m) && !crate::switched::is_off(self.store.dir(), id, m))
+                .collect()
         };
-        let mut running = self.running.lock().unwrap();
-        if let Some(r) = running.get(id) {
-            let taken = if event.sender == "human" {
-                let joined = r.council.join(event, &members);
-                if joined {
-                    self.journal.join(id, &r.turn, &members);
+        // As in `send_via`: the turn table is never held while the council takes the message in.
+        let mut tried: Option<String> = None;
+        let mut allowed: Option<bool> = None;
+        loop {
+            let live = self.running.lock().unwrap().get(id).map(|r| (r.council.clone(), r.turn.clone()));
+            if let Some((council, turn)) = live.filter(|(_, t)| tried.as_deref() != Some(t.as_str())) {
+                let taken = if event.sender == "human" {
+                    let joined = council.join(event, &members);
+                    if joined {
+                        self.journal.join(id, &turn, &members);
+                    }
+                    joined
+                } else if !addressed.is_empty() {
+                    council.mentioned(event, &addressed)
+                } else {
+                    council.heard(event)
+                };
+                if taken {
+                    return;
                 }
-                joined
-            } else if !addressed.is_empty() {
-                r.council.mentioned(event, &addressed)
-            } else {
-                r.council.heard(event)
-            };
-            if taken {
+                tried = Some(turn);
+            }
+            // Asked once only: `may_start` counts each yes.
+            if members.is_empty() || !*allowed.get_or_insert_with(may_start) {
                 return;
             }
-        }
-        if members.is_empty() || !may_start() {
+            let mut running = self.running.lock().unwrap();
+            let lock = match running.get(id) {
+                // A newer turn started meanwhile: give the message to it instead.
+                Some(r) if tried.as_deref() != Some(r.turn.as_str()) => continue,
+                // That turn has just ended; this one starts under the same lock.
+                Some(r) => r.lock.clone(),
+                None => match self.store.try_turn_lock(id) {
+                    Some(l) => Arc::new(l),
+                    // The other process is running this conversation's AIs; it reads this message.
+                    None => return,
+                },
+            };
+            // Those addressed answer; otherwise everyone may react.
+            let targets = if addressed.is_empty() { members } else { addressed };
+            self.begin(&mut running, Pending::new(id, targets, LINKED_ROUNDS), lock, event.seq);
             return;
         }
-        let lock = match running.get(id) {
-            // That turn has just ended; this one starts under the same lock.
-            Some(r) => r.lock.clone(),
-            None => match self.store.try_turn_lock(id) {
-                Some(l) => Arc::new(l),
-                // The other process is running this conversation's AIs; it reads this message.
-                None => return,
-            },
-        };
-        // Those addressed answer; otherwise everyone may react.
-        let targets = if addressed.is_empty() { members } else { addressed };
-        self.begin(&mut running, Pending::new(id, targets, LINKED_ROUNDS), lock, event.seq);
     }
 
     /// The council members a message is for. A message that @mentions council members goes to
@@ -418,30 +459,7 @@ impl Engine {
     /// Tiered candidate selection: flagship paid models take work first; local offline models act
     /// as silent standby fallback when all active flagship models exhaust their quota or rate limits.
     pub fn tier_targets(&self, candidates: &[String]) -> Vec<String> {
-        let (flagship, local): (Vec<String>, Vec<String>) = candidates
-            .iter()
-            .cloned()
-            .partition(|id| !crate::agents::is_local_id(id));
-
-        let available_flagship: Vec<String> = flagship
-            .into_iter()
-            .filter(|id| self.is_available(id))
-            .collect();
-
-        if !available_flagship.is_empty() {
-            return available_flagship;
-        }
-
-        let available_local: Vec<String> = local
-            .into_iter()
-            .filter(|id| self.is_available(id))
-            .collect();
-
-        if !available_local.is_empty() {
-            available_local
-        } else {
-            candidates.to_vec()
-        }
+        select_tier_targets(candidates, crate::agents::is_local_id, |id| self.is_available(id))
     }
 
     /// Sets up the turn `pending` and runs it in the background. `cursor` is the newest event it
@@ -484,7 +502,7 @@ impl Engine {
                 *c = last;
                 (messages, last)
             };
-            let targets = self.targets_of(&unanswered);
+            let targets = self.targets_of(&unanswered, &conv);
             let mut running = self.running.lock().unwrap();
             if !targets.is_empty() && running.get(&conv).is_some_and(|r| r.turn == pending.turn) {
                 self.journal.finish(&conv, &pending.turn);
@@ -502,7 +520,7 @@ impl Engine {
         // A message sent from the other process just before the lock was let go found it still
         // taken, so its sender left it to this process.
         let (late, last) = self.sent_elsewhere(&conv, cursor);
-        let targets = self.targets_of(&late);
+        let targets = self.targets_of(&late, &conv);
         if targets.is_empty() || late.iter().any(|m| self.answered(&conv, m.seq)) {
             return;
         }
@@ -573,11 +591,11 @@ impl Engine {
     }
 
     /// Council members addressed by any of `messages`.
-    fn targets_of(&self, messages: &[Event]) -> Vec<String> {
+    fn targets_of(&self, messages: &[Event], conv: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for m in messages {
             for t in &m.to {
-                if self.config.is_member(t) && !out.contains(t) {
+                if self.config.is_member(t) && !out.contains(t) && !crate::switched::is_off(self.store.dir(), conv, t) {
                     out.push(t.clone());
                 }
             }
@@ -729,9 +747,9 @@ don't repeat changes that are already made.",
             .filter(|m| !crate::switched::is_off(self.store.dir(), conversation, m))
             .collect();
         let targets = self.tier_targets(&members);
-        let mut running = self.running.lock().unwrap();
         let e = self.store.append(conversation, council::CONSILIUM, "system", targets.clone(), text)?;
         self.ui.event(&e);
+        let mut running = self.running.lock().unwrap();
         if targets.is_empty() || running.contains_key(conversation) {
             return Ok(e);
         }
@@ -762,6 +780,7 @@ don't repeat changes that are already made.",
                 c.stop_agent(agent);
             }
         }
+        crate::peer_sync::share_switched(conversation, agent, on);
         Ok(now_off)
     }
 
@@ -807,6 +826,11 @@ don't repeat changes that are already made.",
                 let mut all = true;
                 for m in messages {
                     let targets = self.addressed(m.to.clone(), &m.text);
+                    let targets: Vec<String> = targets.into_iter().filter(|t| !crate::switched::is_off(self.store.dir(), conv, t)).collect();
+                    if targets.is_empty() {
+                        *c = m.seq;
+                        continue;
+                    }
                     if !council.join(&m, &targets) {
                         // The turn is ending; `run` gives this message a turn of its own.
                         all = false;
@@ -921,8 +945,10 @@ impl council::Host for RealHost {
         );
         // The model chosen in this AI's council box (#29), read fresh like the folder.
         let chosen_model = self.config.model(agent.id);
-        let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w)));
-        let shared = self.memory.for_prompt();
+        // Keep project notes and shared memory compact for local models' smaller context windows.
+        let local = agents::is_local(agent);
+        let notes = workspace.as_deref().and_then(|w| memory::project_notes(std::path::Path::new(w), local));
+        let shared = if local { self.memory.for_prompt_within(LOCAL_MEMORY_CHARS) } else { self.memory.for_prompt() };
         let members = self.config.get().members;
         let ctx = prompt::Context {
             members: &members,
@@ -953,23 +979,24 @@ impl council::Host for RealHost {
                 system.push_str(&crate::skills::for_flagship(&library, &locals, crate::skills::index(&library).len()));
             }
         }
-        // Everyone's plan usage and reset times, as last read.
-        if let Some(usage) = crate::usage::for_prompt(&crate::usage::load(&self.data), &members, agent.id, store::now_ms()) {
+        // Everyone's plan usage and reset times, as last read (not for local models: no plan).
+        if let Some(usage) = (!local)
+            .then(|| crate::usage::for_prompt(&crate::usage::load(&self.data), &members, agent.id, store::now_ms()))
+            .flatten()
+        {
             system.push_str(&usage);
         }
         // The conversation's shared task board, and how to change it.
-        system.push_str(&crate::tasks::for_prompt(&crate::tasks::load(self.store.dir(), conv)));
+        system.push_str(&crate::tasks::for_prompt(
+            &crate::tasks::load(self.store.dir(), conv),
+            agent.id,
+            local,
+        ));
         // The projects' GitHub checks, as last read by the background watcher.
-        if let Some(w) = workspace.as_deref() {
+        if let Some(w) = workspace.as_deref().filter(|_| !local) {
             system.push_str(&crate::ci::for_prompt(std::path::Path::new(w)));
         }
-        // Local models have small context windows: they get a smaller transcript, with long
-        // command outputs and files offloaded to the data folder (offline blueprint, phase 4).
-        let transcript = if agents::is_local(agent) {
-            prompt::local_transcript(&events, agent.id, Some(&self.data))
-        } else {
-            prompt::transcript(&events, agent.id)
-        };
+        let handoff = self.store.handoff_path(conv);
         let mut elevated_commands = prompt::elevated_command_grants(&events, agent.id);
         // The Tools page's Install button: one pinned catalog install for the AI it was sent to.
         if let Some(command) = prompt::catalog_install_grant(&events, agent.id, &self.data) {
@@ -987,7 +1014,10 @@ checking what it would remove (list the folder first), so everything else still 
             );
         }
         if access == Access::Unrestricted || access == Access::Own {
-            system.push_str(&prompt::saved_grants_note(&saved_grants));
+            // The list is long; a local model can still use the grants, it just isn't shown them.
+            if !local {
+                system.push_str(&prompt::saved_grants_note(&saved_grants));
+            }
             for grant in saved_grants {
                 if !elevated_commands.contains(&grant) {
                     elevated_commands.push(grant);
@@ -1063,22 +1093,37 @@ checking what it would remove (list the folder first), so everything else still 
             };
             // Git can briefly touch many files in a large repository, so keep it off the async
             // executor and bound the wait. A slow/non-git folder must never delay the AI turn.
-            // The project's git state for linked computers, refreshed before and after each answer.
-            if let Some(path) = ws_path.clone() {
-                refresh_git_summary(path.clone()).await;
-            }
+            // Share one status read between the prompt and the linked-computer summary.
             let summary_path = ws_path.clone();
             if let Some(path) = state_path {
-                if let Ok(Ok(Some(state))) = tokio::time::timeout(
+                if let Ok(Ok(snapshot)) = tokio::time::timeout(
                     Duration::from_secs(3),
-                    tokio::task::spawn_blocking(move || prompt::workspace_state(&path)),
+                    tokio::task::spawn_blocking(move || prompt::workspace_snapshot(&path, !local)),
                 )
                 .await
                 {
-                    system.push_str("\n\n");
-                    system.push_str(&state);
+                    let (peer_summary, state) = snapshot.map_or((None, None), |snapshot| (Some(snapshot.peer_summary), snapshot.prompt));
+                    crate::link::set_git_summary(peer_summary);
+                    if let Some(state) = state {
+                        system.push_str("\n\n");
+                        system.push_str(&state);
+                    }
                 }
+            } else if let Some(path) = ws_path.clone() {
+                refresh_git_summary(path).await;
             }
+            let local_window = match agents::provider_of(agent) {
+                Some(provider) => tokio::select! {
+                    window = crate::apiagent::local_window(provider) => window,
+                    _ = cancel.cancelled() => return Err("stopped".into()),
+                },
+                None => None,
+            };
+            let transcript = if local {
+                prompt::local_transcript(&events, agent.id, Some(&data), handoff.as_deref(), local_window, &system)
+            } else {
+                prompt::transcript(&events, agent.id)
+            };
             let reply = agents::run_with_files_observed(
                 agent,
                 access,
@@ -1090,6 +1135,7 @@ checking what it would remove (list the folder first), so everything else still 
                 Some(activity),
                 elevated_commands,
                 chosen_model.as_deref(),
+                local_window,
             )
             .await;
             drop(permit);
@@ -1398,22 +1444,103 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn tier_targets_prefers_flagship_and_falls_back_to_local_when_exhausted() {
+    async fn a_resumed_turn_skips_an_ai_switched_off_after_it_was_recorded() {
         let (app, _term, dir) = pair(0);
-        let candidates = vec!["gpt".to_string(), "claude".to_string()];
-        let selected = app.tier_targets(&candidates);
-        assert!(!selected.is_empty());
-        assert!(selected.iter().all(|id| !crate::agents::is_local_id(id)));
-
-        // Bench all flagship models
-        let now = crate::store::now_ms();
-        app.bench.bench("gpt", now + 100_000, true);
-        app.bench.bench("claude", now + 100_000, true);
-
-        let exhausted = app.tier_targets(&candidates);
-        assert_eq!(exhausted, candidates, "falls back cleanly when all candidates are benched");
+        let conv = app.store.create("x").unwrap().id;
+        app.store.append(&conv, "human", "message", vec!["gpt".into(), "claude".into()], "hello").unwrap();
+        // The turn was recorded with both, then Claude was switched off before the restart.
+        app.journal.begin(Pending::new(&conv, vec!["gpt".into(), "claude".into()], 1));
+        crate::switched::set(app.store.dir(), &conv, "claude", false).unwrap();
+        app.resume_interrupted(None);
+        until_idle(&[&app], &conv).await;
+        let said = said(&app, &conv);
+        assert!(said.iter().any(|m| m.starts_with("gpt:")), "{said:?}");
+        assert!(!said.iter().any(|m| m.starts_with("claude:")), "a switched-off AI answered: {said:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// A window that counts the events it was shown while the turn table was locked (#14).
+    #[derive(Default)]
+    struct LockCheck {
+        engine: std::sync::OnceLock<std::sync::Weak<Engine>>,
+        locked: std::sync::atomic::AtomicUsize,
+    }
+    impl Ui for Arc<LockCheck> {
+        fn event(&self, _e: &Event) {
+            if let Some(e) = self.engine.get().and_then(|w| w.upgrade()) {
+                if !e.turns_lock_free() {
+                    self.locked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        fn turn(&self, _t: TurnState) {}
+        fn activity(&self, _activity: &AgentActivity) {}
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_turn_table_is_free_while_the_window_hears_of_a_message_and_concurrent_sends_both_get_answered() {
+        let dir = std::env::temp_dir().join(format!("consilium-engine-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("council.json"), r#"{"members":["gpt","claude"]}"#).unwrap();
+        let check = Arc::new(LockCheck::default());
+        let ui: Arc<dyn Ui> = Arc::new(check.clone());
+        let e = Arc::new(
+            Engine::open(&dir, ui, Box::new(|t| {
+                tokio::spawn(t);
+            }))
+            .unwrap()
+            .with_host(Box::new(|_, _| Arc::new(Echo { delay: 400 }))),
+        );
+        check.engine.set(Arc::downgrade(&e)).unwrap();
+        let conv = e.store.create("x").unwrap().id;
+        // Claude is switched off here, so the "wasn't asked" note is shown too.
+        crate::switched::set(e.store.dir(), &conv, "claude", false).unwrap();
+        e.send(&conv, "first", vec!["gpt".into(), "claude".into()], 1).unwrap();
+        assert!(e.running_here(&conv));
+        // A linked computer's human message joins the running turn.
+        let linked = e.store.append(&conv, "human", "message", vec![], "second").unwrap();
+        e.from_linked(&conv, &linked, &|| true);
+        assert_eq!(check.locked.load(std::sync::atomic::Ordering::SeqCst), 0, "the window was told while the turn table was locked");
+        until_idle(&[&e], &conv).await;
+        assert!(said(&e, &conv).contains(&"gpt: ChatGPT heard: second".to_string()), "{:?}", said(&e, &conv));
+        // Two messages at the same moment: one starts a turn, the other joins it (or the next one).
+        let (a, b) = (e.clone(), e.clone());
+        let (c1, c2) = (conv.clone(), conv.clone());
+        let t1 = tokio::task::spawn_blocking(move || a.send(&c1, "third", vec!["gpt".into()], 1).unwrap());
+        let t2 = tokio::task::spawn_blocking(move || b.send(&c2, "fourth", vec!["gpt".into()], 1).unwrap());
+        let newest = t1.await.unwrap().seq.max(t2.await.unwrap().seq);
+        until_idle(&[&e], &conv).await;
+        let events = e.store.load(&conv).unwrap();
+        let last_human = events.iter().find(|m| m.seq == newest).unwrap().text.clone();
+        let answered = events.iter().any(|m| m.seq > newest && m.text == format!("ChatGPT heard: {last_human}"));
+        assert!(answered, "{:?}", said(&e, &conv));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tier_targets_prefers_flagship_and_falls_back_to_local_when_exhausted() {
+        let candidates = ["gpt", "claude", "qwen"].map(str::to_string);
+        let is_local = |id: &str| id == "qwen";
+        assert_eq!(select_tier_targets(&candidates, is_local, |_| true), ["gpt", "claude"]);
+        assert_eq!(select_tier_targets(&candidates, is_local, |id| id != "gpt"), ["claude"]);
+        assert_eq!(select_tier_targets(&candidates, is_local, |id| id == "qwen"), ["qwen"]);
+        assert_eq!(select_tier_targets(&candidates, is_local, |_| false), candidates);
+    }
+}
+
+fn select_tier_targets(
+    candidates: &[String],
+    is_local: impl Fn(&str) -> bool,
+    available: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let (local, flagship): (Vec<_>, Vec<_>) = candidates.iter().partition(|id| is_local(id));
+    for tier in [flagship, local] {
+        let ready: Vec<_> = tier.into_iter().filter(|id| available(id)).cloned().collect();
+        if !ready.is_empty() {
+            return ready;
+        }
+    }
+    candidates.to_vec()
 }
 
 /// Who a message goes to: the council members it @mentions if it names any, else the ticked ones.

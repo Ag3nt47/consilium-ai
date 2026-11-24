@@ -30,7 +30,7 @@ A larger **Usage panel** now shows per-agent conversation and daily token totals
 - The back end records tokens per turn from each CLI's official machine-readable output (Codex
   `--json` `turn.completed.usage`, Claude Code JSON result `usage`, and Antigravity stream-json
   result `usage`) and exposes them in the Usage panel as conversation/day totals.
-- A budget you set ("warn me at N tokens a day"), with a red `REQUEST:` before a Discuss run would exceed it.
+- An optional daily threshold in Token Usage shows a `REQUEST` before starting Discuss once recorded usage reaches the limit. Projected per-run usage and provider spend limits remain open.
 
 ## v0.2: Voice Studio
 

@@ -2,12 +2,11 @@
 //! Keeps linked computers on the same build of Consilium.
 //!
 //! Every linked computer reports the build it runs in its heartbeat (see `build_id`, `link`). Once
-//! a minute this computer looks for a linked computer running a later build that anyone can
-//! rebuild (committed, with a known commit). If there is one, and nothing as new is already
-//! staged here, it fetches that exact commit from GitHub into its own folder
-//! (`<data>/update/source`, never the human's checkout), builds it with
-//! `scripts/stage-update.mjs` and stages it. Installing then goes the usual way (Update Now, or the
-//! automatic install), and turns cut short resume after the restart.
+//! a minute this computer looks for a linked computer running a later reproducible build. Windows
+//! downloads the matching published installer, macOS waits for the release check in the window to
+//! download its DMG, and Linux rebuilds the exact commit in `<data>/update/source` (never the
+//! human's checkout). Installing then goes the usual way (Update Now, or the automatic install),
+//! and turns cut short resume after the restart.
 //!
 //! So every computer ends up on the newest build any of them runs, never an older one: a build is
 //! only staged when it is later than both the running and the staged build, and the staging script
@@ -20,12 +19,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Where builds are fetched from.
+/// Where Linux source builds are fetched from.
+#[cfg(target_os = "linux")]
 const REPO_URL: &str = "https://github.com/Ag3nt47/consilium-ai.git";
 #[cfg(windows)]
 const API_REPO: &str = "https://api.github.com/repos/Ag3nt47/consilium-ai";
 
-#[cfg(windows)]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(windows)]
 use std::time::SystemTime;
@@ -79,6 +78,7 @@ pub fn tag_commit_matches(commit_sha: &str, peer_build: &Build) -> bool {
 
 /// Pure helper: checks if a staged build satisfies the peer build, matching on commit
 /// when versions match even if shallow checkout build numbers differ.
+#[cfg(any(target_os = "linux", test))]
 pub fn staged_matches_peer(staged: &Build, peer: &Build) -> bool {
     if staged.version != peer.version {
         return false;
@@ -200,7 +200,9 @@ const CHECK_EVERY: Duration = Duration::from_secs(60);
 /// After a failed attempt, the same build isn't tried again for this long.
 const RETRY_AFTER_MS: u64 = 30 * 60_000;
 /// Longest a fetch or install step may take, and the build itself.
+#[cfg(target_os = "linux")]
 const STEP_LIMIT: Duration = Duration::from_secs(15 * 60);
+#[cfg(target_os = "linux")]
 const BUILD_LIMIT: Duration = Duration::from_secs(90 * 60);
 
 /// What this computer is doing to keep up with the others, shown with the linked computers.
@@ -238,26 +240,38 @@ pub fn announced(computer: &str, build: Build) {
 /// When a linked computer's human last pressed Request Update (see `peer_sync::request_update`),
 /// in ms; 0 when nobody has. While it lasts, this computer installs a newer staged build even with
 /// automatic install turned off, the same as if its own Request Update had been pressed.
-static INSTALL_REQUESTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static INSTALL_REQUESTED: InstallRequest = InstallRequest(AtomicU64::new(0));
 /// How long a request from another computer stays good, so a release still downloading counts.
 const REQUEST_LASTS_MS: u64 = 30 * 60_000;
 
+struct InstallRequest(AtomicU64);
+
+impl InstallRequest {
+    fn pending(&self, now_ms: u64) -> Option<u64> {
+        let at = self.0.load(Ordering::SeqCst);
+        (at != 0 && now_ms < at.saturating_add(REQUEST_LASTS_MS)).then_some(at)
+    }
+
+    fn consume(&self, at: u64) {
+        let _ = self.0.compare_exchange(at, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
 /// A linked computer asked every computer to update: check GitHub at once and install what comes.
 pub fn install_requested(now_ms: u64) {
-    INSTALL_REQUESTED.store(now_ms, std::sync::atomic::Ordering::SeqCst);
+    INSTALL_REQUESTED.0.store(now_ms, Ordering::SeqCst);
     CHECK_RELEASE.store(true, std::sync::atomic::Ordering::SeqCst);
     WAKE.notify_one();
 }
 
-/// Whether a request from another computer (see `install_requested`) is still good at `now_ms`.
-pub fn install_wanted(now_ms: u64) -> bool {
-    let at = INSTALL_REQUESTED.load(std::sync::atomic::Ordering::SeqCst);
-    at != 0 && now_ms < at.saturating_add(REQUEST_LASTS_MS)
+/// Identify the pending request so a completed attempt can consume only that request.
+pub fn pending_install_request(now_ms: u64) -> Option<u64> {
+    INSTALL_REQUESTED.pending(now_ms)
 }
 
 /// The requested install has been started (or tried), so the request is used up.
-pub fn clear_install_request() {
-    INSTALL_REQUESTED.store(0, std::sync::atomic::Ordering::SeqCst);
+pub fn consume_install_request(at: u64) {
+    INSTALL_REQUESTED.consume(at);
 }
 
 /// Whether the window should check GitHub for a release now (once per announcement).
@@ -341,9 +355,14 @@ async fn check(engine: &Arc<crate::engine::Engine>, data: &Path) {
         return;
     }
     if should_notify_preparing(&mut TOLD_PREPARING.lock().unwrap(), &build) {
+        #[cfg(target_os = "macos")]
+        tell(engine, &format!("{from} runs Consilium {}, newer than this computer's {}. Waiting for its published GitHub release instead of rebuilding it here; it installs like any update, and the AIs carry on after the restart.", build.label(), this.label()));
+        #[cfg(not(target_os = "macos"))]
         tell(engine, &format!("{from} runs Consilium {}, newer than this computer's {}. Preparing the same build here so the computers stay in step; it installs like any update, and the AIs carry on after the restart.", build.label(), this.label()));
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         set("preparing", &build, &from, "Getting the code");
+        #[cfg(target_os = "macos")]
+        set("waiting", &build, &from, "Waiting for the published GitHub release");
     }
     match prepare(data, &build, &from).await {
         Ok(true) => {
@@ -353,7 +372,9 @@ async fn check(engine: &Arc<crate::engine::Engine>, data: &Path) {
         }
         #[cfg(windows)]
         Ok(false) => {}
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        Ok(false) => set("waiting", &build, &from, "Waiting for the published GitHub release; checking again soon"),
+        #[cfg(target_os = "linux")]
         Ok(false) => set("waiting", &build, &from, "That commit isn't on GitHub yet; trying again in a minute"),
         Err(why) => {
             *TOLD_PREPARING.lock().unwrap() = None;
@@ -371,7 +392,7 @@ fn tell(engine: &Arc<crate::engine::Engine>, text: &str) {
     }
 }
 
-/// Fetches `build`'s commit and stages it. Ok(false) if GitHub doesn't have that commit yet.
+/// Prepares `build` for this platform. Ok(false) while its release or commit isn't ready yet.
 async fn prepare(data: &Path, build: &Build, from: &str) -> Result<bool, String> {
     let log = data.join("update").join("follow.log");
     let _ = std::fs::create_dir_all(data.join("update"));
@@ -380,7 +401,18 @@ async fn prepare(data: &Path, build: &Build, from: &str) -> Result<bool, String>
     #[cfg(windows)]
     return prepare_release_windows(data, build, from, &log).await;
 
-    #[cfg(not(windows))]
+    // The window's forced release check downloads, verifies and stages the DMG. Do not race it
+    // with a slow local source build just because the linked PC announced its update first.
+    #[cfg(target_os = "macos")]
+    {
+        // Keep retrying even when automatic updates were turned off locally: a peer's explicit
+        // update request still has to notice the release when its assets finish publishing.
+        CHECK_RELEASE.store(true, std::sync::atomic::Ordering::SeqCst);
+        append(&log, "Waiting for the published macOS release; no source build started\n");
+        Ok(false)
+    }
+
+    #[cfg(target_os = "linux")]
     {
         let src = data.join("update").join("source");
         if !src.join(".git").exists() {
@@ -415,6 +447,7 @@ fn append(log: &Path, text: &str) {
 
 /// Runs `program args` in `dir`, with its output added to `log`. Builds go into the app's own
 /// folder, and the human's usual tool folders are on the PATH.
+#[cfg(target_os = "linux")]
 async fn run(log: &Path, dir: Option<&Path>, program: &str, args: &[&str], limit: Duration) -> Result<(), String> {
     let data = log.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default();
     let mut cmd = if cfg!(windows) && program == "npm" {
@@ -456,6 +489,34 @@ async fn run(log: &Path, dir: Option<&Path>, program: &str, args: &[&str], limit
 #[cfg(test)]
 mod tests {
     use crate::build_id::Build;
+
+    #[test]
+    fn an_install_attempt_does_not_clear_a_newer_request() {
+        use super::{InstallRequest, AtomicU64, Ordering, REQUEST_LASTS_MS};
+        let requests = InstallRequest(AtomicU64::new(75));
+        assert_eq!(requests.pending(80), Some(75));
+        requests.0.store(100, Ordering::SeqCst);
+        requests.consume(75);
+        assert_eq!(requests.pending(100 + REQUEST_LASTS_MS - 1), Some(100));
+        assert_eq!(requests.pending(100 + REQUEST_LASTS_MS), None);
+        requests.consume(100);
+        assert_eq!(requests.pending(100), None);
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn mac_waits_for_the_published_release_without_starting_a_source_build() {
+        let data = std::env::temp_dir().join(format!("follow-release-test-{}", uuid::Uuid::new_v4()));
+        let build = Build { version: "999.1.0".into(), number: 1, commit: "0123456789ab".into() };
+
+        let _ = take_release_check();
+        assert!(!prepare(&data, &build, "Windows PC").await.unwrap());
+        assert!(!data.join("update/source").exists(), "the Mac must not clone or build the peer commit");
+        assert!(take_release_check(), "the window retries until the release assets are published");
+        let log = std::fs::read_to_string(data.join("update/follow.log")).unwrap();
+        assert!(log.contains("no source build started"), "{log}");
+        let _ = std::fs::remove_dir_all(data);
+    }
 
     #[test]
     fn test_tag_commit_matches_validation() {

@@ -15,6 +15,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+#[path = "signal_registration_tests.rs"]
+mod registration_tests;
+
 /// What the setup panel shows. Never contains the full phone number.
 #[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
 pub struct SetupState {
@@ -97,35 +101,159 @@ fn quiet(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// Whether signal-cli already holds keys for this number on this computer.
-fn already_linked(cli: &std::path::Path, account: &str) -> bool {
-    // While a daemon holds the account, `listAccounts` can wait for its lock forever, so it gets
-    // 30 seconds and is then stopped instead of being left behind.
-    let Ok(mut child) = quiet(Command::new(cli).arg("listAccounts"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return false;
+const LINK_REQUIRED: &str = "Signal has no registered link for this computer. Open messaging setup and scan a new QR code from Signal on your phone, then complete Note to Self verification. Existing account data has been kept.";
+const CHECK_UNAVAILABLE: &str = "Consilium could not check Signal's registered accounts. No account data was changed and no new link was started. Check signal-cli and try again.";
+const CHECK_TIMED_OUT: &str = "Checking Signal's registered accounts timed out. No account data was changed and no new link was started. Close any other account setup and try again.";
+const INVALID_ACCOUNTS: &str = "signal-cli returned an unreadable registered-account list. No account data was changed and no new link was started. Update signal-cli and try again.";
+const MAX_ACCOUNT_OUTPUT: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Registration {
+    Registered,
+    LinkRequired,
+    Unavailable(&'static str),
+}
+
+/// Only a successful structured list can establish that a phone link is missing.
+/// Warning/error text can mention an unregistered account and is never evidence of a link.
+fn parse_registration(output: &[u8], account: &str) -> Registration {
+    if output.len() > MAX_ACCOUNT_OUTPUT {
+        return Registration::Unavailable(INVALID_ACCOUNTS);
+    }
+    let Ok(serde_json::Value::Array(rows)) = serde_json::from_slice(output) else {
+        return Registration::Unavailable(INVALID_ACCOUNTS);
     };
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() < Duration::from_secs(30) => std::thread::sleep(Duration::from_millis(200)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
+    let mut matched = false;
+    for row in rows {
+        let Some(aci) = row.get("aci").and_then(serde_json::Value::as_str) else {
+            return Registration::Unavailable(INVALID_ACCOUNTS);
+        };
+        if uuid::Uuid::parse_str(aci).is_err() {
+            return Registration::Unavailable(INVALID_ACCOUNTS);
+        }
+        match row.get("number") {
+            Some(serde_json::Value::String(number)) if bridge::valid_account(number) => {
+                matched |= number == account;
             }
+            Some(serde_json::Value::Null) => {}
+            _ => return Registration::Unavailable(INVALID_ACCOUNTS),
         }
     }
-    let mut out = String::new();
-    if let Some(mut o) = child.stdout.take() {
-        let _ = std::io::Read::read_to_string(&mut o, &mut out);
+    if matched { Registration::Registered } else { Registration::LinkRequired }
+}
+
+fn registration_probe(mut command: tokio::process::Command, account: &str, limit: Duration) -> Registration {
+    use tokio::io::AsyncReadExt;
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, including the batch launcher.
+    #[cfg(unix)]
+    command.process_group(0);
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return Registration::Unavailable(CHECK_UNAVAILABLE);
+    };
+    runtime.block_on(async {
+        let Ok(mut child) = command.spawn() else {
+            return Registration::Unavailable(CHECK_UNAVAILABLE);
+        };
+        let Some(stdout) = child.stdout.take() else {
+            stop_registration_probe(&mut child).await;
+            return Registration::Unavailable(CHECK_UNAVAILABLE);
+        };
+        let mut output = Vec::new();
+        let completed = tokio::time::timeout(limit, async {
+            let mut reader = stdout.take((MAX_ACCOUNT_OUTPUT + 1) as u64);
+            tokio::try_join!(child.wait(), reader.read_to_end(&mut output))
+        }).await;
+        match completed {
+            Ok(Ok((status, _))) if status.success() => parse_registration(&output, account),
+            Ok(_) => {
+                stop_registration_probe(&mut child).await;
+                Registration::Unavailable(CHECK_UNAVAILABLE)
+            }
+            Err(_) => {
+                stop_registration_probe(&mut child).await;
+                Registration::Unavailable(CHECK_TIMED_OUT)
+            }
+        }
+    })
+}
+
+/// The Windows batch launcher owns a Java child. Ending only cmd.exe leaves the
+/// account lock held, so cancel precisely this owned process tree before reaping it.
+async fn stop_registration_probe(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        #[cfg(windows)]
+        {
+            let mut killer = tokio::process::Command::new("taskkill");
+            killer.args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                .creation_flags(0x0800_0000).kill_on_drop(true);
+            if let Ok(mut task) = killer.spawn() {
+                if tokio::time::timeout(Duration::from_secs(5), task.wait()).await.is_err() {
+                    let _ = task.kill().await;
+                }
+            }
+        }
+        #[cfg(unix)]
+        // This probe was placed in its own group above; no other app is selected.
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
     }
-    out.lines().any(|l| l.split_whitespace().any(|w| w == account))
+    let _ = child.kill().await;
+}
+
+fn registered_account(cli: &std::path::Path, account: &str) -> Registration {
+    let mut command = tokio::process::Command::new(cli);
+    command.args(["--output", "json", "listAccounts"]);
+    registration_probe(command, account, Duration::from_secs(30))
+}
+
+fn start_if_registered(registration: Registration, start: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    match registration {
+        Registration::Registered => start(),
+        Registration::LinkRequired => Err(LINK_REQUIRED.into()),
+        Registration::Unavailable(detail) => Err(detail.into()),
+    }
+}
+
+fn link_if_needed(registration: Registration, link: impl FnOnce() -> Result<(), String>) -> Result<bool, String> {
+    match registration {
+        Registration::Registered => Ok(false),
+        Registration::LinkRequired => link().map(|()| true),
+        Registration::Unavailable(detail) => Err(detail.into()),
+    }
+}
+
+fn background_failure(run: u64, detail: String) {
+    set(run, |state| {
+        if !matches!(state.phase.as_str(), "linking" | "starting" | "verifying") {
+            state.phase = "failed".into();
+            state.link_uri = None;
+            state.code = None;
+            state.detail = detail;
+        }
+    });
+}
+
+/// UI readiness is separate from the raw daemon probe used during setup/startup.
+pub fn connector_status(cfg: &BridgeConfig, timeout: Duration) -> bridge::ConnectorStatus {
+    setup_connector_status(cfg, bridge::probe_signal(cfg, timeout), &state())
+}
+
+fn setup_connector_status(cfg: &BridgeConfig, mut status: bridge::ConnectorStatus, setup: &SetupState) -> bridge::ConnectorStatus {
+    if !cfg.enabled {
+        return status;
+    }
+    if status.state == "ok" {
+        if cfg.allowed_acis.is_empty() {
+            status.state = "down";
+            status.detail = "Signal's daemon is running, but phone verification is not complete. Open messaging setup and finish Note to Self verification.".into();
+        }
+    } else if setup.phase == "failed" && [LINK_REQUIRED, CHECK_UNAVAILABLE, CHECK_TIMED_OUT, INVALID_ACCOUNTS].contains(&setup.detail.as_str()) {
+        status.state = "down";
+        status.detail = setup.detail.clone();
+    }
+    status
 }
 
 /// Whether a signal-cli command line is one an older Consilium left running that now does harm:
@@ -143,6 +271,13 @@ pub fn stale_signal_cli(args: &[String], account: &str, running_secs: u64) -> bo
     ours && rest.iter().any(|a| a == "daemon") && !rest.iter().any(|a| a == "manual")
 }
 
+/// Checks the executable name before considering signal-cli arguments. AI prompts and
+/// shell scripts can contain those same arguments and must never select their processes.
+pub fn stale_signal_cli_process(name: &str, args: &[String], account: &str, running_secs: u64) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "java" | "java.exe" | "javaw" | "javaw.exe")
+        && stale_signal_cli(args, account, running_secs)
+}
+
 /// Stops the signal-cli processes `stale_signal_cli` picks out. Returns how many were stopped.
 fn stop_stale_signal_cli(account: &str) -> usize {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -155,13 +290,63 @@ fn stop_stale_signal_cli(account: &str) -> usize {
     let mut stopped = 0;
     for p in sys.processes().values() {
         let args: Vec<String> = p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        if stale_signal_cli(&args, account, p.run_time()) && p.kill() {
+        if stale_signal_cli_process(&p.name().to_string_lossy(), &args, account, p.run_time()) && p.kill() {
             stopped += 1;
         }
     }
     stopped
 }
 
+/// Whether a process is a signal-cli daemon for `account`, in any receive mode. The process is
+/// picked by name first (java running signal-cli, or a native signal-cli build), never by text alone.
+pub fn daemon_for(name: &str, args: &[String], account: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let rest: &[String] = if matches!(name.as_str(), "java" | "java.exe" | "javaw" | "javaw.exe") {
+        match args.iter().position(|a| a == "org.asamk.signal.Main") {
+            Some(i) => &args[i + 1..],
+            None => return false,
+        }
+    } else if matches!(name.as_str(), "signal-cli" | "signal-cli.exe") {
+        args.get(1..).unwrap_or(&[])
+    } else {
+        return false;
+    };
+    rest.windows(2).any(|w| w[0] == "-a" && w[1] == account) && rest.iter().any(|a| a == "daemon")
+}
+
+/// After a fresh link, stops any daemon for the account (it still has the old keys) and waits
+/// for the endpoint port to be free, so ensure_daemon starts one with the new link.
+fn replace_old_daemon(run: u64, cfg: &BridgeConfig) -> Result<(), String> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    let mut stopped = 0;
+    for p in sys.processes().values() {
+        let args: Vec<String> = p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        if daemon_for(&p.name().to_string_lossy(), &args, &cfg.account) && p.kill() {
+            stopped += 1;
+        }
+    }
+    if stopped == 0 {
+        return Ok(());
+    }
+    set(run, |s| {
+        s.detail = format!("Stopped {stopped} older Signal background process(es) that still had the old link.");
+    });
+    let addr = endpoint_addr(cfg)?;
+    let started = Instant::now();
+    while TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+        if started.elapsed() > Duration::from_secs(15) {
+            return Err(format!("An older signal-cli is still using {addr} after being stopped. Close it and click Try again."));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    Ok(())
+}
 /// Pulls "+15551234567" out of signal-cli's "Associated with: +15551234567" line.
 pub fn associated_number(text: &str) -> Option<String> {
     text.lines()
@@ -204,8 +389,15 @@ pub fn cancel() {
 }
 
 fn run_setup(run: u64, cli: std::path::PathBuf, cfg_path: std::path::PathBuf, cfg: BridgeConfig) {
-    if !already_linked(&cli, &cfg.account) {
-        if let Err(e) = link(run, &cli, &cfg.account) {
+    let registration = if daemon_answers(&cfg) { Registration::Registered } else { registered_account(&cli, &cfg.account) };
+    let new_link = match link_if_needed(registration, || link(run, &cli, &cfg.account)) {
+        Ok(new_link) => new_link,
+        Err(detail) => return fail(run, detail),
+    };
+    if new_link {
+        // A daemon started before this link still holds the old keys and the port, and
+        // ensure_daemon would take it as running; replace it so the code reply reaches setup.
+        if let Err(e) = replace_old_daemon(run, &cfg) {
             return fail(run, e);
         }
     }
@@ -228,12 +420,19 @@ fn run_setup(run: u64, cli: std::path::PathBuf, cfg_path: std::path::PathBuf, cf
     match verify(&cfg, &code, run) {
         Ok(aci) => {
             // Turn Signal on and allow the confirmed sender, keeping everything else as it was.
+            // Without the sender's account ID, the chat bridge would ignore every reply, so
+            // "verified" would be a lie.
+            let Some(a) = aci else {
+                return fail(
+                    run,
+                    "Your reply arrived, but signal-cli didn't say which account sent it, so Consilium can't \
+recognise your messages. Update signal-cli, then click Try again.",
+                );
+            };
             let mut next = BridgeConfig::load(&cfg_path).unwrap_or(cfg);
             next.enabled = true;
-            if let Some(a) = aci {
-                if !next.allowed_acis.iter().any(|x| x.eq_ignore_ascii_case(&a)) {
-                    next.allowed_acis.push(a);
-                }
+            if !next.allowed_acis.iter().any(|x| x.eq_ignore_ascii_case(&a)) {
+                next.allowed_acis.push(a);
             }
             if let Err(e) = next.save(&cfg_path) {
                 return fail(run, format!("Verified, but saving settings failed: {e}"));
@@ -345,12 +544,20 @@ pub fn autostart(cfg_path: std::path::PathBuf) {
         if !cfg.enabled || !bridge::valid_account(&cfg.account) {
             return;
         }
-        if let Ok(cli) = signal_cli() {
+        if matches!(state().phase.as_str(), "linking" | "starting" | "verifying") {
+            return;
+        }
+        let run = *RUN.lock().unwrap();
+        let outcome = signal_cli().and_then(|cli| {
             // A daemon that already answers proves the account is linked; asking signal-cli
             // again would wait on the daemon's lock.
-            if daemon_answers(&cfg) || already_linked(&cli, &cfg.account) {
-                let _ = ensure_daemon(&cli, &cfg);
+            if daemon_answers(&cfg) {
+                return Ok(());
             }
+            start_if_registered(registered_account(&cli, &cfg.account), || ensure_daemon(&cli, &cfg))
+        });
+        if let Err(detail) = outcome {
+            background_failure(run, detail);
         }
     });
 }
@@ -374,10 +581,15 @@ pub fn revive(cfg: &BridgeConfig) {
     if matches!(state().phase.as_str(), "linking" | "starting" | "verifying") {
         return; // a setup in progress manages the daemon itself
     }
-    if let Ok(cli) = signal_cli() {
-        if let Err(e) = ensure_daemon(&cli, cfg) {
-            eprintln!("signal: couldn't restart signal-cli: {e}");
+    let run = *RUN.lock().unwrap();
+    let outcome = signal_cli().and_then(|cli| {
+        if daemon_answers(cfg) {
+            return Ok(());
         }
+        start_if_registered(registered_account(&cli, &cfg.account), || ensure_daemon(&cli, cfg))
+    });
+    if let Err(detail) = outcome {
+        background_failure(run, detail);
     }
 }
 
@@ -476,10 +688,7 @@ fn verify(cfg: &BridgeConfig, code: &str, run: u64) -> Result<Option<String>, St
 /// Note to Self arrives as a sync "sent" message) and its text contains the code.
 /// Returns Some(aci) on a match; the inner value is None when the daemon gave no account ID.
 pub fn reply_with_code(v: &serde_json::Value, account: &str, code: &str) -> Option<Option<String>> {
-    if v.get("method").and_then(|m| m.as_str()) != Some("receive") {
-        return None;
-    }
-    let env = v.get("params")?.get("envelope")?;
+    let env = crate::signal_chat::receive_envelope(v)?;
     let from_self = env.get("sourceNumber").and_then(|n| n.as_str()) == Some(account)
         || env.get("source").and_then(|n| n.as_str()) == Some(account);
     if !from_self {
@@ -553,5 +762,84 @@ mod tests {
         let stranger = serde_json::json!({"method":"receive","params":{"envelope":{
             "sourceNumber": "+15559999999", "dataMessage": {"message": "4821"}}}});
         assert_eq!(reply_with_code(&stranger, acc, "4821"), None);
+    }
+
+    #[test]
+    fn the_reply_is_read_in_the_shape_signal_cli_sends_to_a_subscriber() {
+        // After `subscribeReceive`, signal-cli wraps each message as params.result.envelope.
+        let acc = "+15551234567";
+        let aci = "8f0c6e1a-1111-4222-8333-944455556666";
+        let sub = |env: serde_json::Value| serde_json::json!({"jsonrpc":"2.0","method":"receive",
+            "params":{"subscription":0,"result":{"account":acc,"envelope":env}}});
+        let mine = sub(serde_json::json!({"sourceNumber": acc, "sourceUuid": aci,
+            "syncMessage": {"sentMessage": {"message": "8575", "destinationNumber": acc}}}));
+        assert_eq!(reply_with_code(&mine, acc, "8575"), Some(Some(aci.to_string())));
+        assert_eq!(reply_with_code(&mine, acc, "1234"), None);
+        let stranger = sub(serde_json::json!({"sourceNumber": "+15559999999", "dataMessage": {"message": "8575"}}));
+        assert_eq!(reply_with_code(&stranger, acc, "8575"), None);
+    }
+}
+
+#[cfg(test)]
+mod stale_cleanup_process_tests {
+    use super::*;
+
+    fn args(command: &str) -> Vec<String> {
+        ["java", "org.asamk.signal.Main", "-a", "+15550001000", command]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn stale_cleanup_never_selects_ai_or_shell_processes() {
+        for command in ["daemon", "listAccounts"] {
+            let args = args(command);
+            assert!(stale_signal_cli(&args, "+15550001000", 180));
+            for name in ["claude.exe", "codex.exe", "node.exe", "powershell.exe", "pwsh.exe", "cmd.exe"] {
+                assert!(
+                    !stale_signal_cli_process(name, &args, "+15550001000", 180),
+                    "selected {name} for {command}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_cleanup_still_selects_the_matching_java_process() {
+        for command in ["daemon", "listAccounts"] {
+            let args = args(command);
+            for name in ["java", "java.exe", "javaw", "javaw.exe", "JAVA.EXE"] {
+                assert!(stale_signal_cli_process(name, &args, "+15550001000", 180));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod relink_tests {
+    use super::*;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_manual_mode_daemon_for_the_account_is_replaced_after_relinking() {
+        let args = v(&["java", "-cp", "x", "org.asamk.signal.Main", "-a", "+15550001111", "daemon", "--tcp", "127.0.0.1:7583", "--receive-mode", "manual"]);
+        assert!(daemon_for("java.exe", &args, "+15550001111"));
+        assert!(daemon_for("signal-cli", &v(&["signal-cli", "-a", "+15550001111", "daemon"]), "+15550001111"));
+    }
+
+    #[test]
+    fn other_accounts_commands_and_processes_are_left_alone() {
+        let other = v(&["java", "org.asamk.signal.Main", "-a", "+15550002222", "daemon"]);
+        assert!(!daemon_for("java.exe", &other, "+15550001111"));
+        let link = v(&["java", "org.asamk.signal.Main", "-a", "+15550001111", "link"]);
+        assert!(!daemon_for("java.exe", &link, "+15550001111"));
+        // An AI CLI or shell whose prompt mentions the same words is never picked.
+        let shell = v(&["pwsh", "-c", "org.asamk.signal.Main -a +15550001111 daemon"]);
+        assert!(!daemon_for("pwsh.exe", &shell, "+15550001111"));
+        assert!(!daemon_for("claude.exe", &shell, "+15550001111"));
     }
 }

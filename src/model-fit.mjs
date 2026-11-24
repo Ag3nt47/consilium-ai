@@ -1,0 +1,83 @@
+const MODELS = [
+  ["Qwen3 0.6B", 0.6],
+  ["Qwen3 1.7B", 1.7],
+  ["Qwen3 4B", 4],
+  ["Qwen2.5-Coder 7B", 7.61],
+  ["Qwen3 8B", 8],
+  ["Llama 3.1 8B", 8],
+  ["14B class", 14],
+  ["32B class", 32],
+  ["Llama 3.1 70B", 70],
+];
+
+const positive = (value) => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
+export const gib = (value) => `${value.toFixed(1)} GiB`;
+
+export function equalSplitMemoryGiB(weights, count, overhead) {
+  return positive(weights) / count + positive(overhead);
+}
+
+export function weightBudgets(devices, overhead) {
+  const runtime = positive(overhead);
+  return devices.map(({ name, memory }) => ({
+    name: name || "Unnamed device",
+    capacity: Math.max(0, positive(memory) - runtime),
+  }));
+}
+
+export function modelFit(devices, bits, overhead, customWeights, preferSplit = false, distribution = "balanced") {
+  const hasMemory = devices.some(({ memory }) => positive(memory) > 0);
+  const budgets = weightBudgets(devices, overhead).filter(({ capacity }) => capacity > 0).sort((a, b) => b.capacity - a.capacity);
+  const combined = budgets.reduce((sum, { capacity }) => sum + capacity, 0);
+  const models = MODELS.map(([name, parameters]) => ({
+    name,
+    weights: parameters * 1e9 * bits / 8 / 2 ** 30 * (bits < 16 ? 1.15 : 1),
+  }));
+  if (positive(customWeights) > 0) models.push({ name: "Custom model", weights: positive(customWeights) });
+
+  return models.map(({ name, weights }) => {
+    const single = budgets.filter(({ capacity }) => capacity >= weights);
+    if (single.length && (!preferSplit || budgets.length < 2)) {
+      const eligible = single.map((device) => device.name).join(", ");
+      const fit = preferSplit
+        ? `Split needs two devices with weight capacity. One device: ${eligible}`
+        : `One device: ${eligible}`;
+      return { name, weights, fit };
+    }
+    if (combined < weights) return {
+      name, weights, fit: hasMemory ? `Needs at least ${gib(weights - combined)} more for weights` : "Enter usable memory",
+    };
+    // Balanced splits cap smaller budgets first. Capacity-weighted splits use the
+    // same fraction of every device's post-reserve budget.
+    const weighted = distribution === "capacity";
+    let remaining = weights;
+    const selected = [...budgets].reverse().map(({ name, capacity }, index) => {
+      const share = weighted ? (capacity / combined) * weights : remaining / (budgets.length - index);
+      const allocated = Math.min(capacity, share);
+      remaining -= allocated;
+      return { name, allocated };
+    }).reverse();
+    const names = selected.map((device) => device.name).join(" + ");
+    const allocation = selected.map(({ name, allocated }) =>
+      `${name} ${allocated < 0.05 ? "<0.1 GiB" : gib(allocated)}`
+    ).join(", ");
+    const label = weighted ? "Capacity-weighted split estimate" : "Split estimate";
+    return { name, weights, fit: `${label}: ${names} (${allocation})`, allocation: selected };
+  });
+}
+
+export function ggufShardError(names) {
+  const shards = names.map((name) => /^(.*)-(\d{5})-of-(\d{5})\.gguf$/i.exec(name));
+  const first = shards.find(Boolean);
+  if (!first) return names.length > 1 ? "Select one GGUF file or all numbered shards from one model." : undefined;
+  const [, model, , countText] = first;
+  const count = Number(countText);
+  if (shards.some((shard) => !shard || shard[1] !== model || shard[3] !== countText)) {
+    return "Select GGUF shards from one model and one shard set.";
+  }
+  const indices = new Set(shards.map((shard) => Number(shard[2])));
+  if (indices.size !== count || shards.length !== count || [...indices].some((index) => index < 1 || index > count)) {
+    return `Select all ${count} GGUF shards exactly once.`;
+  }
+  return undefined;
+}

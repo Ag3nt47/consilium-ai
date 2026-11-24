@@ -3,9 +3,11 @@
 //! "continue". It stops on its own too:
 //!
 //! - when no task is left to do (every task is done, or the rest are blocked);
-//! - when an AI has asked the human something (a `REQUEST:` line) that the human hasn't answered,
-//!   except in an auto-run chat, where the request is approved on the human's behalf after
-//!   `DELAY_SECS` (time to click Deny first) and work goes on, every time, with no limit;
+//! - when an AI here has asked the human something (a `REQUEST:` line) that the human hasn't
+//!   answered and the AI hasn't withdrawn: it pauses with a note saying so, so the chat never just
+//!   goes quiet. Another computer's AIs' requests are answered there and don't hold this one up.
+//!   In an auto-run chat the request is approved on the human's behalf after `DELAY_SECS` (time
+//!   to click Deny first) and work goes on, every time, with no limit;
 //! - after `MAX_ROUNDS` automatic rounds since the human's last message;
 //! - when `IDLE_ROUNDS` automatic rounds in a row changed nothing on the board, which is what
 //!   waiting on a build, or every AI being out of usage, looks like. Not in a chat where the human
@@ -33,6 +35,7 @@ pub const AUTO_RUN_DELAY_SECS: u64 = 5;
 pub const AUTO_RUN_MAX_ROUNDS: usize = 25;
 /// While a command box holds rounds back, how often auto-continue looks again.
 pub const RECHECK_SECS: u64 = 30;
+const TASKS_IN_CONTINUE_NOTE: usize = 5;
 
 /// The wait before the next automatic round.
 pub fn delay_secs(auto_run: bool) -> u64 {
@@ -60,25 +63,33 @@ fn is_auto_note(e: &Event) -> bool {
 const APPROVED: &str = "Approved: ";
 const AUTO_APPROVED: &str = "auto-approved because Auto-run this chat is on";
 
-/// Requests from AIs since the human's last message that nobody has answered yet, oldest first.
+/// Requests from this computer's AIs since the human's last message that nobody has answered
+/// and their AI hasn't withdrawn, oldest first. Another computer's requests (`via`) are answered
+/// there, so they don't hold rounds back here.
 fn unanswered(since_human: &[Event]) -> Vec<String> {
-    let mut asked: Vec<String> = Vec::new();
+    let mut asked: Vec<(String, String)> = Vec::new();
     for e in since_human {
         if e.sender == CONSILIUM {
             if is_auto_note(e) {
                 for line in e.text.lines() {
                     if let Some(r) = line.trim().strip_prefix(APPROVED) {
-                        if let Some(i) = asked.iter().position(|a| a.trim() == r.trim()) {
+                        if let Some(i) = asked.iter().position(|(_, a)| a.trim() == r.trim()) {
                             asked.remove(i);
                         }
                     }
                 }
             }
-        } else if e.sender != "human" {
-            asked.extend(e.requests.iter().cloned());
+        } else if e.sender != "human" && e.via.is_none() {
+            for line in e.text.lines() {
+                let line = line.trim();
+                if line.get(..9).is_some_and(|p| p.eq_ignore_ascii_case("WITHDRAW:")) {
+                    asked.retain(|(who, r)| !(who == &e.sender && crate::prompt::withdraws(&line[9..], r)));
+                }
+            }
+            asked.extend(e.requests.iter().map(|r| (e.sender.clone(), r.clone())));
         }
     }
-    asked
+    asked.into_iter().map(|(_, r)| r).collect()
 }
 
 /// How Consilium words a run, or a Deny, of a command box when it reports back in the human's
@@ -134,7 +145,7 @@ pub fn decide(events: &[Event], board: &Board, auto_run: bool) -> Decision {
 
 /// `decide`, knowing whether a command box is still due to report back (`pending_boxes`).
 pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pending: bool) -> Decision {
-    let open: Vec<_> = board.tasks.iter().filter(|t| matches!(t.status, Status::Todo | Status::Doing)).collect();
+    let mut open: Vec<_> = board.tasks.iter().filter(|t| matches!(t.status, Status::Todo | Status::Doing)).collect();
     let since_human = events
         .iter()
         .rposition(is_human_message)
@@ -143,12 +154,9 @@ pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pendin
     if open.is_empty() && (waiting.is_empty() || !auto_run) {
         return Decision::Stop;
     }
-    if !waiting.is_empty() && !auto_run {
-        return Decision::Stop;
-    }
     // In an auto-run chat every waiting request is approved, every time, however many rounds have
     // run; approvals don't count as rounds.
-    if !waiting.is_empty() {
+    if !waiting.is_empty() && auto_run {
         let approved = waiting.iter().map(|r| format!("{APPROVED}{}", r.trim())).collect::<Vec<_>>().join("\n");
         return Decision::Continue(format!("{PREFIX}: {AUTO_APPROVED}:\n{approved}\nGo ahead with what you asked."));
     }
@@ -163,6 +171,16 @@ pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pendin
     // A pause note is the last word until the human writes again.
     if notes.last().is_some_and(|n| n.text.starts_with(&format!("{PREFIX} paused"))) {
         return Decision::Stop;
+    }
+    // Waiting for the human: say so once rather than going quiet. Their answer starts it again.
+    if !waiting.is_empty() {
+        let list = waiting.iter().map(|r| format!("- {}", r.trim())).collect::<Vec<_>>().join("\n");
+        return Decision::Pause(format!(
+            "{PREFIX} paused: waiting for your answer to {} request(s):\n{list}\nApprove or Deny them (or send any \
+             message) to carry on. {} task(s) are still open.",
+            waiting.len(),
+            open.len()
+        ));
     }
     let rounds: Vec<&&Event> = notes.iter().filter(|n| !n.text.starts_with(&format!("{PREFIX} paused"))).collect();
     let max_rounds = if auto_run { AUTO_RUN_MAX_ROUNDS } else { MAX_ROUNDS };
@@ -182,7 +200,13 @@ pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pendin
             open.len()
         ));
     }
-    let list = open.iter().map(|t| format!("#{} {}", t.id, t.title)).collect::<Vec<_>>().join("; ");
+    open.sort_by_key(|task| (task.status != Status::Doing, task.priority, task.id));
+    let mut list = open.iter().take(TASKS_IN_CONTINUE_NOTE)
+        .map(|t| format!("#{} {}", t.id, t.title)).collect::<Vec<_>>().join("; ");
+    let omitted = open.len().saturating_sub(TASKS_IN_CONTINUE_NOTE);
+    if omitted > 0 {
+        list.push_str(&format!("; {omitted} more on the task board"));
+    }
     Decision::Continue(format!(
         "{PREFIX} (round {} of {max_rounds}): {} task(s) still open: {list}. Carry on with the task you own, or take an \
          open one nobody owns. Don't repeat work another AI reports done. If you are only waiting on something \
@@ -214,12 +238,32 @@ mod tests {
                 title: "Sync".into(),
                 owner: Some("claude".into()),
                 status,
+                priority: crate::tasks::Priority::Normal,
                 note: None,
                 by: "claude".into(),
                 updated,
             }],
             next: 2,
         }
+    }
+
+    #[test]
+    fn continuation_lists_at_most_five_active_and_prioritized_items() {
+        let mut b = board(Status::Doing, 1);
+        for id in 2..=12 {
+            let mut task = b.tasks[0].clone();
+            task.id = id;
+            task.title = format!("Pending item {id}");
+            task.status = Status::Todo;
+            task.owner = None;
+            b.tasks.push(task);
+        }
+        b.tasks.last_mut().unwrap().priority = crate::tasks::Priority::High;
+        let Decision::Continue(note) = decide(&[], &b, false) else { panic!("continue open work") };
+        assert!(note.starts_with("Auto-continue (round 1 of 8): 12 task(s) still open: #1 Sync; #12 Pending item 12; #2"));
+        assert!(note.contains("7 more on the task board"));
+        assert!(!note.contains("#6 "));
+        assert!(!note.contains("#11 "));
     }
 
     fn auto(seq: u64, ts: u64) -> Event {
@@ -286,7 +330,31 @@ mod tests {
             ev(1, 10, "human", "message", "go", vec![]),
             ev(2, 20, "claude", "message", "REQUEST: ok?", vec!["ok?".into()]),
         ];
-        assert_eq!(decide(&events, &board(Status::Doing, 15), false), Decision::Stop);
+        let Decision::Pause(note) = decide(&events, &board(Status::Doing, 15), false) else { panic!("says it is waiting") };
+        assert!(note.contains("waiting for your answer") && note.contains("- ok?"), "{note}");
+        let mut events = events;
+        events.push(ev(3, 30, CONSILIUM, "system", &note, vec![]));
+        assert_eq!(decide(&events, &board(Status::Doing, 15), false), Decision::Stop, "said once");
+        events.push(ev(4, 40, "human", "message", "Approved: ok?", vec![]));
+        assert!(matches!(decide(&events, &board(Status::Doing, 15), false), Decision::Continue(_)), "the answer restarts it");
+    }
+
+    #[test]
+    fn withdrawn_and_other_computers_requests_dont_hold_rounds_back() {
+        let b = board(Status::Doing, 15);
+        let withdrawn = vec![
+            ev(1, 10, "human", "message", "go", vec![]),
+            ev(2, 20, "claude", "message", "REQUEST: Can I merge PR 47 now?", vec!["Can I merge PR 47 now?".into()]),
+            ev(3, 25, "gpt", "message", "WITHDRAW: all", vec![]),
+            ev(4, 30, "claude", "message", "Merged already.\nWITHDRAW: can i merge pr 47 now", vec![]),
+        ];
+        assert!(matches!(decide(&withdrawn, &b, false), Decision::Continue(_)), "withdrawn by its own AI");
+        let only_gpt = vec![withdrawn[0].clone(), withdrawn[1].clone(), withdrawn[2].clone()];
+        assert!(matches!(decide(&only_gpt, &b, false), Decision::Pause(_)), "another AI can't withdraw it");
+        let mut theirs = ev(2, 20, "claude", "message", "REQUEST: Redo Signal setup?", vec!["Redo Signal setup?".into()]);
+        theirs.via = Some("MSI-AGENT47".into());
+        let remote = vec![ev(1, 10, "human", "message", "go", vec![]), theirs];
+        assert!(matches!(decide(&remote, &b, false), Decision::Continue(_)), "answered on the other computer");
     }
 
     #[test]

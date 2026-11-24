@@ -6,7 +6,7 @@ use crate::store::Event;
 use std::hash::{DefaultHasher, Hasher};
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// Once a transcript passes this budget, older turns become a compact digest and the newest
@@ -26,7 +26,13 @@ const LOCAL_LATEST_HUMAN_CHARS: usize = 8_000;
 /// Enough patch context to identify concurrent edits without spending the whole prompt on a diff.
 const MAX_WORKSPACE_DIFF_BYTES: usize = 12_000;
 const MAX_WORKSPACE_STATUS_BYTES: usize = 8_000;
+const LOCAL_WORKSPACE_DIFF_BYTES: usize = 2_000;
+const LOCAL_WORKSPACE_STATUS_BYTES: usize = 1_200;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_millis(1_500);
+const PEER_STATUS_BYTES: usize = 64 * 1024;
+const MAX_UNTRACKED_PREFLIGHT_FILES: usize = 4;
+const MAX_UNTRACKED_PREFLIGHT_BYTES: u64 = 256 * 1024;
+const MAX_PATCH_DIAGNOSTICS: usize = 4;
 
 type TranscriptPart<'a> = (&'a Event, String);
 
@@ -40,8 +46,12 @@ struct Limits<'a> {
 
 const CLOUD_LIMITS: Limits<'static> = Limits { total: MAX_TRANSCRIPT_CHARS, summary: MAX_TRANSCRIPT_SUMMARY_CHARS, per_message: None };
 
-fn local_limits(data: Option<&Path>) -> Limits<'_> {
-    Limits { total: LOCAL_TRANSCRIPT_CHARS, summary: LOCAL_SUMMARY_CHARS, per_message: Some((LOCAL_MESSAGE_CHARS, data)) }
+fn local_limits(data: Option<&Path>, window: Option<usize>, system_chars: usize) -> Limits<'_> {
+    let total = window.map_or(LOCAL_TRANSCRIPT_CHARS, |tokens| {
+        let input = (tokens - tokens / 4).saturating_mul(crate::apiagent::CHARS_PER_TOKEN);
+        input.saturating_sub(system_chars).clamp(512, LOCAL_TRANSCRIPT_CHARS)
+    });
+    Limits { total, summary: LOCAL_SUMMARY_CHARS.min(total / 3), per_message: Some((LOCAL_MESSAGE_CHARS, data)) }
 }
 
 struct GitOutput {
@@ -50,10 +60,27 @@ struct GitOutput {
     truncated: bool,
 }
 
+fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput> {
+    let (status, output) = git_capture(workspace, args, keep)?;
+    status.success().then_some(output)
+}
+
 /// Runs a read-only git command without a shell, hashes its complete output, and retains only the
 /// bounded prefix needed for the prompt. A reader thread keeps the pipe drained; the parent polls
 /// the child and kills it at the deadline so a stuck Git process cannot survive an async timeout.
-fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput> {
+fn git_capture(workspace: &Path, args: &[&str], keep: usize) -> Option<(ExitStatus, GitOutput)> {
+    git_capture_until(workspace, args, keep, Instant::now() + GIT_COMMAND_TIMEOUT)
+}
+
+fn git_capture_until(
+    workspace: &Path,
+    args: &[&str],
+    keep: usize,
+    deadline: Instant,
+) -> Option<(ExitStatus, GitOutput)> {
+    if Instant::now() >= deadline {
+        return None;
+    }
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(workspace)
@@ -95,12 +122,11 @@ fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput>
             truncated: total > shown.len(),
         })
     });
-    let started = Instant::now();
-    let success = loop {
+    let status = loop {
         if let Some(status) = child.try_wait().ok()? {
-            break status.success();
+            break status;
         }
-        if started.elapsed() >= GIT_COMMAND_TIMEOUT {
+        if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
             let _ = reader.join();
@@ -109,7 +135,7 @@ fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput>
         std::thread::sleep(Duration::from_millis(10));
     };
     let output = reader.join().ok().flatten()?;
-    success.then_some(output)
+    Some((status, output))
 }
 
 /// A fresh, redacted snapshot of the repository immediately before an agent starts. It gives each
@@ -118,11 +144,27 @@ fn git_output(workspace: &Path, args: &[&str], keep: usize) -> Option<GitOutput>
 /// A one-line git summary of a project folder for linked computers, such as
 /// "consilium-ai · main @ 1a2b3c4 · 3 changed". `None` if the folder isn't a git repository.
 pub fn git_summary(workspace: &Path) -> Option<String> {
-    let status = git_output(workspace, &["status", "--short", "--branch", "--untracked-files=normal"], 64 * 1024)?;
+    let status = workspace_status(workspace)?;
+    Some(summary_from_status(workspace, &status))
+}
+
+/// Read tracked project state for the local audit without starting a repository fsmonitor hook.
+pub(crate) fn audit_git_summary(workspace: &Path) -> Option<String> {
+    let status = git_output(workspace, &[
+        "-c", "core.fsmonitor=false", "status", "--short", "--branch", "--untracked-files=no",
+    ], PEER_STATUS_BYTES)?;
+    Some(summary_from_status(workspace, &status))
+}
+
+fn workspace_status(workspace: &Path) -> Option<GitOutput> {
+    git_output(workspace, &["status", "--short", "--branch", "--untracked-files=normal"], PEER_STATUS_BYTES)
+}
+
+fn summary_from_status(workspace: &Path, status: &GitOutput) -> String {
     let mut lines = status.shown.lines();
     let head = lines.next().unwrap_or_default();
     let changed = lines.filter(|l| !l.trim().is_empty()).count();
-    Some(summarize_git(&folder_name(workspace), head, changed, status.truncated))
+    summarize_git(&folder_name(workspace), head, changed, status.truncated)
 }
 
 fn folder_name(workspace: &Path) -> String {
@@ -146,32 +188,163 @@ fn summarize_git(folder: &str, header: &str, changed: usize, truncated: bool) ->
     out
 }
 
-pub fn workspace_state(workspace: &Path) -> Option<String> {
-    let status = git_output(
-        workspace,
-        &["status", "--short", "--branch", "--untracked-files=normal"],
-        MAX_WORKSPACE_STATUS_BYTES,
-    )?;
-    let diff = git_output(
+/// Returns just the bounded Git-issued diagnostics. The offending lines belong to the diff,
+/// not the preflight report. A failed check invocation is distinct from a detected issue.
+fn patch_preflight(workspace: &Path) -> Option<String> {
+    let (status, report) = git_capture(
         workspace,
         &[
-            "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".",
+            "-c", "core.whitespace=cr-at-eol", "diff", "--check", "--no-ext-diff", "--no-textconv",
+            "HEAD", "--", ".", ":(exclude,attr:linguist-generated)",
         ],
-        MAX_WORKSPACE_DIFF_BYTES,
-    )
-    .or_else(|| {
-        // An unborn repository has no HEAD yet, but its index can still be described.
+        4096,
+    )?;
+    if status.success() {
+        return Some("Tracked patch preflight: no Git whitespace or conflict marker issues.".into());
+    }
+    if status.code() != Some(2) {
+        return None;
+    }
+    let mut out = String::from("Tracked patch preflight found Git whitespace or conflict marker issues.");
+    append_patch_diagnostics(&mut out, &report.shown, MAX_PATCH_DIAGNOSTICS);
+    Some(out)
+}
+
+fn append_patch_diagnostics(out: &mut String, report: &str, limit: usize) -> usize {
+    let diagnostics = report.lines().filter(|line| {
+        if line.starts_with('+') {
+            return false;
+        }
+        let Some((location, issue)) = line.rsplit_once(": ") else {
+            return false;
+        };
+        location.rsplit_once(':').is_some_and(|(_, n)| n.parse::<u32>().is_ok())
+            && matches!(
+                issue,
+                "trailing whitespace."
+                    | "space before tab in indent."
+                    | "new blank line at EOF."
+                    | "leftover conflict marker"
+            )
+    });
+    let mut appended = 0;
+    for line in diagnostics.take(limit) {
+        out.push('\n');
+        out.extend(crate::redact::scrub(line).chars().take(200));
+        appended += 1;
+    }
+    appended
+}
+
+/// Check a small sample of new files without staging them or inserting their contents into prompts.
+fn untracked_preflight(workspace: &Path) -> Option<String> {
+    let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
+    let (status, files) = git_capture_until(
+        workspace,
+        &["ls-files", "--others", "--exclude-standard", "-z", "--", ".", ":(exclude,attr:linguist-generated)"],
+        4096,
+        deadline,
+    )?;
+    if !status.success() {
+        return None;
+    }
+    let mut out = String::from("Untracked file preflight found Git whitespace or conflict marker issues.");
+    let mut remaining = MAX_PATCH_DIAGNOSTICS;
+    for path in files.shown.split_inclusive('\0').filter_map(|part| part.strip_suffix('\0'))
+        .filter(|path| !path.contains('\u{fffd}'))
+        .take(MAX_UNTRACKED_PREFLIGHT_FILES)
+    {
+        let relative = Path::new(path);
+        if !relative.components().all(|part| matches!(part, std::path::Component::Normal(_))) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(workspace.join(relative)) else { continue };
+        if !metadata.is_file() || metadata.len() > MAX_UNTRACKED_PREFLIGHT_BYTES {
+            continue;
+        }
+        let path = format!("./{path}");
+        let Some((status, report)) = git_capture_until(
+            workspace,
+            &[
+                "-c", "core.whitespace=cr-at-eol", "diff", "--no-index", "--check",
+                "--no-ext-diff", "--no-textconv", "--", "/dev/null", &path,
+            ],
+            4096,
+            deadline,
+        ) else { break };
+        if matches!(status.code(), Some(2 | 3)) {
+            remaining -= append_patch_diagnostics(&mut out, &report.shown, remaining);
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+    (remaining < MAX_PATCH_DIAGNOSTICS).then_some(out)
+}
+
+pub struct WorkspaceSnapshot {
+    pub peer_summary: String,
+    pub prompt: Option<String>,
+}
+
+pub fn workspace_snapshot(workspace: &Path, detailed: bool) -> Option<WorkspaceSnapshot> {
+    let status = workspace_status(workspace)?;
+    Some(WorkspaceSnapshot {
+        peer_summary: summary_from_status(workspace, &status),
+        prompt: workspace_prompt(workspace, &status, detailed),
+    })
+}
+
+fn workspace_prompt(workspace: &Path, status: &GitOutput, detailed: bool) -> Option<String> {
+    let (status_limit, diff_limit) = if detailed {
+        (MAX_WORKSPACE_STATUS_BYTES, MAX_WORKSPACE_DIFF_BYTES)
+    } else {
+        (LOCAL_WORKSPACE_STATUS_BYTES, LOCAL_WORKSPACE_DIFF_BYTES)
+    };
+    let mut status_end = status_limit.min(status.shown.len());
+    while !status.shown.is_char_boundary(status_end) {
+        status_end -= 1;
+    }
+    let status_excerpt = &status.shown[..status_end];
+    let read_diff = || {
         git_output(
             workspace,
-            &["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", "."],
-            MAX_WORKSPACE_DIFF_BYTES,
+            &[
+                "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".", ":(exclude,attr:linguist-generated)",
+            ],
+            diff_limit,
         )
-    })?;
+        .or_else(|| {
+            // An unborn repository has no HEAD yet, but its index can still be described.
+            git_output(
+                workspace,
+                &["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=1", "--", ".", ":(exclude,attr:linguist-generated)"],
+                diff_limit,
+            )
+        })
+    };
+    let mut changed = status.shown.lines().skip(1).peekable();
+    let (diff, tracked, untracked) = if detailed && changed.peek().is_some() {
+        let has_untracked = changed.clone().any(|line| line.starts_with("?? "));
+        let has_tracked = changed.any(|line| !line.starts_with("?? "));
+        std::thread::scope(|scope| {
+            let tracked = has_tracked.then(|| scope.spawn(|| patch_preflight(workspace)));
+            let untracked = has_untracked.then(|| scope.spawn(|| untracked_preflight(workspace)));
+            (
+                read_diff(),
+                tracked.and_then(|check| check.join().ok().flatten()),
+                untracked.and_then(|check| check.join().ok().flatten()),
+            )
+        })
+    } else {
+        (read_diff(), None, None)
+    };
+    let diff = diff?;
     let mut state = DefaultHasher::new();
     state.write_u64(status.digest);
     state.write_u64(diff.digest);
     let id = state.finish();
-    let status_text = crate::redact::scrub(status.shown.trim());
+    let status_text = crate::redact::scrub(status_excerpt.trim());
     let diff_text = crate::redact::scrub(diff.shown.trim());
     let mut out = format!("PROJECT STATE (read-only snapshot refreshed immediately before this answer; id {id:016x}):\n");
     if status_text.is_empty() {
@@ -179,12 +352,16 @@ pub fn workspace_state(workspace: &Path) -> Option<String> {
     } else {
         out.push_str("Git status:\n");
         out.push_str(&status_text);
-        if status.truncated {
+        if status.truncated || status_end < status.shown.len() {
             out.push_str("\n… status truncated");
         }
     }
+    for preflight in [tracked, untracked].into_iter().flatten() {
+        out.push_str("\n\n");
+        out.push_str(&preflight);
+    }
     if !diff_text.is_empty() {
-        out.push_str("\n\nCurrent diff excerpt:\n");
+        out.push_str("\n\nCurrent diff excerpt (files marked linguist-generated appear in Git status above):\n");
         out.push_str(&diff_text);
         if diff.truncated {
             out.push_str("\n… diff truncated; inspect the workspace for the complete change");
@@ -295,22 +472,18 @@ pub struct Context<'a> {
 /// For AIs reached over a chat API (local models through Ollama, Grok, DeepSeek): no tools of their
 /// own, so they code through command boxes, which run by themselves in an Auto-run chat.
 pub fn command_box_coding(workspace: &str, os: &str, auto_run: bool) -> String {
-    let (shell, read, write) = if os == "windows" {
-        (
-            "powershell",
-            "Get-Content -Raw path\\to\\file",
-            "Set-Content -Encoding utf8 -Path path\\to\\file -Value @'<newline><whole file><newline>'@",
-        )
+    let (shell, read) = if os == "windows" {
+        ("powershell", "Get-Content path\\to\\file | Select-Object -Skip 40 -First 30")
     } else {
-        ("bash", "cat path/to/file", "cat > path/to/file <<'EOF'<newline><whole file><newline>EOF")
+        ("bash", "sed -n '41,70p' path/to/file")
     };
     let runs = if auto_run { " by itself, because Auto-run is on in this chat," } else { " when the human clicks Run" };
     format!(
         "\n\nCODING THROUGH COMMAND BOXES\nYou can still work on the project in {workspace}: every command box you post \
 runs there{runs} and its output comes back to you as the next message. Work in small steps, one command per \
 ```{shell} box:\n\
-- Look first: list files (`git status`, `git ls-files`) and read what you'll change ({read}).\n\
-- Change a file by writing it whole ({write}). Never write a file you haven't read this turn.\n\
+- Look first: check `git status --short` and locate the symbol you need. Read only its relevant lines ({read}). If you need to find tracked source, scope `git ls-files -- . ':(exclude,attr:linguist-generated)'` to the relevant directory.\n\
+- Make a targeted edit using the source you just read. Review the file diff and run `git diff --check` after editing.\n\
 - Then build or run the tests, and fix what fails before saying it's done.\n\
 - Work on a branch of your own (`git switch -c ai/<you>/<task>`) and commit with a clear message; leave pushing \
 and merging to an AI with tools or the human.\n\
@@ -543,10 +716,10 @@ command box only for a command that needs administrator rights, or one your own 
     }
     if ctx.workspace.is_some() && matches!(ctx.access, Access::Edit | Access::Own | Access::Unrestricted) {
         s.push_str(
-            "\n\nWhen the human asks the council to build or change something, work at full capacity as a team: \
-agree on a short plan, split the work between participants with @mentions so nobody duplicates effort, \
-build your part in the project folder, and review what the others changed. You have creative latitude: \
-make sensible decisions yourself and ask the human (REQUEST:) only for choices that are genuinely theirs. \
+            "\n\nFor council implementation, work at full capacity and assign deliverables and file scope once with @mentions. \
+Build your part and review related changes. Skip greetings, repeated plans and unchanged code. \
+Report handoffs with one field per line: Status:, Files:, Artifacts:, Tests:, Blocker:, Next:. Omit empty fields. Use artifact paths or PR and workflow run links instead of copying output. \
+Resolve routine choices and use REQUEST: for decisions that belong to the human. \
 Working rules across computers and tasks:\n\
 - Git worktrees: when working on code concurrently with other AIs, work in an isolated git worktree \
 (`git worktree add ../consilium-<feature> -b ai/<handle>/<task-id>`) rather than editing the main checkout directly. \
@@ -554,10 +727,15 @@ Leave the primary checkout clean for reading, and remove completed worktrees.\n\
 - Resource-aware builds: direct heavy builds to the computer or drive with sufficient disk space (e.g. on Windows \
 use D: for Cargo targets when C: is tight; offload releases to the Mac).",
         );
-        let peer_res = crate::peer_sync::peer_resources();
+        let mut reports = crate::peer_sync::peer_resources();
+        let peer_res: Vec<_> = crate::link_handle()
+            .into_iter()
+            .flat_map(|link| link.connected_peer_ids())
+            .filter_map(|id| reports.remove(&id))
+            .collect();
         if !peer_res.is_empty() {
             s.push_str("\n\nLINKED COMPUTERS (resource status over peer link):\n");
-            for (_, res) in peer_res {
+            for res in peer_res {
                 s.push_str(&format!("- {}\n", res.format_summary()));
             }
         }
@@ -621,17 +799,62 @@ in the council: {}. Never use ADD_AI for a current participant; @mention them in
     )
 }
 
+/// Older successful command runs can dominate a prompt even after the AI has read them.
+const KEEP_FULL_COMMAND_RESULTS: usize = 3;
+const COMMAND_PREVIEW_CHARS: usize = 2400;
+
+fn successful_command_output(event: &Event) -> Option<(&str, &str, &str)> {
+    if event.kind != "message" || event.sender != "human" || !event.attachments.is_empty() {
+        return None;
+    }
+    let (header, body) = event.text.split_once("\n```text\n")?;
+    if !header.starts_with("Ran command from ") || !header.contains("(exit 0, succeeded, ") {
+        return None;
+    }
+    let (output, reference) = body.rsplit_once("\n```\n")?;
+    let (id, index) = reference.strip_prefix("(command ref ")?.strip_suffix(')')?.rsplit_once('#')?;
+    if id.is_empty() || id.chars().any(char::is_whitespace) || index.parse::<usize>().is_err() {
+        return None;
+    }
+    Some((header, output, reference))
+}
+
+fn command_prompt_preview(event: &Event) -> Option<String> {
+    let (header, output, reference) = successful_command_output(event)?;
+    let chars: Vec<_> = output.chars().collect();
+    if chars.len() <= COMMAND_PREVIEW_CHARS {
+        return None;
+    }
+    let half = COMMAND_PREVIEW_CHARS / 2;
+    let head: String = chars[..half].iter().collect();
+    let tail: String = chars[chars.len() - half..].iter().collect();
+    Some(format!(
+        "{header}\n```text\n{head}\n[Earlier command output shortened in this prompt. Full output is in the chat.]\n{tail}\n```\n{reference}"
+    ))
+}
+
 /// Transcript entries, newest last. Once the safety threshold is crossed, returns the older
-/// entries separately for condensation and keeps a generous recent window verbatim.
+/// entries separately for condensation and keeps a generous recent window in full where possible.
 fn transcript_parts<'a>(events: &'a [Event], me: &str, limits: &Limits) -> (Vec<TranscriptPart<'a>>, Vec<TranscriptPart<'a>>) {
     let latest_human = events.iter().rposition(|e| e.kind == "message" && e.sender == "human");
+    let recent_command_boundary = if limits.per_message.is_none() {
+        events.iter().enumerate().rev()
+            .filter(|(_, event)| successful_command_output(event).is_some())
+            .nth(KEEP_FULL_COMMAND_RESULTS - 1)
+            .map(|(i, _)| i)
+    } else {
+        None
+    };
     let mut parts: Vec<TranscriptPart<'a>> = events
         .iter()
         .enumerate()
         .filter(|(_, e)| e.kind == "message" || (e.kind == "system" && e.sender == crate::council::CONSILIUM))
         .map(|(i, e)| {
             let who = if e.sender == me && e.via.is_none() { format!("{} (you)", label(me)) } else { named(e) };
-            let body = format!("{}{}", e.text, crate::attach::for_transcript(&e.attachments, me));
+            let preview = recent_command_boundary.filter(|&boundary| i < boundary)
+                .filter(|_| Some(i) != latest_human)
+                .and_then(|_| command_prompt_preview(e));
+            let body = preview.unwrap_or_else(|| format!("{}{}", e.text, crate::attach::for_transcript(&e.attachments, me)));
             let body = match limits.per_message {
                 Some((max, data)) => {
                     let max = if Some(i) == latest_human { max.max(LOCAL_LATEST_HUMAN_CHARS) } else { max };
@@ -665,6 +888,38 @@ fn clipped(text: &str, max: usize) -> String {
     }
 }
 
+/// Preserve the fields of an agent handoff when its surrounding message ages out of context.
+fn compact_handoff(text: &str) -> Option<String> {
+    let mut fields = [None; 6];
+    let labels = ["Status", "Files", "Artifacts", "Tests", "Blocker", "Next"];
+    let mut fenced = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let Some((label, value)) = line.split_once(':') else { continue };
+        let label = label.trim_start_matches("- ").trim_matches('*');
+        let value = value.trim_start_matches('*').trim();
+        if !value.is_empty() {
+            if let Some(index) = labels.iter().position(|candidate| candidate.eq_ignore_ascii_case(label)) {
+                fields[index] = Some(value);
+            }
+        }
+    }
+    if fields[0].is_none() || fields.iter().flatten().count() < 2 {
+        return None;
+    }
+    let has_artifacts = fields[2].is_some();
+    Some(labels.into_iter().zip(fields).filter_map(|(label, value)| {
+        let limit = if label == "Artifacts" { 120 } else if has_artifacts { 46 } else { 72 };
+        value.map(|value| format!("{label}: {}", clipped(value, limit)))
+    }).collect::<Vec<_>>().join(" | "))
+}
+
 /// A local, deterministic digest of older turns. It intentionally avoids another provider call:
 /// context compression must still work offline, under rate limits, and on weaker hardware. The
 /// scoring keeps human intent and explicit decisions ahead of routine progress narration.
@@ -685,7 +940,11 @@ fn transcript_digest(older: &[(&Event, String)], budget: usize) -> String {
             let outcome = [" decided ", " complete", " committed", " pushed", " blocked", " failed", " fixed", " next step"]
                 .iter()
                 .any(|needle| lower.contains(needle));
-            let score = u8::from(decisive) * 100 + u8::from(event.sender == "human") * 30 + u8::from(outcome) * 10;
+            let handoff = if decisive || event.sender == "human" { None } else { compact_handoff(&event.text) };
+            let score = u8::from(decisive) * 100
+                + u8::from(event.sender == "human") * 30
+                + u8::from(handoff.is_some()) * 20
+                + u8::from(outcome) * 10;
             let attachments = if event.attachments.is_empty() {
                 String::new()
             } else {
@@ -697,7 +956,7 @@ fn transcript_digest(older: &[(&Event, String)], budget: usize) -> String {
             (
                 index,
                 score,
-                format!("- [{}] {}{}", named(event), clipped(&compact, MAX_SUMMARY_ENTRY_CHARS), attachments),
+                format!("- [{}] {}{}", named(event), clipped(handoff.as_deref().unwrap_or(&compact), MAX_SUMMARY_ENTRY_CHARS), attachments),
             )
         })
         .collect();
@@ -737,16 +996,16 @@ pub fn visible_message_ids(events: &[Event], me: &str) -> Vec<String> {
 /// crossed. The latest window remains verbatim so current code, requests and corrections retain
 /// their exact wording.
 pub fn transcript(events: &[Event], me: &str) -> String {
-    transcript_within(events, me, &CLOUD_LIMITS)
+    transcript_within(events, me, &CLOUD_LIMITS, None)
 }
 
 /// The transcript for a local model: a small budget, with long messages offloaded to files in
 /// `data`'s offload folder (see `offload`) so one command's output can't fill its context window.
-pub fn local_transcript(events: &[Event], me: &str, data: Option<&Path>) -> String {
-    transcript_within(events, me, &local_limits(data))
+pub fn local_transcript(events: &[Event], me: &str, data: Option<&Path>, handoff: Option<&Path>, window: Option<usize>, system: &str) -> String {
+    transcript_within(events, me, &local_limits(data, window, system.chars().count()), handoff)
 }
 
-fn transcript_within(events: &[Event], me: &str, limits: &Limits) -> String {
+fn transcript_within(events: &[Event], me: &str, limits: &Limits, handoff: Option<&Path>) -> String {
     let (older, parts) = transcript_parts(events, me, limits);
     let mut out = String::from("CONVERSATION SO FAR\n\n");
     if events.iter().any(|e| e.kind == "message" && e.sender != "human" && e.via.is_some()) {
@@ -754,8 +1013,13 @@ fn transcript_within(events: &[Event], me: &str, limits: &Limits) -> String {
         out.push_str(&handles_note(events, me));
     }
     if !older.is_empty() {
-        out.push_str(&transcript_digest(&older, limits.summary));
-        out.push_str("\n\nRECENT MESSAGES (verbatim)\n\n");
+        let digest = transcript_digest(&older, limits.summary);
+        if let Some(path) = handoff {
+            let checkpoint = format!("# Consilium handoff\n\n{}\n", crate::redact::scrub(&digest));
+            let _ = crate::store::write_atomic(path, checkpoint.as_bytes());
+        }
+        out.push_str(&digest);
+        out.push_str("\n\nRECENT MESSAGES\n\n");
     }
     out.push_str(&parts.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n\n"));
     out.push_str(&command_boxes_note(events, me, crate::runcmd::is_running));
@@ -770,7 +1034,7 @@ fn request_words(text: &str) -> String {
 }
 
 /// Whether a WITHDRAW line's text names `request`: the same words, the start of them, or "all".
-fn withdraws(withdrawal: &str, request: &str) -> bool {
+pub(crate) fn withdraws(withdrawal: &str, request: &str) -> bool {
     let (w, r) = (request_words(withdrawal), request_words(request));
     w == "all" || w == "all requests" || w == r || (w.chars().count() >= 12 && (r.starts_with(&w) || w.starts_with(&r)))
 }
@@ -843,8 +1107,8 @@ const COMMAND_BOXES_LISTED: usize = 8;
 /// AIs kept writing "still waiting on the output" after the output had already arrived.
 fn command_boxes_note(events: &[Event], me: &str, running: impl Fn(&str, usize) -> bool) -> String {
     let mut lines: Vec<String> = Vec::new();
-    for e in events.iter().filter(|e| e.sender == me && e.kind == "message" && e.via.is_none()) {
-        for (i, b) in crate::runcmd::fenced_blocks(&e.text).iter().enumerate() {
+    'messages: for e in events.iter().rev().filter(|e| e.sender == me && e.kind == "message" && e.via.is_none()) {
+        for (i, b) in crate::runcmd::fenced_blocks(&e.text).iter().enumerate().rev() {
             if crate::runcmd::shell_for(&b.lang).is_none() || crate::runcmd::check(b).is_err() {
                 continue;
             }
@@ -866,16 +1130,19 @@ fn command_boxes_note(events: &[Event], me: &str, running: impl Fn(&str, usize) 
             let first_line = b.code.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
             let preview: String = first_line.chars().take(60).collect();
             lines.push(format!("- ref {}#{i} ({}, starts `{preview}`): {state}", &e.id[..e.id.len().min(8)], b.lang));
+            if lines.len() == COMMAND_BOXES_LISTED {
+                break 'messages;
+            }
         }
     }
     if lines.is_empty() {
         return String::new();
     }
-    let skip = lines.len().saturating_sub(COMMAND_BOXES_LISTED);
+    lines.reverse();
     format!(
         "\n\nYOUR COMMAND BOXES ON THIS COMPUTER (newest last)\n{}\nTrust this list over your memory: don't say you're \
          waiting on a box marked FINISHED, and don't repost a box that is RUNNING or NOT RUN.",
-        lines[skip..].join("\n")
+        lines.join("\n")
     )
 }
 
@@ -999,9 +1266,9 @@ mod tests {
     #[test]
     fn local_ais_are_told_how_to_code_through_command_boxes() {
         let win = command_box_coding(r"C:\proj", "windows", true);
-        assert!(win.contains("```powershell") && win.contains("Set-Content") && win.contains("by itself"));
+        assert!(win.contains("```powershell") && win.contains("Select-Object -Skip") && win.contains("by itself"));
         let mac = command_box_coding("/proj", "macos", false);
-        assert!(mac.contains("```bash") && mac.contains("cat > path/to/file") && mac.contains("clicks Run"));
+        assert!(mac.contains("```bash") && mac.contains("sed -n") && mac.contains("clicks Run"));
         assert!(mac.contains("/proj"));
     }
 
@@ -1057,6 +1324,23 @@ mod tests {
     }
 
     #[test]
+    fn command_boxes_note_checks_only_the_newest_boxes() {
+        let shell = if cfg!(windows) { "powershell" } else { "bash" };
+        let events: Vec<_> = (0..12).map(|i| Event {
+            id: format!("event-{i:02}"),
+            ..ev("claude", &format!("```{shell}\necho command-{i:02}\n```"))
+        }).collect();
+        let checked = std::cell::Cell::new(0);
+        let note = command_boxes_note(&events, "claude", |_, _| {
+            checked.set(checked.get() + 1);
+            false
+        });
+        assert_eq!(checked.get(), COMMAND_BOXES_LISTED);
+        assert!(!note.contains("command-03"));
+        assert!(note.find("command-04").unwrap() < note.find("command-11").unwrap());
+    }
+
+    #[test]
     fn system_prompt_includes_working_rules_and_command_box_guidance() {
         let members = vec!["claude".to_string(), "gemini".to_string()];
         let ctx = Context {
@@ -1068,6 +1352,7 @@ mod tests {
         };
         let s = system("gemini", 1, 1, &ctx);
         assert!(s.contains("Working rules across computers and tasks:"));
+        assert!(s.contains("one field per line: Status:, Files:, Artifacts:, Tests:, Blocker:, Next:"));
         assert!(s.contains("Git worktrees:"));
         assert!(s.contains("Resource-aware builds:"));
         assert!(s.contains("Sketches, script templates with unfilled parameters, and notes belong in ```text blocks"));
@@ -1090,6 +1375,7 @@ mod tests {
             usage: None,
             attachments: vec![],
             via: None,
+            source_event: None,
         }
     }
 
@@ -1100,6 +1386,32 @@ mod tests {
         assert!(t.contains("[ChatGPT] hello"));
         assert!(t.contains("[Claude (you)] hey"));
         assert!(t.ends_with("Write your next message as Claude now."));
+    }
+
+    #[test]
+    fn older_successful_command_output_is_shortened_in_cloud_prompts() {
+        let middle = "middle payload ".repeat(300);
+        let output = format!("HEAD{}TAIL", middle);
+        let report = |status: &str, id: &str| {
+            ev("human", &format!(
+                "Ran command from Claude's message ({status}, 1.0 s):\n```text\n{output}\n```\n(command ref {id}#0)"
+            ))
+        };
+        let recent = report("exit 0, succeeded", "recent");
+        let failed = report("exit 1, failed", "failed");
+        let events = [
+            report("exit 0, succeeded", "older"),
+            failed.clone(),
+            recent.clone(),
+            recent.clone(),
+            recent.clone(),
+        ];
+        let prompt = transcript(&events, "gpt");
+        assert_eq!(prompt.matches("output shortened in this prompt").count(), 1);
+        assert!(prompt.contains("(command ref older#0)"));
+        assert!(prompt.contains(&failed.text));
+        assert_eq!(prompt.matches(&recent.text).count(), 3);
+        assert_eq!(events[0].text.matches(&middle).count(), 1);
     }
 
     #[test]
@@ -1117,9 +1429,45 @@ mod tests {
         assert!(t.contains("latest"));
         assert!(t.contains("EARLIER CONVERSATION DIGEST"));
         assert!(t.contains("Approved: keep the safe design"));
-        assert!(t.contains("RECENT MESSAGES (verbatim)"));
+        assert!(t.contains("RECENT MESSAGES"));
         assert!(t.len() <= MAX_TRANSCRIPT_CHARS + 500);
         assert_eq!(visible_message_ids(&events, "gpt"), vec!["latest"]);
+    }
+
+    #[test]
+    fn compact_handoff_preserves_fields_after_verbose_status() {
+        let text = format!(
+            "**Status:** {}\nFiles: src/update.rs\nArtifacts: https://github.com/example/project/actions/runs/123456\nTests: cargo test passed\nNext: verify Mac restart",
+            "progress ".repeat(150)
+        );
+        let compact = compact_handoff(&text).unwrap();
+        assert!(compact.len() <= MAX_SUMMARY_ENTRY_CHARS);
+        assert!(compact.contains("Files: src/update.rs"));
+        assert!(compact.contains("Artifacts: https://github.com/example/project/actions/runs/123456"));
+        assert!(compact.contains("Tests: cargo test passed"));
+        assert!(compact.ends_with("Next: verify Mac restart"));
+        assert!(compact_handoff("Status: ordinary line").is_none());
+        let example = "Status: ready\nTests: cargo test passed\n```text\nStatus: example\nTests: example\n```";
+        assert_eq!(compact_handoff(example).as_deref(), Some("Status: ready | Tests: cargo test passed"));
+    }
+
+    #[test]
+    fn transcript_digest_fits_approval_and_handoff_in_a_tight_budget() {
+        let events = [
+            ev("human", "Approved: verify before rollout"),
+            ev("gpt", &format!(
+                "Status: {}\nTests: cargo test passed\nNext: verify Mac restart",
+                "progress ".repeat(150)
+            )),
+            ev("gpt", &"routine progress".repeat(150)),
+        ];
+        let older: Vec<_> = events.iter().map(|event| (event, String::new())).collect();
+        let digest = transcript_digest(&older, 400);
+        assert!(digest.contains("Approved: verify before rollout"));
+        assert!(digest.contains("Tests: cargo test passed"));
+        assert!(digest.contains("Next: verify Mac restart"));
+        assert!(!digest.contains("routine progress"));
+        assert!(digest.len() <= 400);
     }
 
     #[test]
@@ -1135,6 +1483,13 @@ mod tests {
     }
 
     #[test]
+    fn known_local_window_reserves_a_quarter_and_system_prompt_space() {
+        assert_eq!(local_limits(None, Some(8192), 1024).total, 17_408);
+        assert_eq!(local_limits(None, None, 1024).total, LOCAL_TRANSCRIPT_CHARS);
+        assert_eq!(local_limits(None, Some(512), 9999).total, 512);
+    }
+
+    #[test]
     fn local_models_get_a_small_transcript_with_long_outputs_offloaded() {
         let data = std::env::temp_dir().join(format!("consilium-local-transcript-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
@@ -1142,7 +1497,13 @@ mod tests {
         let mut events: Vec<Event> = (0..30).map(|i| ev("gpt", &format!("progress note {i} {}", "x".repeat(1_500)))).collect();
         events.push(ev("human", &output));
         events.push(ev("human", "now fix the linker error"));
-        let t = local_transcript(&events, "qwen", Some(&data));
+        let path = data.join("test.HANDOFF.md");
+        let t = local_transcript(&events, "qwen", Some(&data), Some(&path), Some(8_192), "");
+        let checkpoint = std::fs::read_to_string(path).unwrap();
+        assert!(checkpoint.starts_with("# Consilium handoff"));
+        assert!(t.contains(checkpoint.trim_start_matches("# Consilium handoff\n\n").trim_end()));
+        assert!(!checkpoint.contains("now fix the linker error"));
+        assert!(checkpoint.len() <= LOCAL_SUMMARY_CHARS + 64);
         assert!(t.len() <= LOCAL_TRANSCRIPT_CHARS + 2_000, "{}", t.len());
         assert!(t.contains("now fix the linker error"));
         assert!(t.contains("error: linker failed"));
@@ -1159,7 +1520,7 @@ mod tests {
     fn the_newest_human_message_keeps_more_room_for_local_models() {
         let task = format!("TASK START {} TASK END", "spec ".repeat(1_000));
         let events = vec![ev("human", &task)];
-        let t = local_transcript(&events, "qwen", None);
+        let t = local_transcript(&events, "qwen", None, None, None, "");
         assert!(t.contains("TASK START") && t.contains("TASK END"));
         assert!(!t.contains("left out"));
     }
@@ -1176,20 +1537,74 @@ mod tests {
         git(&["config", "user.name", "Consilium Test"]);
         git(&["config", "user.email", "test@invalid.example"]); // consilium-allow-secret-scan (non-routable test identity)
         std::fs::write(repo.join("note.txt"), "base\n").unwrap();
-        git(&["add", "note.txt"]);
+        std::fs::write(repo.join(".gitattributes"), "bundle.txt linguist-generated\n").unwrap();
+        std::fs::write(repo.join("bundle.txt"), "initial generated content\n").unwrap();
+        git(&["add", "note.txt", "bundle.txt", ".gitattributes"]);
         git(&["commit", "-qm", "base", "--no-gpg-sign"]);
+        let snapshot = |detailed| workspace_snapshot(&repo, detailed).unwrap().prompt.unwrap();
 
         let secret = format!("sk-{}", "Ab3_".repeat(8));
         std::fs::write(repo.join("note.txt"), format!("base\nAPI_KEY={secret}\n")).unwrap();
-        let state = workspace_state(&repo).unwrap();
+        std::fs::write(repo.join("bundle.txt"), "bulky generated output\n".repeat(1_000)).unwrap();
+        let state = snapshot(false);
+        assert!(state.contains("bundle.txt"));
+        assert!(!state.contains("bulky generated output"));
         assert!(state.contains("PROJECT STATE") && state.contains("note.txt"));
         assert!(state.contains("Current diff excerpt"));
         assert!(state.contains("[REDACTED OpenAI key]"));
         assert!(!state.contains(&secret));
 
+        std::fs::write(repo.join("bundle.txt"), "generated trailing whitespace \n").unwrap();
+        std::fs::write(repo.join("note.txt"), "base\r\nclean addition\r\n").unwrap();
+        let checked = snapshot(true);
+        assert!(checked.contains("no Git whitespace or conflict marker issues"));
+        std::fs::write(repo.join("note.txt"), "base\nprivate fixture source \n").unwrap();
+        let checked = snapshot(true);
+        assert!(checked.contains("note.txt:2: trailing whitespace."));
+        assert!(patch_preflight(&repo).unwrap().contains("note.txt:2: trailing whitespace."));
+        assert!(!patch_preflight(&repo).unwrap().contains("private fixture source"));
+        assert!(!snapshot(false).contains("Tracked patch preflight"));
+
+        let edited = format!("base\n{}FULL PATCH TAIL\n", "ordinary source line\n".repeat(260));
+        std::fs::write(repo.join("note.txt"), edited).unwrap();
+        let local = snapshot(false);
+        let cloud = snapshot(true);
+        assert!(local.contains("diff truncated") && local.contains("ordinary source line"));
+        assert!(!local.contains("FULL PATCH TAIL"));
+        assert!(local.len() < 2_700, "local snapshot was {} bytes", local.len());
+        assert!(cloud.contains("FULL PATCH TAIL"));
+
+        git(&["restore", "note.txt", "bundle.txt"]);
+        std::fs::write(repo.join(".git/info/exclude"), "ignored.txt\n").unwrap();
+        std::fs::write(repo.join(".gitattributes"), "bundle.txt linguist-generated\nscratch*.txt linguist-generated\n").unwrap();
+        git(&["add", ".gitattributes"]);
+        git(&["commit", "-qm", "attributes", "--no-gpg-sign"]);
+        std::fs::write(repo.join("new notes.txt"), "fixture source to omit \n").unwrap();
+        std::fs::write(repo.join("ignored.txt"), "ignored issue \n").unwrap();
+        std::fs::write(repo.join("scratch-data.txt"), "generated issue \n").unwrap();
+        std::fs::write(repo.join("clean.txt"), "valid CRLF\r\n").unwrap();
+        std::fs::write(repo.join("large.txt"), "irrelevant data \n".repeat(20_000)).unwrap();
+        let checked = snapshot(true);
+        assert!(checked.contains("Untracked file preflight"));
+        assert!(checked.contains("new notes.txt:1: trailing whitespace."));
+        for excluded in ["Tracked patch preflight", "fixture source to omit", "ignored.txt", "scratch-data.txt:1", "clean.txt:1", "large.txt:1"] {
+            assert!(!checked.contains(excluded), "unexpected {excluded} in {checked}");
+        }
+        assert!(!snapshot(false).contains("Untracked file preflight"));
+
+        for index in 0..90 {
+            std::fs::write(repo.join(format!("untouched-snapshot-status-fixture-{index:02}.txt")), "").unwrap();
+        }
+        let split = workspace_snapshot(&repo, false).unwrap();
+        assert_eq!(Some(&split.peer_summary), git_summary(&repo).as_ref());
+        assert!(split.peer_summary.contains("94 changed"), "{}", split.peer_summary);
+        let local = split.prompt.unwrap();
+        assert!(local.contains("status truncated") && local.len() < 1_750);
+        assert!(!local.contains("untouched-snapshot-status-fixture-89.txt"));
+
         std::fs::remove_dir_all(&repo).unwrap();
         let plain = std::env::temp_dir();
-        assert!(workspace_state(&plain).is_none());
+        assert!(workspace_snapshot(&plain, true).is_none());
     }
 
     #[test]

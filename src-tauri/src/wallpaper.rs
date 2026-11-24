@@ -107,21 +107,10 @@ pub async fn fetch_and_cache_daily_wallpaper(
         info.startdate.trim().to_string()
     };
 
-    let target_file = dir.join(format!("bing_{start_date}.jpg"));
+    let target_name = format!("bing_{start_date}.jpg");
+    let target_file = dir.join(&target_name);
 
     if !target_file.exists() {
-        // Remove older cached bing_*.jpg files to save disk space
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("bing_") && name.ends_with(".jpg") && p != target_file {
-                        let _ = std::fs::remove_file(p);
-                    }
-                }
-            }
-        }
-
         let img_url = if info.url.starts_with("http://") || info.url.starts_with("https://") {
             info.url.clone()
         } else {
@@ -146,7 +135,30 @@ pub async fn fetch_and_cache_daily_wallpaper(
             .await
             .map_err(|e| format!("failed to read image payload: {e}"))?;
 
-        let _ = std::fs::write(&target_file, &bytes);
+        if bytes.is_empty() {
+            return Err("Bing returned an empty wallpaper image".into());
+        }
+
+        // Publish the replacement before pruning, so a failed refresh leaves the fallback intact.
+        let temporary = dir.join(format!("wallpaper-{}.tmp", uuid::Uuid::new_v4()));
+        if std::fs::write(&temporary, &bytes)
+            .and_then(|()| crate::store::replace_file(&temporary, &target_file))
+            .is_ok()
+        {
+            // Remove older cached bing_*.jpg files to save disk space
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                        if name.starts_with("bing_") && name.ends_with(".jpg") && name < target_name.as_str() {
+                            let _ = std::fs::remove_file(p);
+                        }
+                    }
+                }
+            }
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+        }
 
         let data_url = format!("data:image/jpeg;base64,{}", to_base64(&bytes));
         return Ok(DailyWallpaper {

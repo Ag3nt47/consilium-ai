@@ -32,8 +32,8 @@ if ! node node_modules/typescript/bin/tsc --noEmit -p .; then
   echo "pre-commit: the staged screen code does not type-check (see above). Stage the missing files, or unstage the unfinished ones." >&2
   exit 1
 fi
-if ! node --test "tests/*.test.mjs" >/dev/null 2>&1; then
-  node --test "tests/*.test.mjs" >&2 || true
+if ! node --test "tests/*.test.mjs" >"$snap/test-output.log" 2>&1; then
+  cat "$snap/test-output.log" >&2
   echo "pre-commit: the staged tests fail (see above)." >&2
   exit 1
 fi
