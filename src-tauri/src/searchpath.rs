@@ -237,8 +237,8 @@ fn path_output(mut command: std::process::Command, budget: Duration, limit: usiz
             if status.is_none() { status = child.try_wait().ok()?; }
             if eof {
                 if let Some(status) = status {
-                    completed = true;
-                    return status.success().then_some(output);
+                    completed = status.success();
+                    return completed.then_some(output);
                 }
             }
             std::thread::sleep(Duration::from_millis(5).min(budget.saturating_sub(started.elapsed())));

@@ -106,3 +106,23 @@ fn a_running_shell_and_unbounded_output_have_bounded_failure_paths() {
     assert!(path_output(shell("printf '123456789'"), Duration::from_secs(3), 8).is_none());
     assert!(path_output(shell("while :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done"), Duration::from_secs(2), 1024).is_none());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_failed_shell_cleans_its_descendants_even_when_their_output_is_redirected() {
+    let marker = std::env::temp_dir().join(format!("consilium-path-failed-{}.pid", uuid::Uuid::new_v4()));
+    let mut command = shell("sleep 30 >/dev/null 2>&1 & printf '%s' \"$!\" > \"$1\"; exit 1");
+    command.arg("fixture").arg(&marker);
+    assert!(path_output(command, Duration::from_secs(3), 128 * 1024).is_none());
+    let pid: u32 = std::fs::read_to_string(&marker).unwrap().parse().unwrap();
+    let _ = std::fs::remove_file(marker);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let system = sysinfo::System::new_all();
+        let running = system.process(sysinfo::Pid::from_u32(pid)).is_some_and(|process|
+            !matches!(process.status(), sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead));
+        if !running { break; }
+        assert!(Instant::now() < deadline, "The failed probe left an owned descendant running");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
