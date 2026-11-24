@@ -8,6 +8,12 @@ Use the same Consilium build on both computers. Open a dedicated shared chat and
 4. Disconnect Ethernet on one computer. Record the time and send a unique message from that computer while the session is reconnecting. Preserve the send and receive timestamps and count the matching messages on the receiving computer. Verify the send queue drains and confirm that the re-established socket uses Wi-Fi.
 5. Restore Ethernet and repeat with Wi-Fi disconnected and Ethernet available. Start this leg with an active Wi-Fi session, and send the queued message from the other computer. Restore the original interface state after the run.
 
+Before switching live routes, choose one computer under **Test target** and select addresses
+on at least two adapters under **Try local source addresses**. Run **Check handshakes in parallel**
+to start independent authenticated probes without replacing the live session. Record which
+local addresses and peer endpoints authenticate. These short probes are a preflight for the
+outage and simultaneous payload trials below.
+
 Windows socket and interface inspection:
 
 ```powershell
