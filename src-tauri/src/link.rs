@@ -557,6 +557,8 @@ struct PeerState {
     signal_on: bool,
     /// A separate clock: unrelated authenticated traffic cannot renew Signal readiness.
     signal_report: Option<SignalReport>,
+    /// Only an automatic startup diagnostic may own this child. Native publication preempts it.
+    startup_stress: Option<Arc<CancellationToken>>,
     active_ms: u64,
     activity: Vec<String>,
     git: Option<String>,
@@ -640,6 +642,30 @@ struct Inner {
 
 #[derive(Clone)]
 pub struct Link(Arc<Inner>);
+
+/// Manual controls may select every transport; unattended checks stay on IP.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StressOrigin { Manual, StartupIpOnly }
+
+impl StressOrigin {
+    fn eligible_routes(self, routes: &[String]) -> Vec<String> {
+        routes.iter().filter(|address| self == Self::Manual || bluetooth_address(address).is_none()).cloned().collect()
+    }
+}
+
+struct StartupStressScope { link: Link, node_id: String, stop: Arc<CancellationToken> }
+
+impl Drop for StartupStressScope {
+    fn drop(&mut self) {
+        let mut states = self.link.0.peers.lock().unwrap();
+        let Some(state) = states.get_mut(&self.node_id) else { return };
+        if state.startup_stress.as_ref().is_some_and(|current| Arc::ptr_eq(current, &self.stop)) {
+            // The restored TCP session may still use this child. Dropping
+            // the diagnostic registration must not cancel that session.
+            state.startup_stress = None;
+        }
+    }
+}
 
 /// A dropped UI request must release the selected route and keep diagnostics
 /// exclusive until the asynchronous restoration attempt has finished.
@@ -1076,6 +1102,26 @@ impl Link {
     }
 
     pub async fn stress_test_selected(&self, node_id: Option<&str>, sources: &[IpAddr], endpoints: &[String]) -> Result<Vec<StressReport>, String> {
+        self.stress_test_with_origin(node_id, sources, endpoints, StressOrigin::Manual).await
+    }
+
+    pub(crate) async fn startup_stress_test(&self) -> Result<Vec<StressReport>, String> {
+        self.stress_test_with_origin(None, &[], &[], StressOrigin::StartupIpOnly).await
+    }
+
+    fn startup_stress_scope(&self, node_id: &str, parent: &CancellationToken) -> Option<StartupStressScope> {
+        let mut states = self.0.peers.lock().unwrap();
+        let state = states.get_mut(node_id)?;
+        if parent.is_cancelled() || state.tx.as_ref().is_none_or(mpsc::UnboundedSender::is_closed)
+            || matches!(state.route_evidence.as_ref(), Some(RouteEvidence::BluetoothRfcomm { .. })) {
+            return None;
+        }
+        let stop = Arc::new(parent.child_token());
+        state.startup_stress = Some(stop.clone());
+        Some(StartupStressScope { link: self.clone(), node_id: node_id.into(), stop })
+    }
+
+    async fn stress_test_with_origin(&self, node_id: Option<&str>, sources: &[IpAddr], endpoints: &[String], origin: StressOrigin) -> Result<Vec<StressReport>, String> {
         let _run = self.0.stress_test_lock.try_lock().map_err(|_| "A communication stress test is already running")?;
         let token = self.0.running.lock().unwrap().clone().ok_or("linking is off")?;
         if !sources.is_empty() {
@@ -1095,13 +1141,18 @@ impl Link {
             None => self.0.cfg.lock().unwrap().peers.clone(),
         };
         let mut out = Vec::new();
-        for peer in peers.into_iter().filter(|p| !p.addrs.is_empty()) {
+        'peer: for peer in peers.into_iter().filter(|p| !p.addrs.is_empty()) {
             let connected = self.0.peers.lock().unwrap().get(&peer.node_id).is_some_and(|s| s.tx.is_some());
             if !connected {
                 let computer = self.peer_name(&peer.node_id);
                 out.push(StressReport { node_id: peer.node_id, computer, routes: vec![], restored: None });
                 continue;
             }
+            let scope = if origin == StressOrigin::StartupIpOnly {
+                let Some(scope) = self.startup_stress_scope(&peer.node_id, &token) else { continue };
+                Some(scope)
+            } else { None };
+            let operation = scope.as_ref().map_or_else(|| token.clone(), |scope| scope.stop.as_ref().clone());
             let updates = self.0.peers.lock().unwrap().get(&peer.node_id).map_or(0, |s| s.route_updates);
             // Wait briefly for the peer's next authenticated interface advertisement.
             let deadline = tokio::time::Instant::now() + HEARTBEAT + Duration::from_millis(500);
@@ -1112,24 +1163,33 @@ impl Link {
                     break;
                 }
                 tokio::select! {
-                    _ = token.cancelled() => return Err("The direct link was turned off".into()),
+                    _ = operation.cancelled() => {
+                        if origin == StressOrigin::StartupIpOnly { continue 'peer; }
+                        return Err("The direct link was turned off".into());
+                    },
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                 }
             }
             let Some(peer) = self.peer(&peer.node_id) else { continue };
-            let selected = selected_endpoints(&peer, endpoints)?;
+            let selected = origin.eligible_routes(&selected_endpoints(&peer, endpoints)?);
+            let restore_routes = origin.eligible_routes(&peer.addrs);
+            if origin == StressOrigin::StartupIpOnly && (selected.is_empty() || restore_routes.is_empty()) { continue; }
             let mut routes = Vec::new();
             if sources.is_empty() {
                 for addr in &selected {
-                    routes.push(self.switch_to(&peer, std::slice::from_ref(addr), None, &token).await);
+                    if origin == StressOrigin::StartupIpOnly && operation.is_cancelled() { continue 'peer; }
+                    routes.push(self.switch_to(&peer, std::slice::from_ref(addr), None, &operation).await);
                 }
             } else {
                 for &source in sources {
-                    routes.push(self.switch_to(&peer, &selected, Some(source), &token).await);
+                    routes.push(self.switch_to(&peer, &selected, Some(source), &operation).await);
                 }
             }
-            // Back to normal: the fastest route that answers.
-            let restored = self.switch_to(&peer, &peer.addrs, None, &token).await;
+            // A native session that arrived meanwhile owns the live route;
+            // neither the pending IP attempt nor restoration may replace it.
+            if origin == StressOrigin::StartupIpOnly && operation.is_cancelled() { continue; }
+            let restored = self.switch_to(&peer, &restore_routes, None, &operation).await;
+            if origin == StressOrigin::StartupIpOnly && operation.is_cancelled() { continue; }
             out.push(StressReport {
                 computer: self.peer_name(&peer.node_id),
                 node_id: peer.node_id,
@@ -2104,6 +2164,11 @@ impl Link {
                 return;
             }
             let s = states.entry(peer.node_id.clone()).or_default();
+            if matches!(&evidence, RouteEvidence::BluetoothRfcomm { .. }) {
+                // Under the publication lock: a late startup TCP session must
+                // observe cancellation before it can replace this native one.
+                if let Some(startup) = s.startup_stress.take() { startup.cancel(); }
+            }
             if let Some(previous) = s.session_cancel.replace(token.clone()) {
                 previous.cancel();
             }
@@ -3366,6 +3431,73 @@ mod tests {
         host.stop();
         joiner.stop();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn startup_stress_stays_on_ip_and_cannot_replace_a_native_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (host, _) = node(dir.path(), "host");
+        let (client, _) = node(dir.path(), "client");
+        let code = host.begin_pairing().unwrap();
+        let ip = format!("127.0.0.1:{}", host.0.port);
+        client.join(&ip, &code.code).await.unwrap();
+        let host_id = host.me().0;
+        assert!(wait_for(|| client.status().peers[0].connected).await);
+        let native = "rfcomm://020000000001".to_string();
+        client.0.cfg.lock().unwrap().peers[0].addrs = vec![native.clone(), ip.clone()];
+        let addresses = client.peer(&host_id).unwrap().addrs;
+        assert_eq!(StressOrigin::StartupIpOnly.eligible_routes(&addresses), vec![ip.clone()]);
+        assert!(StressOrigin::Manual.eligible_routes(&addresses).contains(&native));
+
+        // The actual unattended path tests and restores TCP even though a
+        // native endpoint is saved. No Bluetooth API is needed by this fixture.
+        let reports = client.startup_stress_test().await.unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].routes.len(), 1);
+        assert!(reports[0].routes[0].ok, "{reports:?}");
+        assert_eq!(reports[0].routes[0].addr, ip);
+        assert!(reports[0].restored.as_ref().is_some_and(|route| route.ok && route.addr == ip));
+
+        let running = client.0.running.lock().unwrap().clone().unwrap();
+        let startup = client.startup_stress_scope(&host_id, &running).unwrap();
+        let startup_token = startup.stop.as_ref().clone();
+        // Pause a TCP session just before publication, as if its startup
+        // authentication completed while a native route was becoming active.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let held = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let LinkConnection { stream, evidence } = LinkConnection::tcp(socket).unwrap();
+        let route = evidence.remote_endpoint();
+        let (read, write) = tokio::io::split(stream);
+        let peer = client.peer(&host_id).unwrap();
+        let key = peer_key(&peer).unwrap();
+        let owner = client.clone();
+        let (release, paused) = oneshot::channel();
+        let queued_tcp = tokio::spawn(async move {
+            paused.await.unwrap();
+            owner.session(peer, key, BufReader::new(read), write, route, evidence, None, startup_token).await;
+        });
+        let native_token = running.child_token();
+        let (receiving, sending) = memory_session(&host, &client, native_token.clone()).await;
+        assert!(wait_for(|| client.status().peers[0].route_evidence.as_ref()
+            .is_some_and(|evidence| matches!(evidence, RouteEvidence::BluetoothRfcomm { .. }))).await);
+        assert!(startup.stop.is_cancelled(), "Native publication preempts only the startup child");
+        let (generation, native_session) = {
+            let peers = client.0.peers.lock().unwrap();
+            (peers[&host_id].generation, peers[&host_id].session_cancel.clone().unwrap())
+        };
+        assert!(client.startup_stress_test().await.unwrap().is_empty(), "A live native route is left alone");
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), queued_tcp).await.unwrap().unwrap();
+        drop(startup);
+        assert_eq!(client.0.peers.lock().unwrap()[&host_id].generation, generation);
+        assert!(!native_session.is_cancelled(), "Neither late TCP publication nor startup restoration replaces native");
+        native_token.cancel();
+        tokio::time::timeout(Duration::from_secs(2), sending).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), receiving).await.unwrap().unwrap().unwrap();
+        drop(held);
+        client.stop();
+        host.stop();
     }
 
     #[tokio::test(flavor = "multi_thread")]
