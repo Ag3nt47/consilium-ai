@@ -14,6 +14,7 @@ fn framed_progress(large: bool, stderr_between_chunks: bool) {
     print!("{}", "x".repeat(if large { 65_536 } else { 1_024 }));
     std::io::stdout().flush().unwrap();
     if stderr_between_chunks {
+        std::thread::sleep(Duration::from_millis(50));
         eprintln!("warning from stderr between stdout chunks");
         std::thread::sleep(Duration::from_millis(50));
     }
