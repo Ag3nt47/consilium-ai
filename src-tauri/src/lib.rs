@@ -1390,6 +1390,11 @@ async fn link_test_peer(node_id: String, source: Option<std::net::IpAddr>) -> Re
 }
 
 #[tauri::command]
+async fn link_transfer_trial(node_id: String, paths: Vec<link::TransferPath>) -> Result<link::TransferTrial, String> {
+    the_link()?.transfer_trial(&node_id, paths).await
+}
+
+#[tauri::command]
 fn link_probe_sources() -> Result<Vec<link::ProbeSource>, String> {
     link::probe_sources()
 }
@@ -1696,6 +1701,7 @@ pub fn run() {
             link_pair_join,
             link_unpair,
             link_test_peer,
+            link_transfer_trial,
             link_probe_sources,
             link_test_ai_handshake,
             link_add_peer_route,

@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, buildCompare, buildLabel, type Build, type LinkPeer, type LinkStatus, type PeerTestReport, type ProbeSource, type StressReport } from "./api";
 import { LocalModelFit } from "./LocalModelFit";
+import { LinkTransferTrial } from "./LinkTransferTrial";
 
 /** Topbar status light and button for multi-computer sync (Mac & Windows).
  *  Displays connection health, fastest active route, and opens the sync setup modal on click. */
@@ -584,6 +585,10 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                 );
               })}
             </div>
+
+            {stressPeers.some((peer) => peer.connected) && (
+              <LinkTransferTrial peers={stressPeers} disabled={stressing} />
+            )}
 
             <div style={{ marginTop: "8px" }}>
               <span className="muted small">Local Addresses (reachable on your network):</span>

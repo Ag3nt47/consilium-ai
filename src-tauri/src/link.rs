@@ -24,15 +24,15 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -51,6 +51,71 @@ const PAIR_TTL_MS: u64 = 5 * 60 * 1000;
 const PAIR_ATTEMPTS: u32 = 3;
 const LINE_LIMIT: usize = 3 * 1024 * 1024;
 const OUTBOX_LIMIT: usize = 2000;
+const TRIAL_CHUNK_BYTES: usize = 8 * 1024;
+const TRIAL_CHUNKS: usize = 4;
+const TRIAL_INTERVAL: Duration = Duration::from_millis(75);
+
+#[derive(Deserialize)]
+pub struct TransferPath {
+    source: IpAddr,
+    endpoint: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TransferReceipt {
+    sha256: String,
+    bytes: usize,
+    receiver_ip: IpAddr,
+    received_ms: u64,
+    clock_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferResult {
+    source: ProbeSource,
+    endpoint: String,
+    receipts: Vec<TransferReceipt>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferTrial {
+    paths: Vec<TransferResult>,
+    overlap_ms: Option<u64>,
+}
+
+fn transfer_overlap(paths: &[TransferResult]) -> Option<u64> {
+    let clock_id = &paths.first()?.receipts.first()?.clock_id;
+    let mut latest_start = 0;
+    let mut earliest_end = u64::MAX;
+    for path in paths {
+        if path.receipts.len() != TRIAL_CHUNKS || path.receipts.iter().any(|receipt| receipt.clock_id != *clock_id) {
+            return None;
+        }
+        latest_start = latest_start.max(path.receipts.first()?.received_ms);
+        earliest_end = earliest_end.min(path.receipts.last()?.received_ms);
+    }
+    earliest_end.checked_sub(latest_start).filter(|ms| {
+        *ms > 0 && paths.len() >= 2 && paths.iter().all(|path| {
+            path.receipts.iter().any(|receipt| (latest_start..=earliest_end).contains(&receipt.received_ms))
+        })
+    })
+}
+
+fn transfer_receipt(payload: &str, receiver_ip: IpAddr) -> Result<TransferReceipt, String> {
+    if payload.len() != TRIAL_CHUNK_BYTES || !payload.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid transfer chunk".into());
+    }
+    static CLOCK: OnceLock<(Instant, String)> = OnceLock::new();
+    let (started, clock_id) = CLOCK.get_or_init(|| (Instant::now(), random_hex(16)));
+    Ok(TransferReceipt {
+        sha256: hex(&Sha256::digest(payload.as_bytes())),
+        bytes: payload.len(),
+        receiver_ip,
+        received_ms: started.elapsed().as_millis() as u64,
+        clock_id: clock_id.clone(),
+    })
+}
 
 /// Whether this computer's Signal connection is running, shared with linked computers in each
 /// heartbeat so they can agree which one answers a phone message.
@@ -859,6 +924,85 @@ impl Link {
         }
     }
 
+    /// Sends bounded authenticated data over separately selected local and remote addresses.
+    pub async fn transfer_trial(&self, node_id: &str, paths: Vec<TransferPath>) -> Result<TransferTrial, String> {
+        let _run = self.0.stress_test_lock.try_lock().map_err(|_| "A communication test is already running")?;
+        let token = self.0.running.lock().unwrap().clone().ok_or("linking is off")?;
+        let peer = self.peer(node_id).ok_or("Linked computer not found")?;
+        if !(2..=4).contains(&paths.len()) {
+            return Err("Choose two to four paths to the same linked computer".into());
+        }
+        let interfaces = if_addrs::get_if_addrs().map_err(|error| error.to_string())?;
+        let mut planned: Vec<(ProbeSource, String)> = Vec::with_capacity(paths.len());
+        let mut destinations = std::collections::HashSet::new();
+        for path in paths {
+            let source = validate_probe_source(&interfaces, path.source)?;
+            let endpoint: SocketAddr = path.endpoint.parse().map_err(|_| "Choose a saved IP endpoint")?;
+            if !peer.addrs.contains(&path.endpoint) {
+                return Err("Choose a saved endpoint for this linked computer".into());
+            }
+            if !destinations.insert(endpoint.ip().to_canonical())
+                || planned.iter().any(|(existing, _)| existing.interface == source.interface)
+            {
+                return Err("Each path needs a different local adapter and peer IP address".into());
+            }
+            planned.push((source, path.endpoint));
+        }
+
+        let key = peer_key(&peer)?;
+        let mut running = tokio::task::JoinSet::new();
+        for (index, (source, endpoint)) in planned.into_iter().enumerate() {
+            let (link, peer, key) = (self.clone(), peer.clone(), key.clone());
+            running.spawn(async move { (index, link.transfer_path(&peer, &key, source, endpoint).await) });
+        }
+        let mut results = Vec::new();
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => return Err("The direct link was turned off".into()),
+                result = running.join_next() => match result {
+                    Some(result) => results.push(result.map_err(|error| error.to_string())?),
+                    None => break,
+                }
+            }
+        }
+        results.sort_by_key(|(index, _)| *index);
+        let paths: Vec<_> = results.into_iter().map(|(_, result)| result).collect();
+        Ok(TransferTrial { overlap_ms: transfer_overlap(&paths), paths })
+    }
+
+    async fn transfer_path(&self, peer: &Peer, key: &[u8], source: ProbeSource, endpoint: String) -> TransferResult {
+        let mut receipts: Vec<TransferReceipt> = Vec::with_capacity(TRIAL_CHUNKS);
+        let result: Result<(), String> = async {
+            for index in 0..TRIAL_CHUNKS {
+                if index > 0 {
+                    tokio::time::sleep(TRIAL_INTERVAL).await;
+                }
+                let receipt = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+                    let stream = connect_with_source(&endpoint, Some(source.address)).await
+                        .map_err(|error| error.to_string())?;
+                    let sender_ip = stream.local_addr().map_err(|error| error.to_string())?.ip().to_canonical();
+                    let remote_ip = stream.peer_addr().map_err(|error| error.to_string())?.ip().to_canonical();
+                    let chunk = random_hex(TRIAL_CHUNK_BYTES / 2);
+                    let reply = self.exchange_probe(peer, key, stream, Some(&chunk)).await?;
+                    let receipt: TransferReceipt = serde_json::from_value(reply["transfer_receipt"].clone())
+                        .map_err(|_| "The linked computer did not return a payload receipt. Update both computers.")?;
+                    if sender_ip != source.address.to_canonical() || receipt.receiver_ip != remote_ip
+                        || receipt.bytes != chunk.len() || receipt.sha256 != hex(&Sha256::digest(chunk.as_bytes()))
+                    {
+                        return Err("The payload receipt did not match the requested path or checksum".into());
+                    }
+                    Ok::<_, String>(receipt)
+                }).await.map_err(|_| "Payload probe timed out")??;
+                if receipts.last().is_some_and(|prev| prev.clock_id != receipt.clock_id || prev.received_ms > receipt.received_ms) {
+                    return Err("The receiver clock changed during the test".into());
+                }
+                receipts.push(receipt);
+            }
+            Ok(())
+        }.await;
+        TransferResult { source, endpoint, receipts, error: result.err() }
+    }
+
     /// Tests connectivity, route latency, and sync alignment for a paired computer.
     pub async fn test_peer(&self, node_id: &str, source: Option<IpAddr>) -> Result<PeerTestReport, String> {
         let peer = self.peer(node_id).ok_or_else(|| format!("computer {node_id} not found"))?;
@@ -1153,7 +1297,13 @@ impl Link {
                     let probe_nonce = probe.get("nonce").and_then(Value::as_str)
                         .filter(|nonce| nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
                         .ok_or("invalid route probe nonce")?;
-                    let reply = self.route_probe_frame(&key, json!({ "route_probe_ack": probe_nonce }))?;
+                    let mut payload = json!({ "route_probe_ack": probe_nonce });
+                    if let Some(chunk) = probe.get("transfer_chunk") {
+                        let chunk = chunk.as_str().ok_or("invalid transfer chunk")?;
+                        let receiver_ip = w.local_addr().map_err(|error| error.to_string())?.ip().to_canonical();
+                        payload["transfer_receipt"] = json!(transfer_receipt(chunk, receiver_ip)?);
+                    }
+                    let reply = self.route_probe_frame(&key, payload)?;
                     tokio::time::timeout(HANDSHAKE_TIMEOUT, w.write_all(reply.as_bytes())).await
                         .map_err(|_| "route probe reply timed out".to_string())?
                         .map_err(|err| err.to_string())?;
@@ -1443,13 +1593,22 @@ impl Link {
     /// A diagnostic handshake does not replace a live session. Older peers close the probe
     /// before registering it because this first authenticated frame has no session hello.
     async fn probe_route(&self, peer: &Peer, key: &[u8], stream: TcpStream) -> Result<(), String> {
+        self.exchange_probe(peer, key, stream, None).await.map(|_| ())
+    }
+
+    async fn exchange_probe(&self, peer: &Peer, key: &[u8], stream: TcpStream, chunk: Option<&str>) -> Result<Value, String> {
+        let _ = stream.set_nodelay(true);
         let (r, mut w) = stream.into_split();
         let mut r = BufReader::new(r);
         let Wire::Challenge { nonce } = read_wire(&mut r).await? else {
             return Err("expected challenge".into());
         };
         let mine = random_hex(16);
-        let request = self.route_probe_frame(key, json!({ "route_probe": { "challenge": nonce, "nonce": mine } }))?;
+        let mut payload = json!({ "route_probe": { "challenge": nonce, "nonce": mine } });
+        if let Some(chunk) = chunk {
+            payload["route_probe"]["transfer_chunk"] = json!(chunk);
+        }
+        let request = self.route_probe_frame(key, payload)?;
         w.write_all(request.as_bytes()).await.map_err(|err| err.to_string())?;
         let Wire::Sealed { from, n, c } = read_wire(&mut r).await? else {
             return Err("expected route probe reply".into());
@@ -1462,7 +1621,7 @@ impl Link {
         if reply.payload.get("route_probe_ack").and_then(Value::as_str) != Some(mine.as_str()) {
             return Err("stale route probe reply".into());
         }
-        Ok(())
+        Ok(reply.payload)
     }
 
     fn route_probe_frame(&self, key: &[u8], payload: Value) -> Result<String, String> {
@@ -2861,6 +3020,47 @@ mod tests {
         assert!(host.test_peer(&joiner_id, Some("198.51.100.1".parse().unwrap())).await.unwrap_err()
             .contains("selected source address"));
 
+        host.stop();
+        joiner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authenticated_payload_paths_report_overlap_without_replacing_session() {
+        let dir = std::env::temp_dir().join(format!("link-transfer-{}", uuid::Uuid::new_v4()));
+        let (host, _) = node(&dir, "host");
+        let (joiner, _) = node(&dir, "joiner");
+        let code = host.begin_pairing().unwrap();
+        joiner.join(&format!("127.0.0.1:{}", host.0.port), &code.code).await.unwrap();
+        assert!(wait_for(|| host.status().peers[0].connected && joiner.status().peers[0].connected).await);
+        let joiner_id = joiner.status().node_id;
+        let generation = host.0.peers.lock().unwrap()[&joiner_id].generation;
+        let peer = host.peer(&joiner_id).unwrap();
+        let key = peer_key(&peer).unwrap();
+        let dest = format!("127.0.0.1:{}", joiner.0.port);
+        let address = "127.0.0.1".parse().unwrap();
+        let source = validate_probe_source(&if_addrs::get_if_addrs().unwrap(), address).unwrap();
+        // Run the wire protocol on loopback. The public trial requires distinct interfaces and IPs.
+        let (a, b, c) = tokio::join!(
+            host.transfer_path(&peer, &key, source.clone(), dest.clone()),
+            host.transfer_path(&peer, &key, source.clone(), dest.clone()),
+            host.transfer_path(&peer, &key, source, dest.clone()),
+        );
+        let mut paths = [a, b, c];
+        for path in &paths {
+            assert!(path.error.is_none(), "{:?}", path.error);
+            assert_eq!(path.receipts.iter().map(|receipt| receipt.bytes).sum::<usize>(), 32 * 1024);
+            assert!(path.receipts.iter().all(|receipt| receipt.receiver_ip == address && receipt.sha256.len() == 64));
+        }
+        assert!(transfer_overlap(&paths).is_some());
+        paths[0].receipts.pop();
+        assert_eq!(transfer_overlap(&paths), None);
+        let duplicate = || TransferPath { source: address, endpoint: dest.clone() };
+        assert!(host.transfer_trial(&joiner_id, vec![duplicate(), duplicate()]).await.unwrap_err()
+            .contains("different local adapter"));
+        assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, generation);
+        assert!(transfer_receipt("a", address).is_err());
+        assert!(transfer_receipt(&"g".repeat(TRIAL_CHUNK_BYTES), address).is_err());
         host.stop();
         joiner.stop();
         let _ = std::fs::remove_dir_all(&dir);
