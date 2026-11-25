@@ -10,7 +10,8 @@ test("delete-all requires two distinct confirmations before invoking the backend
   assert.match(app, /deleteAllStep === 1/);
   assert.match(app, /deleteAllStep === 2/);
   assert.match(app, /A second confirmation is required before anything is deleted/);
-  assert.match(app, /Final confirmation:<\/strong> this can't be undone/);
+  assert.match(app, /Final confirmation:<\/strong> this can't be undone\. Type <strong>DELETE<\/strong> to confirm/);
+  assert.match(app, /deleteAllText\.trim\(\)\.toUpperCase\(\) !== "DELETE"/);
   assert.equal(app.match(/api\.removeAll\(\)/g)?.length, 1);
   const finalDialog = app.slice(app.indexOf("{deleteAllStep === 2"), app.indexOf("{showRestartModal"));
   assert.match(finalDialog, /onClick=\{deleteAllConfirmed\}/);

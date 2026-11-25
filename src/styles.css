@@ -275,6 +275,12 @@ code {
   font-size: 11px;
 }
 
+.delete-all-input {
+  width: 100%;
+  box-sizing: border-box;
+  letter-spacing: 0.08em;
+}
+
 .conv {
   text-align: left;
   background: none;

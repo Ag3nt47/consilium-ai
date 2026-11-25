@@ -2606,9 +2606,15 @@ export default function App() {
   // every conversation before deleting the first one, so a running chat cannot leave a partial
   // cleanup behind.
   const [deleteAllStep, setDeleteAllStep] = useState<0 | 1 | 2>(0);
+  const [deleteAllText, setDeleteAllText] = useState("");
   const [deletingAll, setDeletingAll] = useState(false);
-  async function deleteAllConfirmed() {
+  function closeDeleteAll() {
     if (deletingAll) return;
+    setDeleteAllStep(0);
+    setDeleteAllText("");
+  }
+  async function deleteAllConfirmed() {
+    if (deletingAll || deleteAllText.trim().toUpperCase() !== "DELETE") return;
     setDeletingAll(true);
     try {
       const removed = await api.removeAll();
@@ -2616,10 +2622,12 @@ export default function App() {
       await refreshList();
       setCurrent(fresh.id);
       setDeleteAllStep(0);
+      setDeleteAllText("");
       setToast(`${removed} conversation${removed === 1 ? "" : "s"} deleted`);
       setTimeout(() => setToast(null), 2500);
     } catch (e) {
       setDeleteAllStep(0);
+      setDeleteAllText("");
       setError(`Couldn't delete all conversations: ${e}`);
     } finally {
       setDeletingAll(false);
@@ -4405,14 +4413,14 @@ export default function App() {
       )}
 
       {deleteAllStep === 1 && (
-        <div className="modal-backdrop" onClick={() => setDeleteAllStep(0)}>
+        <div className="modal-backdrop" onClick={closeDeleteAll}>
           <div
             className="modal confirm-modal"
             role="alertdialog"
             aria-labelledby="confirm-delete-all-title"
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
-              if (e.key === "Escape") setDeleteAllStep(0);
+              if (e.key === "Escape") closeDeleteAll();
             }}
           >
             <h2 id="confirm-delete-all-title">Delete all conversations?</h2>
@@ -4422,7 +4430,7 @@ export default function App() {
             </p>
             <p className="muted small">A second confirmation is required before anything is deleted.</p>
             <div className="confirm-actions">
-              <button className="btn" autoFocus onClick={() => setDeleteAllStep(0)} title="Keep every conversation">
+              <button className="btn" autoFocus onClick={closeDeleteAll} title="Keep every conversation">
                 Cancel
               </button>
               <button className="btn danger" onClick={() => setDeleteAllStep(2)} title="Continue to the final confirmation">
@@ -4434,23 +4442,43 @@ export default function App() {
       )}
 
       {deleteAllStep === 2 && (
-        <div className="modal-backdrop" onClick={() => !deletingAll && setDeleteAllStep(0)}>
+        <div className="modal-backdrop" onClick={closeDeleteAll}>
           <div
             className="modal confirm-modal"
             role="alertdialog"
             aria-labelledby="final-delete-all-title"
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
-              if (e.key === "Escape" && !deletingAll) setDeleteAllStep(0);
+              if (e.key === "Escape") closeDeleteAll();
             }}
           >
             <h2 id="final-delete-all-title">Permanently delete every conversation?</h2>
-            <p><strong>Final confirmation:</strong> this can't be undone. A new empty conversation will open afterwards.</p>
+            <p>
+              <strong>Final confirmation:</strong> this can't be undone. Type <strong>DELETE</strong> to confirm.
+              A new empty conversation will open afterwards.
+            </p>
+            <input
+              className="delete-all-input"
+              autoFocus
+              value={deleteAllText}
+              disabled={deletingAll}
+              placeholder="DELETE"
+              aria-label="Type DELETE to confirm"
+              onChange={(e) => setDeleteAllText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") deleteAllConfirmed();
+              }}
+            />
             <div className="confirm-actions">
-              <button className="btn" autoFocus disabled={deletingAll} onClick={() => setDeleteAllStep(0)} title="Keep every conversation">
+              <button className="btn" disabled={deletingAll} onClick={closeDeleteAll} title="Keep every conversation">
                 Cancel
               </button>
-              <button className="btn danger" disabled={deletingAll} onClick={deleteAllConfirmed} title="Delete every conversation permanently">
+              <button
+                className="btn danger"
+                disabled={deletingAll || deleteAllText.trim().toUpperCase() !== "DELETE"}
+                onClick={deleteAllConfirmed}
+                title="Delete every conversation permanently"
+              >
                 {deletingAll ? "Deleting…" : "Delete all permanently"}
               </button>
             </div>
