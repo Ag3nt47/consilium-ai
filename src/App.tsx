@@ -687,7 +687,7 @@ type PendingItem =
   | { kind: "command"; key: string; event: ChatEvent; index: number; fence: Fence };
 
 /** The waiting requests and commands, one at a time, pinned above the message box. */
-function RequestTray({ items, index, agents, answered, deciding, decide, respond, commands, onFocus, onShow }: {
+function RequestTray({ items, index, agents, answered, deciding, decide, respond, commands, onFocus, onShow, autoRun }: {
   items: PendingItem[];
   index: number;
   agents: AgentInfo[];
@@ -698,8 +698,12 @@ function RequestTray({ items, index, agents, answered, deciding, decide, respond
   commands: CommandActions;
   onFocus: (index: number) => void;
   onShow: (item: PendingItem) => void;
+  /** Auto-run is on (for every chat or this one): start minimized, since boxes run by themselves. */
+  autoRun: boolean;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(autoRun);
+  // Follow auto-run when it is switched on or off; the ▴/▾ button still overrides it until then.
+  useEffect(() => setCollapsed(autoRun), [autoRun]);
   const item = items[index];
   if (!item) return null;
   const from = senderName(item.event.sender, agents);
@@ -3644,6 +3648,7 @@ export default function App() {
               commands={commandActions}
               onFocus={focusTray}
               onShow={showInChat}
+              autoRun={!!council?.auto_run_commands || chatAutoRun}
             />
           )}
           <div className="composer-controls">
