@@ -4065,3 +4065,73 @@ button.attachment {
 
 .add-choice { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; text-align: left; padding: 10px 12px; }
 .add-choice small { grid-column: 2; color: var(--muted); font-weight: normal; }
+
+/* Hover glow: the box or button under the pointer gets a glowing outline in the theme's accent
+   colour. A box that contains a hovered button or chip stays quiet, so only the item under the
+   pointer glows. Disabled buttons don't glow. */
+:is(.btn, .chip, .pv-tab, .task-pill, .conv, .msg, .note, .thinking, .request, textarea, select,
+    input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"])) {
+  transition: box-shadow 0.15s ease, border-color 0.15s ease, background 0.15s, transform 0.05s;
+}
+:is(.btn, .chip, .pv-tab, .task-pill, .conv, textarea, select,
+    input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"])):hover:not(:disabled),
+:is(.msg, .note, .thinking, .request):hover:not(:has(:is(.btn, .chip, .request, .task-pill, a, button, textarea, input, select):hover)) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent),
+    0 0 14px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  :is(.btn, .chip, .pv-tab, .task-pill, .conv, .msg, .note, .thinking, .request, textarea, select, input) {
+    transition: none;
+  }
+}
+
+/* Glass over the wallpaper or a live backdrop: the composer's labels, chips and buttons float on
+   clear glass, so on a bright picture (snow, sky) their pale text vanished. Each gets its own
+   dark frosted pill, and the section labels (Ask, Persona) get bright text. */
+[data-theme="glass"] .main.has-wallpaper .composer .section-label,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer .section-label {
+  color: #e6e9f2;
+  font-weight: 600;
+}
+[data-theme="glass"] .main.has-wallpaper :is(.topbar, .composer) :is(.chip:not(.on), .btn:not(:is(.primary, .stop, .danger, .approve, .deny, .on, .request-update, .autorun-toggle, .update-now, .respond-request))),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.topbar, .composer) :is(.chip:not(.on), .btn:not(:is(.primary, .stop, .danger, .approve, .deny, .on, .request-update, .autorun-toggle, .update-now, .respond-request))) {
+  background: rgba(16, 20, 34, 0.72);
+  color: #e6e9f2;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+[data-theme="glass"] .main.has-wallpaper :is(.topbar, .composer) .chip.on,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.topbar, .composer) .chip.on {
+  background: color-mix(in srgb, var(--accent) 30%, rgba(16, 20, 34, 0.8));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+/* "Next request" with nothing waiting was a faded grey on clear glass; keep it visibly off but
+   readable. */
+[data-theme="glass"] .main.has-wallpaper .composer .btn.respond-request:disabled,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer .btn.respond-request:disabled {
+  opacity: 0.85;
+  background: rgba(16, 20, 34, 0.72);
+  color: #aab1c2;
+}
+[data-theme="glass"] .main.has-wallpaper .composer .rounds,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer .rounds {
+  color: #e6e9f2;
+}
+
+/* The explainability boxes (the activity line, task pills and the audit drawer) use the same
+   dark frosted glass as the chat messages, in every Glass mode, with brighter text. */
+[data-theme="glass"] :is(.thinking, .task-pill, .task-claim-italic),
+[data-theme="glass"] .main.has-wallpaper :is(.thinking, .task-pill, .task-claim-italic),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.thinking, .task-pill, .task-claim-italic) {
+  background: rgba(16, 20, 34, 0.65);
+  color: #d5d9e3;
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+}
+[data-theme="glass"] .audit-drawer {
+  background: rgba(16, 20, 34, 0.65);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+}
