@@ -85,3 +85,19 @@ export function outlineSource(ts, source, functionName, filter) {
 export function outlineSourceText(ts, file, text, functionName, filter) {
   return outlineSource(ts, parseSourceText(ts, file, text), functionName, filter);
 }
+
+// One selected file per worker. Filter-only requests reuse its parsed source.
+export function createOutlineSession(ts) {
+  let source;
+  return async ({ file, functionName, filter }) => {
+    if (file) {
+      source = undefined;
+      const extension = /\.[^.]+$/.exec(file.name)?.[0]?.toLowerCase() ?? "";
+      if (!supportedSourceExtensions.has(extension)) throw new Error("Choose a JavaScript or TypeScript file.");
+      if (file.size > SOURCE_LIMIT) throw new Error("Choose a source file up to 1 MiB.");
+      source = parseSourceText(ts, file.name, await file.text());
+    }
+    if (!source) throw new Error("Choose a source file before building an outline.");
+    return outlineSource(ts, source, functionName || undefined, filter || undefined);
+  };
+}

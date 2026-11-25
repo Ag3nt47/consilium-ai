@@ -3,6 +3,7 @@ import type { OutlineReply, OutlineRequest } from "./source-outline.worker";
 
 export default function SourceOutline({ copyText }: { copyText: (text: string) => Promise<void> }) {
   const worker = useRef<Worker | null>(null);
+  const inFlight = useRef(false);
   const [file, setFile] = useState<File>();
   const [scope, setScope] = useState("");
   const [filter, setFilter] = useState("");
@@ -11,7 +12,11 @@ export default function SourceOutline({ copyText }: { copyText: (text: string) =
   const [error, setError] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
 
-  useEffect(() => () => worker.current?.terminate(), []);
+  useEffect(() => () => {
+    worker.current?.terminate();
+    worker.current = null;
+    inFlight.current = false;
+  }, []);
 
   function clear() {
     setOutline("");
@@ -20,24 +25,32 @@ export default function SourceOutline({ copyText }: { copyText: (text: string) =
   }
 
   function build() {
-    if (!file || worker.current) return;
+    if (!file || inFlight.current) return;
     clear();
+    inFlight.current = true;
     setRunning(true);
+    const firstRequest = worker.current === null;
     let parser: Worker;
     try {
-      parser = new Worker(new URL("./source-outline.worker.ts", import.meta.url), { type: "module" });
+      parser = worker.current ?? new Worker(new URL("./source-outline.worker.ts", import.meta.url), { type: "module" });
     } catch {
       setError("Could not start the local source parser.");
+      inFlight.current = false;
       setRunning(false);
       return;
     }
     worker.current = parser;
-    const finish = () => {
-      parser.terminate();
-      worker.current = null;
+    const finish = (discard = false) => {
+      if (worker.current !== parser) return;
+      if (discard) {
+        parser.terminate();
+        worker.current = null;
+      }
+      inFlight.current = false;
       setRunning(false);
     };
     parser.onmessage = ({ data }: MessageEvent<OutlineReply>) => {
+      if (worker.current !== parser) return;
       if ("error" in data) {
         setError(data.error);
       } else {
@@ -45,15 +58,16 @@ export default function SourceOutline({ copyText }: { copyText: (text: string) =
         if (data.omitted) summary.push(`${data.omitted} additional rows omitted.`);
         setOutline(summary.join("\n"));
       }
-      finish();
+      finish("error" in data);
     };
     const failed = () => {
+      if (worker.current !== parser) return;
       setError("The local source parser stopped unexpectedly.");
-      finish();
+      finish(true);
     };
     parser.onerror = failed;
     parser.onmessageerror = failed;
-    const request: OutlineRequest = { file, functionName: scope.trim(), filter: filter.trim() };
+    const request: OutlineRequest = { ...(firstRequest ? { file } : {}), functionName: scope.trim(), filter: filter.trim() };
     try {
       parser.postMessage(request);
     } catch {
@@ -75,7 +89,14 @@ export default function SourceOutline({ copyText }: { copyText: (text: string) =
       <summary>JavaScript and TypeScript outline</summary>
       <p className="muted small">List symbols and line ranges from a file up to 1 MiB. Copy the outline into a task or chat.</p>
       <input type="file" aria-label="Source file" accept=".js,.jsx,.ts,.tsx,.mjs,.cjs,.mts,.cts"
-        disabled={running} onChange={(event) => { setFile(event.target.files?.[0]); clear(); }} />
+        disabled={running} onChange={(event) => {
+          worker.current?.terminate();
+          worker.current = null;
+          inFlight.current = false;
+          setRunning(false);
+          setFile(event.target.files?.[0]);
+          clear();
+        }} />
       <div className="row wrap gap-sm">
         <input aria-label="Top-level function" placeholder="Top-level function (optional)" value={scope}
           disabled={running} onChange={(event) => { setScope(event.target.value); clear(); }} />
