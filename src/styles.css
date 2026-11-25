@@ -2603,6 +2603,10 @@ button.attachment {
     #000;
 }
 
+.app[data-backdrop="rain"] > .main {
+  background-color: rgba(14, 19, 28, .48);
+}
+
 [data-effects="on"][data-theme="netrunner"] .body,
 [data-effects="on"][data-theme="netrunner"] .who,
 [data-effects="on"][data-theme="netrunner"] .brand-name {
