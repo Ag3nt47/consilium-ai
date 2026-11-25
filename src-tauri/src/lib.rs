@@ -1156,7 +1156,7 @@ fn run_in_turn(engine: Arc<Engine>, e: &Event, runnable: Vec<usize>) {
     });
 }
 
-/// When Auto-run is turned on in a chat, runs the AI boxes posted since the human last wrote that
+/// When Auto-run is turned on in a chat, runs the AI boxes posted recently that
 /// are still waiting (under `autocontinue::CATCH_UP_MS` old): auto-run only sees a box as it
 /// arrives, so ones posted while it was off would otherwise wait for a click forever. A note names
 /// them first and they start after `autocontinue::DELAY_SECS`, so the human can Deny any of them.
@@ -1165,9 +1165,8 @@ fn catch_up_auto_run(engine: Arc<Engine>, conversation: String) {
         return;
     }
     let Ok(events) = engine.store.load(&conversation) else { return };
-    let from = crate::autocontinue::since_human_start(&events);
     let picks: Vec<(String, usize)> =
-        crate::autocontinue::waiting_boxes(&events, from, crate::store::now_ms(), crate::autocontinue::CATCH_UP_MS)
+        crate::autocontinue::waiting_boxes(&events, 0, crate::store::now_ms(), crate::autocontinue::CATCH_UP_MS)
             .into_iter()
             .filter(|(id, _)| events.iter().any(|e| &e.id == id && engine.config.is_member(&e.sender)))
             .collect();
