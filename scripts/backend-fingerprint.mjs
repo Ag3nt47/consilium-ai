@@ -15,20 +15,22 @@ function files(rel, out, root = ROOT) {
   } else out.push(rel);
 }
 
-export function fingerprint() {
+export function fingerprint(root = ROOT) {
   const list = [];
-  for (const p of PARTS) files(p, list);
-  return hash(list, ROOT);
+  for (const p of PARTS) files(p, list, root);
+  return hash(list, root, true);
 }
 
 // The built page in `dir` (default dist/), as build.rs's page_fingerprint (ui.json left out).
 export function pageFingerprint(dir = join(ROOT, "..", "dist")) {
   const list = [];
   files("", list, dir);
-  return hash(list.filter((n) => n !== "ui.json"), dir);
+  return hash(list.filter((n) => n !== "ui.json"), dir, false);
 }
 
-function hash(list, root) {
+// `textEol`: CRLF becomes LF in text files (engine sources, which checkouts may convert); the built
+// page is hashed byte for byte.
+function hash(list, root, textEol) {
   // Rust sorts strings by bytes; so does this for the ASCII paths used here.
   list.sort((a, b) => (Buffer.compare(Buffer.from(a), Buffer.from(b))));
   let h = 0xcbf29ce484222325n;
@@ -37,8 +39,9 @@ function hash(list, root) {
   };
   for (const name of list) {
     let body = readFileSync(join(root, name));
+    if (textEol && isText(body)) body = lfOnly(body);
     if (name === "tauri.conf.json") {
-      const text = body.toString("utf8").replace(/\r\n/g, "\n");
+      const text = body.toString("utf8");
       body = Buffer.from(text.split("\n").filter((l) => !l.trimStart().startsWith('"version"')).join("\n"));
     }
     feed(Buffer.from(name));
@@ -47,6 +50,23 @@ function hash(list, root) {
     feed([0]);
   }
   return h.toString(16).padStart(16, "0");
+}
+
+// Every CRLF turned into LF, as build.rs's lf_only: Windows checkouts convert line endings, and the
+// same commit must fingerprint the same everywhere.
+// Git's own test for text: no NUL byte in the first 8000 bytes. Binary files are never converted.
+export function isText(buf) {
+  return !buf.subarray(0, 8000).includes(0);
+}
+
+export function lfOnly(buf) {
+  const out = Buffer.alloc(buf.length);
+  let n = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x0d && buf[i + 1] === 0x0a) continue;
+    out[n++] = buf[i];
+  }
+  return out.subarray(0, n);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) console.log(fingerprint());
