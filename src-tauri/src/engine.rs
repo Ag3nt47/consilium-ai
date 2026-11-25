@@ -421,8 +421,7 @@ impl Engine {
                 }
                 tried = Some(turn);
             }
-            // Asked once only: `may_start` counts each yes.
-            if members.is_empty() || !*allowed.get_or_insert_with(may_start) {
+            if members.is_empty() {
                 return;
             }
             let mut running = self.running.lock().unwrap();
@@ -437,9 +436,19 @@ impl Engine {
                     None => return,
                 },
             };
+            // Only consume the linked-message allowance after owning the turn lock. A busy
+            // process must not exhaust it without actually starting an answer.
+            if !*allowed.get_or_insert_with(may_start) {
+                return;
+            }
             // Those addressed answer; otherwise everyone may react.
             let targets = if addressed.is_empty() { members } else { addressed };
-            self.begin(&mut running, Pending::new(id, targets, LINKED_ROUNDS), lock, event.seq);
+            let mut pending = Pending::new(id, targets, LINKED_ROUNDS);
+            // Earlier work can finish after this message arrives. It belongs to the old turn;
+            // only answers produced after this fresh start consume the new linked budget.
+            let cursor = self.store.load(id).unwrap_or_default().last().map_or(event.seq, |e| e.seq.max(event.seq));
+            pending.after = Some(cursor);
+            self.begin(&mut running, pending, lock, cursor);
             return;
         }
     }
@@ -473,7 +482,17 @@ impl Engine {
             members: self.config.get().members,
         };
         let token = CancellationToken::new();
-        let council = Council::new(turn, self.store.clone(), self.bench.clone(), host, token.clone());
+        let council = if pending.extra.is_empty() && pending.pulled_in == 0 {
+            match pending.after {
+                Some(after) => Council::new_after(turn, self.store.clone(), self.bench.clone(), host, token.clone(), Some(after)),
+                None => Council::new(turn, self.store.clone(), self.bench.clone(), host, token.clone()),
+            }
+        } else {
+            Council::new_with_allowance(
+                turn, self.store.clone(), self.bench.clone(), host, token.clone(),
+                pending.after, (pending.extra.clone(), pending.pulled_in),
+            )
+        };
         let live = Running {
             turn: pending.turn.clone(),
             token,
@@ -1170,6 +1189,10 @@ checking what it would remove (list the folder first), so everything else still 
         });
     }
 
+    fn extra_answers(&self, extra: &HashMap<String, u32>, pulled_in: usize) {
+        self.journal.extra_answers(&self.conversation, &self.turn, extra, pulled_in);
+    }
+
     fn installed(&self, agent: &'static Agent) -> bool {
         agents::installed(agent)
     }
@@ -1395,6 +1418,51 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(10), "the turn never ended");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fresh_linked_mention_answers_after_previous_local_and_remote_answers() {
+        prompt::set_here("Windows PC");
+        let (app, term, dir) = pair(10);
+        let conv = app.store.create("linked follow-up").unwrap().id;
+        app.send(&conv, "first", vec!["gpt".into()], 1).unwrap();
+        until_idle(&[&app, &term], &conv).await;
+
+        for text in ["@gpt-windows-pc the worker is ready", "@gpt-windows-pc check the next result"] {
+            let remote = app.store.append_imported(
+                &conv, "gpt", "message", vec![], text, Some("MacBook".into()), None,
+            ).unwrap();
+            app.from_linked(&conv, &remote, &|| true);
+            until_idle(&[&app, &term], &conv).await;
+        }
+        let events = app.store.load(&conv).unwrap();
+        let replies: Vec<_> = events.iter().filter(|e| e.kind == "message" && e.via.is_none() && e.sender != "human").collect();
+        assert_eq!(replies.len(), 3, "each permitted linked turn gets one fresh answer");
+        assert!(replies.iter().all(|e| e.sender == "gpt"), "only the addressed local AI answers");
+        let remote = app.store.append_imported(
+            &conv, "claude", "message", vec![], "@gpt-windows-pc over the loop limit", Some("MacBook".into()), None,
+        ).unwrap();
+        app.from_linked(&conv, &remote, &|| false);
+        assert!(!app.busy(&conv), "a denied start must still honor the peer loop limit");
+        assert_eq!(app.store.load(&conv).unwrap().iter().filter(|e| e.sender == "gpt" && e.kind == "message" && e.via.is_none()).count(), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_busy_other_process_does_not_consume_the_linked_start_allowance() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        prompt::set_here("Windows PC");
+        let (app, term, dir) = pair(100);
+        let conv = app.store.create("busy linked follow-up").unwrap().id;
+        term.send(&conv, "first", vec!["gpt".into()], 1).unwrap();
+        let remote = app.store.append_imported(
+            &conv, "claude", "message", vec![], "@gpt-windows-pc check readiness", Some("MacBook".into()), None,
+        ).unwrap();
+        let used = AtomicUsize::new(0);
+        app.from_linked(&conv, &remote, &|| { used.fetch_add(1, Ordering::SeqCst); true });
+        assert_eq!(used.load(Ordering::SeqCst), 0, "no allowance is used without owning the turn");
+        until_idle(&[&app, &term], &conv).await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn said(engine: &Engine, conv: &str) -> Vec<String> {
