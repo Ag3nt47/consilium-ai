@@ -36,9 +36,9 @@ function hash(list, root) {
     for (const b of buf) h = ((h ^ BigInt(b)) * 0x100000001b3n) & 0xffffffffffffffffn;
   };
   for (const name of list) {
-    let body = readFileSync(join(root, name));
+    let body = lfOnly(readFileSync(join(root, name)));
     if (name === "tauri.conf.json") {
-      const text = body.toString("utf8").replace(/\r\n/g, "\n");
+      const text = body.toString("utf8");
       body = Buffer.from(text.split("\n").filter((l) => !l.trimStart().startsWith('"version"')).join("\n"));
     }
     feed(Buffer.from(name));
@@ -47,6 +47,18 @@ function hash(list, root) {
     feed([0]);
   }
   return h.toString(16).padStart(16, "0");
+}
+
+// Every CRLF turned into LF, as build.rs's lf_only: Windows checkouts convert line endings, and the
+// same commit must fingerprint the same everywhere.
+export function lfOnly(buf) {
+  const out = Buffer.alloc(buf.length);
+  let n = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x0d && buf[i + 1] === 0x0a) continue;
+    out[n++] = buf[i];
+  }
+  return out.subarray(0, n);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) console.log(fingerprint());

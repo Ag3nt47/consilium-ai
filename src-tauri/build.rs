@@ -63,9 +63,9 @@ fn hash(mut names: Vec<(String, PathBuf)>) -> String {
         }
     };
     for (name, path) in names {
-        let mut body = std::fs::read(&path).unwrap();
+        let mut body = lf_only(&std::fs::read(&path).unwrap());
         if name == "tauri.conf.json" {
-            let text = String::from_utf8_lossy(&body).replace("\r\n", "\n");
+            let text = String::from_utf8_lossy(&body).into_owned();
             body = text
                 .split('\n')
                 .filter(|l| !l.trim_start().starts_with("\"version\""))
@@ -79,6 +79,20 @@ fn hash(mut names: Vec<(String, PathBuf)>) -> String {
         feed(&[0]);
     }
     format!("{h:016x}")
+}
+
+/// The bytes with every CRLF turned into LF. Windows checkouts (GitHub's Windows runners among them)
+/// convert line endings, so without this the same commit fingerprints differently per checkout and
+/// an instant page update is refused against an engine that is really the same.
+fn lf_only(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            continue;
+        }
+        out.push(*b);
+    }
+    out
 }
 
 /// Output of `git <args>` in this folder, trimmed; None without git or outside a checkout.
