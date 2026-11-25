@@ -32,7 +32,7 @@ if-addrs = "0.13"
 mdns-sd = { version = "0.22", default-features = false, features = ["async"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tauri-plugin-dialog = "2"
-sysinfo = "0.37"
+sysinfo = "0.40"
 tauri-plugin-window-state = "2"
 tauri-plugin-global-shortcut = "=2.3.2"
 tauri-plugin-clipboard-manager = "=2.3.2"
