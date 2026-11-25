@@ -41,10 +41,17 @@ use tokio_util::sync::CancellationToken;
 #[path = "link_discovery.rs"]
 mod discovery;
 
+#[path = "link_probe_status.rs"]
+mod probe_status;
+
+#[path = "link_compute_routes.rs"]
+mod compute_routes;
+
 pub const PORT: u16 = 8470;
 const HEARTBEAT: Duration = Duration::from_millis(1500);
 const DEAD_AFTER_MS: u64 = 4_000;
 const SIGNAL_REPORT_TTL: Duration = Duration::from_millis(DEAD_AFTER_MS);
+const BLUETOOTH_ADVERTISEMENT_TTL: Duration = Duration::from_millis(DEAD_AFTER_MS);
 const SESSION_WRITE_IDLE: Duration = Duration::from_millis(DEAD_AFTER_MS);
 const RETRY_MIN: Duration = Duration::from_millis(1000);
 const RETRY_MAX: Duration = Duration::from_secs(30);
@@ -59,6 +66,7 @@ const TRIAL_CHUNK_BYTES: usize = 8 * 1024;
 const TRIAL_CHUNKS: usize = 4;
 const TRIAL_INTERVAL: Duration = Duration::from_millis(75);
 const BLUETOOTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const AI_STATUS_FRAME_LIMIT: u64 = 16 * 1024;
 
 /// The authenticated protocol consumes bytes independently of the physical transport.
 pub trait LinkIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -152,6 +160,7 @@ pub struct TransferResult {
     endpoint: String,
     route_evidence: Option<RouteEvidence>,
     receipts: Vec<TransferReceipt>,
+    median_probe_ms: Option<u64>,
     error: Option<String>,
 }
 
@@ -160,17 +169,21 @@ pub struct TransferTrial {
     paths: Vec<TransferResult>,
     overlap_ms: Option<u64>,
     distinct_receiver_interfaces: bool,
+    compute_routes: compute_routes::ComputeRoutes,
+}
+
+fn verified_receiver_interface(path: &TransferResult) -> Option<String> {
+    if path.error.is_some() || path.receipts.len() != TRIAL_CHUNKS {
+        return None;
+    }
+    let first = receipt_interface(&path.receipts[0])?;
+    path.receipts.iter().all(|receipt| receipt_interface(receipt).as_ref() == Some(&first))
+        .then_some(first)
 }
 
 fn distinct_receiver_interfaces(paths: &[TransferResult]) -> bool {
     let mut interfaces = std::collections::HashSet::new();
-    paths.len() >= 2 && paths.iter().all(|path| {
-        path.receipts.len() == TRIAL_CHUNKS
-            && receipt_interface(&path.receipts[0]).is_some_and(|first| {
-                path.receipts.iter().all(|receipt| receipt_interface(receipt).as_ref() == Some(&first))
-                    && interfaces.insert(first)
-            })
-    })
+    paths.len() >= 2 && paths.iter().all(|path| verified_receiver_interface(path).is_some_and(|name| interfaces.insert(name)))
 }
 
 fn transfer_overlap(paths: &[TransferResult]) -> Option<u64> {
@@ -279,6 +292,30 @@ pub fn set_council(ids: Vec<String>) {
 /// What the AIs here have read of `node_id`'s AIs, for its heartbeat: {their AI: [our AIs]}.
 fn read_for(node_id: &str) -> Value {
     READ.lock().unwrap().get(node_id).map(|m| json!(m)).unwrap_or_else(|| json!({}))
+}
+
+#[derive(Serialize)]
+struct LocalAiReport {
+    council: Vec<String>,
+    read: Value,
+}
+
+fn local_ai_report(node_id: &str) -> LocalAiReport {
+    // Do not retain COUNCIL while taking READ: handshake reads them in the
+    // opposite order. Both heartbeats and isolated probes use this snapshot.
+    let council = COUNCIL.lock().unwrap().clone();
+    let read = read_for(node_id);
+    LocalAiReport { council, read }
+}
+
+fn read_ai_receipts(value: Option<&Value>) -> std::collections::BTreeMap<String, Vec<String>> {
+    value.and_then(Value::as_object).map(|map|
+        map.iter()
+            .filter(|(ours, _)| crate::agents::all().iter().any(|ai| ai.id == ours.as_str()))
+            .take(MAX_ROLL)
+            .map(|(ours, theirs)| (ours.clone(), theirs.as_array().map(|ais| known_ais(ais.iter())).unwrap_or_default()))
+            .collect()
+    ).unwrap_or_default()
 }
 
 /// Known AI ids from another computer's list, so nothing odd reaches the screen.
@@ -532,6 +569,13 @@ enum Wire {
     Sealed { from: String, n: String, c: String },
 }
 
+#[derive(Clone, Copy)]
+enum ProbeRequest<'a> {
+    Route,
+    Transfer(&'a str),
+    AiStatus,
+}
+
 struct Pending {
     code: String,
     expires_ms: u64,
@@ -557,6 +601,8 @@ struct PeerState {
     signal_on: bool,
     /// A separate clock: unrelated authenticated traffic cannot renew Signal readiness.
     signal_report: Option<SignalReport>,
+    /// Pairing may use only the radio explicitly advertised on this live session.
+    bluetooth_advertisement: Option<BluetoothAdvertisement>,
     /// Only an automatic startup diagnostic may own this child. Native publication preempts it.
     startup_stress: Option<Arc<CancellationToken>>,
     active_ms: u64,
@@ -574,6 +620,23 @@ struct PeerState {
 }
 
 impl PeerState {
+    fn record_ai_report(&mut self, payload: &Value) -> bool {
+        self.council = payload.get("council").and_then(Value::as_array).map(|ais| known_ais(ais.iter())).unwrap_or_default();
+        self.read_ours = read_ai_receipts(payload.get("read"));
+        let valid = payload.get("council").is_some_and(Value::is_array)
+            && payload.get("read").is_some_and(Value::is_object);
+        if valid { self.ai_reports = self.ai_reports.wrapping_add(1); }
+        valid
+    }
+
+    fn record_bluetooth_advertisement(&mut self, generation: u64, payload: &Value, received: Instant) {
+        if self.generation != generation || self.tx.is_none() {
+            return;
+        }
+        self.bluetooth_advertisement = advertised_bluetooth_address(payload)
+            .map(|address| BluetoothAdvertisement { generation, received, address });
+    }
+
     fn reset_signal_report(&mut self) {
         self.signal_report = None;
     }
@@ -603,6 +666,46 @@ struct SignalReport {
     generation: u64,
     received: Instant,
     healthy: bool,
+}
+
+struct BluetoothAdvertisement {
+    generation: u64,
+    received: Instant,
+    address: String,
+}
+
+/// Deliberately separate from persisted candidate routes. A saved or manually
+/// entered address cannot authorize an operating-system pairing request.
+fn advertised_bluetooth_address(payload: &Value) -> Option<String> {
+    payload.get("ping")?.as_u64()?;
+    let addresses = payload.get("addrs")?.as_array()?;
+    if addresses.len() > 12 { return None; }
+    let mut radio = None;
+    for value in addresses {
+        let endpoint = value.as_str()?;
+        if let Some(address) = bluetooth_address(endpoint) {
+            if radio.as_ref().is_some_and(|previous| previous != &address) { return None; }
+            radio = Some(address);
+        } else if endpoint.starts_with("rfcomm:") {
+            return None;
+        }
+    }
+    radio
+}
+
+#[derive(Clone)]
+struct BluetoothPairingBinding {
+    node_id: String,
+    key: String,
+    generation: u64,
+    address: String,
+}
+
+pub(crate) struct BluetoothPairingTarget {
+    pub node_id: String,
+    pub name: String,
+    pub address: String,
+    pub valid: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 #[derive(Debug, Serialize)]
@@ -684,29 +787,6 @@ impl Drop for StartupStressScope {
             // The restored TCP session may still use this child. Dropping
             // the diagnostic registration must not cancel that session.
             state.startup_stress = None;
-        }
-    }
-}
-
-/// A dropped UI request must release the selected route and keep diagnostics
-/// exclusive until the asynchronous restoration attempt has finished.
-struct RestoreDefaultRoute {
-    link: Link,
-    peer: Peer,
-    token: CancellationToken,
-    run: Option<tokio::sync::OwnedMutexGuard<()>>,
-}
-
-impl Drop for RestoreDefaultRoute {
-    fn drop(&mut self) {
-        let Some(run) = self.run.take() else { return };
-        if self.token.is_cancelled() { return; }
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let (link, peer, token) = (self.link.clone(), self.peer.clone(), self.token.clone());
-            runtime.spawn(async move {
-                let _run = run;
-                let _ = link.switch_to(&peer, &peer.addrs, None, &token).await;
-            });
         }
     }
 }
@@ -845,6 +925,7 @@ impl Link {
             state.session_cancel = None;
             state.generation += 1;
             state.reset_signal_report();
+            state.bluetooth_advertisement = None;
         }
     }
 
@@ -890,6 +971,54 @@ impl Link {
 
     pub fn signal_relay_status(&self) -> SignalRelayStatus {
         self.signal_relay_status_at(Instant::now())
+    }
+
+    /// Resolve only a saved, authenticated peer. The worker owns the native
+    /// enable epoch and rechecks this lease before accepting human confirmation.
+    pub(crate) fn bluetooth_pairing_target(&self, node_id: &str) -> Result<BluetoothPairingTarget, String> {
+        if !crate::bluetooth::is_enabled() {
+            return Err("Enable native Bluetooth in Consilium first.".into());
+        }
+        let (binding, name) = self.bluetooth_pairing_binding_at(node_id, Instant::now())?;
+        let target = BluetoothPairingTarget {
+            node_id: binding.node_id.clone(), name, address: binding.address.clone(),
+            valid: {
+                let link = self.clone();
+                Arc::new(move || crate::bluetooth::is_enabled()
+                    && link.bluetooth_pairing_is_current_at(&binding, Instant::now()))
+            },
+        };
+        Ok(target)
+    }
+
+    fn bluetooth_pairing_binding_at(&self, node_id: &str, now: Instant) -> Result<(BluetoothPairingBinding, String), String> {
+        let cfg = self.0.cfg.lock().unwrap().clone();
+        if !cfg.enabled || self.0.running.lock().unwrap().as_ref().is_none_or(CancellationToken::is_cancelled) {
+            return Err("Keep the computer link enabled and connected while pairing Bluetooth.".into());
+        }
+        let peer = cfg.peers.iter().find(|peer| peer.node_id == node_id)
+            .ok_or("Choose a saved PeerLink computer before pairing Bluetooth.")?;
+        if peer_key(peer).is_err() {
+            return Err("This computer's saved PeerLink trust needs to be repaired before pairing Bluetooth.".into());
+        }
+        let states = self.0.peers.lock().unwrap();
+        let state = states.get(node_id).filter(|state|
+            state.tx.as_ref().is_some_and(|tx| !tx.is_closed())
+                && state.session_cancel.as_ref().is_some_and(|token| !token.is_cancelled()))
+            .ok_or("Keep this saved computer connected over Ethernet or Wi-Fi while pairing Bluetooth.")?;
+        let advertisement = state.bluetooth_advertisement.as_ref().filter(|advertisement|
+            advertisement.generation == state.generation
+                && now.checked_duration_since(advertisement.received).is_some_and(|age| age < BLUETOOTH_ADVERTISEMENT_TTL))
+            .ok_or("Waiting for this computer's fresh Bluetooth announcement. Enable Consilium Bluetooth on the Mac and keep its computer link connected.")?;
+        Ok((BluetoothPairingBinding {
+            node_id: peer.node_id.clone(), key: peer.key.clone(), generation: state.generation,
+            address: advertisement.address.clone(),
+        }, peer.name.clone()))
+    }
+
+    fn bluetooth_pairing_is_current_at(&self, binding: &BluetoothPairingBinding, now: Instant) -> bool {
+        self.bluetooth_pairing_binding_at(&binding.node_id, now).is_ok_and(|(current, _)|
+            current.key == binding.key && current.generation == binding.generation && current.address == binding.address)
     }
 
     fn signal_relay_status_at(&self, now: Instant) -> SignalRelayStatus {
@@ -1084,6 +1213,7 @@ impl Link {
         let states = self.0.peers.lock().unwrap();
         if let Some(s) = states.get(node_id) {
             if let Some(tx) = &s.tx {
+                let ai = local_ai_report(node_id);
                 let ping = PeerPacket::signed(
                     &me,
                     now_ms(),
@@ -1096,8 +1226,8 @@ impl Link {
                         "working": local_activity(),
                         "git": GIT_SUMMARY.lock().unwrap().clone(),
                         "build": crate::build_id::Build::this(),
-                        "council": COUNCIL.lock().unwrap().clone(),
-                        "read": read_for(node_id),
+                        "council": ai.council,
+                        "read": ai.read,
                         "addrs": local_addrs(self.0.port),
                     }),
                     &key,
@@ -1323,27 +1453,40 @@ impl Link {
         }
     }
 
-    pub async fn test_ai_handshake_selected(&self, node_id: &str, endpoint: Option<&str>) -> Result<AiHandshakeTestReport, String> {
-        let run = self.0.stress_test_lock.clone().try_lock_owned().map_err(|_| "A communication test is already running")?;
+    pub async fn test_ai_handshake_selected(&self, node_id: &str, endpoint: Option<&str>, source: Option<IpAddr>) -> Result<AiHandshakeTestReport, String> {
         let peer = self.peer(node_id).ok_or("Linked computer not found")?;
-        let token = self.0.running.lock().unwrap().clone().ok_or("linking is off")?;
-        let endpoints = endpoint.map(|endpoint| selected_endpoints(&peer, &[endpoint.to_string()])).transpose()?;
-        let mut run = Some(run);
-        let mut restore = endpoint.map(|_| RestoreDefaultRoute { link: self.clone(), peer: peer.clone(), token: token.clone(), run: run.take() });
-        let selected = if let Some(endpoint) = endpoint {
-            let switched = self.switch_to(&peer, endpoints.as_ref().expect("selected endpoint validated"), None, &token).await;
-            if !switched.ok {
-                return Err(format!("The selected route did not confirm traffic: {}", switched.detail));
+        if let Some(endpoint) = endpoint {
+            selected_endpoints(&peer, &[endpoint.to_string()])?;
+            if bluetooth_address(endpoint).is_some() && source.is_some() {
+                return Err("Native Bluetooth has no IP source address".into());
             }
-            Some(endpoint)
-        } else { None };
+            if let Some(address) = source {
+                let interfaces = if_addrs::get_if_addrs().map_err(|_| "Could not read local adapters for the AI status query.")?;
+                validate_probe_source(&interfaces, address)?;
+            }
+            let token = self.0.running.lock().unwrap().clone().filter(|token| !token.is_cancelled()).ok_or("linking is off")?;
+            let key = peer_key(&peer)?;
+            let budget = connect_timeout(endpoint) + HANDSHAKE_TIMEOUT;
+            // This independent control request can run beside payload trials
+            // and calculations. It never publishes a session or restores one.
+            return tokio::select! {
+                biased;
+                _ = token.cancelled() => Err("The AI status query was cancelled because the computer link stopped.".into()),
+                result = tokio::time::timeout(budget, async {
+                    let connection = connect_endpoint(endpoint, source).await
+                        .map_err(|error| probe_status::connection_failure(bluetooth_address(endpoint).is_some(), Some(&error)))?;
+                    self.probe_ai_handshake(&peer, &key, connection, endpoint).await
+                }) => result.unwrap_or_else(|_| Err("The selected-route AI status query timed out. The main session was left in place.".into())),
+            };
+        }
+        if source.is_some() {
+            return Err("Choose a saved endpoint to test a local source. The active-session AI check uses its current adapter.".into());
+        }
+        let _run = self.0.stress_test_lock.try_lock().map_err(|_| "A communication test is already running")?;
         let (generation, route, route_evidence) = {
             let states = self.0.peers.lock().unwrap();
             let state = states.get(node_id).filter(|state| state.tx.is_some()).ok_or("The linked computer is offline")?;
             let route = state.route.clone().ok_or("The active route is unavailable")?;
-            if selected.is_some_and(|selected| selected != route) {
-                return Err("The selected route changed before the AI handshake test".into());
-            }
             (state.generation, route, state.route_evidence.clone())
         };
         let mut outcome = self.test_ai_handshake(node_id).await;
@@ -1351,13 +1494,26 @@ impl Link {
             .is_none_or(|state| state.tx.is_none() || state.generation != generation || state.route.as_deref() != Some(route.as_str())) {
             outcome = Err("The connection changed during the AI handshake test. Try again.".into());
         }
-        let restored = if let Some(restore) = restore.as_mut() {
-            let restored = self.switch_to(&peer, &peer.addrs, None, &token).await;
-            // The explicit attempt finished; Drop must not start a second dial.
-            let _ = restore.run.take();
-            Some(restored)
-        } else { None };
-        Ok(AiHandshakeTestReport { handshake: outcome?, route, route_evidence, restored })
+        Ok(AiHandshakeTestReport { handshake: outcome?, route, route_evidence, restored: None })
+    }
+
+    async fn probe_ai_handshake(&self, peer: &Peer, key: &[u8], connection: LinkConnection, endpoint: &str) -> Result<AiHandshakeTestReport, String> {
+        let route_evidence = Some(connection.evidence.clone());
+        let reply = self.exchange_probe(peer, key, connection, ProbeRequest::AiStatus).await?;
+        let report = reply.get("ai_status")
+            .ok_or("The linked computer does not support an isolated AI status query. Update both computers before testing a selected route.")?;
+        let mut snapshot = PeerState::default();
+        if !snapshot.record_ai_report(report) {
+            return Err("The linked computer returned an invalid AI status report.".into());
+        }
+        if self.peer(&peer.node_id).is_none_or(|current| current.key != peer.key) {
+            return Err("The saved computer's trust changed during the AI status query.".into());
+        }
+        let (_, mine) = self.me();
+        Ok(AiHandshakeTestReport {
+            handshake: handshake(&peer.node_id, &peer.name, &mine, Some(&snapshot)),
+            route: endpoint.into(), route_evidence, restored: None,
+        })
     }
 
     /// Sends bounded authenticated data over separately selected local and remote addresses.
@@ -1418,12 +1574,14 @@ impl Link {
         Ok(TransferTrial {
             overlap_ms: transfer_overlap(&paths),
             distinct_receiver_interfaces: distinct_receiver_interfaces(&paths),
+            compute_routes: compute_routes::recommend(&paths),
             paths,
         })
     }
 
     async fn transfer_path(&self, peer: &Peer, key: &[u8], source: Option<ProbeSource>, endpoint: String) -> TransferResult {
         let mut receipts: Vec<TransferReceipt> = Vec::with_capacity(TRIAL_CHUNKS);
+        let mut probe_times = Vec::with_capacity(TRIAL_CHUNKS);
         let mut route_evidence = None;
         let result: Result<(), String> = async {
             for index in 0..TRIAL_CHUNKS {
@@ -1431,13 +1589,14 @@ impl Link {
                     tokio::time::sleep(TRIAL_INTERVAL).await;
                 }
                 let budget = if bluetooth_address(&endpoint).is_some() { BLUETOOTH_CONNECT_TIMEOUT + HANDSHAKE_TIMEOUT } else { HANDSHAKE_TIMEOUT };
+                let started = Instant::now();
                 let receipt = tokio::time::timeout(budget, async {
                     let connection = connect_endpoint(&endpoint, source.as_ref().map(|source| source.address)).await
                         .map_err(|error| format!("Could not connect to the peer endpoint: {error}"))?;
                     let evidence = connection.evidence.clone();
                     route_evidence = Some(evidence.clone());
                     let chunk = random_hex(TRIAL_CHUNK_BYTES / 2);
-                    let reply = self.exchange_probe(peer, key, connection, Some(&chunk)).await?;
+                    let reply = self.exchange_probe(peer, key, connection, ProbeRequest::Transfer(&chunk)).await?;
                     let receipt: TransferReceipt = serde_json::from_value(reply["transfer_receipt"].clone())
                         .map_err(|_| "The linked computer did not return a payload receipt. Update both computers.")?;
                     if !receipt_matches_path(&receipt, &evidence, source.as_ref())
@@ -1453,10 +1612,14 @@ impl Link {
                     return Err("The receiver clock changed during the test".into());
                 }
                 receipts.push(receipt);
+                probe_times.push(started.elapsed().as_millis() as u64);
             }
             Ok(())
         }.await;
-        TransferResult { source, endpoint, route_evidence, receipts, error: result.err() }
+        probe_times.sort_unstable();
+        let median_probe_ms = (probe_times.len() == TRIAL_CHUNKS)
+            .then(|| u64::midpoint(probe_times[(TRIAL_CHUNKS - 1) / 2], probe_times[TRIAL_CHUNKS / 2]));
+        TransferResult { source, endpoint, route_evidence, receipts, median_probe_ms, error: result.err() }
     }
 
     /// Tests connectivity, route latency, and sync alignment for a paired computer.
@@ -1477,24 +1640,25 @@ impl Link {
             let key = key.clone();
             probes.spawn(async move {
                 let kind = route_kind(&addr).to_string();
+                let native = bluetooth_address(&addr).is_some();
                 let started = std::time::Instant::now();
-                let timeout = if bluetooth_address(&addr).is_some() { BLUETOOTH_CONNECT_TIMEOUT } else { Duration::from_secs(1) };
+                let timeout = if native { BLUETOOTH_CONNECT_TIMEOUT } else { Duration::from_secs(1) };
                 let (rtt_ms, authenticated_ms, local_ip, route_evidence, status) = match tokio::time::timeout(timeout, connect_endpoint(&addr, source)).await {
                     Ok(Ok(connection)) => {
                         let elapsed = started.elapsed().as_millis() as u64;
                         let evidence = connection.evidence.clone();
                         let local_ip = evidence.local_addr().map(|address| address.ip());
                         let result = tokio::time::timeout(timeout, link.probe_route(&peer, &key, connection)).await;
-                        let authenticated_ms = matches!(result, Ok(Ok(())))
+                        let authenticated_ms = matches!(&result, Ok(Ok(())))
                             .then(|| started.elapsed().as_millis() as u64);
                         let status = match authenticated_ms {
                             Some(total) => format!("Authenticated probe passed in {total} ms"),
-                            None => format!("{} connected in {elapsed} ms · peer authentication unconfirmed", if local_ip.is_some() { "TCP" } else { "RFCOMM" }),
+                            None => probe_status::authentication_failure(native, if local_ip.is_some() { "TCP" } else { "RFCOMM" }, elapsed, result.is_err()),
                         };
                         (Some(elapsed), authenticated_ms, local_ip, Some(evidence), status)
                     }
-                    Ok(Err(_)) => (None, None, None, None, "Refused or unreachable".to_string()),
-                    Err(_) => (None, None, None, None, "Timed out".to_string()),
+                    Ok(Err(error)) => (None, None, None, None, probe_status::connection_failure(native, Some(&error))),
+                    Err(_) => (None, None, None, None, probe_status::connection_failure(native, None)),
                 };
                 (index, RouteTest { addr, kind, reachable: rtt_ms.is_some(), rtt_ms, authenticated_ms, local_ip, local_interface: route_evidence.as_ref().and_then(RouteEvidence::local_interface), route_evidence, status })
             });
@@ -1782,6 +1946,9 @@ impl Link {
                         .filter(|nonce| nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
                         .ok_or("invalid route probe nonce")?;
                     let mut payload = json!({ "route_probe_ack": probe_nonce });
+                    if probe.get("ai_status").and_then(Value::as_bool) == Some(true) {
+                        payload["ai_status"] = json!(local_ai_report(&peer.node_id));
+                    }
                     if let Some(chunk) = probe.get("transfer_chunk") {
                         let chunk = chunk.as_str().ok_or("invalid transfer chunk")?;
                         payload["transfer_receipt"] = json!(transfer_receipt(chunk, &evidence)?);
@@ -2083,24 +2250,27 @@ impl Link {
     /// A diagnostic handshake does not replace a live session. Older peers close the probe
     /// before registering it because this first authenticated frame has no session hello.
     async fn probe_route(&self, peer: &Peer, key: &[u8], connection: LinkConnection) -> Result<(), String> {
-        self.exchange_probe(peer, key, connection, None).await.map(|_| ())
+        self.exchange_probe(peer, key, connection, ProbeRequest::Route).await.map(|_| ())
     }
 
-    async fn exchange_probe(&self, peer: &Peer, key: &[u8], connection: LinkConnection, chunk: Option<&str>) -> Result<Value, String> {
+    async fn exchange_probe(&self, peer: &Peer, key: &[u8], connection: LinkConnection, request: ProbeRequest<'_>) -> Result<Value, String> {
         let (r, mut w) = tokio::io::split(connection.stream);
         let mut r = BufReader::new(r);
-        let Wire::Challenge { nonce } = read_wire(&mut r).await
+        let small = matches!(request, ProbeRequest::AiStatus);
+        let Wire::Challenge { nonce } = read_probe_wire(&mut r, small).await
             .map_err(|error| format!("Could not read the peer challenge: {error}"))? else {
             return Err("expected challenge".into());
         };
         let mine = random_hex(16);
         let mut payload = json!({ "route_probe": { "challenge": nonce, "nonce": mine } });
-        if let Some(chunk) = chunk {
-            payload["route_probe"]["transfer_chunk"] = json!(chunk);
+        match request {
+            ProbeRequest::Route => {}
+            ProbeRequest::Transfer(chunk) => payload["route_probe"]["transfer_chunk"] = json!(chunk),
+            ProbeRequest::AiStatus => payload["route_probe"]["ai_status"] = json!(true),
         }
         let request = self.route_probe_frame(key, payload)?;
         w.write_all(request.as_bytes()).await.map_err(|error| format!("Could not send the probe: {error}"))?;
-        let Wire::Sealed { from, n, c } = read_wire(&mut r).await
+        let Wire::Sealed { from, n, c } = read_probe_wire(&mut r, small).await
             .map_err(|error| format!("Could not read the authenticated probe reply: {error}"))? else {
             return Err("expected route probe reply".into());
         };
@@ -2205,6 +2375,7 @@ impl Link {
             s.packets_in = 0;
             s.supports_lan_notes = false;
             s.reset_signal_report();
+            s.bluetooth_advertisement = None;
             // Re-send everything not yet acknowledged, re-stamped so it is still fresh.
             for p in &s.outbox {
                 if let Ok(line) = p.resigned(now_ms(), &key).and_then(|p| seal(&me, &key, &p)) {
@@ -2256,6 +2427,7 @@ impl Link {
                     let native_active = read_progress.as_ref().is_some_and(|progress|
                         progress.recent(Instant::now()) || !in_rx.is_empty());
                     if silent > DEAD_AFTER_MS && !native_active { break; }
+                    let ai = local_ai_report(&peer.node_id);
                     let ping = PeerPacket::signed(
                         &me,
                         now_ms(),
@@ -2269,8 +2441,8 @@ impl Link {
                             "git": GIT_SUMMARY.lock().unwrap().clone(),
                             "build": crate::build_id::Build::this(),
                             "lan_notes": true,
-                            "council": COUNCIL.lock().unwrap().clone(),
-                            "read": read_for(&peer.node_id),
+                            "council": ai.council,
+                            "read": ai.read,
                             "addrs": local_addrs(self.0.port),
                         }),
                         &key,
@@ -2301,6 +2473,7 @@ impl Link {
             PacketKind::Heartbeat => {
                 if let Some(state) = self.0.peers.lock().unwrap().get_mut(from) {
                     state.record_signal_report(generation, &packet.payload, Instant::now());
+                    state.record_bluetooth_advertisement(generation, &packet.payload, Instant::now());
                 }
                 if packet.payload.get("ping").is_some() {
                     if let Some(s) = self.0.peers.lock().unwrap().get_mut(from).filter(|state| state.generation == generation) {
@@ -2310,24 +2483,7 @@ impl Link {
                         s.git = packet.payload.get("git").and_then(Value::as_str).map(clean_status).filter(|g| !g.is_empty());
                         s.build = packet.payload.get("build").and_then(crate::build_id::Build::from_peer);
                         s.supports_lan_notes = packet.payload.get("lan_notes").and_then(Value::as_bool) == Some(true);
-                        s.council = packet.payload.get("council").and_then(Value::as_array).map(|a| known_ais(a.iter())).unwrap_or_default();
-                        s.read_ours = packet
-                            .payload
-                            .get("read")
-                            .and_then(Value::as_object)
-                            .map(|m| {
-                                m.iter()
-                                    .filter(|(ours, _)| crate::agents::all().iter().any(|a| a.id == ours.as_str()))
-                                    .take(MAX_ROLL)
-                                    .map(|(ours, theirs)| (ours.clone(), theirs.as_array().map(|a| known_ais(a.iter())).unwrap_or_default()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        if packet.payload.get("council").is_some_and(Value::is_array)
-                            && packet.payload.get("read").is_some_and(Value::is_object)
-                        {
-                            s.ai_reports = s.ai_reports.wrapping_add(1);
-                        }
+                        s.record_ai_report(&packet.payload);
                     }
                     if packet.payload.get("addrs").is_some() {
                         self.learn_addrs(from, &packet.payload, None);
@@ -2629,6 +2785,15 @@ async fn read_line_clocked<R: AsyncBufRead + Unpin>(
 
 async fn read_wire<R: AsyncBufRead + Unpin>(r: &mut R) -> Result<Wire, String> {
     serde_json::from_str(&read_line(r).await?).map_err(|_| "malformed frame".into())
+}
+
+async fn read_probe_wire<R: AsyncBufRead + Unpin>(r: &mut R, small: bool) -> Result<Wire, String> {
+    if small {
+        let mut bounded = tokio::io::AsyncReadExt::take(r, AI_STATUS_FRAME_LIMIT);
+        read_wire(&mut bounded).await
+    } else {
+        read_wire(r).await
+    }
 }
 
 async fn read_native_wire<R: AsyncBufRead + Unpin>(r: &mut R, progress: &NativeReadProgress) -> Result<Wire, String> {
@@ -2964,6 +3129,14 @@ fn route_ip_allowed(ip: std::net::IpAddr) -> bool {
 mod signal_status_tests;
 
 #[cfg(test)]
+#[path = "link_bluetooth_pairing_tests.rs"]
+mod bluetooth_pairing_tests;
+
+#[cfg(test)]
+#[path = "link_ai_probe_tests.rs"]
+mod ai_probe_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3140,14 +3313,14 @@ mod tests {
         assert_eq!(error, "frame too large");
     }
 
-    fn memory_evidence(local: &str, remote: &str) -> RouteEvidence {
+    pub(super) fn memory_evidence(local: &str, remote: &str) -> RouteEvidence {
         RouteEvidence::BluetoothRfcomm {
             local_adapter: local.into(), remote_device: remote.into(),
             service_uuid: crate::bluetooth::SERVICE_UUID.into(), channel: 7,
         }
     }
 
-    fn trust_memory_pair(host: &Link, client: &Link) {
+    pub(super) fn trust_memory_pair(host: &Link, client: &Link) {
         for (here, there) in [(host, client), (client, host)] {
             let (node_id, name) = there.me();
             here.remember(Peer { node_id, name, key: "42".repeat(32), addrs: vec![] }).unwrap();
@@ -3240,7 +3413,7 @@ mod tests {
         let chunk = random_hex(TRIAL_CHUNK_BYTES / 2);
         let reply = tokio::time::timeout(Duration::from_secs(5), client.exchange_probe(&peer, &key, LinkConnection {
             stream: Box::new(stream), evidence: evidence.clone(),
-        }, Some(&chunk))).await.unwrap().unwrap();
+        }, ProbeRequest::Transfer(&chunk))).await.unwrap().unwrap();
         receiving.await.unwrap().unwrap();
         let mut receipt: TransferReceipt = serde_json::from_value(reply["transfer_receipt"].clone()).unwrap();
         assert_eq!(receipt.bytes, TRIAL_CHUNK_BYTES);
@@ -3272,7 +3445,7 @@ mod tests {
         });
         let result = client.exchange_probe(&peer, &key, LinkConnection {
             stream: Box::new(stream), evidence: memory_evidence("020000000002", "020000000001"),
-        }, None).await;
+        }, ProbeRequest::Route).await;
         assert!(result.is_err());
         assert!(receiving.await.unwrap().is_err());
         assert!(!host.status().peers[0].connected);
@@ -3372,7 +3545,7 @@ mod tests {
         assert_eq!(link.inbox(), vec![second, first], "appending still works after a trim");
         let _ = std::fs::remove_dir_all(&dir);
     }
-    fn node(dir: &Path, name: &str) -> (Link, Arc<Mutex<Vec<PeerPacket>>>) {
+    pub(super) fn node(dir: &Path, name: &str) -> (Link, Arc<Mutex<Vec<PeerPacket>>>) {
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink = got.clone();
         let handler: Handler = Arc::new(move |p: &PeerPacket| {
@@ -3459,6 +3632,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("link-startup-stress-{}", uuid::Uuid::new_v4()));
         let (host, _) = node(&dir, "host");
         let (client, _) = node(&dir, "client");
+        struct Cleanup { host: Link, client: Link, dir: PathBuf }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.host.stop();
+                self.client.stop();
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+        let _cleanup = Cleanup { host: host.clone(), client: client.clone(), dir: dir.clone() };
         let code = host.begin_pairing().unwrap();
         let ip = format!("127.0.0.1:{}", host.0.port);
         client.join(&ip, &code.code).await.unwrap();
@@ -3479,7 +3661,22 @@ mod tests {
         assert_eq!(reports[0].routes[0].addr, ip);
         assert!(reports[0].restored.as_ref().is_some_and(|route| route.ok && route.addr == ip));
 
-        let running = client.0.running.lock().unwrap().clone().unwrap();
+        // The TCP policy phase above is genuine. Isolate the controlled
+        // publication race below from both ordinary reconnect supervisors:
+        // cancelling their parents also fences any already queued auto-dial.
+        host.stop();
+        client.stop();
+        let running = CancellationToken::new();
+        *client.0.running.lock().unwrap() = Some(running.clone());
+        // Keep only a live placeholder for registering the startup owner.
+        // Actual late TCP/native publication still uses production session().
+        let (tx, _current_tcp) = mpsc::unbounded_channel();
+        {
+            let mut states = client.0.peers.lock().unwrap();
+            let state = states.get_mut(&host_id).unwrap();
+            state.tx = Some(tx);
+            state.session_cancel = Some(running.child_token());
+        }
         let startup = client.startup_stress_scope(&host_id, &running).unwrap();
         let startup_token = startup.stop.as_ref().clone();
         // Pause a TCP session just before publication, as if its startup
@@ -3495,13 +3692,22 @@ mod tests {
         let owner = client.clone();
         let (release, paused) = oneshot::channel();
         let queued_tcp = tokio::spawn(async move {
-            paused.await.unwrap();
-            owner.session(peer, key, BufReader::new(read), write, route, evidence, None, startup_token).await;
+            // An earlier assertion dropping the sender is teardown, not an
+            // independent fixture panic or a reason to publish a session.
+            if paused.await.is_ok() {
+                owner.session(peer, key, BufReader::new(read), write, route, evidence, None, startup_token).await;
+            }
         });
         let native_token = running.child_token();
         let (receiving, sending) = memory_session(&host, &client, native_token.clone()).await;
-        assert!(wait_for(|| client.status().peers[0].route_evidence.as_ref()
-            .is_some_and(|evidence| matches!(evidence, RouteEvidence::BluetoothRfcomm { .. }))).await);
+        let published = wait_for(|| client.0.peers.lock().unwrap().get(&host_id).is_some_and(|state|
+            state.tx.is_some() && matches!(state.route_evidence.as_ref(), Some(RouteEvidence::BluetoothRfcomm { .. })))).await;
+        let (observed_generation, connected) = {
+            let states = client.0.peers.lock().unwrap();
+            let state = &states[&host_id];
+            (state.generation, state.tx.is_some())
+        };
+        assert!(published, "Controlled native publication failed: generation={observed_generation}, connected={connected}, sender_finished={}, receiver_finished={}", sending.is_finished(), receiving.is_finished());
         assert!(startup.stop.is_cancelled(), "Native publication preempts only the startup child");
         let (generation, native_session) = {
             let peers = client.0.peers.lock().unwrap();
@@ -3511,15 +3717,13 @@ mod tests {
         release.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(2), queued_tcp).await.unwrap().unwrap();
         drop(startup);
-        assert_eq!(client.0.peers.lock().unwrap()[&host_id].generation, generation);
+        let final_generation = client.0.peers.lock().unwrap()[&host_id].generation;
+        assert_eq!(final_generation, generation);
         assert!(!native_session.is_cancelled(), "Neither late TCP publication nor startup restoration replaces native");
         native_token.cancel();
         tokio::time::timeout(Duration::from_secs(2), sending).await.unwrap().unwrap();
         tokio::time::timeout(Duration::from_secs(2), receiving).await.unwrap().unwrap().unwrap();
         drop(held);
-        client.stop();
-        host.stop();
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4138,11 +4342,20 @@ mod tests {
             assert!(states[&joiner_id].ai_reports > reports);
         }
         let endpoint = format!("127.0.0.1:{}", joiner.0.port);
-        let selected = host.test_ai_handshake_selected(&joiner_id, Some(&endpoint)).await.unwrap();
+        let host_generation = host.0.peers.lock().unwrap()[&joiner_id].generation;
+        let joiner_generation = joiner.0.peers.lock().unwrap()[&host.me().0].generation;
+        // A separately running data trial owns this lock. The isolated status
+        // control must still answer without acquiring it or switching routes.
+        let _data_trial = host.0.stress_test_lock.lock().await;
+        let selected = host.test_ai_handshake_selected(&joiner_id, Some(&endpoint), Some("127.0.0.1".parse().unwrap())).await.unwrap();
         assert_eq!(selected.route, endpoint);
         assert!(matches!(selected.route_evidence, Some(RouteEvidence::Tcp { .. })));
-        assert!(selected.restored.as_ref().is_some_and(|route| route.ok), "{selected:?}");
-        assert!(host.test_ai_handshake_selected(&joiner_id, Some("rfcomm://020000000099")).await.is_err());
+        assert_eq!(selected.route_evidence.as_ref().and_then(RouteEvidence::local_addr).unwrap().ip(), "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert!(selected.restored.is_none(), "The primary session must never need restoration");
+        assert_eq!(host.0.peers.lock().unwrap()[&joiner_id].generation, host_generation);
+        assert_eq!(joiner.0.peers.lock().unwrap()[&host.me().0].generation, joiner_generation);
+        assert!(host.test_ai_handshake_selected(&joiner_id, Some("rfcomm://020000000099"), None).await.is_err());
+        assert!(host.test_ai_handshake_selected(&joiner_id, Some(&endpoint), Some("198.51.100.20".parse().unwrap())).await.is_err());
         host.stop();
         assert_eq!(host.test_ai_handshake(&joiner_id).await.unwrap_err(), "The linked computer is offline");
         joiner.stop();

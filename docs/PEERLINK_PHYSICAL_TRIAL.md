@@ -102,11 +102,14 @@ The check uses existing AI confirmations and sends no new prompts. In the same m
 
 ### Native Bluetooth between Windows and Mac
 
-Use matching installed builds that include native Bluetooth. Pair the two computers
-in their operating systems, confirming the matching code. Keep the existing
+Use matching installed builds that include native Bluetooth. Keep the existing
 Ethernet PeerLink connection while enabling **Native Bluetooth · Windows and Mac**
 in Consilium's linked-computer settings on both hosts. Allow macOS Bluetooth access
-when requested. The Mac announces its RFCOMM endpoint only after its transient
+when requested. On Windows, open the linked Mac's card and choose **Show Bluetooth code**.
+Compare the Windows number with the macOS pairing prompt, type the Mac's number into
+**Enter Mac code**, and confirm on both computers. The device pairing prompt is separate
+from the code generated when first linking the computers in Consilium.
+The Mac announces its RFCOMM endpoint only after its transient
 service is published; the Windows peer learns it through authenticated heartbeats.
 This route does not require a Bluetooth PAN network or an IP address.
 
@@ -115,9 +118,22 @@ and run **Test Connection**, then **Test AI handshake**. Select the Mac as the
 communication test target, choose **Native Bluetooth** under **Routes to test**,
 and run **Communication stress test**. Record fresh authentication and traffic,
 actual Bluetooth adapter identities, service UUID and the discovered channel.
-The AI check must receive a fresh status report on the selected native session;
-an existing Ethernet session cannot supply that proof. Verify default routing
-returns after the temporary tests, including failed or cancelled checks.
+The AI check requests a fresh authenticated status report on its own native connection
+while the existing Ethernet session continues. Verify the default route after the
+switch stress test, including failed or cancelled checks.
+
+On November 24, 2026, cycling the Windows Bluetooth radio restored the operating system's
+numeric comparison prompt. Both computers showed the bond after the attended confirmation.
+Windows recorded the remote adapter as authenticated, remembered and connected after the
+diagnostic pairing request had ended. The follow-up native data probe on both installed
+0.3.58 build #606 apps still reported the RFCOMM route as refused or unreachable and returned
+no channel evidence. Ethernet continued carrying the session. Windows Wi-Fi was disconnected.
+The native AI handshake and switch stress tests remained pending after the failed data probe.
+An encrypted Windows RFCOMM socket reached the connect completion event with error `10049`.
+An uncached service-directory lookup reached the selected Mac and found an L2CAP record, while
+the lookup for the Consilium service UUID returned no result. The Mac listener now includes the
+service ID and public browse group in its SDP record. Repeat the targeted lookup on the updated
+Mac before treating the physical Bluetooth data route as verified.
 
 For parallel payload trials, choose **Native Bluetooth** as one path's local
 adapter and match its RFCOMM endpoint. Native paths have no source/receiver IP;
@@ -138,7 +154,7 @@ the peer's PAN address is required before an outage or simultaneous transfer tri
 
 ## Simultaneous transfer trial
 
-After the individual routes pass, test with Ethernet, Wi-Fi and Bluetooth PAN active. Open
+After the individual routes pass, test with Ethernet, Wi-Fi and the verified Bluetooth path active. Open
 **Test parallel payload transfer**, choose one computer, then match each local adapter with
 its peer endpoint. Use both computers' network settings to confirm the selected addresses
 belong to distinct physical adapters. Run the test and record the bound source interface,
@@ -152,11 +168,31 @@ Use the reported receiving adapter names to check the endpoint mapping. The rece
 computer supplies those names from its socket addresses. Use OS measurements at both ends
 to establish which physical interface actually carried the traffic.
 
+The report ranks completed IP paths by median authenticated sample time and suggests a primary
+calculation route and separate paths for independent jobs or fallback. It suggests a verified
+native Bluetooth path for small coordination messages and recovery. Each suggested IP route
+uses a different receiving adapter. Sample time includes connection setup and authentication.
+The report measures and recommends routes while leaving the live session in place.
+
 For a throughput comparison, compare the three-path run against each single-path baseline
 with the same payload and computers. To pass the physical overlap trial, authenticated payload
 bytes must arrive over each claimed path during overlapping receipt windows. Repeat while
 disconnecting each path in turn. Check payload integrity and record whether the trial returned
 a partial result. Live chat and model traffic use their own routing and recovery logic.
+
+### Live dual-route check on November 24, 2026
+
+The Windows and Mac apps both ran 0.3.58 build #606. Windows joined the previously tested Wi-Fi
+network while Ethernet stayed active. The transfer test returned all four checksum receipts on
+each route, totaling 32 KiB per route. The Mac reported distinct receiving adapters and 258 ms
+of overlap between authenticated payload receipts. The existing PeerLink session remained on
+Ethernet throughout the parallel transfer. This run measured payloads over two IP routes.
+
+The source-bound communication stress test then confirmed authenticated traffic after switching
+to each Windows adapter. Ethernet switched in 107 ms and confirmed traffic in 1,625 ms. Wi-Fi
+switched in 109 ms and confirmed traffic in 1,639 ms. The default route reconnected in 104 ms,
+confirmed traffic in 1,638 ms, and the live link returned to Ethernet. Windows Wi-Fi went back
+to its original disconnected state. The established PeerLink socket stayed on Ethernet.
 
 ## Split-model inference trial
 
@@ -185,6 +221,13 @@ immediately before a live load. A model that fits this system-memory estimate ca
 the available memory on a selected accelerator.
 
 ### Inference measurements
+
+Keep a single model runner's ordered RPC stream on one route. Test separate jobs on different
+IP routes and put small status requests on a separate verified path. Compare this against one
+route with the same model, prompts, context size and concurrency. Measure both per-job latency
+and total job throughput. Losing an active RPC stream requires the runner to recover or restart
+the request from saved context. A fresh request can choose an available route independently.
+[Configure source-bound worker routes](LLAMA_RPC_TUNNEL.md#credentials-and-endpoints).
 
 Use a fixed prompt and record load time, time to first token, tokens per second, and peak memory per device. Run the same prompt with internet access disabled and the local paths still connected. During a separate request, interrupt the active path and record whether inference resumes, restarts from saved context, or fails. Confirm that the user sees one terminal result and that all worker allocations are released on cancellation. Report transport recovery and inference recovery separately.
 
