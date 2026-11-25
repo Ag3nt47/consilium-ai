@@ -87,16 +87,15 @@ export function ProjectVersions({ workspace }: { workspace: string | null }) {
       <button
         className={`pv-tab ${allMatch ? "pv-ok" : "pv-diff"}`}
         onClick={() => setOpen(!open)}
-        title="Versions of the projects being worked on: this PC and GitHub. Click for details."
+        title={list.length > 1 ? `${first.name}, plus ${list.length - 1} more project${list.length > 2 ? "s" : ""} being worked on. Click for details.` : `${first.name}: version on this PC and on GitHub. Click for details.`}
       >
-        {list.length === 1 ? (
+        <span className="pv-k">PC</span> {label(first.local_version, first.local_commit)}
+        <span className="pv-sep">·</span>
+        <span className="pv-k">GitHub</span> {label(first.remote_version, first.remote_commit)}
+        {list.length > 1 && (
           <>
-            <span className="pv-k">PC</span> {label(first.local_version, first.local_commit)}
-            <span className="pv-sep">·</span>
-            <span className="pv-k">GitHub</span> {label(first.remote_version, first.remote_commit)}
+            <span className="pv-sep">·</span>+{list.length - 1}
           </>
-        ) : (
-          <>{list.length} projects · versions</>
         )}
       </button>
       {open && (
