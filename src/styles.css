@@ -3541,20 +3541,21 @@ button.attachment {
   -webkit-backdrop-filter: none;
 }
 
-/* visionOS Glass: keep the main background (wallpaper or live rain/static backdrop) completely
-   transparent so the background shows through in full behind floating glass messages. */
+/* visionOS Glass over the wallpaper or a live backdrop: the main pane has no fill at all, so
+   the background shows through edge to edge. Only the messages (and the thinking rows) keep a
+   light pane of frosted glass so they stay readable. The top bar and composer float on clear
+   glass with a soft text shadow. REQUEST boxes stay solid so Approve/Deny never fades. Stealth
+   is excluded because that mode promises an opaque, quiet UI. */
 [data-theme="glass"] .main.has-wallpaper .messages,
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .messages {
   background: transparent;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   border-color: transparent;
-  border-radius: 0;
-  margin: 0;
+  box-shadow: none;
 }
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) > .main {
   background: transparent;
-  background-color: transparent;
 }
 [data-theme="glass"] .main.has-wallpaper :is(.topbar, .composer),
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.topbar, .composer) {
@@ -3564,11 +3565,21 @@ button.attachment {
   border-color: transparent;
   box-shadow: none;
 }
-[data-theme="glass"] .main.has-wallpaper .topbar :is(h1, .workspace, .btn.ghost),
-[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .topbar :is(h1, .workspace, .btn.ghost),
-[data-theme="glass"] .main.has-wallpaper .composer .rounds,
-[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer .rounds {
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+[data-theme="glass"] .main.has-wallpaper :is(.topbar, .composer) :is(h1, .btn, .chip, label, span),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.topbar, .composer) :is(h1, .btn, .chip, label, span) {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 10px rgba(0, 0, 0, 0.6);
+}
+[data-theme="glass"] .main.has-wallpaper :is(.msg, .thinking),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.msg, .thinking) {
+  background: rgba(16, 20, 34, 0.5);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+}
+[data-theme="glass"] .main.has-wallpaper .request,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .request {
+  background: rgba(36, 10, 14, 0.95);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 [data-theme="glass"] .main.has-wallpaper .composer textarea,
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer textarea {
@@ -3590,9 +3601,10 @@ button.attachment {
 [data-theme="glass"] .note {
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
+}
+[data-theme="glass"] .note:not(.note-error) {
   border: 1px solid var(--border);
 }
-
 .theme-hint {
   margin: 6px 0 10px;
   font-size: 12px;
