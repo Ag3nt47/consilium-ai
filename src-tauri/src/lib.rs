@@ -1401,6 +1401,32 @@ fn bluetooth_set_enabled(enabled: bool) -> Result<bluetooth::Status, String> {
 }
 
 #[tauri::command]
+async fn bluetooth_pairing_begin(node_id: String) -> Result<bluetooth::pairing::PairingStatus, String> {
+    if !cfg!(windows) {
+        return Err("Start Bluetooth code comparison from the saved Mac's card on Windows. Confirm the matching Bluetooth prompt on the Mac.".into());
+    }
+    let target = the_link()?.bluetooth_pairing_target(&node_id)?;
+    bluetooth::pairing::start(bluetooth::pairing::PairingTarget {
+        node_id: target.node_id, peer_name: target.name, address: target.address, valid: target.valid,
+    })
+}
+
+#[tauri::command]
+fn bluetooth_pairing_status(attempt_id: String) -> Result<bluetooth::pairing::PairingStatus, String> {
+    bluetooth::pairing::status(&attempt_id)
+}
+
+#[tauri::command]
+fn bluetooth_pairing_confirm(attempt_id: String, challenge_id: String, code: String) -> Result<bluetooth::pairing::PairingStatus, String> {
+    bluetooth::pairing::confirm(&attempt_id, &challenge_id, &code)
+}
+
+#[tauri::command]
+fn bluetooth_pairing_cancel(attempt_id: String) -> Result<bluetooth::pairing::PairingStatus, String> {
+    bluetooth::pairing::cancel(&attempt_id)
+}
+
+#[tauri::command]
 async fn link_discover_lan(include_legacy: Option<bool>) -> Result<Vec<String>, String> {
     the_link()?.discover(include_legacy.unwrap_or(true)).await
 }
@@ -1461,8 +1487,8 @@ async fn link_test_ai_handshake(node_id: String) -> Result<Vec<link::AiHandshake
 }
 
 #[tauri::command]
-async fn link_test_ai_handshake_selected(node_id: String, endpoint: String) -> Result<link::AiHandshakeTestReport, String> {
-    the_link()?.test_ai_handshake_selected(&node_id, Some(&endpoint)).await
+async fn link_test_ai_handshake_selected(node_id: String, endpoint: String, source: Option<std::net::IpAddr>) -> Result<link::AiHandshakeTestReport, String> {
+    the_link()?.test_ai_handshake_selected(&node_id, Some(&endpoint), source).await
 }
 
 #[tauri::command]
@@ -1771,6 +1797,10 @@ pub fn run() {
             link_status,
             bluetooth_status,
             bluetooth_set_enabled,
+            bluetooth_pairing_begin,
+            bluetooth_pairing_status,
+            bluetooth_pairing_confirm,
+            bluetooth_pairing_cancel,
             link_discover_lan,
             link_set_enabled,
             link_pair_host,

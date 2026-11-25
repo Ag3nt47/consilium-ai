@@ -188,14 +188,17 @@ fn service_dictionary() -> Result<Retained<NSDictionary<NSString, NSObject>>, St
     let bytes = uuid::Uuid::parse_str(SERVICE_UUID).map_err(|_| "Invalid Bluetooth service UUID")?;
     // SAFETY: UUID bytes remain valid for this constructor, whose result owns a
     // copy. Protocol UUIDs are the Bluetooth-assigned L2CAP and RFCOMM identifiers.
-    let (service, l2cap, rfcomm) = unsafe {
+    let (service, l2cap, rfcomm, public_browse) = unsafe {
         (IOBluetoothSDPUUID::uuidWithBytes_length(bytes.as_bytes().as_ptr().cast(), 16),
-         IOBluetoothSDPUUID::uuid16(0x0100), IOBluetoothSDPUUID::uuid16(0x0003))
+         IOBluetoothSDPUUID::uuid16(0x0100), IOBluetoothSDPUUID::uuid16(0x0003),
+         IOBluetoothSDPUUID::uuid16(0x1002))
     };
     let service = service.ok_or("Create PeerLink Bluetooth service UUID")?;
     let l2cap = l2cap.ok_or("Create L2CAP UUID")?;
     let rfcomm = rfcomm.ok_or("Create RFCOMM UUID")?;
+    let public_browse = public_browse.ok_or("Create Bluetooth browse group UUID")?;
     let classes = NSArray::<NSObject>::from_slice(&[&service]);
+    let browse_groups = NSArray::<NSObject>::from_slice(&[&public_browse]);
     let l2cap_descriptor = NSArray::<NSObject>::from_slice(&[&l2cap]);
     // An explicit unsigned byte is required by SDP for the RFCOMM channel;
     // macOS substitutes its actually assigned channel when the preferred one is in use.
@@ -211,9 +214,10 @@ fn service_dictionary() -> Result<Retained<NSDictionary<NSString, NSObject>>, St
     let persistent = NSNumber::new_bool(false);
     let local = NSDictionary::<NSString, NSObject>::from_slices(&[ns_string!("Persistent")], &[&persistent]);
     Ok(NSDictionary::from_slices(
-        &[ns_string!("0001 - ServiceClassIDList"), ns_string!("0004 - ProtocolDescriptorList"),
+        &[ns_string!("0001 - ServiceClassIDList"), ns_string!("0003 - ServiceID"),
+          ns_string!("0004 - ProtocolDescriptorList"), ns_string!("0005 - BrowseGroupList"),
           ns_string!("0100 - ServiceName"), ns_string!("LocalAttributes")],
-        &[&classes, &protocols, ns_string!("Consilium PeerLink"), &local],
+        &[&classes, &service, &protocols, &browse_groups, ns_string!("Consilium PeerLink"), &local],
     ))
 }
 
