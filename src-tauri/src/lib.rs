@@ -23,6 +23,8 @@ mod follow;
 mod link;
 mod lan_notes;
 mod liveui;
+#[cfg(any(target_os = "macos", test))]
+mod mac_signing;
 mod memory;
 mod offload;
 pub mod ollama;
