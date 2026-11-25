@@ -32,19 +32,21 @@ impl Default for Options {
 struct Control {
     stop: AtomicBool,
     ready: AtomicBool,
-    connect_failed: AtomicBool,
+    daemon_unresponsive: AtomicBool,
     socket: Mutex<Option<TcpStream>>,
 }
 
-pub(super) struct Subscription<T> {
+pub(crate) struct Subscription<T> {
     messages: mpsc::Receiver<T>,
     control: Arc<Control>,
     task: Option<JoinHandle<()>>,
 }
 impl<T> Subscription<T> {
-    pub(super) fn is_ready(&self) -> bool { self.control.ready.load(Ordering::Acquire) }
-    pub(super) fn take_connect_failure(&self) -> bool { self.control.connect_failed.swap(false, Ordering::AcqRel) }
-    pub(super) fn recv_timeout(&self, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError> {
+    pub(crate) fn is_ready(&self) -> bool { self.control.ready.load(Ordering::Acquire) }
+    pub(crate) fn take_daemon_unresponsive(&self) -> bool {
+        self.control.daemon_unresponsive.swap(false, Ordering::AcqRel)
+    }
+    pub(crate) fn recv_timeout(&self, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError> {
         self.messages.recv_timeout(timeout)
     }
 }
@@ -58,17 +60,30 @@ impl<T> Drop for Subscription<T> {
     }
 }
 
-pub(super) fn start<T, Current, Decode, Ready>(endpoint: SocketAddr, current: Current, decode: Decode, ready: Ready) -> Result<Subscription<T>, String>
+#[cfg(any(windows, test))]
+pub(crate) fn start<T, Current, Decode, Ready>(endpoint: SocketAddr, current: Current, decode: Decode, ready: Ready) -> Result<Subscription<T>, String>
 where
     T: Send + 'static,
     Current: Fn() -> Result<bool, String> + Send + 'static,
     Decode: Fn(&Value) -> Option<T> + Send + 'static,
     Ready: Fn(bool) + Send + 'static,
 {
-    start_with(endpoint, current, decode, ready, Options::default())
+    start_with_restart(endpoint, current, decode, ready, None)
 }
 
-fn start_with<T, Current, Decode, Ready>(endpoint: SocketAddr, current: Current, decode: Decode, ready: Ready, options: Options) -> Result<Subscription<T>, String>
+pub(super) fn start_with_restart<T, Current, Decode, Ready>(endpoint: SocketAddr, current: Current, decode: Decode, ready: Ready,
+    restart: Option<super::ListenerRestarts>) -> Result<Subscription<T>, String>
+where
+    T: Send + 'static,
+    Current: Fn() -> Result<bool, String> + Send + 'static,
+    Decode: Fn(&Value) -> Option<T> + Send + 'static,
+    Ready: Fn(bool) + Send + 'static,
+{
+    start_with(endpoint, current, decode, ready, Options::default(), restart)
+}
+
+fn start_with<T, Current, Decode, Ready>(endpoint: SocketAddr, current: Current, decode: Decode, ready: Ready, options: Options,
+    mut restart: Option<super::ListenerRestarts>) -> Result<Subscription<T>, String>
 where
     T: Send + 'static,
     Current: Fn() -> Result<bool, String> + Send + 'static,
@@ -76,7 +91,7 @@ where
     Ready: Fn(bool) + Send + 'static,
 {
     if !endpoint.ip().is_loopback() { return Err("Signal subscriber requires a loopback endpoint".into()); }
-    let control = Arc::new(Control { stop: AtomicBool::new(false), ready: AtomicBool::new(false), connect_failed: AtomicBool::new(false), socket: Mutex::new(None) });
+    let control = Arc::new(Control { stop: AtomicBool::new(false), ready: AtomicBool::new(false), daemon_unresponsive: AtomicBool::new(false), socket: Mutex::new(None) });
     let (send, messages) = mpsc::sync_channel(options.queue_capacity);
     let shared = control.clone();
     ready(false);
@@ -89,10 +104,12 @@ where
                 // A parsed message retained during EOF, an RPC timeout or
                 // backpressure belongs to this unchanged configuration.
                 offer(&mut pending, &send, &shared, &current, None, options.poll)?;
-                connection(endpoint, Delivery { queue: &send, pending: &mut pending }, &shared, &current, &decode, &ready, options)
+                let delivery = Delivery { queue: &send, pending: &mut pending, restart: restart.as_mut() };
+                connection(endpoint, delivery, &shared, &current, &decode, &ready, options)
             })();
             match attempt {
                 Err(Failure::Stopped) => break,
+                Err(Failure::RestartRequested) => continue,
                 Err(Failure::Retry(error)) => {
                     // Reconnect failures must not turn into a console/log pump.
                     if last_log.is_none_or(|at: Instant| at.elapsed() >= Duration::from_secs(30)) {
@@ -111,7 +128,7 @@ where
 }
 
 #[derive(Debug)]
-enum Failure { Stopped, Retry(String) }
+enum Failure { Stopped, RestartRequested, Retry(String) }
 impl From<std::io::Error> for Failure {
     fn from(error: std::io::Error) -> Self { Self::Retry(error.to_string()) }
 }
@@ -172,22 +189,32 @@ impl<Ready: Fn(bool)> Drop for Connected<'_, Ready> {
 struct Delivery<'a, T> {
     queue: &'a mpsc::SyncSender<T>,
     pending: &'a mut Option<T>,
+    restart: Option<&'a mut super::ListenerRestarts>,
 }
 
-fn connection<T>(endpoint: SocketAddr, delivery: Delivery<'_, T>,
+fn connection<T>(endpoint: SocketAddr, mut delivery: Delivery<'_, T>,
     control: &Control, current: &impl Fn() -> Result<bool, String>, decode: &impl Fn(&Value) -> Option<T>,
     ready: &impl Fn(bool), options: Options) -> Result<(), Failure> {
     check(control, current)?;
-    let stream = TcpStream::connect_timeout(&endpoint, options.connect_timeout).map_err(|error| {
-        control.connect_failed.store(true, Ordering::Release);
-        Failure::from(error)
-    })?;
+    let unresponsive = |detail: String| {
+        control.daemon_unresponsive.store(true, Ordering::Release);
+        Failure::Retry(detail)
+    };
+    let socket_failure = |error: std::io::Error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            Failure::from(error)
+        } else {
+            unresponsive(error.to_string())
+        }
+    };
+    let stream = TcpStream::connect_timeout(&endpoint, options.connect_timeout)
+        .map_err(|error| unresponsive(error.to_string()))?;
     stream.set_read_timeout(Some(options.poll))?;
     stream.set_write_timeout(Some(options.rpc_timeout.min(Duration::from_secs(2))))?;
     *control.socket.lock().unwrap_or_else(|e| e.into_inner()) = Some(stream.try_clone()?);
     let _connected = Connected { control, ready };
     check(control, current)?;
-    (&stream).write_all(SUBSCRIBE_REQUEST.as_bytes())?;
+    (&stream).write_all(SUBSCRIBE_REQUEST.as_bytes()).map_err(socket_failure)?;
     let mut reader = BufReader::new(stream);
     let mut bytes = Vec::new();
     let subscribe_until = Instant::now() + options.rpc_timeout;
@@ -197,24 +224,27 @@ fn connection<T>(endpoint: SocketAddr, delivery: Delivery<'_, T>,
     let mut health_id = 0u64;
     loop {
         check(control, current)?;
+        if delivery.restart.as_deref_mut().is_some_and(super::ListenerRestarts::take) {
+            return Err(Failure::RestartRequested);
+        }
         let now = Instant::now();
         if !subscribed && now >= subscribe_until {
-            return Err(Failure::Retry("Signal did not acknowledge subscribeReceive before its deadline".into()));
+            return Err(unresponsive("Signal did not acknowledge subscribeReceive before its deadline".into()));
         }
         if health.as_ref().is_some_and(|(_, until)| now >= *until) {
-            return Err(Failure::Retry("Signal subscriber stopped answering its same-session health request".into()));
+            return Err(unresponsive("Signal subscriber stopped answering its same-session health request".into()));
         }
         if subscribed && health.is_none() && now >= next_health {
             health_id = health_id.wrapping_add(1);
             let id = format!("consilium-listener-health-{health_id}");
             let request = json!({"jsonrpc": "2.0", "id": id, "method": "version"});
             let mut writer = reader.get_ref();
-            writer.write_all(format!("{request}\n").as_bytes())?;
+            writer.write_all(format!("{request}\n").as_bytes()).map_err(socket_failure)?;
             health = Some((id, Instant::now() + options.rpc_timeout));
         }
         let deadline = if !subscribed { Some(subscribe_until) } else { Some(health.as_ref().map_or(next_health + options.rpc_timeout, |(_, until)| *until)) };
         offer(delivery.pending, delivery.queue, control, current, deadline, options.poll)?;
-        let Some(line) = read_frame(&mut reader, &mut bytes, options.frame_limit)? else { continue };
+        let Some(line) = read_frame(&mut reader, &mut bytes, options.frame_limit).map_err(socket_failure)? else { continue };
         let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
         if value.get("id").and_then(Value::as_str) == Some(SUBSCRIBE_ID) {
             if value.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || value.get("error").is_some()
@@ -224,6 +254,7 @@ fn connection<T>(endpoint: SocketAddr, delivery: Delivery<'_, T>,
             if !subscribed {
                 subscribed = true;
                 next_health = Instant::now() + options.health_interval;
+                control.daemon_unresponsive.store(false, Ordering::Release);
                 control.ready.store(true, Ordering::Release);
                 ready(true);
             }
@@ -248,22 +279,23 @@ fn connection<T>(endpoint: SocketAddr, delivery: Delivery<'_, T>,
 
 /// Read one available fragment, retaining incomplete frames across timeouts.
 /// Returning between fragments also bounds RPC deadlines under constant output.
-fn read_frame(reader: &mut impl BufRead, bytes: &mut Vec<u8>, limit: usize) -> Result<Option<String>, Failure> {
+pub(super) fn read_frame(reader: &mut impl BufRead, bytes: &mut Vec<u8>, limit: usize) -> std::io::Result<Option<String>> {
     let input = match reader.fill_buf() {
-        Ok([]) => return Err(Failure::Retry("Signal closed the subscriber connection".into())),
+        Ok([]) => return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Signal closed the connection")),
         Ok(input) => input,
         Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(error),
     };
     let length = input.iter().position(|byte| *byte == b'\n').map_or(input.len(), |index| index + 1);
     if bytes.len().saturating_add(length) > limit {
-        return Err(Failure::Retry("Signal subscriber frame exceeded its size limit".into()));
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Signal frame exceeded its size limit"));
     }
     let complete = input[length - 1] == b'\n';
     bytes.extend_from_slice(&input[..length]);
     reader.consume(length);
     if !complete { return Ok(None); }
-    let line = String::from_utf8(std::mem::take(bytes)).map_err(|_| Failure::Retry("Signal subscriber frame is not UTF-8".into()))?;
+    let line = String::from_utf8(std::mem::take(bytes))
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Signal frame is not UTF-8"))?;
     Ok(Some(line))
 }
 
@@ -276,7 +308,7 @@ mod tests {
 
     fn options() -> Options {
         Options { queue_capacity: 2, frame_limit: 2048, poll: Duration::from_millis(10),
-            connect_timeout: Duration::from_millis(300), rpc_timeout: Duration::from_millis(250),
+            connect_timeout: Duration::from_secs(1), rpc_timeout: Duration::from_secs(1),
             health_interval: Duration::from_millis(150), retry_delay: Duration::from_millis(20) }
     }
     fn listener() -> TcpListener {
@@ -285,12 +317,12 @@ mod tests {
         listener
     }
     fn accept(listener: &TcpListener) -> TcpStream {
-        let until = Instant::now() + Duration::from_secs(3);
+        let until = Instant::now() + Duration::from_secs(5);
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
                     stream.set_nonblocking(false).unwrap();
-                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                     return stream;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until => thread::sleep(Duration::from_millis(5)),
@@ -311,7 +343,7 @@ mod tests {
             .then(|| value.pointer("/params/number").and_then(Value::as_u64)).flatten()
     }
     fn wait(mut condition: impl FnMut() -> bool) {
-        let until = Instant::now() + Duration::from_secs(3);
+        let until = Instant::now() + Duration::from_secs(5);
         while !condition() { assert!(Instant::now() < until, "fake socket condition timed out"); thread::sleep(Duration::from_millis(5)); }
     }
     fn eof(reader: &mut impl BufRead) {
@@ -343,7 +375,7 @@ mod tests {
             });
             let count = Arc::new(AtomicUsize::new(0));
             let seen = count.clone();
-            let subscription = start_with(endpoint, || Ok(true), decode, move |ready| { if ready { seen.fetch_add(1, Ordering::SeqCst); } }, options()).unwrap();
+            let subscription = start_with(endpoint, || Ok(true), decode, move |ready| { if ready { seen.fetch_add(1, Ordering::SeqCst); } }, options(), None).unwrap();
             server.join().unwrap();
             drop(subscription);
             assert_eq!(count.load(Ordering::SeqCst), 0);
@@ -364,7 +396,7 @@ mod tests {
             ack(&mut stream);
             eof(&mut reader);
         });
-        let subscription = start_with(endpoint, || Ok(true), decode, |_| {}, options()).unwrap();
+        let subscription = start_with(endpoint, || Ok(true), decode, |_| {}, options(), None).unwrap();
         assert_eq!(subscription.recv_timeout(Duration::from_secs(2)).unwrap(), 7);
         assert!(!subscription.is_ready());
         release.send(()).unwrap();
@@ -392,7 +424,7 @@ mod tests {
             event(&mut second, 4);
             eof(&mut reader);
         });
-        let subscription = start_with(endpoint, || Ok(true), decode, |_| {}, options()).unwrap();
+        let subscription = start_with(endpoint, || Ok(true), decode, |_| {}, options(), None).unwrap();
         finished_writing.recv_timeout(Duration::from_secs(2)).unwrap();
         thread::sleep(Duration::from_millis(30)); // hold the worker beyond the two-slot channel
         let received: Vec<_> = (0..5).map(|_| subscription.recv_timeout(Duration::from_secs(2)).unwrap()).collect();
@@ -407,6 +439,7 @@ mod tests {
         let endpoint = listener.local_addr().unwrap();
         let count = Arc::new(AtomicUsize::new(0));
         let seen = count.clone();
+        let (release, allow_second_session) = mpsc::channel();
         let server = thread::spawn(move || {
             let mut first = accept(&listener);
             let mut reader = BufReader::new(first.try_clone().unwrap());
@@ -418,12 +451,16 @@ mod tests {
             eof(&mut reader); // unanswered health request must close this silent session
             let mut second = accept(&listener);
             let mut reader = BufReader::new(second.try_clone().unwrap());
-            read(&mut reader); ack(&mut second); event(&mut second, 43);
+            read(&mut reader);
+            allow_second_session.recv_timeout(Duration::from_secs(2)).unwrap();
+            ack(&mut second); event(&mut second, 43);
             eof(&mut reader);
         });
-        let subscription = start_with(endpoint, || Ok(true), decode, move |ready| { if ready { seen.fetch_add(1, Ordering::SeqCst); } }, options()).unwrap();
-        assert_eq!(subscription.recv_timeout(Duration::from_secs(2)).unwrap(), 42);
-        assert_eq!(subscription.recv_timeout(Duration::from_secs(2)).unwrap(), 43);
+        let subscription = start_with(endpoint, || Ok(true), decode, move |ready| { if ready { seen.fetch_add(1, Ordering::SeqCst); } }, options(), None).unwrap();
+        assert_eq!(subscription.recv_timeout(Duration::from_secs(5)).unwrap(), 42);
+        wait(|| subscription.take_daemon_unresponsive());
+        release.send(()).unwrap();
+        assert_eq!(subscription.recv_timeout(Duration::from_secs(5)).unwrap(), 43);
         assert!(count.load(Ordering::SeqCst) >= 2);
         drop(subscription);
         server.join().unwrap();
@@ -446,12 +483,55 @@ mod tests {
             healthy.send(()).unwrap();
             eof(&mut reader);
         });
-        let subscription = start_with(endpoint, || Ok(true), decode, |_| {}, options()).unwrap();
+        let subscription = start_with(endpoint, || Ok(true), decode, |_| {}, options(), None).unwrap();
         assert_eq!(subscription.recv_timeout(Duration::from_secs(2)).unwrap(), 81);
         next_health.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(subscription.is_ready());
         drop(subscription);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn a_new_manual_restart_marker_reconnects_and_retains_accepted_input() {
+        let directory = std::env::temp_dir().join(format!("consilium-signal-restart-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        super::super::request_listener_restart(&directory).unwrap();
+        let restart = super::super::ListenerRestarts::new(&directory);
+        let listener = listener();
+        let endpoint = listener.local_addr().unwrap();
+        let received_first = Arc::new(AtomicBool::new(false));
+        let seen = received_first.clone();
+        let server = thread::spawn(move || {
+            let mut first = accept(&listener);
+            let mut reader = BufReader::new(first.try_clone().unwrap());
+            read(&mut reader);
+            ack(&mut first);
+            event(&mut first, 1);
+            eof(&mut reader);
+            let mut second = accept(&listener);
+            let mut reader = BufReader::new(second.try_clone().unwrap());
+            read(&mut reader);
+            ack(&mut second);
+            event(&mut second, 2);
+            eof(&mut reader);
+        });
+        let options = Options { health_interval: Duration::from_secs(5), ..options() };
+        let subscription = start_with(endpoint, || Ok(true), move |value| {
+            let number = decode(value);
+            if number == Some(1) {
+                seen.store(true, Ordering::SeqCst);
+            }
+            number
+        }, |_| {}, options, Some(restart)).unwrap();
+        wait(|| subscription.is_ready() && received_first.load(Ordering::SeqCst));
+        super::super::request_listener_restart(&directory).unwrap();
+        assert_eq!(subscription.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
+        assert_eq!(subscription.recv_timeout(Duration::from_secs(3)).unwrap(), 2);
+        assert!(!subscription.take_daemon_unresponsive());
+        drop(subscription);
+        server.join().unwrap();
+        std::fs::remove_file(directory.join(super::super::LISTENER_RESTART_MARKER)).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
@@ -474,7 +554,7 @@ mod tests {
             let message = decode(value);
             if message == Some(9) { accepted.store(true, Ordering::SeqCst); }
             message
-        }, move |ready| { if ready { seen.fetch_add(1, Ordering::SeqCst); } }, options()).unwrap();
+        }, move |ready| { if ready { seen.fetch_add(1, Ordering::SeqCst); } }, options(), None).unwrap();
         wait(|| subscription.is_ready() && decoded.load(Ordering::SeqCst));
         phase.store(1, Ordering::SeqCst);
         wait(|| !subscription.is_ready());
@@ -496,7 +576,7 @@ mod tests {
             for number in 0..5 { event(&mut stream, number); }
             written.send(()).unwrap(); eof(&mut reader);
         });
-        let subscription = start_with(endpoint, || Ok(true), decode, |_| {}, options()).unwrap();
+        let subscription = start_with(endpoint, || Ok(true), decode, |_| {}, options(), None).unwrap();
         full.recv_timeout(Duration::from_secs(2)).unwrap();
         let started = Instant::now(); drop(subscription);
         assert!(started.elapsed() < Duration::from_secs(1));
@@ -519,14 +599,14 @@ mod tests {
         for _ in 0..30 { if let Some(frame) = read_frame(&mut reader, &mut bytes, 100).unwrap() { received = Some(frame); break; } }
         assert_eq!(received.as_deref(), Some(expected));
         let mut reader = Cursor::new(vec![b'x'; 101]);
-        assert!(matches!(read_frame(&mut reader, &mut Vec::new(), 100), Err(Failure::Retry(_))));
+        assert_eq!(read_frame(&mut reader, &mut Vec::new(), 100).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn refused_loopback_connections_request_existing_revive_without_marking_ready() {
         let unused = listener(); let endpoint = unused.local_addr().unwrap(); drop(unused);
-        let subscription = start_with(endpoint, || Ok(true), decode, |_| {}, options()).unwrap();
-        wait(|| subscription.take_connect_failure());
+        let subscription = start_with(endpoint, || Ok(true), decode, |_| {}, options(), None).unwrap();
+        wait(|| subscription.take_daemon_unresponsive());
         assert!(!subscription.is_ready());
         drop(subscription);
     }

@@ -388,14 +388,18 @@ impl Sync {
             self.save(&m)?;
         }
         let Some(conv) = self.store.list().into_iter().find(|c| !self.is_mirror(&c.id)) else {
-            crate::restart_this_computer();
+            if let Err(error) = crate::restart_this_computer() {
+                eprintln!("peer restart: {error}");
+            }
             return Ok(None);
         };
         let note = format!(
             "{computer} requested a restart of Consilium on this computer. Restarting now; in-progress work will resume after."
         );
         let event = self.store.append(&conv.id, crate::council::CONSILIUM, "system", vec![], &note).map(Some)?;
-        crate::restart_this_computer();
+        if let Err(error) = crate::restart_this_computer() {
+            eprintln!("peer restart: {error}");
+        }
         Ok(event)
     }
 

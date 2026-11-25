@@ -62,3 +62,19 @@ This specification documents the architecture for bridging Signal and a future c
 - [ ] Test the chosen Signal account topology; Note-to-Self delivery to linked devices is not assumed reliable.
 - [ ] Design and build a separate mobile companion app before implementing offline BLE transport for macOS and Windows.
 - [ ] Add mobile notification toggle in Settings panel.
+
+## 4. Consilium Watchdog on Windows
+
+With Signal verified and enabled, run `consilium watchdog-signal setup` once from the installed Windows app's terminal command. It creates or verifies the private **Consilium Watchdog** group and starts a hidden listener that can stay running when the app closes. Consilium starts the listener again when it opens in a new Windows session.
+
+From the primary Signal phone, send one of these messages in **Consilium Watchdog**.
+
+- `status` checks whether the watchdog can see the Windows app.
+- `restart` opens the app or restarts it if it is running.
+- `restart signal` asks the Windows app to reconnect its Signal listener. If the app is closed, use `restart`.
+
+The watchdog accepts only these commands from the verified primary phone in the private group. It uses the existing linked Signal account and needs Signal service connectivity. If the local daemon stops, the watchdog can start it with the saved registration. It can replace an unresponsive daemon only when it owns that process.
+
+While the desktop is unavailable, the listener can save up to 64 ordinary Consilium group messages locally for 15 minutes. Verification, approval, and launcher commands need the live desktop conversation.
+
+App relaunch attempts are recorded in `watchdog/relaunch.log` inside the Consilium data folder. The helper confirms its own startup before the app exits, then waits for the original process before reopening the app.

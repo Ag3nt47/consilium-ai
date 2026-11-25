@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const COMMANDS: &[&str] =
-    &["chat", "ask", "say", "log", "list", "new", "stop", "status", "check", "install-cli", "help", "--help", "-h", "--version", "-V", "--watchdog", "watchdog", "--bluetooth-pairing-worker", "--bluetooth-sdp-worker"];
+    &["chat", "ask", "say", "log", "list", "new", "stop", "status", "check", "install-cli", "help", "--help", "-h", "--version", "-V", "--watchdog", "watchdog", "watchdog-signal", "--signal-watchdog-worker", "--bluetooth-pairing-worker", "--bluetooth-sdp-worker"];
 
 /// Whether the program was started as the terminal command rather than to open the window.
 pub fn wants_cli(args: &[String]) -> bool {
@@ -34,6 +34,7 @@ Usage:
   consilium status                   the council: who is in it, signed in, access
   consilium check                    one tiny test message to every AI (uses a little allowance)
   consilium install-cli              install this `consilium` command for your terminal
+  consilium watchdog-signal setup    set up the private Signal restart group (Windows)
   consilium                          (no command) open the app
 
 Options:
@@ -387,6 +388,9 @@ pub fn main(args: Vec<String>) -> i32 {
     if args.first().is_some_and(|a| a == "--watchdog" || a == "watchdog") {
         return crate::watchdog::main_watchdog(&args);
     }
+    if args.first().is_some_and(|a| a == "--signal-watchdog-worker") {
+        return crate::watchdog::run_signal_worker(&args[1..]);
+    }
     #[cfg(windows)]
     attach_console();
     let command = args.first().cloned().unwrap_or_default();
@@ -407,6 +411,15 @@ pub fn main(args: Vec<String>) -> i32 {
                 }
                 Err(e) => fail(&e),
             }
+        }
+        "watchdog-signal" => {
+            return match crate::watchdog::setup_signal_worker(&args[1..]) {
+                Ok(()) => {
+                    print("Consilium Watchdog is set up. Send status from your primary Signal phone.\n");
+                    0
+                }
+                Err(error) => fail(&error),
+            };
         }
         _ => {}
     }

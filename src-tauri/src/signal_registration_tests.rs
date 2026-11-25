@@ -131,6 +131,27 @@ fn a_timed_out_ready_probe_does_not_leave_its_owned_descendant_running() {
 }
 
 #[test]
+fn recovery_can_stop_its_exact_live_launcher_without_touching_registration() {
+    let mut command = Command::new(native_fixture());
+    command.arg("hang").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let launcher = quiet(&mut command).spawn().unwrap();
+    let endpoint = "127.0.0.1:7583".parse().unwrap();
+    let mut daemon = ManagedDaemon { launcher, account: ACCOUNT.into(), addr: endpoint };
+    let mut cfg = BridgeConfig { account: ACCOUNT.into(), ..Default::default() };
+    assert!(daemon.owns(&cfg, endpoint));
+    assert!(!daemon.owns(&cfg, "127.0.0.1:7584".parse().unwrap()));
+    cfg.account = "+15559999999".into();
+    assert!(!daemon.owns(&cfg, endpoint));
+    daemon.stop().unwrap();
+    assert!(daemon.launcher.try_wait().unwrap().is_some());
+}
+
+#[test]
 fn the_existing_ui_reports_phone_link_requirements_without_redefining_raw_daemon_health() {
     let mut cfg = BridgeConfig { enabled: true, account: ACCOUNT.into(), ..Default::default() };
     let raw = || bridge::ConnectorStatus { id: "signal", name: "Signal", state: "ok", detail: "Fixture daemon answered its raw version probe".into() };

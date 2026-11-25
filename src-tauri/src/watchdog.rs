@@ -291,6 +291,94 @@ pub fn main_watchdog(_args: &[String]) -> i32 {
     0
 }
 
+pub(crate) fn setup_signal_worker(args: &[String]) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let target = match args {
+            [setup] if setup == "setup" => std::env::current_exe().map_err(|e| e.to_string())?,
+            [setup, flag, path] if setup == "setup" && flag == "--app" => {
+                std::path::absolute(path).map_err(|e| e.to_string())?
+            }
+            _ => return Err("usage: consilium watchdog-signal setup".into()),
+        };
+        validate_target(&target)?;
+        let data = crate::data_dir().ok_or("couldn't find Consilium's data folder")?;
+        if !crate::signal_watchdog::configured(&data) {
+            crate::signal_watchdog::enroll(&data)?;
+        }
+        crate::signal_watchdog_host::start(&data, &target)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = args;
+        Err("The independent Signal restart group is available on Windows.".into())
+    }
+}
+
+#[cfg(windows)]
+fn validate_target(target: &Path) -> Result<(), String> {
+    if target.is_absolute() && target.is_file()
+        && target.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.eq_ignore_ascii_case("consilium.exe"))
+    {
+        Ok(())
+    } else {
+        Err("couldn't identify the installed Consilium executable".into())
+    }
+}
+
+pub(crate) fn run_signal_worker(args: &[String]) -> i32 {
+    #[cfg(windows)]
+    {
+        let [target] = args else { return 2 };
+        let target = Path::new(target);
+        let result = validate_target(target).and_then(|_| {
+            let data = crate::data_dir().ok_or("couldn't find Consilium's data folder")?;
+            crate::signal_watchdog::run(&data, |action| signal_action(&data, target, action))
+        });
+        match result {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("Signal watchdog: {error}");
+                1
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = args;
+        2
+    }
+}
+
+#[cfg(windows)]
+fn signal_action(data: &Path, target: &Path, action: crate::signal_watchdog::Action) -> String {
+    use crate::restart::windows::{app_pid, remote};
+    use crate::signal_watchdog::Action;
+
+    match action {
+        Action::RestartApp => match remote(data, target) {
+            Ok(()) => "Consilium relaunch requested on Windows.".into(),
+            Err(error) => {
+                eprintln!("Signal watchdog could not restart Consilium: {error}");
+                "Consilium restart could not start. Check the Windows watchdog log.".into()
+            }
+        },
+        Action::RestartSignal => match app_pid(target, data) {
+            Ok(Some(_)) => match crate::signal_chat::request_listener_restart(data) {
+                Ok(()) => "Consilium Signal listener reconnect requested.".into(),
+                Err(_) => "Consilium could not queue a Signal listener reconnect.".into(),
+            },
+            Ok(None) => "Consilium is closed. Send restart to reopen it and reconnect Signal.".into(),
+            Err(_) => "The watchdog could not verify Consilium's app process.".into(),
+        },
+        Action::Status => match app_pid(target, data) {
+            Ok(Some(_)) => "The Signal watchdog is listening. Consilium is running on Windows.".into(),
+            Ok(None) => "The Signal watchdog is listening. Consilium is closed on Windows.".into(),
+            Err(_) => "The Signal watchdog is listening. Consilium's app status could not be verified.".into(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

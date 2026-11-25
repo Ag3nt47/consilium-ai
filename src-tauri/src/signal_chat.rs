@@ -15,14 +15,14 @@ use crate::engine::Engine;
 use crate::store::Event;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[path = "signal_subscriber.rs"]
-mod subscriber;
+pub(crate) mod subscriber;
 
 /// Longest text sent in one Signal message; longer replies are cut with a pointer to Consilium.
 const MAX_OUT: usize = 3500;
@@ -51,7 +51,7 @@ pub mod notice {
 }
 
 /// Where a phone message came from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Origin {
     /// The Consilium council group.
     Council,
@@ -60,7 +60,7 @@ pub enum Origin {
 }
 
 /// A message the human sent from their phone.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Incoming {
     pub origin: Origin,
     pub text: String,
@@ -72,7 +72,7 @@ pub struct Incoming {
 }
 
 /// A file attached to a phone message, fetched from signal-cli with `getAttachment`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RemoteFile {
     pub id: String,
     pub name: String,
@@ -252,22 +252,42 @@ pub fn outbound_text(e: &Event) -> Option<String> {
     Some(msg)
 }
 
-fn addr(cfg: &BridgeConfig) -> Result<SocketAddr, String> {
+pub(crate) fn addr(cfg: &BridgeConfig) -> Result<SocketAddr, String> {
     bridge::validate_loopback(&cfg.endpoint)?;
     let raw = cfg.endpoint.trim().trim_start_matches("tcp://").trim_start_matches("http://");
     raw.parse().map_err(|_| "bad Signal address".to_string())
 }
 
 /// One JSON-RPC call on its own connection; returns its `result`.
-fn call(cfg: &BridgeConfig, method: &str, params: Value) -> Result<Value, String> {
-    let s = TcpStream::connect_timeout(&addr(cfg)?, Duration::from_secs(5)).map_err(|e| e.to_string())?;
-    s.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
-    s.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+pub(crate) fn call(cfg: &BridgeConfig, method: &str, params: Value) -> Result<Value, String> {
+    call_with_timeout(cfg, method, params, Duration::from_secs(30))
+}
+
+pub(crate) fn daemon_responds(cfg: &BridgeConfig) -> bool {
+    call_with_timeout(cfg, "version", Value::Null, Duration::from_secs(5))
+        .is_ok_and(|result| result.get("version").and_then(Value::as_str).is_some_and(|version| !version.is_empty()))
+}
+
+fn call_with_timeout(cfg: &BridgeConfig, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout;
+    let connect_limit = timeout.min(Duration::from_secs(5));
+    let s = TcpStream::connect_timeout(&addr(cfg)?, connect_limit).map_err(|e| e.to_string())?;
+    let write_limit = rpc_time_left(deadline)?.min(Duration::from_secs(5));
+    s.set_write_timeout(Some(write_limit)).map_err(|e| e.to_string())?;
     let id = format!("consilium-{}", uuid::Uuid::new_v4());
-    let req = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    let mut req = json!({"jsonrpc": "2.0", "id": id, "method": method});
+    if !params.is_null() {
+        req["params"] = params;
+    }
     (&s).write_all(format!("{req}\n").as_bytes()).map_err(|e| e.to_string())?;
-    for line in BufReader::new(&s).lines().take(10_000) {
-        let line = line.map_err(|e| e.to_string())?;
+    // Attachment replies contain base64; other RPCs only need room for metadata or notifications.
+    let limit = if method == "getAttachment" { (crate::attach::MAX_BYTES * 4 / 3) as usize + 4096 } else { 512 * 1024 };
+    let mut reader = BufReader::new(&s);
+    let mut bytes = Vec::new();
+    loop {
+        let remaining = rpc_time_left(deadline)?;
+        s.set_read_timeout(Some(remaining)).map_err(|e| e.to_string())?;
+        let Some(line) = subscriber::read_frame(&mut reader, &mut bytes, limit).map_err(|e| e.to_string())? else { continue };
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         if v.get("id").and_then(Value::as_str) != Some(id.as_str()) {
             continue;
@@ -278,10 +298,14 @@ fn call(cfg: &BridgeConfig, method: &str, params: Value) -> Result<Value, String
         }
         return Ok(v.get("result").cloned().unwrap_or(Value::Null));
     }
-    Err("signal-cli closed the connection".into())
 }
 
-fn send_group(cfg: &BridgeConfig, group: &str, text: &str) -> Result<(), String> {
+fn rpc_time_left(deadline: Instant) -> Result<Duration, String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() { Err("Signal did not answer before the request deadline".into()) } else { Ok(remaining) }
+}
+
+pub(crate) fn send_group(cfg: &BridgeConfig, group: &str, text: &str) -> Result<(), String> {
     send_group_files(cfg, group, text, &[])
 }
 
@@ -424,6 +448,55 @@ pub fn run(engine: Arc<Engine>, cfg_path: PathBuf) {
     });
 }
 
+const LISTENER_RESTART_MARKER: &str = "signal-listener-restart";
+
+/// Requests a reconnect of the desktop's Signal subscriber using a one-time local marker.
+#[cfg(any(windows, test))]
+pub(crate) fn request_listener_restart(data: &Path) -> Result<(), String> {
+    crate::link::write_private(&data.join(LISTENER_RESTART_MARKER), uuid::Uuid::new_v4().simple().to_string().as_bytes())
+}
+
+pub(super) struct ListenerRestarts {
+    path: PathBuf,
+    last: Option<uuid::Uuid>,
+    next_check: Instant,
+}
+
+impl ListenerRestarts {
+    fn new(data: &Path) -> Self {
+        let path = data.join(LISTENER_RESTART_MARKER);
+        let last = read_listener_restart(&path);
+        Self { path, last, next_check: Instant::now() }
+    }
+
+    fn take(&mut self) -> bool {
+        let now = Instant::now();
+        if now < self.next_check {
+            return false;
+        }
+        self.next_check = now + Duration::from_secs(1);
+        read_listener_restart(&self.path).is_some_and(|id| self.last.replace(id) != Some(id))
+    }
+}
+
+fn read_listener_restart(path: &Path) -> Option<uuid::Uuid> {
+    let mut value = String::new();
+    std::fs::File::open(path).ok()?.take(64).read_to_string(&mut value).ok()?;
+    uuid::Uuid::parse_str(value.trim()).ok()
+}
+
+fn request_daemon_recovery(cfg_path: &Path) {
+    #[cfg(windows)]
+    if crate::data_dir().as_deref().is_some_and(|data| {
+        crate::signal_watchdog::configured(data)
+            && crate::signal_watchdog::worker_running(data).is_ok_and(|running| running)
+    }) {
+        // Let the independent listener own the daemon so it can recover it while the GUI is down.
+        return;
+    }
+    crate::signal_setup::revive(cfg_path);
+}
+
 #[derive(Default)]
 struct Outbox {
     /// Cursors for active conversations: conversation ID -> highest seq mirrored.
@@ -458,7 +531,7 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
         Ok(c) => c,
         Err(e) => {
             // Usually signal-cli itself has stopped: start it again rather than waiting forever.
-            crate::signal_setup::revive(&BridgeConfig::load(cfg_path)?);
+            request_daemon_recovery(cfg_path);
             return Err(e);
         }
     };
@@ -469,7 +542,9 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
     let expected = cfg.clone();
     let current_path = cfg_path.to_path_buf();
     let decode_cfg = cfg.clone();
-    let subscription = subscriber::start(addr(&cfg)?, move || {
+    let data = crate::data_dir();
+    let restarts = data.as_deref().map(ListenerRestarts::new);
+    let subscription = subscriber::start_with_restart(addr(&cfg)?, move || {
         BridgeConfig::load(&current_path).map(|now| same_receiver_config(&now, &expected))
     }, move |value| {
         let msg = parse_incoming(value, &decode_cfg.account, &decode_cfg.groups)?;
@@ -478,8 +553,7 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
             return None;
         }
         Some(msg)
-    }, crate::link::set_signal_on)?;
-    let mut revive_after = Instant::now();
+    }, crate::link::set_signal_on, restarts)?;
     let mut seen: VecDeque<u64> = VecDeque::new();
     let mut seen_set: HashSet<u64> = HashSet::new();
     static ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -495,24 +569,27 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
         if engine.config.get().members.iter().any(|m| !cfg.groups.agents.contains_key(m)) {
             return Ok(()); // a new member needs its own group
         }
-        if subscription.take_connect_failure() && Instant::now() >= revive_after {
-            crate::signal_setup::revive(&cfg);
-            revive_after = Instant::now() + Duration::from_secs(5);
+        if subscription.take_daemon_unresponsive() {
+            request_daemon_recovery(cfg_path);
         }
-        let msg = match subscription.recv_timeout(Duration::from_millis(250)) {
-            Ok(message) => message,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if subscription.is_ready() {
-                    if ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                        forward(engine, &cfg, &mut out);
-                    } else {
-                        let _ = send_group(&cfg, &cfg.groups.main, notice::BACK_ONLINE);
-                    }
-                }
-                continue;
-            }
+        let first = match subscription.recv_timeout(Duration::from_millis(250)) {
+            Ok(message) => Some(message),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err("Signal subscriber stopped".into()),
         };
+        let Some(msg) = receive_from_watchdog_inbox(data.as_deref(), &cfg, first) else {
+            if subscription.is_ready() {
+                if ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    forward(engine, &cfg, &mut out);
+                } else {
+                    let _ = send_group(&cfg, &cfg.groups.main, notice::BACK_ONLINE);
+                }
+            }
+            continue;
+        };
+        if crate::signal_setup::is_verification_reply(&msg.group, msg.timestamp, &msg.text, &cfg.groups.main) {
+            continue;
+        }
         if msg.timestamp != 0 {
             if !seen_set.insert(msg.timestamp) {
                 continue;
@@ -534,6 +611,29 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
             eprintln!("signal chat: couldn't acknowledge the phone message to its group: {e}");
         }
     }
+}
+
+/// When the separate watchdog is enrolled, both subscribers can see the same phone message.
+/// A private inbox keeps ordinary messages received while the desktop was unavailable, and
+/// lets only one copy pass through the existing chat dispatch path.
+#[cfg(any(windows, test))]
+fn receive_from_watchdog_inbox(data: Option<&Path>, cfg: &BridgeConfig, direct: Option<Incoming>) -> Option<Incoming> {
+    let Some(inbox) = data.and_then(|data| crate::signal_watchdog::inbox::CouncilInbox::from_config(data, cfg)) else {
+        return direct;
+    };
+    if let Some(message) = direct {
+        if !crate::signal_watchdog::bufferable_council_text(&message.text)
+            || !inbox.push(cfg, &message).unwrap_or(false)
+        {
+            return Some(message);
+        }
+    }
+    inbox.take(cfg).ok().flatten()
+}
+
+#[cfg(not(any(windows, test)))]
+fn receive_from_watchdog_inbox(_data: Option<&Path>, _cfg: &BridgeConfig, direct: Option<Incoming>) -> Option<Incoming> {
+    direct
 }
 
 /// Posts a phone message as the human's message in the newest conversation, and returns the
@@ -729,6 +829,32 @@ mod tests {
     use super::*;
 
     const ACC: &str = "+15551234567";
+
+    #[test]
+    fn unrelated_rpc_frames_do_not_keep_an_outbound_request_alive() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut request = String::new();
+            BufReader::new(&stream).read_line(&mut request).unwrap();
+            let until = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < until {
+                if stream.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"other\",\"result\":{}}\n").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let cfg = BridgeConfig { endpoint, ..Default::default() };
+        let started = Instant::now();
+        let result = call_with_timeout(&cfg, "version", json!({}), Duration::from_millis(180));
+        assert_eq!(result.unwrap_err(), "Signal did not answer before the request deadline");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        server.join().unwrap();
+    }
 
     fn groups() -> bridge::SignalGroups {
         let mut g = bridge::SignalGroups { main: "MAIN=".into(), ..Default::default() };

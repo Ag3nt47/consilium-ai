@@ -22,6 +22,7 @@ const SYNC_SESSION_STALE_MS: u64 = 15_000;
 /// Restarting recovers inbox.jsonl before acknowledging any new work to the user.
 const SYNC_DELIVERY_STALE_MS: u64 = 60_000;
 const MIN_GAP_MS: u64 = 10 * 60_000;
+const HELPER_RETRY_MS: u64 = 60_000;
 
 /// What one check found.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,6 +85,20 @@ fn log(data: &Path, line: &str) {
     }
 }
 
+fn recover(app: &tauri::AppHandle, data: &Path, now: u64, reason: &str) -> u64 {
+    log(data, reason);
+    match crate::restart::request(app, data, true) {
+        Ok(()) => {
+            let _ = std::fs::write(last_restart_path(data), now.to_string());
+            0
+        }
+        Err(error) => {
+            log(data, &format!("Consilium relaunch could not be scheduled: {error}"));
+            crate::store::now_ms() + HELPER_RETRY_MS
+        }
+    }
+}
+
 /// Starts the guard: a runtime heartbeat task and a plain thread that checks it and the lock.
 pub fn start(app: tauri::AppHandle, engine: Arc<crate::engine::Engine>, data: PathBuf) {
     let beat = Arc::new(AtomicU64::new(crate::store::now_ms()));
@@ -96,6 +111,7 @@ pub fn start(app: tauri::AppHandle, engine: Arc<crate::engine::Engine>, data: Pa
     });
     std::thread::spawn(move || {
         let mut judge = Judge::default();
+        let mut retry_after = 0;
         loop {
             std::thread::sleep(CHECK);
             let now = crate::store::now_ms();
@@ -109,13 +125,14 @@ pub fn start(app: tauri::AppHandle, engine: Arc<crate::engine::Engine>, data: Pa
                 }
                 let delivery = link.delivery_health(now);
                 if sync_delivery_stuck(delivery) {
+                    if now < retry_after {
+                        continue;
+                    }
                     if may_restart(&data, now) {
-                        log(&data, &format!(
+                        retry_after = recover(&app, &data, now, &format!(
                             "peer sync filing worker stalled with {} durable packet(s) for {} ms; restarting Consilium",
                             delivery.pending, delivery.oldest_age_ms
                         ));
-                        let _ = std::fs::write(last_restart_path(&data), now.to_string());
-                        app.restart();
                     } else {
                         log(&data, &format!(
                             "peer sync filing worker is stalled with {} durable packet(s), but Consilium restarted less than 10 min ago",
@@ -127,14 +144,15 @@ pub fn start(app: tauri::AppHandle, engine: Arc<crate::engine::Engine>, data: Pa
             }
             let probe = Probe { lock_free: engine.turns_lock_free(), beat_age_ms: now.saturating_sub(beat.load(Ordering::Relaxed)) };
             let Some(why) = judge.check(probe) else { continue };
+            if now < retry_after {
+                continue;
+            }
             if !may_restart(&data, now) {
                 log(&data, &format!("stuck ({why}); restarted less than 10 min ago, so not again"));
                 judge = Judge::default();
                 continue;
             }
-            log(&data, &format!("stuck ({why}) for about a minute; restarting Consilium"));
-            let _ = std::fs::write(last_restart_path(&data), now.to_string());
-            app.restart();
+            retry_after = recover(&app, &data, now, &format!("stuck ({why}) for about a minute; restarting Consilium"));
         }
     });
 }

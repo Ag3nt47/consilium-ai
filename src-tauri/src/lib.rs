@@ -36,6 +36,7 @@ mod projects;
 pub mod watchdog;
 mod prompt;
 mod reaper;
+mod restart;
 mod repo;
 mod runcmd;
 mod redact;
@@ -44,6 +45,10 @@ mod setup;
 mod skills;
 mod stall;
 mod signal_chat;
+#[cfg(any(windows, test))]
+mod signal_watchdog;
+#[cfg(windows)]
+mod signal_watchdog_host;
 mod signal_setup;
 mod startup_check;
 mod safety;
@@ -732,6 +737,7 @@ fn update_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
 /// automatic install).
 fn install_staged(app: &AppHandle, engine: &Arc<Engine>) -> Result<(), String> {
     let data = data_dir().ok_or("can't find Consilium's data folder")?;
+    let exit = restart::ExitClaim::take(&data)?;
     let staged = update::staged(&data).ok_or("no newer build is staged")?;
 
     // Save a snapshot of each project's uncommitted work before closing the app
@@ -753,6 +759,7 @@ fn install_staged(app: &AppHandle, engine: &Arc<Engine>) -> Result<(), String> {
     // Start the installer first: if it can't run, nobody is told to stop for an update that won't come.
     let build = update::staged_build(&data);
     update::start_install(&data)?;
+    exit.commit();
     // The linked computers update too (queued durably, so it goes out after the restart at worst).
     if let Some(b) = &build {
         peer_sync::announce_update(b);
@@ -877,7 +884,7 @@ fn request_peer_update() -> Result<usize, String> {
 
 /// Restarts Consilium on this computer, targeted linked computers, or all computers.
 #[tauri::command]
-fn restart_app(targets: Vec<String>) -> Result<(), String> {
+async fn restart_app(targets: Vec<String>) -> Result<(), String> {
     let my_name = link_handle().map(|l| l.status().name).unwrap_or_default();
     let restart_all = targets.iter().any(|t| t == "all");
     let restart_self = restart_all || targets.iter().any(|t| t == "this" || (!my_name.is_empty() && t.eq_ignore_ascii_case(&my_name)));
@@ -892,7 +899,9 @@ fn restart_app(targets: Vec<String>) -> Result<(), String> {
     }
 
     if restart_self {
-        restart_this_computer();
+        tauri::async_runtime::spawn_blocking(restart_this_computer)
+            .await
+            .map_err(|e| e.to_string())??;
     }
     Ok(())
 }
@@ -1367,13 +1376,12 @@ async fn get_daily_wallpaper() -> Result<Option<wallpaper::DailyWallpaper>, Stri
     }
 }
 
-static RESTART_HOOK: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+type RestartHook = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
+static RESTART_HOOK: std::sync::OnceLock<RestartHook> = std::sync::OnceLock::new();
 
 /// Restarts Consilium on this computer, saving window state and relaunching.
-pub fn restart_this_computer() {
-    if let Some(f) = RESTART_HOOK.get() {
-        f();
-    }
+pub fn restart_this_computer() -> Result<(), String> {
+    RESTART_HOOK.get().ok_or("Consilium is still starting")?()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1580,21 +1588,33 @@ pub fn run() {
         .setup(|app| {
             bluetooth::initialize(app.handle().clone());
             app.manage(QuickSummon(register_quick_summon(app.handle())));
-            let handle = app.handle().clone();
-            let _ = RESTART_HOOK.set(Box::new(move || {
-                use tauri_plugin_window_state::{AppHandleExt, StateFlags};
-                let _ = handle.save_window_state(StateFlags::all());
-                let h = handle.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                    h.restart();
-                });
-            }));
-            signal_setup::autostart(bridge::config_path(None));
             let data = match data_override() {
                 Some(d) => d,
                 None => app.path().app_data_dir()?,
             };
+            #[cfg(windows)]
+            if signal_watchdog::configured(&data) {
+                let watchdog_data = data.clone();
+                std::thread::spawn(move || {
+                    let result = std::env::current_exe().map_err(|e| e.to_string())
+                        .and_then(|target| signal_watchdog_host::start(&watchdog_data, &target));
+                    if let Err(error) = result {
+                        eprintln!("Signal watchdog: {error}");
+                        signal_setup::autostart(bridge::config_path(None));
+                    }
+                });
+            } else {
+                signal_setup::autostart(bridge::config_path(None));
+            }
+            #[cfg(not(windows))]
+            signal_setup::autostart(bridge::config_path(None));
+            let handle = app.handle().clone();
+            let restart_data = data.clone();
+            let _ = RESTART_HOOK.set(Box::new(move || {
+                use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+                let _ = handle.save_window_state(StateFlags::all());
+                restart::request(&handle, &restart_data, false)
+            }));
             let ui = Arc::new(Window(app.handle().clone()));
             let spawn = Box::new(|task: engine::Task| {
                 tauri::async_runtime::spawn(task);

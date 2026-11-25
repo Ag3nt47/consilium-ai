@@ -212,7 +212,7 @@ fn quote(p: &Path) -> String {
 }
 
 /// PowerShell single-quoted string: a quote is written twice.
-fn ps_quote(p: &Path) -> String {
+pub(crate) fn ps_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', "''"))
 }
 
@@ -704,7 +704,7 @@ fn stage_non_macos_download(data: &Path, version: &str, url: &str, bytes: &[u8])
     Ok(())
 }
 
-/// A PowerShell script that asks WMI to start the Windows update helper with no window, and
+/// A PowerShell script that asks WMI to start a Windows helper with no window, and
 /// prints `WMI <ReturnValue> <ProcessId>`. WMI creates the process under WmiPrvSE, so it is
 /// outside every job Consilium is in and needs no breakaway (which that job refuses).
 fn wmi_launch_script(helper: &Path) -> String {
@@ -738,99 +738,96 @@ fn wmi_launch_result(out: &str) -> Result<u32, String> {
     }
 }
 
-/// Starts the detached helper. The caller then exits the app.
-pub fn start_install(data: &Path) -> Result<Staged, String> {
+/// Runs the short hidden launcher and returns the detached helper's process ID.
+#[cfg(windows)]
+pub(crate) fn start_windows_helper(helper: &Path, launcher: &Path) -> Result<u32, String> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
-    let s = staged(data).ok_or("no newer build is staged")?;
-    let pid = std::process::id();
-    let mut cmd;
-    if cfg!(target_os = "macos") {
-        let target = running_bundle()?;
-        cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg(helper_script(pid, &staged_app(data), &target, &install_log(data)));
-    } else {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let appimage = std::env::var_os("APPIMAGE").filter(|_| cfg!(target_os = "linux")).map(PathBuf::from);
-        let (staged, target) = swap_paths(data, &exe, appimage.as_deref())?;
-        if cfg!(windows) {
-            // Run the helper from a file with -File. An inline -Command script combined with
-            // -WindowStyle Hidden and DETACHED_PROCESS made PowerShell 5.1 die before its first
-            // line, so the app quit and nothing installed or reopened. The BOM makes 5.1 read
-            // the file as UTF-8, so non-ASCII user paths survive.
-            let log = install_log(data);
-            let helper = data.join("update").join("install-helper.ps1");
-            if let Some(dir) = helper.parent() {
-                let _ = std::fs::create_dir_all(dir);
+    use std::time::{Duration, Instant};
+
+    std::fs::write(launcher, format!("\u{feff}{}", wmi_launch_script(helper)))
+        .map_err(|e| format!("couldn't write the Windows launcher: {e}"))?;
+    let mut child = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(launcher)
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("couldn't start the Windows launcher: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("the Windows launcher didn't answer within 20 seconds".into());
             }
-            let script = windows_helper_script(pid, &staged, &target, &staged_dir(data), &log);
-            std::fs::write(&helper, format!("\u{feff}{script}"))
-                .map_err(|e| format!("couldn't write the update helper: {e}"))?;
-            std::fs::write(&log, format!("launching update helper {}\n", helper.display()))
-                .map_err(|e| format!("couldn't write the update log: {e}"))?;
-            // Start the helper through WMI (see `wmi_launch_script`): Consilium runs inside a job
-            // that refuses breakaway, so a helper spawned directly could die when the app quits.
-            let launcher = data.join("update").join("launch-helper.ps1");
-            std::fs::write(&launcher, format!("\u{feff}{}", wmi_launch_script(&helper)))
-                .map_err(|e| format!("couldn't write the update launcher: {e}"))?;
-            cmd = Command::new("powershell.exe");
-            cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(&launcher);
-        } else {
-            cmd = Command::new("/bin/sh");
-            let pkg = matches!(staged.extension().and_then(|e| e.to_str()), Some("deb" | "rpm"));
-            let script = if pkg {
-                linux_package_script(pid, &staged, &target, &staged_dir(data))
-            } else {
-                linux_helper_script(pid, &staged, &target, &staged_dir(data))
-            };
-            cmd.arg("-c").arg(script);
         }
     }
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut out = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut out);
+    }
+    let mut err = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut err);
+    }
+    wmi_launch_result(&out).map_err(|e| match err.lines().map(str::trim).rfind(|l| !l.is_empty()) {
+        Some(l) => format!("{e}: {l}"),
+        None => e,
+    })
+}
+
+/// Starts the detached helper. The caller then exits the app.
+pub fn start_install(data: &Path) -> Result<Staged, String> {
+    let s = staged(data).ok_or("no newer build is staged")?;
+    let pid = std::process::id();
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let (staged, target) = swap_paths(data, &exe, None)?;
+        // Run a script file with a BOM for PowerShell 5.1. WMI makes the update helper
+        // independent of Consilium's process job.
+        let log = install_log(data);
+        let helper = data.join("update").join("install-helper.ps1");
+        let script = windows_helper_script(pid, &staged, &target, &staged_dir(data), &log);
+        let absolute_data = std::path::absolute(data).map_err(|e| format!("couldn't locate Consilium's update profile: {e}"))?;
+        let handoff = crate::restart::windows_handoff_script(&absolute_data);
+        std::fs::write(&helper, format!("\u{feff}{handoff}{script}"))
+            .map_err(|e| format!("couldn't write the update helper: {e}"))?;
+        std::fs::write(&log, format!("launching update helper {}\n", helper.display()))
+            .map_err(|e| format!("couldn't write the update log: {e}"))?;
+        start_windows_helper(&helper, &data.join("update").join("launch-helper.ps1"))?;
+        confirm_helper_started(&log)?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        cmd.process_group(0); // outlives this app's process group
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        // `cmd` is the short launcher: it asks WMI to create the helper and prints the result.
-        cmd.creation_flags(CREATE_NO_WINDOW).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("couldn't start the installer: {e}"))?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(100))
-                }
-                _ => {
-                    let _ = child.kill();
-                    return Err("the installer didn't start within 20 seconds".into());
-                }
+        use std::process::{Command, Stdio};
+        let script = if cfg!(target_os = "macos") {
+            let target = running_bundle()?;
+            helper_script(pid, &staged_app(data), &target, &install_log(data))
+        } else {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let appimage = std::env::var_os("APPIMAGE").filter(|_| cfg!(target_os = "linux")).map(PathBuf::from);
+            let (staged, target) = swap_paths(data, &exe, appimage.as_deref())?;
+            let pkg = matches!(staged.extension().and_then(|e| e.to_str()), Some("deb" | "rpm"));
+            if pkg {
+                linux_package_script(pid, &staged, &target, &staged_dir(data))
+            } else {
+                linux_helper_script(pid, &staged, &target, &staged_dir(data))
             }
-        }
-        let mut out = String::new();
-        if let Some(mut so) = child.stdout.take() {
-            use std::io::Read;
-            let _ = so.read_to_string(&mut out);
-        }
-        let mut err = String::new();
-        if let Some(mut se) = child.stderr.take() {
-            use std::io::Read;
-            let _ = se.read_to_string(&mut err);
-        }
-        wmi_launch_result(&out).map_err(|e| match err.lines().map(str::trim).rfind(|l| !l.is_empty()) {
-            Some(l) => format!("{e}: {l}"),
-            None => e,
-        })?;
-        // spawn() succeeding only means the process exists. Wait for the helper's own first
-        // log line, so a helper that dies on startup leaves the app open with an error.
-        confirm_helper_started(&install_log(data))?;
+        };
+        Command::new("/bin/sh").arg("-c").arg(script)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .process_group(0) // outlives this app's process group
+            .spawn().map_err(|e| format!("couldn't start the installer: {e}"))?;
     }
-    #[cfg(not(windows))]
-    cmd.spawn().map_err(|e| format!("couldn't start the installer: {e}"))?;
     Ok(s)
 }
 

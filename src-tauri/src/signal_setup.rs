@@ -11,6 +11,7 @@ use crate::bridge::{self, BridgeConfig};
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -42,9 +43,12 @@ static LINK_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 /// Bumped whenever a new setup run starts, so a superseded run's thread stops writing state.
 static RUN: Mutex<u64> = Mutex::new(0);
 static RECENT_VERIFICATION_REPLIES: Mutex<RecentReplies> = Mutex::new(RecentReplies::new());
+static MANAGED_DAEMON: Mutex<Option<ManagedDaemon>> = Mutex::new(None);
+static DAEMON_RECOVERY: Mutex<DaemonRecovery> = Mutex::new(DaemonRecovery { running: false, last: None });
 
 const VERIFY_WINDOW: Duration = Duration::from_secs(10 * 60);
 const LINK_WINDOW: Duration = Duration::from_secs(5 * 60);
+const DAEMON_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 pub fn state() -> SetupState {
     STATE.lock().unwrap().clone().unwrap_or_else(|| SetupState {
@@ -419,20 +423,26 @@ fn run_setup(run: u64, cli: std::path::PathBuf, cfg_path: std::path::PathBuf, cf
         Ok(new_link) => new_link,
         Err(detail) => return fail(run, detail),
     };
-    if new_link {
-        // A daemon started before this link still holds the old keys and the port, and
-        // ensure_daemon would take it as running; replace it so the code reply reaches setup.
-        if let Err(e) = replace_old_daemon(run, &cfg) {
-            return fail(run, e);
-        }
-    }
     set(run, |s| {
         s.phase = "starting".into();
         s.link_uri = None;
         s.detail = "Linked. Starting Signal for Consilium in the background…".into();
     });
-    if let Err(e) = ensure_daemon(&cli, &cfg) {
-        return fail(run, e);
+    match try_daemon_lock(&cfg_path) {
+        Ok(Some(_launch)) => {
+            if new_link {
+                // The previous daemon still has the old keys and must release its local port.
+                if let Err(e) = replace_old_daemon(run, &cfg) {
+                    return fail(run, e);
+                }
+            }
+            if let Err(e) = ensure_daemon(&cli, &cfg) {
+                return fail(run, e);
+            }
+        }
+        Ok(None) if !new_link && daemon_answers(&cfg) => {}
+        Ok(None) => return fail(run, "Signal is starting in another Consilium process. Try again when it is ready."),
+        Err(e) => return fail(run, e),
     }
     // Reuse the saved council group, or create it before asking for a phone reply.
     let cfg = match crate::signal_chat::ensure_groups(&cfg_path, &[]) {
@@ -569,57 +579,118 @@ fn link(run: u64, cli: &std::path::Path, account: &str) -> Result<(), String> {
 /// On launch, starts signal-cli's daemon in the background if Signal is set up and switched on,
 /// so it keeps working after a restart without a terminal window.
 pub fn autostart(cfg_path: std::path::PathBuf) {
-    std::thread::spawn(move || {
-        let Ok(cfg) = BridgeConfig::load(&cfg_path) else { return };
-        if !cfg.enabled || !bridge::valid_account(&cfg.account) {
-            return;
-        }
-        if matches!(state().phase.as_str(), "linking" | "starting" | "verifying") {
-            return;
-        }
-        let run = *RUN.lock().unwrap();
-        let outcome = signal_cli().and_then(|cli| {
-            // A daemon that already answers proves the account is linked; asking signal-cli
-            // again would wait on the daemon's lock.
-            if daemon_answers(&cfg) {
-                return Ok(());
-            }
-            start_if_registered(registered_account(&cli, &cfg.account), || ensure_daemon(&cli, &cfg))
-        });
-        if let Err(detail) = outcome {
-            background_failure(run, detail);
-        }
-    });
+    request_daemon_work(cfg_path, false);
 }
 
 fn daemon_answers(cfg: &BridgeConfig) -> bool {
-    let mut probe = cfg.clone();
-    probe.enabled = true;
-    bridge::probe_signal(&probe, Duration::from_secs(2)).state == "ok"
+    crate::signal_chat::daemon_responds(cfg)
 }
 
-/// Called when the chat bridge can't reach the daemon: starts it again, at most once a minute.
-pub fn revive(cfg: &BridgeConfig) {
-    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
-    {
-        let mut last = LAST.lock().unwrap();
-        if last.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
-            return;
+/// Schedules bounded recovery while the subscriber and chat worker continue reconnecting.
+pub fn revive(cfg_path: &Path) {
+    request_daemon_work(cfg_path.to_path_buf(), true);
+}
+
+struct DaemonRecovery {
+    running: bool,
+    last: Option<Instant>,
+}
+
+impl DaemonRecovery {
+    fn claim(&mut self, now: Instant) -> bool {
+        if self.running || self.last.is_some_and(|last| now.saturating_duration_since(last) < DAEMON_RETRY_INTERVAL) {
+            return false;
         }
-        *last = Some(Instant::now());
+        self.running = true;
+        self.last = Some(now);
+        true
     }
-    if matches!(state().phase.as_str(), "linking" | "starting" | "verifying") {
-        return; // a setup in progress manages the daemon itself
+}
+
+struct DaemonWorkGuard;
+
+impl Drop for DaemonWorkGuard {
+    fn drop(&mut self) {
+        DAEMON_RECOVERY.lock().unwrap_or_else(|error| error.into_inner()).running = false;
     }
+}
+
+fn request_daemon_work(cfg_path: std::path::PathBuf, recover: bool) {
+    if !DAEMON_RECOVERY.lock().unwrap_or_else(|error| error.into_inner()).claim(Instant::now()) {
+        return;
+    }
+    let guard = DaemonWorkGuard;
     let run = *RUN.lock().unwrap();
-    let outcome = signal_cli().and_then(|cli| {
-        if daemon_answers(cfg) {
-            return Ok(());
+    if let Err(error) = std::thread::Builder::new().name("signal-daemon-recovery".into()).spawn(move || {
+        let _guard = guard;
+        let Ok(cfg) = BridgeConfig::load(&cfg_path) else { return };
+        if background_current(&cfg_path, &cfg, run) {
+            if let Err(detail) = recover_daemon(&cfg_path, &cfg, run, recover) {
+                if background_current(&cfg_path, &cfg, run) {
+                    background_failure(run, detail);
+                }
+            }
         }
-        start_if_registered(registered_account(&cli, &cfg.account), || ensure_daemon(&cli, cfg))
-    });
-    if let Err(detail) = outcome {
-        background_failure(run, detail);
+    }) {
+        eprintln!("signal daemon: couldn't start recovery worker: {error}");
+    }
+}
+
+fn background_current(cfg_path: &Path, expected: &BridgeConfig, run: u64) -> bool {
+    *RUN.lock().unwrap() == run
+        && !matches!(state().phase.as_str(), "linking" | "starting" | "verifying")
+        && BridgeConfig::load(cfg_path).is_ok_and(|cfg| {
+            cfg.enabled && bridge::valid_account(&cfg.account)
+                && cfg.account == expected.account && cfg.endpoint == expected.endpoint
+        })
+}
+
+fn recover_daemon(cfg_path: &Path, cfg: &BridgeConfig, run: u64, recover: bool) -> Result<(), String> {
+    let addr = endpoint_addr(cfg)?;
+    if daemon_answers(cfg) {
+        return Ok(());
+    }
+    let Some(_shared_launch) = try_daemon_lock(cfg_path)? else { return Ok(()) };
+    let mut managed = MANAGED_DAEMON.lock().unwrap_or_else(|error| error.into_inner());
+    // An app setup may have finished while the first probe ran. Confirm independently before
+    // touching a live process, and leave a recovered daemon on its current registration.
+    if !background_current(cfg_path, cfg, run) || daemon_answers(cfg) {
+        return Ok(());
+    }
+    if let Some(daemon) = managed.as_mut().filter(|daemon| daemon.owns(cfg, addr)) {
+        if daemon.launcher.try_wait().map_err(|e| format!("Couldn't inspect the Signal launcher: {e}"))?.is_none() {
+            if !recover || cfg.allowed_acis.is_empty() || !background_current(cfg_path, cfg, run) {
+                return Ok(());
+            }
+            daemon.stop()?;
+            wait_for_daemon_port(addr)?;
+        }
+        *managed = None;
+    } else if endpoint_listening(addr) {
+        // A socket is already present. An externally managed daemon could be using this account
+        // or port; a listAccounts process could wait on its lock without moving recovery forward.
+        return Ok(());
+    }
+    if !background_current(cfg_path, cfg, run) || endpoint_listening(addr) {
+        return Ok(());
+    }
+    let cli = signal_cli()?;
+    let registration = registered_account(&cli, &cfg.account);
+    if !background_current(cfg_path, cfg, run) {
+        return Ok(());
+    }
+    start_if_registered(registration, || start_daemon(&cli, cfg, addr, &mut managed))
+}
+
+/// The desktop and its independent watcher use the same messaging file and account store.
+fn try_daemon_lock(cfg_path: &Path) -> Result<Option<std::fs::File>, String> {
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
+        .open(cfg_path.with_extension("daemon.lock"))
+        .map_err(|e| format!("Couldn't open the Signal recovery lock: {e}"))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("Couldn't lock Signal recovery: {e}")),
     }
 }
 
@@ -629,26 +700,103 @@ fn endpoint_addr(cfg: &BridgeConfig) -> Result<SocketAddr, String> {
     raw.parse().map_err(|_| "Automatic start needs an address like 127.0.0.1:7583 (Advanced)".to_string())
 }
 
+fn endpoint_listening(addr: SocketAddr) -> bool {
+    TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
+}
+
+fn wait_for_daemon_port(addr: SocketAddr) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while endpoint_listening(addr) {
+        if Instant::now() >= deadline {
+            return Err("Signal's previous daemon has not released its local port.".into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
+}
+
+struct ManagedDaemon {
+    launcher: Child,
+    account: String,
+    addr: SocketAddr,
+}
+
+impl ManagedDaemon {
+    fn owns(&self, cfg: &BridgeConfig, addr: SocketAddr) -> bool {
+        self.account == cfg.account && self.addr == addr
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        if self.launcher.try_wait().map_err(|e| format!("Couldn't inspect the Signal launcher: {e}"))?.is_some() {
+            return Ok(());
+        }
+        let pid = self.launcher.id();
+        #[cfg(windows)]
+        {
+            // The pinned Windows launcher is a batch file; stop exactly its Java process tree.
+            // Keeping the Child open above also keeps that process identity alive on Windows.
+            let mut cmd = Command::new("taskkill");
+            cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            let mut killer = quiet(&mut cmd).spawn().map_err(|e| format!("Couldn't stop the Signal launcher: {e}"))?;
+            if wait_for_child(&mut killer)?.is_none() {
+                let _ = killer.kill();
+                let _ = killer.try_wait();
+                return Err("Stopping the Signal launcher timed out.".into());
+            }
+        }
+        #[cfg(unix)]
+        // start_daemon creates a separate group for this exact child. Stop only that group.
+        if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
+            return Err(format!("Couldn't stop the Signal launcher: {}", std::io::Error::last_os_error()));
+        }
+        if wait_for_child(&mut self.launcher)?.is_none() {
+            return Err("The Signal launcher did not stop before its deadline.".into());
+        }
+        Ok(())
+    }
+}
+
+fn wait_for_child(child: &mut Child) -> Result<Option<std::process::ExitStatus>, String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = child.try_wait().map_err(|e| format!("Couldn't wait for the Signal launcher: {e}"))?;
+        if status.is_some() || Instant::now() >= deadline {
+            return Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Starts `signal-cli daemon` in the background unless one already answers.
-fn ensure_daemon(cli: &std::path::Path, cfg: &BridgeConfig) -> Result<(), String> {
+fn ensure_daemon(cli: &Path, cfg: &BridgeConfig) -> Result<(), String> {
     // Launch, setup and the chat bridge's restart can all get here at once; only one may start it.
-    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut managed = MANAGED_DAEMON.lock().unwrap_or_else(|error| error.into_inner());
     let addr = endpoint_addr(cfg)?;
-    let mut probe = cfg.clone();
-    probe.enabled = true;
     if stop_stale_signal_cli(&cfg.account) > 0 {
         // Give the old daemon a moment to let go of the port and the account.
         std::thread::sleep(Duration::from_secs(3));
     }
-    if bridge::probe_signal(&probe, Duration::from_secs(2)).state == "ok" {
+    if daemon_answers(cfg) {
         return Ok(());
     }
     // A daemon that is still catching up on messages can be too busy to answer the probe in time
     // but already holds the port and the account. Starting a second one only leaves a copy waiting
     // forever for the account lock, so a listening port counts as running.
-    if TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok() {
+    if endpoint_listening(addr) {
         return Ok(());
+    }
+    start_daemon(cli, cfg, addr, &mut managed)
+}
+
+fn start_daemon(cli: &Path, cfg: &BridgeConfig, addr: SocketAddr, managed: &mut Option<ManagedDaemon>) -> Result<(), String> {
+    if endpoint_listening(addr) {
+        return Ok(());
+    }
+    if let Some(daemon) = managed.as_mut().filter(|daemon| daemon.owns(cfg, addr)) {
+        if daemon.launcher.try_wait().map_err(|e| format!("Couldn't inspect the Signal launcher: {e}"))?.is_none() {
+            return Err("Consilium's Signal launcher is still starting.".into());
+        }
     }
     let log = std::fs::File::create(std::env::temp_dir().join("consilium-signal-daemon.log")).ok();
     let mut cmd = Command::new(cli);
@@ -660,12 +808,21 @@ fn ensure_daemon(cli: &std::path::Path, cfg: &BridgeConfig) -> Result<(), String
         Some((o, e)) => cmd.stdout(o).stderr(e),
         None => cmd.stdout(Stdio::null()).stderr(Stdio::null()),
     };
-    quiet(&mut cmd).spawn().map_err(|e| format!("couldn't start signal-cli: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let launcher = quiet(&mut cmd).spawn().map_err(|e| format!("couldn't start signal-cli: {e}"))?;
+    let daemon = managed.insert(ManagedDaemon { launcher, account: cfg.account.clone(), addr });
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(60) {
         std::thread::sleep(Duration::from_secs(1));
-        if bridge::probe_signal(&probe, Duration::from_secs(2)).state == "ok" {
+        if daemon_answers(cfg) {
             return Ok(());
+        }
+        if daemon.launcher.try_wait().is_ok_and(|status| status.is_some()) {
+            break;
         }
     }
     Err("signal-cli started but isn't answering. Its log is consilium-signal-daemon.log in the temp folder.".into())
@@ -755,6 +912,27 @@ fn rand_u32() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn another_signal_runner_skips_recovery_while_the_shared_launch_lock_is_held() {
+        let path = std::env::temp_dir().join(format!("consilium-signal-lock-{}.json", uuid::Uuid::new_v4()));
+        let first = try_daemon_lock(&path).unwrap().unwrap();
+        assert!(try_daemon_lock(&path).unwrap().is_none());
+        drop(first);
+        assert!(try_daemon_lock(&path).unwrap().is_some());
+        std::fs::remove_file(path.with_extension("daemon.lock")).unwrap();
+    }
+
+    #[test]
+    fn recovery_is_single_flight_and_rate_limited_even_if_startup_is_slow() {
+        let mut recovery = DaemonRecovery { running: false, last: None };
+        let now = Instant::now();
+        assert!(recovery.claim(now));
+        assert!(!recovery.claim(now + DAEMON_RETRY_INTERVAL * 2));
+        recovery.running = false;
+        assert!(!recovery.claim(now + DAEMON_RETRY_INTERVAL / 2));
+        assert!(recovery.claim(now + DAEMON_RETRY_INTERVAL));
+    }
+
     #[test]
     fn only_old_daemons_and_stuck_checks_are_stopped() {
         let a = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
