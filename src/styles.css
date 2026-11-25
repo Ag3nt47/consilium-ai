@@ -3595,6 +3595,12 @@ button.attachment {
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .note:not(.note-error) {
   color: #c9cedb;
 }
+/* The audit (explainability) drawer sits over the conversation, so it is 15 points more
+   opaque than the shared 55% panel colour. */
+[data-theme="glass"] .audit-drawer {
+  background: rgba(22, 27, 44, 0.7);
+  -webkit-backdrop-filter: blur(14px);
+}
 [data-theme="glass"] .main.has-wallpaper .request,
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .request {
   background: rgba(36, 10, 14, 0.95);
