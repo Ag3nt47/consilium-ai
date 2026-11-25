@@ -687,7 +687,7 @@ type PendingItem =
   | { kind: "command"; key: string; event: ChatEvent; index: number; fence: Fence };
 
 /** The waiting requests and commands, one at a time, pinned above the message box. */
-function RequestTray({ items, index, agents, answered, deciding, decide, respond, commands, onFocus, onShow }: {
+function RequestTray({ items, index, agents, answered, deciding, decide, respond, commands, onFocus, onShow, autoRun }: {
   items: PendingItem[];
   index: number;
   agents: AgentInfo[];
@@ -698,8 +698,12 @@ function RequestTray({ items, index, agents, answered, deciding, decide, respond
   commands: CommandActions;
   onFocus: (index: number) => void;
   onShow: (item: PendingItem) => void;
+  /** Auto-run is on (for every chat or this one): start minimized, since boxes run by themselves. */
+  autoRun: boolean;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(autoRun);
+  // Follow auto-run when it is switched on or off; the ▴/▾ button still overrides it until then.
+  useEffect(() => setCollapsed(autoRun), [autoRun]);
   const item = items[index];
   if (!item) return null;
   const from = senderName(item.event.sender, agents);
@@ -2420,13 +2424,20 @@ export default function App() {
   // sends the output to the AI that suggested it. Deny tells that AI not to run it.
   // "Auto-run this chat": on only in chats where the human accepted its warning (auto_run.rs).
   const [chatAutoRun, setChatAutoRunState] = useState(false);
+  // The chat whose auto-run setting has arrived. Until it matches `current` the request tray stays
+  // hidden, so switching into an auto-run chat never flashes the tray open before it minimizes.
+  const [chatAutoRunFor, setChatAutoRunFor] = useState<string | null>(null);
   const [autoRunAsk, setAutoRunAsk] = useState<{ eventId: string; index: number } | null>(null);
   useEffect(() => {
     setChatAutoRunState(false);
+    setChatAutoRunFor(null);
     setAutoRunAsk(null);
     if (!current) return;
     let live = true;
-    api.chatAutoRun(current).then((on) => { if (live) setChatAutoRunState(on); }).catch(() => {});
+    api.chatAutoRun(current)
+      .then((on) => { if (live) setChatAutoRunState(on); })
+      .catch(() => {})
+      .finally(() => { if (live) setChatAutoRunFor(current); });
     return () => { live = false; };
   }, [current]);
   const confirmAutoRun = () => {
@@ -3632,8 +3643,9 @@ export default function App() {
               {error}
             </div>
           )}
-          {pendingItems.length > 0 && (
+          {pendingItems.length > 0 && (council?.auto_run_commands || chatAutoRunFor === current) && (
             <RequestTray
+              key={current ?? ""}
               items={pendingItems}
               index={trayIndex}
               agents={agents}
@@ -3644,6 +3656,7 @@ export default function App() {
               commands={commandActions}
               onFocus={focusTray}
               onShow={showInChat}
+              autoRun={!!council?.auto_run_commands || chatAutoRun}
             />
           )}
           <div className="composer-controls">
