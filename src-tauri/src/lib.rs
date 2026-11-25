@@ -1155,12 +1155,10 @@ fn catch_up_auto_run(engine: Arc<Engine>, conversation: String) {
         return;
     }
     let Ok(events) = engine.store.load(&conversation) else { return };
-    let enabled_ts = crate::auto_run::enabled_at(engine.store.dir(), &conversation);
-    let cutoff = enabled_ts.map(|t| t.saturating_sub(crate::autocontinue::CATCH_UP_MS)).unwrap_or(0);
     let picks: Vec<(String, usize)> =
         crate::autocontinue::waiting_boxes(&events, 0, crate::store::now_ms(), crate::autocontinue::CATCH_UP_MS)
             .into_iter()
-            .filter(|(id, _)| events.iter().any(|e| &e.id == id && e.ts >= cutoff && engine.config.is_member(&e.sender)))
+            .filter(|(id, _)| events.iter().any(|e| &e.id == id && engine.config.is_member(&e.sender)))
             .collect();
     if picks.is_empty() {
         return;
