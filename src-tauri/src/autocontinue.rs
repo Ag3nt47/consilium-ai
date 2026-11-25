@@ -12,7 +12,10 @@
 //! - when `IDLE_ROUNDS` automatic rounds in a row changed nothing on the board, which is what
 //!   waiting on a build, or every AI being out of usage, looks like. Not in a chat where the human
 //!   turned on "Auto-run this chat" (`auto_run`): there commands report back by themselves, so
-//!   quiet rounds keep going and only the other stops apply.
+//!   quiet rounds keep going and only the other stops apply, plus one: after
+//!   `AUTO_RUN_WAITING_ROUNDS` rounds in a row where every AI here only said it was waiting
+//!   (`only_waiting`), no command box reported back, nothing came from a linked computer and the
+//!   board didn't change, it pauses, so a peer that has gone to sleep doesn't burn every AI's quota.
 //!
 //! The decision is worked out from the conversation and its board alone, so it survives restarts.
 //! Any message from the human starts the count again; the human's Stop button never continues.
@@ -33,6 +36,12 @@ pub const DELAY_SECS: u64 = 20;
 pub const AUTO_RUN_DELAY_SECS: u64 = 5;
 /// Automatic rounds allowed after each message from the human in an Auto-run chat.
 pub const AUTO_RUN_MAX_ROUNDS: usize = 25;
+/// Rounds in a row in an Auto-run chat where every AI only waited, before it pauses.
+pub const AUTO_RUN_WAITING_ROUNDS: usize = 3;
+/// A reply longer than this is doing more than saying it's waiting.
+const WAITING_REPLY_MAX_CHARS: usize = 1500;
+/// How the waiting pause note says why; a message from a linked computer lifts only this pause.
+const WAITING_PAUSE: &str = "every AI was only waiting";
 /// While a command box holds rounds back, how often auto-continue looks again.
 pub const RECHECK_SECS: u64 = 30;
 const TASKS_IN_CONTINUE_NOTE: usize = 5;
@@ -137,6 +146,42 @@ pub fn pending_boxes(events: &[Event], now: u64) -> bool {
     !waiting_boxes(events, 0, now, PENDING_MS).is_empty()
 }
 
+/// Whether an AI's reply only says it is waiting: it mentions waiting, posts no fenced block
+/// (no command, no patch) and no task-board line, and is short.
+fn only_waiting(e: &Event) -> bool {
+    let text = e.text.trim();
+    text.chars().count() <= WAITING_REPLY_MAX_CHARS
+        && text.to_lowercase().contains("waiting")
+        && !text.contains("```")
+        && !text.lines().any(|l| l.trim_start().starts_with("TASK:"))
+}
+
+/// Whether the round that `events` holds (everything after one round note, up to the next)
+/// was only waiting: at least one AI here replied, every reply only waited, no command box
+/// reported back and nothing arrived from a linked computer.
+fn waiting_round(events: &[Event]) -> bool {
+    let mut replies = 0;
+    for e in events {
+        if e.via.is_some() && e.sender != CONSILIUM {
+            return false;
+        }
+        if e.sender == "human" {
+            if e.text.starts_with(RAN) {
+                return false;
+            }
+            continue;
+        }
+        if e.sender == CONSILIUM || e.kind != "message" {
+            continue;
+        }
+        if !only_waiting(e) {
+            return false;
+        }
+        replies += 1;
+    }
+    replies > 0
+}
+
 /// The old signature, kept for the tests; the engine calls `decide_with`.
 #[cfg(test)]
 pub fn decide(events: &[Event], board: &Board, auto_run: bool) -> Decision {
@@ -169,8 +214,13 @@ pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pendin
     }
     let notes: Vec<&Event> = since_human.iter().filter(|e| is_auto_note(e) && !e.text.contains(AUTO_APPROVED)).collect();
     // A pause note is the last word until the human writes again.
-    if notes.last().is_some_and(|n| n.text.starts_with(&format!("{PREFIX} paused"))) {
-        return Decision::Stop;
+    // The waiting pause also lifts when a linked computer's AI writes after it: whoever was
+    // being waited on is back.
+    if let Some(n) = notes.last().filter(|n| n.text.starts_with(&format!("{PREFIX} paused"))) {
+        let peer_since = since_human.iter().any(|e| e.seq > n.seq && e.via.is_some() && e.sender != "human" && e.sender != CONSILIUM);
+        if !(n.text.contains(WAITING_PAUSE) && peer_since) {
+            return Decision::Stop;
+        }
     }
     // Waiting for the human: say so once rather than going quiet. Their answer starts it again.
     if !waiting.is_empty() {
@@ -199,6 +249,31 @@ pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pendin
              probably waiting on a build, a reset or you. {} task(s) are still open; send any message to carry on.",
             open.len()
         ));
+    }
+    if auto_run {
+        // Each round runs from its note to the next note (or to now).
+        let starts: Vec<usize> = since_human
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| is_auto_note(e) && !e.text.contains(AUTO_APPROVED) && !e.text.starts_with(&format!("{PREFIX} paused")))
+            .map(|(i, _)| i)
+            .collect();
+        let mut waited = 0;
+        for (k, &start) in starts.iter().enumerate().rev() {
+            let end = starts.get(k + 1).copied().unwrap_or(since_human.len());
+            if last_change >= since_human[start].ts || !waiting_round(&since_human[start + 1..end]) {
+                break;
+            }
+            waited += 1;
+        }
+        if waited >= AUTO_RUN_WAITING_ROUNDS {
+            return Decision::Pause(format!(
+                "{PREFIX} paused: {WAITING_PAUSE} in the last {AUTO_RUN_WAITING_ROUNDS} rounds, and nothing changed, so another \
+                 round would only use quota. {} task(s) are still open; send any message to carry on (a message from a \
+                 linked computer carries on too).",
+                open.len()
+            ));
+        }
     }
     open.sort_by_key(|task| (task.status != Status::Doing, task.priority, task.id));
     let mut list = open.iter().take(TASKS_IN_CONTINUE_NOTE)
@@ -403,6 +478,70 @@ mod tests {
         ];
         let Decision::Continue(note) = decide(&asked, &b, true) else { panic!("an auto-run chat approves it") };
         assert!(note.contains("auto-approved") && note.lines().any(|l| l == "Approved: ok?"), "{note}");
+    }
+
+    fn wait(seq: u64, ts: u64, who: &str) -> Event {
+        ev(seq, ts, who, "message", "Still waiting on the Mac worker. Changed: nothing. Ran: no commands.", vec![])
+    }
+
+    /// `n` auto-run rounds after the human wrote, each answered by two AIs saying they're waiting.
+    fn waiting_rounds(n: u64) -> Vec<Event> {
+        let mut events = vec![ev(1, 10, "human", "message", "go", vec![])];
+        for i in 0..n {
+            let base = 20 + 10 * i;
+            events.push(auto(100 + 3 * i, base));
+            events.push(wait(101 + 3 * i, base + 1, "claude"));
+            events.push(wait(102 + 3 * i, base + 2, "gpt"));
+        }
+        events
+    }
+
+    #[test]
+    fn auto_run_chats_pause_after_rounds_where_every_ai_only_waited() {
+        let b = board(Status::Doing, 15);
+        let n = AUTO_RUN_WAITING_ROUNDS as u64;
+        assert!(matches!(decide(&waiting_rounds(n - 1), &b, true), Decision::Continue(_)));
+        let Decision::Pause(note) = decide(&waiting_rounds(n), &b, true) else { panic!("should pause") };
+        assert!(note.contains(WAITING_PAUSE), "{note}");
+        let mut paused = waiting_rounds(n);
+        paused.push(ev(500, 500, CONSILIUM, "system", &note, vec![]));
+        assert_eq!(decide(&paused, &b, true), Decision::Stop, "the pause note is the last word");
+        // A linked computer's AI writing lifts it.
+        let mut peer = wait(501, 501, "claude");
+        peer.text = "The Mac worker is up.".into();
+        peer.via = Some("lukes-mbp".into());
+        paused.push(peer);
+        assert!(matches!(decide(&paused, &b, true), Decision::Continue(_)), "a peer's message carries on");
+        // So does the human.
+        let mut human = waiting_rounds(n);
+        human.push(ev(600, 600, "human", "message", "carry on", vec![]));
+        assert!(matches!(decide(&human, &b, true), Decision::Continue(_)));
+    }
+
+    #[test]
+    fn a_round_with_real_work_breaks_the_waiting_streak() {
+        let b = board(Status::Doing, 15);
+        let n = AUTO_RUN_WAITING_ROUNDS as u64;
+        // One AI did more than wait in the newest round.
+        let mut work = waiting_rounds(n);
+        work.last_mut().unwrap().text = "Ran the split benchmark: 18 t/s. Results are saved.".into();
+        assert!(matches!(decide(&work, &b, true), Decision::Continue(_)));
+        // A command box reported back.
+        let mut boxed = waiting_rounds(n);
+        boxed.push(ran(900, 900, "x"));
+        assert!(matches!(decide(&boxed, &b, true), Decision::Continue(_)));
+        // The board changed during the rounds.
+        assert!(matches!(decide(&waiting_rounds(n), &board(Status::Doing, 1000), true), Decision::Continue(_)));
+        // A reply that posts a command box isn't only waiting.
+        let mut cmd = waiting_rounds(n);
+        cmd.last_mut().unwrap().text = format!("waiting, so checking\n```{SHELL}\nls\n```");
+        assert!(matches!(decide(&cmd, &b, true), Decision::Continue(_)));
+        // Rounds nobody answered (every AI out of usage) aren't counted as waiting.
+        let mut silent = vec![ev(1, 10, "human", "message", "go", vec![])];
+        for i in 0..n {
+            silent.push(auto(100 + i, 20 + i));
+        }
+        assert!(matches!(decide(&silent, &b, true), Decision::Continue(_)));
     }
 
     #[test]
