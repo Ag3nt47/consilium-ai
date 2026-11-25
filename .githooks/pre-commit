@@ -59,7 +59,7 @@ unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_
 cd "$snap"
 if ! npm ls --depth=0 >"$snap/npm-ls.log" 2>&1; then
   cat "$snap/npm-ls.log" >&2
-  echo "pre-commit: $modules doesn't match this commit's package-lock.json. Run npm ci there." >&2
+  echo "pre-commit: the dependency check (npm ls) failed for $modules, which may come from another revision. Run npm ci in $root." >&2
   exit 1
 fi
 if ! node node_modules/typescript/bin/tsc --noEmit -p .; then
