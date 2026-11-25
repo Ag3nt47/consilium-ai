@@ -24,11 +24,23 @@ pub struct Pending {
     /// can't remove the newer one's entry when it finally ends.
     #[serde(default)]
     pub turn: String,
+    /// Linked messages start a fresh answer budget at this event boundary. Persist it so a
+    /// restart resumes that budget rather than counting answers from earlier linked turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<u64>,
+    /// Extra answers and their recipients granted during this turn, including those in flight.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, u32>,
+    #[serde(default)]
+    pub pulled_in: usize,
 }
 
 impl Pending {
     pub fn new(conversation: &str, targets: Vec<String>, rounds: u32) -> Self {
-        Pending { conversation: conversation.into(), targets, rounds, attempts: 0, turn: uuid::Uuid::new_v4().to_string() }
+        Pending {
+            conversation: conversation.into(), targets, rounds, attempts: 0,
+            turn: uuid::Uuid::new_v4().to_string(), after: None, extra: HashMap::new(), pulled_in: 0,
+        }
     }
 }
 
@@ -121,6 +133,19 @@ impl Journal {
                 ((), true)
             }
             None => ((), false),
+        })
+    }
+
+    /// Saves a grant before its worker can start, so a restart keeps both the answer and loop
+    /// budgets. An old turn cannot change a newer turn's allowance.
+    pub fn extra_answers(&self, conversation: &str, turn: &str, extra: &HashMap<String, u32>, pulled_in: usize) {
+        self.update(|items| match items.get_mut(conversation).filter(|p| p.turn == turn) {
+            Some(p) if p.extra != *extra || p.pulled_in != pulled_in => {
+                p.extra = extra.clone();
+                p.pulled_in = pulled_in;
+                ((), true)
+            }
+            _ => ((), false),
         })
     }
 
@@ -221,6 +246,26 @@ mod tests {
         let (resume, _) = Journal::load(path.clone()).interrupted();
         assert_eq!(resume.len(), 1);
         assert_eq!(resume[0].targets, vec!["gpt".to_string()]);
+        assert_eq!(resume[0].after, None);
+        assert!(resume[0].extra.is_empty());
+        assert_eq!(resume[0].pulled_in, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_linked_turn_keeps_its_answer_boundary_after_restart() {
+        let path = temp();
+        let mut pending = Pending::new("c", vec!["gpt".into()], 1);
+        pending.after = Some(42);
+        Journal::load(path.clone()).begin(pending.clone());
+        let extra = HashMap::from([("gpt".to_string(), 1), ("claude".to_string(), 0)]);
+        Journal::load(path.clone()).extra_answers("c", &pending.turn, &extra, 2);
+        Journal::load(path.clone()).extra_answers("c", "old-turn", &HashMap::new(), 0);
+        let (resumed, _) = Journal::load(path.clone()).interrupted();
+        assert_eq!(resumed[0].after, Some(42));
+        assert_eq!(resumed[0].turn, pending.turn);
+        assert_eq!(resumed[0].extra, extra, "both extra answers and new recipients survive");
+        assert_eq!(resumed[0].pulled_in, 2, "restart cannot reset the loop cap");
         let _ = std::fs::remove_file(path);
     }
 
