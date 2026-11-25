@@ -1452,16 +1452,19 @@ mod tests {
     async fn a_busy_other_process_does_not_consume_the_linked_start_allowance() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         prompt::set_here("Windows PC");
-        let (app, term, dir) = pair(100);
+        let (app, term, dir) = pair(10);
         let conv = app.store.create("busy linked follow-up").unwrap().id;
-        term.send(&conv, "first", vec!["gpt".into()], 1).unwrap();
+        let other_lock = term.store.try_turn_lock(&conv).expect("the other process owns the turn");
         let remote = app.store.append_imported(
             &conv, "claude", "message", vec![], "@gpt-windows-pc check readiness", Some("MacBook".into()), None,
         ).unwrap();
         let used = AtomicUsize::new(0);
         app.from_linked(&conv, &remote, &|| { used.fetch_add(1, Ordering::SeqCst); true });
         assert_eq!(used.load(Ordering::SeqCst), 0, "no allowance is used without owning the turn");
+        drop(other_lock);
+        app.from_linked(&conv, &remote, &|| { used.fetch_add(1, Ordering::SeqCst); true });
         until_idle(&[&app, &term], &conv).await;
+        assert_eq!(used.load(Ordering::SeqCst), 1, "the allowance remains available after the lock is released");
         let _ = std::fs::remove_dir_all(dir);
     }
 
