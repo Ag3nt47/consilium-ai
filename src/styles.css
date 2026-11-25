@@ -3542,30 +3542,10 @@ button.attachment {
 }
 
 /* visionOS Glass over the wallpaper or a live backdrop: the main pane has no fill at all, so
-   the background shows through edge to edge. Only the messages, thinking/explainability row,
-   Consilium status notes, and prompt box keep frosted glass (+15% opacity over the base glass
-   panels, with high-contrast text on notes) so they stay easy to read. The top bar and composer
-   chrome float clear with a soft text shadow. REQUEST boxes stay solid so Approve/Deny never fades.
-   Stealth is excluded because that mode promises an opaque, quiet UI. */
-[data-theme="glass"] :is(.msg, .thinking) {
-  background: rgba(22, 27, 44, 0.7);
-}
-[data-theme="glass"] .msg.from-human {
-  background: rgba(32, 38, 60, 0.8);
-}
-[data-theme="glass"] .thinking {
-  color: #cbd5e1;
-}
-[data-theme="glass"] :is(.task-pill, .task-claim) {
-  background: rgba(32, 38, 60, 0.8);
-}
-[data-theme="glass"] .task-pill > span:not(.task-dot),
-[data-theme="glass"] .task-pill small {
-  color: #cbd5e1;
-}
-[data-theme="glass"] .composer textarea {
-  background: rgba(22, 27, 44, 0.7);
-}
+   the background shows through edge to edge. Only the messages (and the thinking rows) keep a
+   light pane of frosted glass so they stay readable. The top bar and composer float on clear
+   glass with a soft text shadow. REQUEST boxes stay solid so Approve/Deny never fades. Stealth
+   is excluded because that mode promises an opaque, quiet UI. */
 [data-theme="glass"] .main.has-wallpaper .messages,
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .messages {
   background: transparent;
@@ -3595,21 +3575,21 @@ button.attachment {
   backdrop-filter: blur(14px) saturate(1.2);
   -webkit-backdrop-filter: blur(14px) saturate(1.2);
 }
-[data-theme="glass"] .main.has-wallpaper .msg.from-human,
-[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .msg.from-human {
-  background: rgba(26, 32, 52, 0.75);
-}
-[data-theme="glass"] .main.has-wallpaper .request,
-[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .request {
-  background: rgba(36, 10, 14, 0.95);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-}
+/* The prompt box is 15 points more opaque than the shared panel colour, and frosted, so typing
+   stays readable over a bright wallpaper. */
 [data-theme="glass"] .main.has-wallpaper .composer textarea,
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer textarea {
-  background: rgba(16, 20, 34, 0.7);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: rgba(22, 27, 44, 0.7);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+/* Consilium's own notes (status lines, startup checks) are small muted text, so they get the
+   darkest pane and brighter text; errors keep their red. */
+[data-theme="glass"] .main.has-wallpaper .note,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .note {
+  background: rgba(12, 15, 26, 0.82);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
 [data-theme="glass"] .main.has-wallpaper .composer .chip:not(.on),
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer .chip:not(.on) {
@@ -3623,14 +3603,22 @@ button.attachment {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
 }
-[data-theme="glass"] .note {
-  background: rgba(16, 20, 34, 0.78);
-  backdrop-filter: blur(20px) saturate(1.2);
-  -webkit-backdrop-filter: blur(20px) saturate(1.2);
-}
-[data-theme="glass"] .note:not(.note-error) {
-  color: #dbe3f0;
+[data-theme="glass"] .main.has-wallpaper .note:not(.note-error),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .note:not(.note-error) {
+  color: #c9cedb;
   border: 1px solid rgba(255, 255, 255, 0.14);
+}
+/* The audit (explainability) drawer sits over the conversation, so it is 15 points more
+   opaque than the shared 55% panel colour. */
+[data-theme="glass"] .audit-drawer {
+  background: rgba(22, 27, 44, 0.7);
+  -webkit-backdrop-filter: blur(14px);
+}
+[data-theme="glass"] .main.has-wallpaper .request,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .request {
+  background: rgba(36, 10, 14, 0.95);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 .theme-hint {
   margin: 6px 0 10px;

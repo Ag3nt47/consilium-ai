@@ -12,7 +12,7 @@ function ruleBlock(selectorPrefix) {
   return match[1];
 }
 
-test("visionOS Glass keeps wallpaper and live backdrop containers transparent behind frosted cards", () => {
+test("visionOS Glass keeps wallpaper and live backdrop containers transparent behind readable cards", () => {
   const messagesBlock = ruleBlock(
     '[data-theme="glass"] .main.has-wallpaper .messages,\n[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .messages'
   );
@@ -33,39 +33,17 @@ test("visionOS Glass keeps wallpaper and live backdrop containers transparent be
   assert.match(chromeBlock, /backdrop-filter:\s*none;/);
   assert.match(chromeBlock, /box-shadow:\s*none;/);
 
-  const baseCardsBlock = ruleBlock('[data-theme="glass"] :is(.msg, .thinking)');
-  assert.match(baseCardsBlock, /background:\s*rgba\(22, 27, 44, 0\.7\);/);
-
-  const baseTextareaBlock = ruleBlock('[data-theme="glass"] .composer textarea');
-  assert.match(baseTextareaBlock, /background:\s*rgba\(22, 27, 44, 0\.7\);/);
-
-  const thinkingTextBlock = ruleBlock('[data-theme="glass"] .thinking');
-  assert.match(thinkingTextBlock, /color:\s*#cbd5e1;/);
-
-  const taskPillsBlock = ruleBlock('[data-theme="glass"] :is(.task-pill, .task-claim)');
-  assert.match(taskPillsBlock, /background:\s*rgba\(32, 38, 60, 0\.8\);/);
-
   const messageCardsBlock = ruleBlock(
     '[data-theme="glass"] .main.has-wallpaper :is(.msg, .thinking),\n[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.msg, .thinking)'
   );
   assert.match(messageCardsBlock, /background:\s*rgba\(16, 20, 34, 0\.65\);/);
   assert.match(messageCardsBlock, /backdrop-filter:\s*blur\(14px\)/);
 
-  const humanCardBlock = ruleBlock(
-    '[data-theme="glass"] .main.has-wallpaper .msg.from-human,\n[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .msg.from-human'
-  );
-  assert.match(humanCardBlock, /background:\s*rgba\(26, 32, 52, 0\.75\);/);
-
-  const requestBlock = ruleBlock(
-    '[data-theme="glass"] .main.has-wallpaper .request,\n[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .request'
-  );
-  assert.match(requestBlock, /backdrop-filter:\s*none;/);
-
   const textareaBlock = ruleBlock(
     '[data-theme="glass"] .main.has-wallpaper .composer textarea,\n[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer textarea'
   );
-  assert.match(textareaBlock, /background:\s*rgba\(16, 20, 34, 0\.7\);/);
-  assert.match(textareaBlock, /backdrop-filter:\s*blur\(20px\);/);
+  assert.match(textareaBlock, /background:\s*rgba\(22, 27, 44, 0\.7\);/);
+  assert.match(textareaBlock, /backdrop-filter:\s*blur\(14px\);/);
 
   const chipOffBlock = ruleBlock(
     '[data-theme="glass"] .main.has-wallpaper .composer .chip:not(.on),\n[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer .chip:not(.on)'
@@ -78,11 +56,24 @@ test("visionOS Glass keeps wallpaper and live backdrop containers transparent be
   );
   assert.match(chipOnBlock, /backdrop-filter:\s*blur\(12px\);/);
 
-  const noteBlock = ruleBlock('[data-theme="glass"] .note');
-  assert.match(noteBlock, /background:\s*rgba\(16, 20, 34, 0\.78\);/);
-  assert.match(noteBlock, /backdrop-filter:\s*blur\(20px\) saturate\(1\.2\);/);
+  const noteBlock = ruleBlock(
+    '[data-theme="glass"] .main.has-wallpaper .note,\n[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .note'
+  );
+  assert.match(noteBlock, /background:\s*rgba\(12, 15, 26, 0\.82\);/);
+  assert.match(noteBlock, /backdrop-filter:\s*blur\(14px\);/);
 
-  const noteBorderBlock = ruleBlock('[data-theme="glass"] .note:not(.note-error)');
-  assert.match(noteBorderBlock, /color:\s*#dbe3f0;/);
-  assert.match(noteBorderBlock, /border:\s*1px solid rgba\(255, 255, 255, 0\.14\);/);
+  const noteTextBlock = ruleBlock(
+    '[data-theme="glass"] .main.has-wallpaper .note:not(.note-error),\n[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .note:not(.note-error)'
+  );
+  assert.match(noteTextBlock, /color:\s*#c9cedb;/);
+  assert.match(noteTextBlock, /border:\s*1px solid rgba\(255, 255, 255, 0\.14\);/);
+
+  const drawerBlock = ruleBlock('[data-theme="glass"] .audit-drawer');
+  assert.match(drawerBlock, /background:\s*rgba\(22, 27, 44, 0\.7\);/);
+
+  const requestBlock = ruleBlock(
+    '[data-theme="glass"] .main.has-wallpaper .request,\n[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .request'
+  );
+  assert.match(requestBlock, /background:\s*rgba\(36, 10, 14, 0\.95\);/);
+  assert.match(requestBlock, /backdrop-filter:\s*none;/);
 });
