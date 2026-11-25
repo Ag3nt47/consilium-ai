@@ -1,0 +1,27 @@
+{
+  "local-preflight": {
+    "summary": "Check a selected file scope before escalating an edit.",
+    "command": "node scripts/local-preflight.mjs <file>",
+    "guidance": "Run from the Git worktree with up to 16 files. In an isolated worktree, use --changed to discover changed JavaScript and TypeScript files automatically. This checks patch whitespace and syntax. Include the short failure diagnostic in your handoff."
+  },
+  "typescript-symbols": {
+    "summary": "Find declarations in a JavaScript or TypeScript file.",
+    "command": "node scripts/symbol-map.mjs src/App.tsx App send",
+    "guidance": "Pass a source file and optionally a top-level function and a name filter. Use --filter in place of the function to filter the whole file. For namespace members, filter by qualified name, such as Outer.Inner.Entry. Read the relevant lines before editing."
+  },
+  "python-symbols": {
+    "summary": "Find Python declarations without importing the source.",
+    "command": "python scripts/python-symbol-map.py <file> --filter <name>",
+    "guidance": "Use the reported spans to select which lines to read. The parser works offline."
+  },
+  "powershell-symbols": {
+    "summary": "Find PowerShell declarations without running the source.",
+    "command": "./scripts/powershell-symbol-map.ps1 <file> -Filter <name>",
+    "guidance": "The filter matches functions, types, and class members. Read the relevant lines before editing."
+  },
+  "model-fit": {
+    "summary": "Estimate memory fit for one or more computers.",
+    "command": "node scripts/model-fit.mjs --host 10 --device Mac=6 --weights 10",
+    "guidance": "Use free or usable RAM in GiB for each computer. Runtime overhead is reserved per device. The estimate requires no model runner."
+  }
+}

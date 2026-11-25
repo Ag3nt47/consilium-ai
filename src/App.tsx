@@ -2,7 +2,7 @@ import { TypedText, TYPED_THEMES } from "./typed";
 import { clock, clockShort, day, num } from "./fmt";
 import { commandElementId, fencedBlocks, handledCommands, needsAdmin, pendingCommands, runsOn, shellName, shellSystem, deniedText, type Fence } from "./commands";
 import { OS, dictationHint, paletteKey, paletteKeyWords, terminalName } from "./platform";
-import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, lazy, memo, Suspense, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -15,6 +15,7 @@ import {
   onActivity,
   onEvent,
   onTurn,
+  onQuickSummon,
   senderName,
   type Access,
   type AgentActivity,
@@ -32,17 +33,19 @@ import {
   type StagedUpdate,
   type TokenUsageReport,
   type TurnState,
+  type UpdateDownloadStatus,
   type UsageWindow,
   type ModelChoice,
 } from "./api";
 import { canListen, canSpeak, isEcho, Listener, parseVoiceCommand, RESUME_AFTER_MS, Speaker, startsInterrupt, voiceOn } from "./voice";
 import { VoiceSettings } from "./voicesettings";
 import { AgentVoiceMeter, VoiceVisualizer } from "./visualizer";
-import { checkForUpdate, RELEASES_URL, type UpdateInfo } from "./updates";
+import { checkForUpdate, nextUpdateCheckDelay, RELEASES_URL, type UpdateInfo } from "./updates";
 import { installHoverTips } from "./tooltip";
 import { AuditDrawer, loadPersona, PersonaChips, savePersona, withPersona } from "./qol";
 import { MessagingIndicator, MessagingSettings } from "./messaging";
 import { LinkIndicator, LinkSettings } from "./link";
+import type { BackdropMode, BackdropPrefs } from "./TelemetryBackdrop";
 import { SecurityScanSettings } from "./security";
 import { ToolsSettings } from "./tools";
 import { CiBadge, ProjectVersions } from "./projects";
@@ -51,6 +54,10 @@ import { RepoDrawer } from "./repo";
 import { BranchesDrawer } from "./branches";
 import { CustomAiForm } from "./customai";
 import { demoAddAi, demoDraft, demoSettings, demoTheme, demoTurn } from "./demo";
+
+const UpgradeProgress = lazy(() => import("./UpgradeProgress"));
+const OfflineSkills = lazy(() => import("./OfflineSkills"));
+const EnvironmentAudit = lazy(() => import("./EnvironmentAudit"));
 
 const THEMES = [
   { id: "glass", name: "visionOS Glass", note: "Frosted translucent glass, ambient glow" },
@@ -76,18 +83,24 @@ const PROVIDER_PORTALS: Record<string, { account: string; accountLabel: string; 
 };
 
 const knownTheme = (id: string | null | undefined) => THEMES.some((t) => t.id === id);
+const TelemetryBackdrop = lazy(() => import("./TelemetryBackdrop"));
+const BackdropSettings = lazy(() => import("./TelemetryBackdrop").then((module) => ({ default: module.BackdropSettings })));
+const backdropModes = { rain: "Matrix code rain", static: "Static glass", stealth: "Stealth solid" };
+const defaultBackdrop: BackdropPrefs = { enabled: false, mode: "rain", filter: "all", opacity: 22, speed: 100, fps: 30 };
+const nextBackdrop = (mode: BackdropMode): BackdropMode => mode === "rain" ? "static" : mode === "static" ? "stealth" : "rain";
 
-type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean };
+type Prefs = { theme: string; effects: boolean; autoUpdate: boolean; bingWallpaper: boolean; dailyTokenWarning: number; backdrop: BackdropPrefs };
 const PREFS_KEY = "consilium.prefs";
 const REQUEST_FLOOR_KEY = "consilium.request-floor.v2";
 
 function loadPrefs(): Prefs {
   // New installs start in Netrunner; anyone who has already picked a theme keeps it.
-  const defaults: Prefs = { theme: "netrunner", effects: true, autoUpdate: true, bingWallpaper: true };
+  const defaults: Prefs = { theme: "netrunner", effects: true, autoUpdate: true, bingWallpaper: true, dailyTokenWarning: 0, backdrop: defaultBackdrop };
   // Demo mode (README screenshots) uses Netrunner unless ?theme= says otherwise.
   if (!IN_APP) return { ...defaults, theme: knownTheme(demoTheme) ? demoTheme! : "netrunner", autoUpdate: false };
   try {
-    const saved: Prefs = { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
+    const stored = JSON.parse(localStorage.getItem(PREFS_KEY) || "{}");
+    const saved: Prefs = { ...defaults, ...stored, backdrop: { ...defaultBackdrop, ...stored.backdrop } };
     // Themes that were removed (Consilium, Cyber, Slate, CRT) fall back to Netrunner.
     return knownTheme(saved.theme) ? saved : { ...saved, theme: defaults.theme };
   } catch {
@@ -145,6 +158,51 @@ async function copyText(text: string) {
 
 function time(ts: number) {
   return clock(ts);
+}
+
+function ConversationTitle({ title, rename }: { title: string; rename: (title: string) => void }) {
+  const [draft, setDraft] = useState<{ original: string; value: string } | null>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const returnFocus = useRef(false);
+  const editing = draft !== null;
+
+  useEffect(() => {
+    if (!editing && returnFocus.current) {
+      returnFocus.current = false;
+      button.current?.focus();
+    }
+  }, [editing]);
+
+  return draft !== null ? (
+    <input
+      className="title-edit"
+      autoFocus
+      value={draft.value}
+      maxLength={60}
+      aria-label="Conversation title"
+      onChange={(event) => setDraft({ ...draft, value: event.target.value })}
+      onFocus={(event) => event.target.select()}
+      onBlur={(event) => {
+        const next = event.currentTarget.value.trim();
+        setDraft(null);
+        if (next && next !== draft.original.trim() && next !== title) rename(next);
+      }}
+      onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing || (event.key !== "Enter" && event.key !== "Escape")) return;
+        event.preventDefault();
+        returnFocus.current = true;
+        if (event.key === "Enter") event.currentTarget.blur();
+        else setDraft(null);
+      }}
+    />
+  ) : (
+    <h1>
+      <button type="button" className="title-rename" ref={button} onClick={() => setDraft({ original: title, value: title })}
+        title="Rename this conversation" aria-label={`Rename conversation: ${title}`}>
+        {title}<span className="title-pencil" aria-hidden>✎</span>
+      </button>
+    </h1>
+  );
 }
 
 type SeenReceipt = { agent: string; ts: number };
@@ -804,46 +862,46 @@ function ApiKeyField({ agent, onSaved, onError }: { agent: AgentInfo; onSaved: (
   );
 }
 
+function usagePeriod(window: UsageWindow): "session" | "weekly" | "other" {
+  const label = window.label.toLowerCase().replace(/[-_]+/g, " ").trim();
+  if (/^(?:(?:current )?session|(?:5|five) hours?|5h)(?:$|\s)/.test(label)) return "session";
+  if (/^(?:weekly|(?:7|seven) days?)(?:$|\s)/.test(label)) return "weekly";
+  return "other";
+}
+
+function UsagePeriod({ agent, label, windows }: { agent: AgentInfo; label: string; windows: UsageWindow[] }) {
+  return windows.length ? (
+    <UsageBar label={label} percent={Math.min(...windows.map((window) => window.remaining_percent))}
+      windows={windows} aria={`${agent.name} ${label.toLowerCase()} usage remaining`} />
+  ) : (
+    <div className="usage-row" title={`${agent.tool} did not report this usage window`}>
+      <div className="usage-label">
+        <span className="usage-name">{label}</span>
+        <span className="usage-unavailable">Unavailable</span>
+      </div>
+    </div>
+  );
+}
+
 function UsageMeter({ agent, forecast, claudeResets }: { agent: AgentInfo; forecast?: ResetForecast | null; claudeResets?: ClaudeResetHistory | null }) {
   const usage = agent.usage;
-  if (!usage) {
-    return (
-      <div className="usage-meter">
-        {agent.available && (
-          <span className="usage-unavailable" title={`${agent.tool} did not report plan usage`}>
-            usage unavailable
-          </span>
-        )}
-        {forecast && (
-          <div className="usage-forecast" title={`Unofficial estimate${forecast.confidence ? `, ${forecast.confidence} confidence` : ""}. Not affiliated with OpenAI.`}>
-            {forecast.official
-              ? `Reset announced: ${forecast.official}`
-              : `Global reset: ${forecast.chance_24h ?? "?"}% chance in 24 h${forecast.chance_48h != null ? ` (${forecast.chance_48h}% in 48 h)` : ""}`}
-            {" · "}
-            <button title="Open codex-reset.com, the unofficial source of the reset forecast" className="link" onClick={() => openUrl(FORECAST_SITE)}>
-              codex-reset.com
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  }
-  const { model, overall } = usage;
+  const model = usage?.model;
+  const plan = usage?.overall?.windows ?? (model ? [] : usage?.windows ?? []);
   return (
     <div className="usage-meter" title="How much of this AI's plan allowance is left, and when each limit resets">
-      {model && (
+      <UsagePeriod agent={agent} label="Current session" windows={plan.filter((window) => usagePeriod(window) === "session")} />
+      <UsagePeriod agent={agent} label="Overall weekly" windows={plan.filter((window) => usagePeriod(window) === "weekly")} />
+      {plan.filter((window) => usagePeriod(window) === "other").map((window, index) => (
+        <UsageBar key={`${window.label}-${index}`} label={window.label} percent={window.remaining_percent}
+          windows={[window]} aria={`${agent.name} ${window.label} usage remaining`} />
+      ))}
+      {model && !model.shared && (
         <UsageBar
-          label={model.shared ? `${model.label} · shares overall` : model.label}
+          label={`${model.label} · model limit`}
           percent={model.remaining_percent}
           windows={model.windows}
           aria={`${model.label} usage remaining`}
-          note={model.shared ? `${model.label} has no separate limit; it uses ${agent.name}'s overall allowance.` : undefined}
         />
-      )}
-      {overall ? (
-        <UsageBar label={`${agent.name} overall`} percent={overall.remaining_percent} windows={overall.windows} aria={`${agent.name} overall usage remaining`} />
-      ) : (
-        !model && <UsageBar label="usage left" percent={usage.remaining_percent} windows={usage.windows} aria={`${agent.name} plan usage remaining`} />
       )}
       {forecast && (
         <div className="usage-forecast" title={`Unofficial estimate${forecast.confidence ? `, ${forecast.confidence} confidence` : ""}. Not affiliated with OpenAI.`}>
@@ -1200,8 +1258,26 @@ function saveCachedAgents(agents: AgentInfo[]) {
 
 export default function App() {
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
+  const [meshPeers, setMeshPeers] = useState(0);
+  const updateBackdrop = (change: Partial<BackdropPrefs>) =>
+    setPrefs((current) => ({ ...current, backdrop: { ...current.backdrop, ...change } }));
+  const cycleBackdrop = useCallback(() => setPrefs((current) => ({
+    ...current, backdrop: { ...current.backdrop, mode: nextBackdrop(current.backdrop.mode) },
+  })), []);
+  useEffect(() => {
+    if (!prefs.backdrop.enabled) return;
+    const hotkey = (event: KeyboardEvent) => {
+      if (!event.repeat && event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.code === "KeyM") {
+        event.preventDefault();
+        cycleBackdrop();
+      }
+    };
+    window.addEventListener("keydown", hotkey);
+    return () => window.removeEventListener("keydown", hotkey);
+  }, [prefs.backdrop.enabled, cycleBackdrop]);
   const [agents, setAgents] = useState<AgentInfo[]>(loadCachedAgents);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const conversationReads = useRef({ issued: 0, applied: 0, list: [] as Conversation[] });
   const [current, setCurrent] = useState<string | null>(null);
   const [events, setEvents] = useState<ChatEvent[]>([]);
   const [turn, setTurn] = useState<TurnState | null>(null);
@@ -1235,6 +1311,7 @@ export default function App() {
   const [repoOpen, setRepoOpen] = useState(false);
   const [branchesOpen, setBranchesOpen] = useState(false);
   const [wallpaper, setWallpaper] = useState<DailyWallpaper | null>(null);
+  const [wallpaperRefresh, setWallpaperRefresh] = useState(0);
   const setPersona = (id: string) => {
     setPersonaState(id);
     savePersona(id);
@@ -1242,8 +1319,21 @@ export default function App() {
   const agentNames = useMemo(() => Object.fromEntries(agents.map((a) => [a.id, a.name])), [agents]);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(!IN_APP && demoSettings);
-  const [showAddAi, setShowAddAi] = useState(!IN_APP && demoAddAi);
+  const [quickSummonAvailable, setQuickSummonAvailable] = useState(false);
+  const [addPanel, setAddPanel] = useState<"choose" | "ai" | "device" | null>(!IN_APP && demoAddAi ? "ai" : null);
+  const addTrigger = useRef<HTMLButtonElement>(null);
+  const focusAddHeading = useCallback((heading: HTMLHeadingElement | null) => {
+    heading?.focus({ preventScroll: true });
+  }, []);
+  function closeAddPanel() {
+    setAddPanel(null);
+    addTrigger.current?.focus();
+  }
   const [showUsage, setShowUsage] = useState(false);
+  const usageVisible = useRef(false);
+  const usageRequest = useRef(0);
+  const [budgetWarning, setBudgetWarning] = useState<{ id: string; text: string; message: string } | null>(null);
+  const budgetCheck = useRef(false);
   const [showPalette, setShowPalette] = useState(false);
   // Voice chat: whether replies are being read aloud right now, and what the recogniser is hearing.
   const [speakingAgent, setSpeakingAgent] = useState<string | null>(null);
@@ -1287,10 +1377,37 @@ export default function App() {
   const [claudeResets, setClaudeResets] = useState<ClaudeResetHistory | null>(null);
   const [pressure, setPressure] = useState<SystemPressure | null>(null);
   const [staged, setStaged] = useState<StagedUpdate | null>(null);
+  const [downloadStatus, setDownloadStatus] = useState<UpdateDownloadStatus>({ active: false, version: "" });
   const [updating, setUpdating] = useState(false);
   const [stagedUi, setStagedUi] = useState<{ version: string } | null>(null);
   const [requestingStatus, setRequestingStatus] = useState(false);
   const [requestingUpdate, setRequestingUpdate] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
+  const [requestingInstallers, setRequestingInstallers] = useState(false);
+  const [installerRequest, setInstallerRequest] = useState<{ message: string; url?: string } | null>(null);
+
+  async function buildInstallers() {
+    setRequestingInstallers(true);
+    setInstallerRequest(null);
+    try {
+      const url = await api.requestDraftInstallers();
+      setInstallerRequest(url
+        ? { message: "GitHub accepted the installer build request.", url }
+        : { message: "GitHub accepted the workflow request. Open Installer builds to follow it." });
+    } catch (error) {
+      setInstallerRequest({ message: `Couldn't request installer builds: ${String(error)}` });
+    } finally {
+      setRequestingInstallers(false);
+    }
+  }
+  const markDownloadStarting = useCallback((version: string) => {
+    setDownloadError("");
+    setDownloadStatus({ active: true, version: version.replace(/^v/i, "") });
+  }, []);
+  const markDownloadFailed = useCallback((error: unknown) => {
+    setDownloadStatus({ active: false, version: "" });
+    setDownloadError(`Couldn't prepare the GitHub update: ${String(error)}`);
+  }, []);
 
   // Quick hover explanations for every control that has a title.
   useEffect(() => installHoverTips(), []);
@@ -1308,9 +1425,9 @@ export default function App() {
     api.uiUpdateAvailable().then(setStagedUi).catch(() => undefined);
     // A linked computer is installing an update: look for the release now, so this one follows.
     api.releaseCheckRequested()
-      .then((now) => (now ? checkForUpdate(true).then(setUpdate) : undefined))
+      .then((now) => (now ? checkForUpdate(true, markDownloadStarting, markDownloadFailed).then(setUpdate) : undefined))
       .catch(() => undefined);
-  }, []);
+  }, [markDownloadStarting, markDownloadFailed]);
   useEffect(() => {
     pollStaged();
     const t = setInterval(pollStaged, 4000);
@@ -1325,6 +1442,12 @@ export default function App() {
       document.removeEventListener("visibilitychange", onShow);
     };
   }, [pollStaged]);
+
+  useEffect(() => {
+    const poll = () => api.updateDownloadStatus().then(setDownloadStatus).catch(() => undefined);
+    const t = window.setInterval(poll, downloadStatus.active ? 500 : 4000);
+    return () => window.clearInterval(t);
+  }, [downloadStatus.active]);
 
   // Screen-only update: swap the page in place; the AIs' work carries on untouched.
   const applyUi = async () => {
@@ -1362,6 +1485,7 @@ export default function App() {
   const [unseen, setUnseen] = useState(0);
 
   currentRef.current = current;
+  usageVisible.current = showUsage;
 
   const adaptiveMode = pressure?.adaptive_mode ?? "balanced";
 
@@ -1394,12 +1518,38 @@ export default function App() {
   }, [adaptiveMode]);
 
   useEffect(() => {
-    if (prefs.bingWallpaper) {
-      api.getDailyWallpaper().then(setWallpaper).catch(() => undefined);
-    } else {
+    if (!prefs.bingWallpaper) {
       setWallpaper(null);
+      return;
     }
-  }, [prefs.bingWallpaper]);
+    let disposed = false;
+    let pending = false;
+    let lastAttempt = -Infinity;
+    let lastDay = "";
+    const refresh = () => {
+      if (pending || document.visibilityState !== "visible") return;
+      const now = new Date();
+      const day = now.toDateString();
+      const elapsed = now.getTime() - lastAttempt;
+      if (day === lastDay && elapsed >= 0 && elapsed < 30 * 60_000) return;
+      lastDay = day;
+      lastAttempt = now.getTime();
+      pending = true;
+      api.getDailyWallpaper().then((next) => {
+        if (!disposed && next) setWallpaper(next);
+      }).catch(() => undefined).finally(() => { pending = false; });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 60_000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [prefs.bingWallpaper, wallpaperRefresh]);
 
   const refreshAgents = useCallback(() => {
     // Focus, turn completion and the refresh button can all fire together. Share one request so
@@ -1452,36 +1602,60 @@ export default function App() {
   }, []);
 
   const refreshList = useCallback(async () => {
+    const reads = conversationReads.current;
+    const request = ++reads.issued;
     const list = await api.list();
+    if (request < reads.applied) return reads.list;
+    reads.applied = request;
+    reads.list = list;
     setConversations(list);
     return list;
   }, []);
 
   const loadTokenUsage = useCallback(async (convId?: string | null) => {
     const id = convId ?? currentRef.current;
+    const request = ++usageRequest.current;
     if (!id) {
       setTokenReport(null);
+      setUsageLoading(false);
       return;
     }
     setUsageLoading(true);
     try {
       const dayStart = new Date().setHours(0, 0, 0, 0);
       const report = await api.tokenUsage(id, dayStart);
-      setTokenReport(report);
+      if (request === usageRequest.current && id === currentRef.current) setTokenReport(report);
     } catch {
-      /* ignore */
+      if (request === usageRequest.current) setTokenReport(null);
     } finally {
-      setUsageLoading(false);
+      if (request === usageRequest.current) setUsageLoading(false);
     }
   }, []);
 
   const openUsage = useCallback(() => {
     setShowUsage(true);
-    loadTokenUsage();
-  }, [loadTokenUsage]);
+  }, []);
 
   // Startup: agents, conversations (creating a first one), live events, update check.
   useEffect(() => {
+    let disposed = false;
+    let readingForEvent = false;
+    let queuedRead = false;
+    async function refreshAfterEvent() {
+      if (disposed) return;
+      queuedRead = true;
+      if (readingForEvent) return;
+      readingForEvent = true;
+      try {
+        do {
+          queuedRead = false;
+          await refreshList().catch(() => undefined);
+        } while (queuedRead && !disposed);
+      } finally {
+        readingForEvent = false;
+      }
+    }
+
     refreshAgents();
     refreshList().then(async (list) => {
       const first = list[0] ?? (await api.create());
@@ -1496,11 +1670,14 @@ export default function App() {
           speakerRef.current?.say(e.sender, senderName(e.sender, agentsRef.current), e.text);
         }
       }
-      refreshList();
+      void refreshAfterEvent();
       // An AI saying an update is ready should light the button straight away.
       if (e.kind === "message" && e.sender !== "human") pollStaged();
-      // A note from Consilium (an AI ran out of usage, or is back) changes the AIs' status.
-      if (e.sender === "consilium") refreshAgents();
+      // A note from Consilium (an AI ran out of usage, or is back, or council on/off changed) changes the AIs' status.
+      if (e.sender === "consilium") {
+        refreshAgents();
+        if (currentRef.current) api.switchedOff(currentRef.current).then(setOffHere).catch(() => setOffHere([]));
+      }
     });
     const un2 = onTurn((t) => {
       if (t.conversation === currentRef.current) {
@@ -1514,7 +1691,7 @@ export default function App() {
       }
       if (t.state === "idle") {
         refreshAgents();
-        loadTokenUsage();
+        if (usageVisible.current) loadTokenUsage();
       }
     });
     const un3 = onActivity((activity) => {
@@ -1532,6 +1709,7 @@ export default function App() {
     };
     window.addEventListener("focus", onFocus);
     return () => {
+      disposed = true;
       un1.then((f) => f());
       un2.then((f) => f());
       un3.then((f) => f());
@@ -1543,11 +1721,38 @@ export default function App() {
   // with automatic install on (Settings → Updates) Consilium installs it and restarts by itself.
   useEffect(() => {
     if (!prefs.autoUpdate) return;
-    const check = () => checkForUpdate(false).then(setUpdate).catch(() => undefined);
+    let lastCheck = 0;
+    let checking = false;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = () => {
+      if (checking || disposed) return;
+      clearTimeout(timer);
+      checking = true;
+      lastCheck = Date.now();
+      void checkForUpdate(false, markDownloadStarting, markDownloadFailed)
+        .then((result) => { if (!disposed) setUpdate(result); })
+        .catch(() => undefined)
+        .finally(() => {
+          checking = false;
+          if (!disposed) timer = setTimeout(check, nextUpdateCheckDelay());
+        });
+    };
+    const onResume = () => {
+      if (document.visibilityState === "visible" && Date.now() - lastCheck >= 30_000) check();
+    };
     check();
-    const t = setInterval(check, 30 * 60 * 1000);
-    return () => clearInterval(t);
-  }, [prefs.autoUpdate]);
+    window.addEventListener("focus", onResume);
+    window.addEventListener("online", onResume);
+    document.addEventListener("visibilitychange", onResume);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      window.removeEventListener("focus", onResume);
+      window.removeEventListener("online", onResume);
+      document.removeEventListener("visibilitychange", onResume);
+    };
+  }, [prefs.autoUpdate, markDownloadStarting, markDownloadFailed]);
 
   useEffect(() => {
     if (!current) return;
@@ -1592,22 +1797,78 @@ export default function App() {
   // Shows the floating jump-to-latest button whenever the chat is scrolled off the bottom.
   const [awayFromLatest, setAwayFromLatest] = useState(false);
 
+  // Only a scroll the reader started unpins; content shrinking, scroll anchoring and our own
+  // scrolls also lower scrollTop and must not stop following.
+  const userScrollIntentRef = useRef(0);
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const mark = () => { userScrollIntentRef.current = Date.now(); };
+    const onWheel = (e: WheelEvent) => { if (e.deltaY < 0) mark(); };
+    // Scrollbar drags hit the list itself; clicks on message controls (Collapse, Reply) hit children.
+    const onPointer = (e: PointerEvent) => { if (e.target === el) mark(); };
+    const onKey = (e: KeyboardEvent) => { if (["PageUp", "ArrowUp", "Home"].includes(e.key)) mark(); };
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchmove", mark, { passive: true });
+    el.addEventListener("pointerdown", onPointer);
+    el.addEventListener("keydown", onKey);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchmove", mark);
+      el.removeEventListener("pointerdown", onPointer);
+      el.removeEventListener("keydown", onKey);
+    };
+  }, [current]);
+
   function onMessagesScroll() {
     const el = messagesRef.current;
     if (!el) return;
     const top = el.scrollTop;
-    const nearBottom = el.scrollHeight - top - el.clientHeight < 80;
+    const nearBottom = el.scrollHeight - top - el.clientHeight <= 4;
     // The jump button shows whenever the view is off the bottom, not only when far up.
     setAwayFromLatest(!nearBottom);
     // Only an upward scroll unpins: smooth auto-scrolls and growing content never move scrollTop up.
-    if (nearBottom) {
+    if (top < lastScrollTopRef.current - 2 && Date.now() - userScrollIntentRef.current < 400) {
+      followRef.current = false;
+    } else if (nearBottom) {
       followRef.current = true;
       setUnseen(0);
-    } else if (top < lastScrollTopRef.current - 2) {
-      followRef.current = false;
     }
     lastScrollTopRef.current = top;
   }
+
+  // Streamed text, images loading and expanded messages make the list taller without a new
+  // event; while following, keep the newest content in view.
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const stick = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (!followRef.current) return;
+        el.scrollTop = el.scrollHeight;
+        lastScrollTopRef.current = el.scrollTop;
+      });
+    };
+    const ro = new ResizeObserver(stick);
+    ro.observe(el);
+    Array.from(el.children).forEach((c) => ro.observe(c));
+    const mo = new MutationObserver((records) => {
+      for (const r of records) {
+        r.addedNodes.forEach((n) => n instanceof Element && ro.observe(n));
+        r.removedNodes.forEach((n) => n instanceof Element && ro.unobserve(n));
+      }
+      stick();
+    });
+    mo.observe(el, { childList: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [current]);
 
   function scrollToLatest() {
     followRef.current = true;
@@ -1801,9 +2062,33 @@ export default function App() {
   const others = useMemo(() => agents.filter((a) => !a.member), [agents]);
 
   // Sending while the AIs are answering doesn't interrupt them: they read it and carry on. Stop interrupts.
-  async function send() {
+  async function send(budgetChecked = false) {
     const text = draftBox.current?.get() ?? "";
-    if (!text.trim() && !pending.length) return;
+    if (budgetCheck.current || (!budgetChecked && budgetWarning) || (!text.trim() && !pending.length)) return;
+    const limit = prefs.dailyTokenWarning;
+    if (!budgetChecked && current && discuss && !busy && Number.isSafeInteger(limit) && limit > 0) {
+      budgetCheck.current = true;
+      let message = "";
+      try {
+        const dayStart = new Date().setHours(0, 0, 0, 0);
+        const report = await api.tokenUsage(current, dayStart);
+        const total = Object.values(report.today).reduce((sum, agent) => sum + agent.total_tokens, 0);
+        if (total >= limit) {
+          message = `Consilium recorded ${num(total)} tokens today. Your warning threshold is ${num(limit)} tokens.`;
+        }
+      } catch {
+        message = "Consilium couldn't check today's recorded token usage.";
+      } finally {
+        budgetCheck.current = false;
+      }
+      if (current !== currentRef.current || text !== (draftBox.current?.get() ?? "")) return;
+      if (message) {
+        setBudgetWarning({ id: current, text, message });
+      } else {
+        await sendRef.current(true);
+      }
+      return;
+    }
     // Enter used to do nothing at all when no conversation was open (for example when the list
     // failed to load at startup). Open the newest one, or start one, and send there instead.
     let id = current;
@@ -1877,7 +2162,7 @@ export default function App() {
         (peers
           ? `Update request (also sent to ${peers} linked computer${peers === 1 ? "" : "s"}, which install any newer build they have or download): `
           : "Update request: ") +
-          "nothing is staged to install. If a build is already running, say so and when it should be ready; don't start a second one. Otherwise agree in one message who takes what, then work from docs/UPGRADE_STATUS.md, the canonical backlog for every requirement in the uploaded Word documents 'Consilium Upgrade Overhaul.docx', '2nd consilium update.docx' and '3rd update.docx'. Prioritize unfinished document items marked in progress or next before later items, docs/ROADMAP.md, open bugs, or newly noticed improvements. Build and test the selected work, update the backlog in the same commit, commit it, integrate it onto main, and push origin/main before staging it. Confirm GitHub checks pass on macOS, Windows and Linux. Stage with npm run update:ui for screen-only changes, or a version bump and npm run update:stage for engine changes. Do not mark a document item complete until it is implemented and verified. Only one build at a time on this machine.",
+          "No update is staged. If a build is active, give its status. Otherwise use docs/UPGRADE_STATUS.md, the queue for all six upgrade documents. Check open PRs and agree on owners and file scope in one message. Prefer small app and token-efficiency tasks, and avoid duplicate builds. Record verification in the queue, integrate only after checks pass, then stage the appropriate UI or desktop update.",
         members.map((member) => member.id),
         1,
       );
@@ -1906,6 +2191,23 @@ export default function App() {
   // Stable handles for the prompt box, so it doesn't re-render when the app does.
   const sendRef = useRef(send);
   sendRef.current = send;
+  useEffect(() => {
+    if (!IN_APP) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    api.quickSummonAvailable().then((available) => {
+      if (!disposed) setQuickSummonAvailable(available);
+    }).catch(() => undefined);
+    onQuickSummon(() => draftBox.current?.focus()).then((remove) => {
+      if (disposed) remove();
+      else unlisten = remove;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const attachPastedRef = useRef(attachPasted);
   attachPastedRef.current = attachPasted;
 
@@ -1915,10 +2217,46 @@ export default function App() {
       try {
         const data = Array.from(new Uint8Array(await f.arrayBuffer()));
         const name = f.name && f.name !== "image.png" ? f.name : `pasted-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.${f.type.split("/")[1] || "png"}`;
+        if (current !== currentRef.current) return;
         const a = await api.attachData(current, name, data);
+        if (current !== currentRef.current) return;
         setPending((p) => [...p, a]);
       } catch (e) {
         setError(`Couldn't attach ${f.name || "the pasted file"}: ${e}`);
+      }
+    }
+  }
+
+  async function attachClipboardImage() {
+    if (!current) return;
+    const conversation = current;
+    try {
+      if (IN_APP) {
+        const attachment = await api.attachClipboardImage(conversation);
+        if (conversation === currentRef.current) {
+          setPending((previous) => [...previous, attachment]);
+          setError(null);
+        }
+        return;
+      }
+      const items = await navigator.clipboard.read();
+      const files: File[] = [];
+      for (const item of items) {
+        const format = item.types.find((type) => ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(type));
+        if (!format) continue;
+        const blob = await item.getType(format);
+        const extension = format === "image/jpeg" ? "jpg" : format.split("/")[1];
+        files.push(new File([blob], `clipboard-${files.length + 1}.${extension}`, { type: format }));
+      }
+      if (conversation !== currentRef.current) return;
+      if (files.length === 0) {
+        setError("Copy a screenshot or image first, then try again.");
+        return;
+      }
+      await attachPasted(files);
+    } catch (error) {
+      if (conversation === currentRef.current) {
+        setError(IN_APP ? String(error) : "Couldn't read an image from the clipboard. Paste the copied image directly into the message box instead.");
       }
     }
   }
@@ -2306,17 +2644,9 @@ export default function App() {
     }
   }
 
-  // Renaming happens in place: the title turns into a text box (prompt() shows nothing in the app window).
-  const [titleDraft, setTitleDraft] = useState<string | null>(null);
-  function renameCurrent() {
-    if (current && meta) setTitleDraft(meta.title);
-  }
-  async function saveTitle() {
-    const title = titleDraft?.trim();
-    setTitleDraft(null);
-    if (!current || !meta || !title || title === meta.title) return;
+  async function saveTitle(conversation: string, title: string) {
     try {
-      await api.rename(current, title);
+      await api.rename(conversation, title);
       refreshList();
     } catch (e) {
       setError(String(e));
@@ -2325,13 +2655,17 @@ export default function App() {
 
   async function checkNow() {
     setUpdateNote("Checking…");
-    const u = await checkForUpdate(true).catch(() => null);
-    setUpdate(u);
-    setUpdateNote(
-      !u ? "You're up to date (or offline)."
-        : u.unreleased ? `Version ${u.latest} is on GitHub but has no installer yet (you have ${u.current}). Build it from source, or ask the AIs to publish a release.`
-        : `Version ${u.latest} is available (you have ${u.current}).`,
-    );
+    try {
+      const u = await checkForUpdate(true, markDownloadStarting, markDownloadFailed);
+      setUpdate(u);
+      setUpdateNote(
+        !u ? "You're up to date."
+          : u.unreleased ? `Version ${u.latest} is on GitHub but has no installer yet (you have ${u.current}). Build it from source, or ask the AIs to publish a release.`
+          : `Version ${u.latest} is available (you have ${u.current}).`,
+      );
+    } catch (error) {
+      setUpdateNote(`Couldn't check GitHub for updates: ${String(error)}`);
+    }
   }
 
   const notReady = members.filter((a) => !a.available);
@@ -2355,7 +2689,7 @@ export default function App() {
   async function bringIn(a: AgentInfo) {
     const st = agentState(a);
     if (a.transport === "api" && st !== "ready") {
-      setShowAddAi(true);
+      setAddPanel("ai");
       const portal = PROVIDER_PORTALS[a.id];
       if (portal) await openUrl(portal.account).catch((e) => setError(`Couldn't open ${a.company}: ${e}`));
       setToast(`Finish account, billing, and API-key setup with ${a.company}; then paste only the key in Add AI`);
@@ -2365,7 +2699,7 @@ export default function App() {
     if (st !== "ready") {
       try {
         const title = await api.setup(a.id, st === "missing" ? "install" : "signin");
-        setShowAddAi(true);
+        setAddPanel("ai");
         setToast(`${title}: finish in the terminal window, then approve adding ${a.name}`);
         setTimeout(() => setToast(null), 7000);
       } catch (e) {
@@ -2559,7 +2893,7 @@ export default function App() {
     { id: "audit", name: "Open Audit Log", hint: "Approvals, requests, updates and errors, newest first", run: () => setAuditOpen(true) },
     { id: "usage", name: "Show Token Usage", hint: "Conversation & daily totals", run: () => openUsage() },
     { id: "self-check", name: "Run Self-Check", hint: "Probe all active council models", run: () => runSelfCheck() },
-    { id: "manage-ais", name: "Add / Remove AIs", hint: "Council membership", run: () => setShowAddAi(true) },
+    { id: "manage-ais", name: "Add / Remove AIs", hint: "Council membership", run: () => setAddPanel("ai") },
     { id: "link-sync", name: "Multi-Computer Sync", hint: "Pair and sync with Mac or Windows PC over Gigabit / Wi-Fi", run: () => setShowSettings(true) },
     { id: "settings", name: "Open Settings", hint: "Theme & access preferences", run: () => {
         setShowSettings(true);
@@ -2639,15 +2973,31 @@ export default function App() {
   }, [paletteCommands, paletteQuery]);
 
   return (
-    <div className="app">
+    <div className="app" data-backdrop={prefs.backdrop.enabled ? prefs.backdrop.mode : undefined}>
+      {prefs.backdrop.enabled && prefs.backdrop.mode !== "stealth" && (
+        <Suspense fallback={null}>
+          <TelemetryBackdrop prefs={prefs.backdrop} agents={agents} workers={thinkingIds} events={events} meshPeers={meshPeers}
+            memory={pressure?.memory_percent} paused={!prefs.effects || adaptiveMode === "eco"} />
+        </Suspense>
+      )}
       <div className="fx-scanlines" aria-hidden />
       <aside className="sidebar" ref={sidebarRef}>
         <div className="brand">
-          <img src="/icon.png" alt="" className="brand-icon" />
+          <img
+            src="/icon.png"
+            alt=""
+            className={`brand-icon${downloadStatus.active ? " update-downloading" : ""}`}
+            title={downloadStatus.active ? `Downloading Consilium ${downloadStatus.version || "update"} from GitHub` : undefined}
+          />
           <div>
             <div className="brand-name">Consilium</div>
             <div className="brand-tagline">A council of minds</div>
           </div>
+          {downloadStatus.active && (
+            <span className="visually-hidden" role="status">
+              Downloading Consilium {downloadStatus.version || "update"} from GitHub
+            </span>
+          )}
         </div>
         <button title="Start a new, empty conversation with the council" className="btn primary wide" onClick={newConversation}>
           + New conversation
@@ -2905,9 +3255,13 @@ export default function App() {
         </div>
         <div className="sidebar-foot">
         <ResourcePressureGauge pressure={pressure} />
+        {prefs.backdrop.enabled && (
+          <button type="button" className="btn ghost small-btn" title="Cycle the performance backdrop (Ctrl+Shift+M)"
+            onClick={cycleBackdrop}>{backdropModes[prefs.backdrop.mode]}</button>
+        )}
         <div className="sidebar-actions">
-          <button className="btn ghost" onClick={() => setShowAddAi(true)} title="Add or remove AIs">
-            + Add AI
+          <button className="btn ghost" ref={addTrigger} onClick={() => setAddPanel("choose")} aria-haspopup="dialog" aria-label="Add an AI or device">
+            Add <span aria-hidden="true">🤖 💻</span>
           </button>
           <button
             title="Theme, default folder, access level, shared memory, terminal command and updates"
@@ -2928,7 +3282,7 @@ export default function App() {
       </aside>
 
       <main
-        className={`main ${wallpaper && prefs.bingWallpaper ? "has-wallpaper" : ""}`}
+        className={`main ${wallpaper && prefs.bingWallpaper && !prefs.backdrop.enabled ? "has-wallpaper" : ""}`}
         style={wallpaper && prefs.bingWallpaper ? ({ "--bing-wallpaper": `url(${wallpaper.data_url})` } as React.CSSProperties) : undefined}
       >
         {update && (
@@ -2944,27 +3298,9 @@ export default function App() {
         )}
         <header className="topbar">
           <div className="title-block">
-            {titleDraft !== null ? (
-              <input
-                className="title-edit"
-                autoFocus
-                value={titleDraft}
-                maxLength={60}
-                aria-label="Conversation title"
-                onChange={(e) => setTitleDraft(e.target.value)}
-                onFocus={(e) => e.target.select()}
-                onBlur={saveTitle}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") e.currentTarget.blur();
-                  if (e.key === "Escape") setTitleDraft(null);
-                }}
-              />
-            ) : (
-              <h1 onClick={renameCurrent} title="Click to rename this conversation. The AIs can rename it too.">
-                {meta?.title ?? "Consilium"}
-                {meta && <span className="title-pencil" aria-hidden>✎</span>}
-              </h1>
-            )}
+            {meta
+              ? <ConversationTitle key={meta.id} title={meta.title} rename={(title) => void saveTitle(meta.id, title)} />
+              : <h1>Consilium</h1>}
             <div className="workspace">
               {meta?.workspace ? (
                 <>
@@ -2993,7 +3329,7 @@ export default function App() {
           <div className="topbar-actions">
             <div className="topbar-status">
               <MessagingIndicator />
-              <LinkIndicator />
+              <LinkIndicator onConnectedCount={prefs.backdrop.enabled && prefs.backdrop.mode === "rain" ? setMeshPeers : undefined} />
               {wallpaper && prefs.bingWallpaper && wallpaper.title && (
                 <span
                   className="wallpaper-pill"
@@ -3102,6 +3438,7 @@ export default function App() {
         )}
         <div className="task-float-anchor">
           <TaskBoardPanel
+            key={current}
             conversation={current}
             changeKey={events.length}
             people={[{ id: "human", name: "You" }, ...members.map((m) => ({ id: m.id, name: m.name }))]}
@@ -3178,9 +3515,11 @@ export default function App() {
                   {e.usage && e.usage.total_tokens > 0 && (
                     <span
                       className="tokens-tag"
+                      aria-label={e.usage.output_rate_milli !== undefined ? `Provider-reported completion rate: ${(e.usage.output_rate_milli / 1000).toFixed(1)} tokens per second` : undefined}
                       title={`Turn usage:\n• Total: ${num(e.usage.total_tokens)}\n• Input: ${num(e.usage.input_tokens)}\n• Output: ${num(e.usage.output_tokens)}${e.usage.thinking_tokens ? `\n• Thinking: ${num(e.usage.thinking_tokens)}` : ""}${e.usage.cache_read_tokens ? `\n• Cache read: ${num(e.usage.cache_read_tokens)}` : ""}`}
                     >
                       {formatTokens(e.usage.total_tokens)} tokens
+                      {e.usage.output_rate_milli !== undefined && ` · ${(e.usage.output_rate_milli / 1000).toFixed(1)} tok/s`}
                     </span>
                   )}
                 </div>
@@ -3434,6 +3773,10 @@ export default function App() {
               <button className="btn ghost" onClick={attachPicked} title="Attach files: documents, Word files, pictures, PDFs, code" aria-label="Attach files">
                 📎
               </button>
+              <button className="btn ghost" onClick={attachClipboardImage} disabled={!current}
+                title="Attach a copied screenshot or image from the clipboard" aria-label="Attach clipboard image">
+                📋
+              </button>
               {busy && (
                 <button
                   className="btn stop"
@@ -3448,7 +3791,7 @@ export default function App() {
               )}
               <button
                 className="btn primary"
-                onClick={send}
+                onClick={() => void send()}
                 disabled={draftEmpty && !pending.length}
                 title={busy ? "Add this to the discussion; the AIs read it without being interrupted (Enter)" : "Send (Enter)"}
               >
@@ -3480,6 +3823,9 @@ export default function App() {
               ))}
             </div>
             <p className="theme-hint">You can create your own theme by asking the AIs.</p>
+            <Suspense fallback={null}>
+              <BackdropSettings prefs={prefs.backdrop} modes={backdropModes} update={updateBackdrop} />
+            </Suspense>
             <label className="toggle">
               <input type="checkbox" checked={prefs.effects} onChange={(e) => setPrefs({ ...prefs, effects: e.target.checked })} />
               Visual effects (scanlines, glow and animation in neon themes)
@@ -3498,10 +3844,7 @@ export default function App() {
                   type="button"
                   className="btn small-btn"
                   title="Download and apply today's wallpaper from Bing automatically"
-                  onClick={() => {
-                    setWallpaper(null);
-                    api.getDailyWallpaper().then(setWallpaper).catch(() => undefined);
-                  }}
+                  onClick={() => setWallpaperRefresh((request) => request + 1)}
                 >
                   🔄 Download & Apply Today's Wallpaper
                 </button>
@@ -3661,6 +4004,10 @@ export default function App() {
               </ul>
             )}
             <div className="section-label">Tools</div>
+            <Suspense fallback={null}>
+              <OfflineSkills copyText={copyText} />
+              <EnvironmentAudit key={current ?? ""} conversation={current ?? undefined} />
+            </Suspense>
             <ToolsSettings
               ais={members.map((a) => ({ id: a.id, name: a.name }))}
               onSend={async (text, to) => {
@@ -3689,6 +4036,12 @@ export default function App() {
             <LinkSettings />
             <div className="section-label">Security scans</div>
             <SecurityScanSettings />
+            <div className="section-label">Keyboard shortcut</div>
+            <p className="muted small">
+              {quickSummonAvailable
+                ? `Press ${OS === "mac" ? "Command+Option" : "Ctrl+Alt"}+Space to bring Consilium forward and focus the current draft.`
+                : "The global quick-summon shortcut is unavailable on this computer."}
+            </p>
             <div className="section-label">Updates</div>
             <label className="toggle">
               <input
@@ -3714,7 +4067,7 @@ export default function App() {
             </label>
             <div className="row">
               <button title="Check GitHub for a newer Consilium release now" className="btn ghost" onClick={checkNow}>
-                Check now
+                Check GitHub now
               </button>
               <button
                 className="btn primary"
@@ -3733,13 +4086,40 @@ export default function App() {
               <button title="Open the list of all Consilium releases on GitHub" className="link" onClick={() => openUrl(RELEASES_URL)}>
                 All releases
               </button>
-              <span className="muted">{updateNote}</span>
+              <span className="muted">
+                {downloadStatus.active ? `Downloading Consilium ${downloadStatus.version || "update"} from GitHub…` : updateNote}
+              </span>
             </div>
+            {downloadError && <p className="error small" role="status">{downloadError}</p>}
+            <div className="row wrap">
+              <button className="btn ghost" disabled={requestingInstallers} onClick={() => void buildInstallers()}>
+                {requestingInstallers ? "Requesting installer builds…" : "Build draft installers"}
+              </button>
+              <button className="link" onClick={() => openUrl("https://github.com/Ag3nt47/consilium-ai/actions/workflows/release.yml")}>
+                Installer builds
+              </button>
+            </div>
+            {installerRequest && (
+              <p className="muted small" role="status">
+                {installerRequest.message}{" "}
+                {installerRequest.url && (
+                  <button className="link" onClick={() => openUrl(installerRequest.url!)}>Open this build</button>
+                )}
+              </p>
+            )}
             <p className="muted small">
-              A new version downloads in the background and is checked against GitHub's fingerprint; it's only installed when you click Update Now.
-              Your conversations stay on this computer. CLI agents use their provider's existing sign-in;
-              optional API-agent keys are saved locally and are never added to the conversation or returned to this UI.
+              Consilium checks the downloaded installer against GitHub's fingerprint.
+              {" "}{council?.auto_install_updates ?? true
+                ? "The app installs the update and restarts automatically after running commands finish."
+                : "Click Update Now when the installer is ready."}
             </p>
+            <p className="muted small">
+              Conversations stay on this computer. CLI agents use their provider's existing sign-in.
+              Optional API-agent keys are stored locally.
+            </p>
+            <Suspense fallback={null}>
+              <UpgradeProgress />
+            </Suspense>
             <div className="row end">
               <button title="Close Settings" className="btn primary" onClick={() => setShowSettings(false)}>
                 Done
@@ -3748,10 +4128,51 @@ export default function App() {
           </div>
         </div>
       )}
-      {showAddAi && (
-        <div className="modal-backdrop" onClick={() => setShowAddAi(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>Add AI</h2>
+      {addPanel === "choose" && (
+        <div className="modal-backdrop" onClick={closeAddPanel}>
+          <div className="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="add-title"
+            onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") closeAddPanel(); }}>
+            <h2 id="add-title">Add to Consilium</h2>
+            <button autoFocus className="btn ghost add-choice" onClick={() => setAddPanel("ai")}>
+              <span aria-hidden="true">🤖</span> Add an AI
+              <small>Set up a provider or a local model, check it, and add it to the council.</small>
+            </button>
+            <button className="btn ghost add-choice" onClick={() => setAddPanel("device")}>
+              <span aria-hidden="true">💻</span> Connect a device
+              <small>Pair a Windows or Mac computer and test the connection.</small>
+            </button>
+            <div className="row end"><button className="btn ghost" onClick={closeAddPanel}>Cancel</button></div>
+          </div>
+        </div>
+      )}
+      {addPanel === "device" && (
+        <div className="modal-backdrop" onClick={closeAddPanel}>
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="add-device-title"
+            onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") closeAddPanel(); }}>
+            <h2 id="add-device-title" tabIndex={-1} ref={focusAddHeading}>Connect a device</h2>
+            <ol className="addai-steps">
+              <li>Open Consilium on both computers, connect them to the same network, and enable sync below.</li>
+              <li>Generate a pairing code on one computer. Enter its address and code on the other.</li>
+              <li>Under Paired Computers, select Test Connection to verify the handshake and routes.</li>
+            </ol>
+            <LinkSettings />
+            <div className="row end">
+              <button className="btn ghost" onClick={() => setAddPanel("choose")}>Back</button>
+              <button className="btn primary" onClick={closeAddPanel}>Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {addPanel === "ai" && (
+        <div className="modal-backdrop" onClick={closeAddPanel}>
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="add-ai-title"
+            onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") closeAddPanel(); }}>
+            <h2 id="add-ai-title" tabIndex={-1} ref={focusAddHeading}>Add an AI</h2>
+            <ol className="addai-steps">
+              <li>Choose a provider below, or add a custom endpoint for a local or hosted model.</li>
+              <li>Complete the steps on its card, then use Check setup to refresh its status.</li>
+              <li>Add the model to the council. Test council replies sends one short prompt to each active member and may use provider allowance.</li>
+            </ol>
             <p className="muted small">
               Most AIs join through their company's official command-line tool and your own account. Grok and DeepSeek
               have no such tool, so they use an API key you paste here. You can also add any other AI below: a
@@ -3850,6 +4271,7 @@ export default function App() {
               );
             })}
             <CustomAiForm
+              availableGiB={pressure ? (pressure.available_memory_mb ?? pressure.total_memory_mb * (1 - pressure.memory_percent / 100)) / 1024 : undefined}
               onAdded={(id) => {
                 refreshAgents();
                 setToast(`Added @${id}. Press "Add" on its card to bring it into the council.`);
@@ -3858,21 +4280,34 @@ export default function App() {
               onError={(e) => setError(e)}
             />
             <div className="section-label">In the council</div>
-            {members.map((a) => (
-              <div key={a.id} className="member-row">
-                <span className={`agent-name agent-${a.id}`}>{a.name}</span>
-                <span className="muted small">{a.company}</span>
-                <span className="spacer" />
-                <button title="Take this AI out of the council (at least one must stay)" className="link danger-link" disabled={members.length < 2} onClick={() => removeMember(a)}>
-                  remove
-                </button>
-              </div>
-            ))}
+            {members.map((a) => {
+              const check = checks[a.id];
+              return (
+                <div key={a.id} className="member-row">
+                  <span className={`agent-name agent-${a.id}`}>{a.name}</span>
+                  <span className="muted small">{a.company}</span>
+                  {check && (
+                    <small className="muted" role="status" title={check === "running" ? undefined : check.detail}>
+                      {check === "running" ? "Testing…" : check.ok ? "Replied" : "Couldn't reply"}
+                    </small>
+                  )}
+                  <span className="spacer" />
+                  <button title="Take this AI out of the council (at least one must stay)" className="link danger-link" disabled={members.length < 2} onClick={() => removeMember(a)}>
+                    remove
+                  </button>
+                </div>
+              );
+            })}
             <div className="row end">
-              <button title="Check every AI's install and sign-in status again" className="btn ghost" onClick={refreshAgents} disabled={agentsRefreshing}>
-                {agentsRefreshing ? "Checking…" : "Check again"}
+              <button className="btn ghost" onClick={() => setAddPanel("choose")}>Back</button>
+              <button title="Check install and sign-in status" className="btn ghost" onClick={refreshAgents} disabled={agentsRefreshing}>
+                {agentsRefreshing ? "Checking…" : "Check setup"}
               </button>
-              <button title="Close Add AI" className="btn primary" onClick={() => setShowAddAi(false)}>
+              <button title="Send one short test prompt to each active council member" className="btn ghost"
+                onClick={runSelfCheck} disabled={!members.length || Object.values(checks).includes("running")}>
+                Test council replies
+              </button>
+              <button title="Close Add AI" className="btn primary" onClick={closeAddPanel}>
                 Done
               </button>
             </div>
@@ -4008,6 +4443,36 @@ export default function App() {
         </div>
       )}
 
+      {budgetWarning && (
+        <div className="modal-backdrop" onClick={() => setBudgetWarning(null)}>
+          <div
+            className="modal"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="token-warning-title"
+            aria-describedby="token-warning-detail"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => { if (e.key === "Escape") setBudgetWarning(null); }}
+          >
+            <h2 id="token-warning-title" className="error">REQUEST — Daily token warning</h2>
+            <p id="token-warning-detail">{budgetWarning.message}</p>
+            <div className="row end">
+              <button className="btn" autoFocus onClick={() => setBudgetWarning(null)}>Keep draft</button>
+              <button
+                className="btn primary"
+                disabled={budgetWarning.id !== current || budgetWarning.text !== (draftBox.current?.get() ?? "")}
+                onClick={() => {
+                  setBudgetWarning(null);
+                  void send(true);
+                }}
+              >
+                Send anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showUsage && (
         <div className="modal-backdrop" onClick={() => setShowUsage(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -4015,6 +4480,24 @@ export default function App() {
             <p className="muted small">
               Provider-reported token counts recorded from CLI outputs (Codex, Claude Code, Antigravity) for each turn.
             </p>
+            <label className="row">
+              Daily Discuss warning
+              <input
+                type="number"
+                min={0}
+                max={Number.MAX_SAFE_INTEGER}
+                step={1}
+                value={prefs.dailyTokenWarning || ""}
+                placeholder="Off"
+                onChange={(e) => {
+                  const value = e.currentTarget.valueAsNumber;
+                  if (e.currentTarget.value === "" || (Number.isSafeInteger(value) && value >= 0)) {
+                    setPrefs((previous) => ({ ...previous, dailyTokenWarning: value || 0 }));
+                  }
+                }}
+              />
+            </label>
+            <p className="muted small">Enter a token count to warn before starting Discuss once today's recorded usage reaches it. Clear the field to turn it off.</p>
             {usageLoading ? (
               <div className="muted small">Loading token usage…</div>
             ) : tokenReport ? (

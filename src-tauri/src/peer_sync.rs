@@ -58,6 +58,11 @@ const MENTION_TURNS: u32 = 3;
 const CATCH_UP: usize = 20;
 /// How often to check for conversations a linked computer hasn't been sent yet.
 const CATCH_UP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+/// `filed` marker for a packet whose message is being written: its retry checks the conversation first.
+const PENDING: &str = "pending-event:";
+const LEGACY_PENDING: &str = "pending:";
+/// How many events to inspect when recovering a pending write from an older version.
+const RECHECK_EVENTS: usize = 50;
 
 #[derive(Default, Serialize, Deserialize)]
 struct Mirrors {
@@ -86,6 +91,7 @@ struct BoardSnapshot {
 
 pub struct Sync {
     store: Arc<Store>,
+    lan_notes: crate::lan_notes::Inbox,
     path: PathBuf,
     mirrors: Mutex<Mirrors>,
     recent: Mutex<(HashSet<String>, VecDeque<String>)>,
@@ -103,8 +109,16 @@ pub struct Sync {
     reacted: Mutex<HashMap<String, u64>>,
     /// Per conversation: the human message, and how many turns handles have started since it.
     addressed: Mutex<HashMap<String, (u64, u32)>>,
-    /// Host resources reported by linked peer computers (keyed by computer name).
-    resources: Mutex<HashMap<String, crate::resources::HostResources>>,
+    /// Host resources reported by authenticated peer node ID.
+    resources: Mutex<HashMap<String, PeerResourceReport>>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct PeerResourceReport {
+    #[serde(flatten)]
+    resources: crate::resources::HostResources,
+    supports_request_id: bool,
+    request_id: Option<String>,
 }
 
 /// Why an incoming message was turned away.
@@ -166,6 +180,7 @@ impl Sync {
         let mirrors = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         Sync {
             store,
+            lan_notes: crate::lan_notes::Inbox::open(link_dir),
             path,
             mirrors: Mutex::new(mirrors),
             recent: Mutex::new((HashSet::new(), VecDeque::new())),
@@ -255,7 +270,7 @@ impl Sync {
     /// the owning computer. Nothing runs here.
     fn reply(&self, mirror: &str, text: &str, targets: &[String]) -> Result<(Event, Value), String> {
         let (owner, conversation) = self.origin(mirror).ok_or("this isn't another computer's conversation")?;
-        let event = self.store.append_imported(mirror, "human", "message", targets.to_vec(), text, None)?;
+        let event = self.store.append_imported(mirror, "human", "message", targets.to_vec(), text, None, None)?;
         self.sent.lock().unwrap().push((mirror.to_string(), text.to_string()));
         // Sent here, so `outgoing` doesn't send it a second time when the window shows it.
         self.first_time(&event.id);
@@ -399,17 +414,25 @@ impl Sync {
             && !m.map.values().any(|v| *v == shared.conversation)
             && self.store.meta(&shared.conversation).is_ok()
             && !shared.text.trim().is_empty();
-        // Recorded before acting, so a crash can't file the same answer twice.
-        m.filed.insert(packet.id.clone());
-        m.filed.insert(seen);
-        self.save(&m)?;
-        drop(m);
+        // Pending while it's written and filed after, so a crash in between neither loses the
+        // answer nor, when the inbox is replayed, files it twice (see `already_written`).
         if !valid || self.admit(&packet.node_id, packet.timestamp_ms) != Verdict::Accept {
+            self.settle(&mut m, &packet.id, Some(seen))?;
             return Ok(None);
         }
         let via = shown_via(&shared.sender, &None, computer);
         let text = capped(shared.text);
-        let event = self.store.append_imported(&shared.conversation, &shared.sender, "message", shared.to, &text, via)?;
+        let pending = format!("{PENDING}{}", packet.id);
+        if self.already_written(&m, &packet.id, &shared.conversation, &seen, &shared.sender, &text)? {
+            self.settle(&mut m, &packet.id, Some(seen))?;
+            return Ok(None);
+        }
+        m.filed.remove(&format!("{LEGACY_PENDING}{}", packet.id));
+        m.filed.insert(pending);
+        self.save(&m)?;
+        let event = self.store.append_imported(&shared.conversation, &shared.sender, "message", shared.to, &text, via, Some(seen.clone()))?;
+        self.settle(&mut m, &packet.id, Some(seen))?;
+        drop(m);
         // The shared board lives here: the other computer's AI's TASK lines count, under its handle.
         let ops = crate::tasks::task_lines(&text);
         let who = format!("{}-{}", shared.sender, crate::prompt::slug(computer));
@@ -470,11 +493,11 @@ impl Sync {
             return Ok(None);
         }
         let note = format!("Tasks: the shared board was updated on {computer}. {}", snapshot.board.progress());
-        self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None).map(Some)
+        self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None, None).map(Some)
     }
 
     /// Receives host resources reported by a linked peer computer.
-    fn take_resources(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
+    fn take_resources(&self, packet: &PeerPacket, shared: Shared) -> Result<Option<Event>, String> {
         let mut m = self.mirrors.lock().unwrap();
         if m.filed.contains(&packet.id) {
             return Ok(None);
@@ -485,13 +508,107 @@ impl Sync {
 
         if let Ok(res) = serde_json::from_str::<crate::resources::HostResources>(&shared.text) {
             let mut r = self.resources.lock().unwrap();
-            r.insert(computer.to_string(), res);
+            let correlation = packet.payload.get("resource_request_id");
+            r.insert(packet.node_id.clone(), PeerResourceReport {
+                resources: res,
+                supports_request_id: correlation.is_some(),
+                request_id: correlation.and_then(Value::as_str).map(str::to_owned),
+            });
         }
         Ok(None)
     }
 
+    /// A packet carrying an AI's on/off switch state in `conversation`.
+    fn switched_packet(&self, conversation: &str, agent: &str, on: bool) -> Option<Value> {
+        let (conv_id, owner) = if let Some((owner, remote_conv)) = self.origin(conversation) {
+            (remote_conv, Some(owner))
+        } else {
+            let m = self.mirrors.lock().unwrap();
+            if !(m.backfilled.contains(conversation) || m.shared_with.contains_key(conversation)) {
+                return None;
+            }
+            (conversation.to_string(), None)
+        };
+        let payload = serde_json::json!({
+            "agent": agent,
+            "on": on,
+        });
+        serde_json::to_value(Shared {
+            conversation: conv_id,
+            title: String::new(),
+            id: uuid::Uuid::new_v4().to_string(),
+            sender: "human".into(),
+            kind: "switched".into(),
+            to: vec![],
+            text: serde_json::to_string(&payload).ok()?,
+            via: None,
+            owner,
+            history: vec![],
+        })
+        .ok()
+    }
+
+    /// An AI was switched on or off in a linked conversation: updates local state and notifies.
+    fn take_switched(&self, packet: &PeerPacket, shared: Shared, computer: &str) -> Result<Option<Event>, String> {
+        let mut m = self.mirrors.lock().unwrap();
+        if m.filed.contains(&packet.id) {
+            return Ok(None);
+        }
+        m.filed.insert(packet.id.clone());
+        let _ = self.save(&m);
+        drop(m);
+
+        #[derive(Deserialize)]
+        struct SwitchedPayload {
+            agent: String,
+            on: bool,
+        }
+        let Ok(payload) = serde_json::from_str::<SwitchedPayload>(&shared.text) else {
+            return Ok(None);
+        };
+        let is_owner = shared.owner.is_some();
+        let local_conv = if let Some(owner) = &shared.owner {
+            let me = self.me.lock().unwrap().clone();
+            if owner != &me {
+                return Ok(None);
+            }
+            if self.store.meta(&shared.conversation).is_err() {
+                return Ok(None);
+            }
+            shared.conversation.clone()
+        } else {
+            let m = self.mirrors.lock().unwrap();
+            let key = format!("{}/{}", packet.node_id, shared.conversation);
+            let Some(local) = m.map.get(&key).filter(|id| self.store.meta(id).is_ok()).cloned() else {
+                return Ok(None);
+            };
+            local
+        };
+
+        crate::switched::set(self.store.dir(), &local_conv, &payload.agent, payload.on)?;
+
+        if is_owner {
+            if let Some(link) = crate::link_handle().filter(|l| l.enabled() && l.has_peers()) {
+                if let Some(p) = self.switched_packet(&local_conv, &payload.agent, payload.on) {
+                    let _ = link.send(PacketKind::Chat, p);
+                }
+            }
+        }
+
+        let agent_name = crate::agents::by_id(&payload.agent).map_or(payload.agent.as_str(), |a| a.name);
+        let state_str = if payload.on { "switched on" } else { "switched off" };
+        let note = format!("Council: {agent_name} was {state_str} on {computer}.");
+        let event = self.store.append_imported(&local_conv, crate::council::CONSILIUM, "system", vec![], &note, None, None)?;
+        self.notify(&local_conv, &event);
+        Ok(Some(event))
+    }
+
     /// Shares this computer's host resources with linked peers.
     pub fn share_resources(&self, target_path: Option<&Path>) -> Result<(), String> {
+        self.send_resources(target_path, None)
+    }
+
+    fn send_resources(&self, target_path: Option<&Path>, request: Option<(&str, &str)>) -> Result<(), String> {
         let Some(link) = crate::link_handle().filter(|l| l.enabled() && l.has_peers()) else { return Ok(()) };
         let host_res = crate::resources::HostResources::sample(&crate::prompt::here_slug(), target_path);
         let serialized = serde_json::to_string(&host_res).map_err(|e| e.to_string())?;
@@ -501,15 +618,24 @@ impl Sync {
             "id": uuid::Uuid::new_v4().to_string(),
             "sender": "system",
             "kind": "resources",
+            "resource_request_id": request.map(|(_, id)| id),
             "to": [],
             "text": serialized,
         });
-        link.send(PacketKind::Chat, payload)?;
+        if let Some((node_id, _)) = request {
+            link.send_to(node_id, PacketKind::Chat, payload)?;
+        } else {
+            link.send(PacketKind::Chat, payload)?;
+        }
         Ok(())
     }
 
     /// Returns the newest host resources reported by each linked peer computer.
     pub fn peer_resources(&self) -> HashMap<String, crate::resources::HostResources> {
+        self.resources.lock().unwrap().iter().map(|(id, report)| (id.clone(), report.resources.clone())).collect()
+    }
+
+    fn peer_resource_reports(&self) -> HashMap<String, PeerResourceReport> {
         self.resources.lock().unwrap().clone()
     }
 
@@ -664,6 +790,9 @@ impl Sync {
             if !crate::tasks::load(self.store.dir(), &c.id).tasks.is_empty() {
                 out.extend(self.board_packet(&c.id));
             }
+            for agent in crate::switched::off(self.store.dir(), &c.id) {
+                out.extend(self.switched_packet(&c.id, &agent, false));
+            }
         }
         out
     }
@@ -675,6 +804,10 @@ impl Sync {
             return Ok(None);
         }
         let shared: Shared = serde_json::from_value(packet.payload.clone()).map_err(|e| e.to_string())?;
+        if shared.kind == crate::lan_notes::KIND {
+            self.lan_notes.record(packet, computer, &shared.text)?;
+            return Ok(None);
+        }
         if shared.kind == "update" {
             return self.take_update(packet, shared, computer);
         }
@@ -688,7 +821,17 @@ impl Sync {
             return self.take_board(packet, shared, computer);
         }
         if shared.kind == "resources" {
-            return self.take_resources(packet, shared, computer);
+            return self.take_resources(packet, shared);
+        }
+        if shared.kind == "resources_request" {
+            if crate::store::now_ms().abs_diff(packet.timestamp_ms) <= 120_000 {
+                let data = crate::data_dir();
+                self.send_resources(data.as_deref(), Some((&packet.node_id, &packet.id)))?;
+            }
+            return Ok(None);
+        }
+        if shared.kind == "switched" {
+            return self.take_switched(packet, shared, computer);
         }
         if shared.owner.is_some() {
             if shared.sender == "human" {
@@ -723,7 +866,7 @@ impl Sync {
                     "Paused copying from {computer} for a minute: it sent more than {MAX_PER_MINUTE} messages in a minute, \
                      which usually means AIs are caught in a loop. Messages it sent during the pause are not copied here."
                 );
-                self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None)?;
+                self.store.append_imported(&local, crate::council::CONSILIUM, "system", vec![], &note, None, None)?;
             }
             return Ok(None);
         }
@@ -747,10 +890,18 @@ impl Sync {
             }
         }
         let via = shown_via(&shared.sender, &shared.via, computer);
-        let event = self.store.append_imported(&local, &shared.sender, &shared.kind, shared.to, &capped(shared.text), via)?;
-        m.filed.insert(packet.id.clone());
-        m.filed.insert(seen);
+        let text = capped(shared.text);
+        // Pending while it's written and filed after: a crash in between is retried without a copy.
+        let pending = format!("{PENDING}{}", packet.id);
+        if self.already_written(&m, &packet.id, &local, &seen, &shared.sender, &text)? {
+            self.settle(&mut m, &packet.id, Some(seen))?;
+            return Ok(None);
+        }
+        m.filed.remove(&format!("{LEGACY_PENDING}{}", packet.id));
+        m.filed.insert(pending);
         self.save(&m)?;
+        let event = self.store.append_imported(&local, &shared.sender, &shared.kind, shared.to, &text, via, Some(seen.clone()))?;
+        self.settle(&mut m, &packet.id, Some(seen))?;
         drop(m);
         // The AIs here answer the human's message too, and read the other computer's AIs.
         self.notify(&local, &event);
@@ -760,23 +911,74 @@ impl Sync {
     /// Files a conversation's earlier messages in its mirror, skipping any already there (by id,
     /// or by sender and text for ones copied before ids were recorded). Returns the last one filed.
     fn file_history(&self, m: &mut Mirrors, node: &str, local: &str, earlier: Vec<Earlier>, computer: &str) -> Result<Option<Event>, String> {
-        let have: HashSet<(String, String)> =
-            self.store.load(local).unwrap_or_default().into_iter().map(|e| (e.sender, e.text)).collect();
+        let mut sources = HashSet::new();
+        let mut legacy = HashSet::new();
+        for event in self.store.load(local)? {
+            if let Some(source) = event.source_event {
+                sources.insert(source);
+            } else {
+                legacy.insert((event.sender, event.text));
+            }
+        }
         let mut last = None;
         for item in earlier.into_iter().take(HISTORY_LIMIT) {
             let seen = format!("ev:{node}/{}", item.id);
             let text = capped(item.text);
-            if !known_sender(&item.sender) || m.filed.contains(&seen) || have.contains(&(item.sender.clone(), text.clone())) {
+            if !known_sender(&item.sender) || m.filed.contains(&seen) {
+                continue;
+            }
+            if sources.contains(&seen) {
+                m.filed.insert(seen);
+                continue;
+            }
+            if legacy.contains(&(item.sender.clone(), crate::redact::scrub(&text))) {
                 continue;
             }
             let via = shown_via(&item.sender, &item.via, computer);
-            last = Some(self.store.append_imported(local, &item.sender, "message", item.to, &text, via)?);
+            last = Some(self.store.append_imported(local, &item.sender, "message", item.to, &text, via, Some(seen.clone()))?);
             m.filed.insert(seen);
         }
         self.save(m)?;
         Ok(last)
     }
 
+    /// Records `packet_id` (and its event key) as filed and clears its pending mark.
+    fn settle(&self, m: &mut Mirrors, packet_id: &str, seen: Option<String>) -> Result<(), String> {
+        m.filed.remove(&format!("{PENDING}{packet_id}"));
+        m.filed.remove(&format!("{LEGACY_PENDING}{packet_id}"));
+        m.filed.insert(packet_id.to_string());
+        if let Some(seen) = seen {
+            m.filed.insert(seen);
+        }
+        self.save(m)
+    }
+
+    /// Checks the log after an interrupted write. Older pending markers predate source IDs.
+    fn already_written(
+        &self,
+        mirrors: &Mirrors,
+        packet_id: &str,
+        conversation: &str,
+        source_event: &str,
+        sender: &str,
+        text: &str,
+    ) -> Result<bool, String> {
+        let legacy = mirrors.filed.contains(&format!("{LEGACY_PENDING}{packet_id}"));
+        if !legacy && !mirrors.filed.contains(&format!("{PENDING}{packet_id}")) {
+            return Ok(false);
+        }
+        let events = self.store.load(conversation)?;
+        if events.iter().any(|event| event.source_event.as_deref() == Some(source_event)) {
+            return Ok(true);
+        }
+        if legacy {
+            let text = crate::redact::scrub(text);
+            return Ok(events.iter().rev().take(RECHECK_EVENTS).any(|event| {
+                event.source_event.is_none() && event.sender == sender && event.text == text
+            }));
+        }
+        Ok(false)
+    }
     fn save(&self, m: &Mirrors) -> Result<(), String> {
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec(m).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -853,10 +1055,17 @@ pub fn init(engine: Arc<crate::engine::Engine>, link_dir: &Path) {
     let _ = SYNC.set(s);
     // Files anything saved in the inbox but not filed before the last quit or crash.
     if let Some((s, link)) = SYNC.get().zip(crate::link_handle()) {
-        for p in link.inbox() {
+        let replayed = link.inbox();
+        let mut failed = HashSet::new();
+        for p in &replayed {
             let name = link.peer_name(&p.node_id);
-            let _ = s.file(&p, &name);
+            if s.file(p, &name).is_err() {
+                failed.insert(p.id.clone());
+            }
         }
+        // Everything offered is filed (or had nothing to file): keep only failures and late arrivals.
+        let offered: HashSet<String> = replayed.into_iter().map(|p| p.id).collect();
+        let _ = link.retain_inbox(|p| failed.contains(&p.id) || !offered.contains(&p.id));
     }
 }
 
@@ -876,6 +1085,11 @@ pub fn share(e: &Event) {
         let _ = link.send(PacketKind::Chat, history);
         if let Some(board) = s.board_packet(&e.conversation) {
             let _ = link.send(PacketKind::Chat, board);
+        }
+        for agent in crate::switched::off(s.store.dir(), &e.conversation) {
+            if let Some(switched) = s.switched_packet(&e.conversation, &agent, false) {
+                let _ = link.send(PacketKind::Chat, switched);
+            }
         }
     }
     if let Some(payload) = s.outgoing(e) {
@@ -907,6 +1121,17 @@ pub fn share_board(conversation: &str) {
         return;
     }
     if let Some(packet) = s.board_packet(conversation) {
+        let _ = link.send(PacketKind::Chat, packet);
+    }
+}
+
+/// Sends an AI's switched on/off state in `conversation` to linked computers.
+pub fn share_switched(conversation: &str, agent: &str, on: bool) {
+    let (Some(s), Some(link)) = (SYNC.get(), crate::link_handle()) else { return };
+    if !link.enabled() || !link.has_peers() {
+        return;
+    }
+    if let Some(packet) = s.switched_packet(conversation, agent, on) {
         let _ = link.send(PacketKind::Chat, packet);
     }
 }
@@ -992,6 +1217,19 @@ pub fn receive(packet: &PeerPacket) -> Option<Event> {
     s.file(packet, &link.peer_name(&packet.node_id)).ok().flatten()
 }
 
+pub(crate) fn lan_notes() -> Result<Vec<crate::lan_notes::Note>, String> {
+    SYNC.get().ok_or("Computer sync has not finished starting.")?.lan_notes.list()
+}
+
+pub(crate) fn send_lan_note(link: &crate::link::Link, node_id: &str, text: &str) -> Result<String, String> {
+    let text = crate::lan_notes::note_text(text)?;
+    let payload = serde_json::json!({
+        "conversation": "", "title": "", "id": "", "sender": "human",
+        "kind": crate::lan_notes::KIND, "text": text,
+    });
+    link.send_lan_note(node_id, payload)
+}
+
 /// Shares this computer's host resources with linked peers.
 pub fn share_resources(target_path: Option<&Path>) -> Result<(), String> {
     if let Some(s) = SYNC.get() {
@@ -1003,6 +1241,10 @@ pub fn share_resources(target_path: Option<&Path>) -> Result<(), String> {
 /// Returns the newest host resources reported by each linked peer computer.
 pub fn peer_resources() -> HashMap<String, crate::resources::HostResources> {
     SYNC.get().map(|s| s.peer_resources()).unwrap_or_default()
+}
+
+pub fn peer_resource_reports() -> HashMap<String, PeerResourceReport> {
+    SYNC.get().map(|s| s.peer_resource_reports()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1023,6 +1265,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lan_notes_survive_replay_without_creating_conversations() {
+        let root = std::env::temp_dir().join(format!("peer-lan-notes-{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(Store::new(root.join("conversations")).unwrap());
+        let sync = Sync::new(store.clone(), &root);
+        let note = packet("node-other", "note-1", serde_json::json!({
+            "conversation": "", "title": "", "id": "", "sender": "human",
+            "kind": "lan_note", "text": "  @claude\nTASK: take fixture  ",
+        }));
+        assert!(sync.file(&note, "Other computer").unwrap().is_none());
+        let reopened = Sync::new(store.clone(), &root);
+        assert!(reopened.file(&note, "Other computer").unwrap().is_none());
+        let notes = serde_json::to_value(reopened.lan_notes.list().unwrap()).unwrap();
+        assert_eq!(notes.as_array().unwrap().len(), 1);
+        assert_eq!(notes[0]["source"], "Other computer");
+        assert_eq!(notes[0]["text"], "@claude\nTASK: take fixture");
+        assert!(store.list().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_crash_while_a_message_is_pending_files_it_exactly_once() {
+        let root = std::env::temp_dir().join(format!("peer-sync-pending-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        let conv = a.store.create("Plans").unwrap();
+        let typed = a.store.append(&conv.id, "human", "message", vec![], "hello").unwrap();
+        let p1 = packet("node-a", "p1", a.outgoing(&typed).unwrap());
+        let filed = b.file(&p1, "MacBook").unwrap().expect("filed");
+        let count = |text: &str| b.store.load(&filed.conversation).unwrap().iter().filter(|e| e.text == text).count();
+
+        // Crash after the write, before it was recorded as filed: only the pending mark survived.
+        {
+            let mut m = b.mirrors.lock().unwrap();
+            m.filed.retain(|k| k != "p1" && !k.starts_with("ev:"));
+            m.filed.insert(format!("{PENDING}p1"));
+        }
+        assert!(b.file(&p1, "MacBook").unwrap().is_none(), "already in the chat, so not written again");
+        assert_eq!(count("hello"), 1);
+        {
+            let m = b.mirrors.lock().unwrap();
+            assert!(m.filed.contains("p1") && !m.filed.contains(&format!("{PENDING}p1")), "settled as filed");
+        }
+
+        // Crash before the write: pending, but not in the chat, so the retry writes it once.
+        // Identical sender and text can belong to a different source event.
+        let next = a.store.append(&conv.id, "human", "message", vec![], "hello").unwrap();
+        let p2 = packet("node-a", "p2", a.outgoing(&next).unwrap());
+        b.mirrors.lock().unwrap().filed.insert(format!("{PENDING}p2"));
+        assert!(b.file(&p2, "MacBook").unwrap().is_some(), "a lost write is retried");
+        assert!(b.file(&p2, "MacBook").unwrap().is_none());
+        assert_eq!(count("hello"), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
     #[test]
     fn shared_messages_land_once_in_a_mirror_and_never_echo_back() {
         let root = std::env::temp_dir().join(format!("peer-sync-test-{}", uuid::Uuid::new_v4()));
@@ -1049,6 +1346,65 @@ mod tests {
 
         let note = a.store.append(&conv.id, "system", "system", vec![], "note").unwrap();
         assert!(a.outgoing(&note).is_none(), "status notes stay local");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The startup replay of `inbox.jsonl` after a quit or crash files each packet once, even
+    /// though a fresh `Sync` reads it again (the filed ids are saved with the mirrors).
+    #[test]
+    fn replaying_the_inbox_after_a_restart_files_nothing_twice() {
+        let root = std::env::temp_dir().join(format!("peer-sync-replay-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let conv = a.store.create("Plans").unwrap();
+        let typed = a.store.append(&conv.id, "human", "message", vec![], "hello").unwrap();
+        let p = packet("node-a", "p1", a.outgoing(&typed).unwrap());
+
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        let filed = b.file(&p, "MacBook").unwrap().expect("filed");
+        drop(b);
+        // Restart: a new Sync over the same folder replays the whole inbox.
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        assert!(b.file(&p, "MacBook").unwrap().is_none(), "filed once across a restart");
+        let copies = b.store.load(&filed.conversation).unwrap().iter().filter(|e| e.text == "hello").count();
+        assert_eq!(copies, 1);
+        // A packet that arrived but wasn't filed before the crash is filed on replay.
+        let more = a.store.append(&conv.id, "human", "message", vec![], "after").unwrap();
+        let q = packet("node-a", "p2", a.outgoing(&more).unwrap());
+        assert_eq!(b.file(&q, "MacBook").unwrap().expect("filed on replay").conversation, filed.conversation);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn switched_state_syncs_between_owner_and_mirror() {
+        let root = std::env::temp_dir().join(format!("peer-sync-switched-{}", uuid::Uuid::new_v4()));
+        let (a_dir, b_dir) = (root.join("a"), root.join("b"));
+        let a = Sync::new(Arc::new(Store::new(a_dir.join("c")).unwrap()), &a_dir);
+        let b = Sync::new(Arc::new(Store::new(b_dir.join("c")).unwrap()), &b_dir);
+        *a.me.lock().unwrap() = "node-a".into();
+        *b.me.lock().unwrap() = "node-b".into();
+
+        let conv = a.store.create("Plans").unwrap();
+        let typed = a.store.append(&conv.id, "human", "message", vec![], "hello").unwrap();
+        let payload = a.outgoing(&typed).expect("a human message is shared");
+        let filed = b.file(&packet("node-a", "p1", payload), "MacBook").unwrap().expect("filed");
+        let mirror_conv = filed.conversation;
+        a.mirrors.lock().unwrap().backfilled.insert(conv.id.clone());
+
+        // 1. Owner switches an AI off, packet sent to mirror
+        crate::switched::set(a.store.dir(), &conv.id, "claude", false).unwrap();
+        let p_off = a.switched_packet(&conv.id, "claude", false).expect("switched packet generated");
+        let res = b.file(&packet("node-a", "p_sw_1", p_off), "MacBook").unwrap().expect("event logged");
+        assert!(res.text.contains("Claude was switched off on MacBook"));
+        assert!(crate::switched::is_off(b.store.dir(), &mirror_conv, "claude"), "claude is now off in mirror");
+
+        // 2. Mirror switches an AI on, packet sent back to owner
+        crate::switched::set(b.store.dir(), &mirror_conv, "claude", true).unwrap();
+        let p_on = b.switched_packet(&mirror_conv, "claude", true).expect("mirror switched packet generated");
+        let res_owner = a.file(&packet("node-b", "p_sw_2", p_on), "MSI").unwrap().expect("event logged on owner");
+        assert!(res_owner.text.contains("Claude was switched on on MSI"));
+        assert!(!crate::switched::is_off(a.store.dir(), &conv.id, "claude"), "claude is now on in owner");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1236,6 +1592,14 @@ mod tests {
         assert_eq!(copy.tasks.len(), 2);
         assert!(b.file(&packet("node-a", "t1b", snap), "PC").unwrap().is_none(), "an older or equal snapshot changes nothing");
         assert!(board_owner_of(&b, &mirror).is_some(), "now the owner keeps it");
+
+        let completion = b.store.append(
+            &mirror, "claude", "message", vec![], "TASK: done #1\nTASK: done #2",
+        ).unwrap();
+        a.file(&packet("node-b", "c2", b.outgoing(&completion).unwrap()), "MacBook").unwrap().unwrap();
+        let owned = crate::tasks::load(a.store.dir(), &conv.id);
+        assert_eq!(owned.tasks[0].status, crate::tasks::Status::Doing);
+        assert_eq!(owned.tasks[1].status, crate::tasks::Status::Done);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1347,7 +1711,6 @@ mod tests {
         let root = std::env::temp_dir().join(format!("peer-sync-request-{}", uuid::Uuid::new_v4()));
         let b = Sync::new(Arc::new(Store::new(root.join("c")).unwrap()), &root);
         let conv = b.store.create("Plans").unwrap();
-        crate::follow::clear_install_request();
         let request = packet(
             "node-a",
             "r1",
@@ -1357,12 +1720,12 @@ mod tests {
         assert_eq!(note.conversation, conv.id);
         assert!(note.text.starts_with("MacBook asked every linked computer to update"), "{}", note.text);
         let now = crate::store::now_ms();
-        assert!(crate::follow::install_wanted(now), "installs without waiting for the automatic-install setting");
-        assert!(!crate::follow::install_wanted(now + 31 * 60_000), "the request runs out");
+        let request_at = crate::follow::pending_install_request(now).expect("installs even with automatic install off");
+        assert!(crate::follow::pending_install_request(now + 31 * 60_000).is_none(), "the request runs out");
         assert!(crate::follow::take_release_check(), "the window checks GitHub at once");
         assert!(b.file(&request, "MacBook").unwrap().is_none(), "once");
-        crate::follow::clear_install_request();
-        assert!(!crate::follow::install_wanted(now));
+        crate::follow::consume_install_request(request_at);
+        assert!(crate::follow::pending_install_request(now).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1423,12 +1786,15 @@ mod tests {
         let sample = crate::resources::HostResources {
             computer: "MSI-AGENT47".into(),
             os: "windows".into(),
+            build_arch: Some("aarch64".into()),
             free_disk_bytes: 15 * 1024 * 1024 * 1024,
             total_disk_bytes: 1024 * 1024 * 1024 * 1024,
             cpu_percent: 18,
             memory_percent: 32,
+            total_memory_mb: 16384,
+            available_memory_mb: Some(11000),
             cores: 16,
-            tools: vec!["cargo".into(), "git".into(), "npm".into()],
+            tools: vec!["cargo".into(), "git".into(), "ggml-rpc-server".into()],
             updated_at: 100000,
         };
         let packet = packet(
@@ -1445,8 +1811,25 @@ mod tests {
         );
         let res = b.file(&packet, "MSI-AGENT47").unwrap();
         assert!(res.is_none());
+        let mut second = packet.clone();
+        second.id = "res2".into();
+        second.node_id = "node-second".into();
+        second.payload["resource_request_id"] = serde_json::json!("memory-request-1");
+        b.file(&second, "MSI-AGENT47").unwrap();
         let recorded = b.peer_resources();
-        assert_eq!(recorded.get("MSI-AGENT47"), Some(&sample));
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded.get("node-windows"), Some(&sample));
+        assert_eq!(recorded.get("node-second"), Some(&sample));
+        let reports = b.peer_resource_reports();
+        assert!(!reports["node-windows"].supports_request_id);
+        assert!(reports["node-second"].supports_request_id);
+        assert_eq!(reports["node-second"].request_id.as_deref(), Some("memory-request-1"));
+        second.id = "res3".into();
+        second.payload["resource_request_id"] = Value::Null;
+        b.file(&second, "MSI-AGENT47").unwrap();
+        let reports = b.peer_resource_reports();
+        assert!(reports["node-second"].supports_request_id);
+        assert!(reports["node-second"].request_id.is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -1104,6 +1104,7 @@ mod tests {
             usage: None,
             attachments: vec![],
             via: None,
+            source_event: None,
         };
         assert_eq!(render(p, &e), "Claude\n  Done.\n  REQUEST: pick a name\n\n");
         let to_both = Event { sender: "human".into(), to: vec!["gpt".into(), "claude".into()], text: "hi".into(), ..e.clone() };

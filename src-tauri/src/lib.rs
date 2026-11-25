@@ -7,6 +7,7 @@ mod apiagent;
 mod attach;
 mod autocontinue;
 mod bench;
+mod bluetooth;
 mod build_id;
 mod ci;
 pub mod auto_run;
@@ -17,8 +18,10 @@ mod config;
 mod customai;
 mod council;
 mod engine;
+mod environment_audit;
 mod follow;
 mod link;
+mod lan_notes;
 mod liveui;
 mod memory;
 mod offload;
@@ -46,6 +49,7 @@ mod searchpath;
 mod security_scan;
 mod store;
 mod tasks;
+mod runbooks;
 mod toolbox;
 mod update;
 mod usage;
@@ -224,6 +228,11 @@ fn tool_catalog() -> Vec<toolbox::CatalogEntry> {
 }
 
 #[tauri::command]
+async fn local_tool_inventory() -> Vec<String> {
+    toolbox::inventory().into_iter().map(|(name, _)| name).collect()
+}
+
+#[tauri::command]
 fn forget_approval(state: State<AppState>, grant: String) -> Result<config::Council, String> {
     state.engine.config.forget_grant(&grant)
 }
@@ -269,16 +278,7 @@ fn switched_off(state: State<AppState>, conversation: String) -> Vec<String> {
 
 #[tauri::command]
 fn set_auto_run_commands(state: State<AppState>, on: bool) -> Result<(), String> {
-    state.engine.config.set_auto_run_commands(on)?;
-    if on {
-        let engine = state.engine.clone();
-        for c in engine.store.list() {
-            if auto_run::is_on(engine.store.dir(), &c.id) {
-                catch_up_auto_run(engine.clone(), c.id);
-            }
-        }
-    }
-    Ok(())
+    state.engine.config.set_auto_run_commands(on).map(|_| ())
 }
 
 #[tauri::command]
@@ -295,6 +295,13 @@ fn workspace_for(state: &AppState, conversation: Option<String>) -> Result<std::
         .map(std::path::PathBuf::from)
         .filter(|p| p.is_dir())
         .ok_or_else(|| "no project folder is set".to_string())
+}
+
+#[tauri::command]
+async fn read_environment_audit(state: State<'_, AppState>, conversation: Option<String>) -> Result<environment_audit::EnvironmentAudit, String> {
+    let workspace = workspace_for(&state, conversation).ok();
+    tokio::task::spawn_blocking(move || environment_audit::sample(workspace.as_deref()))
+        .await.map_err(|error| error.to_string())
 }
 
 /// Each AI's isolated copy of the project and what merging it would bring in.
@@ -493,6 +500,25 @@ fn tasks_apply(state: State<AppState>, id: String, op: tasks::Op) -> Result<task
 }
 
 #[tauri::command]
+fn tasks_stage_plan(
+    state: State<AppState>, id: String, plan: String, priority: tasks::Priority,
+) -> Result<tasks::PlanReceipt, String> {
+    if !store::valid_id(&id) {
+        return Err("Unknown conversation.".into());
+    }
+    if let Some(owner) = peer_sync::board_owner(&id) {
+        return Err(format!("This board is kept on {owner}. Open the conversation there to stage the plan."));
+    }
+    state.engine.store.meta(&id)?;
+    let (receipt, note) = tasks::stage_plan(state.engine.store.dir(), &id, &plan, priority)?;
+    if let Some(note) = note {
+        peer_sync::share_board(&id);
+        let _ = state.engine.note(&id, &note);
+    }
+    Ok(receipt)
+}
+
+#[tauri::command]
 fn export_markdown(state: State<AppState>, id: String) -> Result<String, String> {
     let meta = state.engine.store.meta(&id)?;
     let mut md = format!("# {}\n\n", meta.title);
@@ -531,6 +557,25 @@ async fn attach_files(state: State<'_, AppState>, id: String, paths: Vec<String>
 #[tauri::command]
 async fn attach_data(state: State<'_, AppState>, id: String, name: String, data: Vec<u8>) -> Result<attach::Attachment, String> {
     state.engine.attach_bytes(&id, &name, &data)
+}
+
+#[tauri::command]
+async fn attach_clipboard_image(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<attach::Attachment, String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+
+    let image = app.clipboard().read_image().map_err(|error| format!("Couldn't read a clipboard image: {error}"))?;
+    if image.rgba().len() as u64 > attach::MAX_BYTES {
+        return Err("The clipboard image is too large. Copy a smaller image and try again.".into());
+    }
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, image.width(), image.height());
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+        writer.write_image_data(image.rgba()).map_err(|error| error.to_string())?;
+    }
+    state.engine.attach_bytes(&id, "clipboard-1.png", &bytes)
 }
 
 /// Opens an attachment of conversation `id` in its usual app.
@@ -588,7 +633,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: the Stop button in an AI's council box now also ends what that AI is doing right now in the chat (its CLI, or a local model's request), not only its next turns; the other AIs carry on.";
+const WHATS_NEW: &str = "What's new: startup recovery and tool detection are more reliable when sending messages or starting the AIs. Slow login-shell checks no longer hold up other tool lookups.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -636,11 +681,25 @@ fn update_available() -> Option<update::Staged> {
     data_dir().and_then(|d| update::staged(&d))
 }
 
-/// Stages a release update downloaded from GitHub into `<data>/update/next`.
+/// Live state for the sidebar emblem while an installer downloads from GitHub.
+#[tauri::command]
+fn update_download_status() -> update::DownloadStatus {
+    update::download_status()
+}
+
+/// Downloads and stages this platform's release update from GitHub.
 #[tauri::command]
 async fn stage_release_update(version: String, url: String, digest: Option<String>) -> Result<(), String> {
     let data = data_dir().ok_or("can't find Consilium's data folder")?;
     update::stage_from_url(&data, &version, &url, digest.as_deref().unwrap_or("")).await
+}
+
+#[tauri::command]
+async fn request_draft_installers() -> Result<Option<String>, String> {
+    let data = data_dir().ok_or("can't find Consilium's data folder")?;
+    tauri::async_runtime::spawn_blocking(move || ci::request_draft_installers(&data))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 /// "deb" or "rpm" when this Linux copy came from a system package, so the update check
@@ -716,14 +775,12 @@ fn start_auto_install(app: AppHandle, engine: Arc<Engine>) {
             tokio::time::sleep(CHECK_EVERY).await;
             let Some(data) = data_dir() else { continue };
             // A linked computer's Request Update counts even with automatic install off.
-            let requested = follow::install_wanted(store::now_ms());
-            if !(engine.config.get().auto_install_updates || requested) || runcmd::running() > 0 {
+            let requested_at = follow::pending_install_request(store::now_ms());
+            let automatic = engine.config.get().auto_install_updates;
+            if !(automatic || requested_at.is_some()) || runcmd::running() > 0 {
                 continue;
             }
             let Some(staged) = update::staged(&data) else { continue };
-            if requested {
-                follow::clear_install_request();
-            }
             if failed.as_ref().is_some_and(|(b, at)| *b == staged.build && store::now_ms() < at + AUTO_INSTALL_RETRY_MS) {
                 continue;
             }
@@ -738,21 +795,34 @@ fn start_auto_install(app: AppHandle, engine: Arc<Engine>) {
                     ),
                 );
             }
-            if let Err(e) = install_staged(&app, &engine) {
+            let result = install_staged(&app, &engine);
+            if let Some(at) = requested_at {
+                follow::consume_install_request(at);
+            }
+            if let Err(e) = result {
                 failed = Some((staged.build.clone(), store::now_ms()));
                 if let Some(id) = &newest {
-                    let _ = engine.note(id, &format!("The automatic install of Consilium {} didn't start: {e}. Trying again in 30 minutes; Update Now works too.", staged.build));
+                    let retry = if automatic {
+                        "Automatic install will retry after 30 minutes. You can also use Update Now."
+                    } else {
+                        "Use Update Now or send a new Request Update to retry."
+                    };
+                    let _ = engine.note(id, &format!("The automatic install of Consilium {} didn't start: {e}. {retry}", staged.build));
                 }
             }
         }
     });
 }
 
-/// Runs the communication stress test with every linked computer and posts each result in the
+/// Runs the communication stress test with the requested linked computer(s) and posts the results in the
 /// newest conversation as a status note. `when` says what started it.
-async fn stress_test_and_post(engine: &Arc<Engine>, when: &str) -> Result<Vec<link::StressReport>, String> {
+async fn stress_test_and_post(engine: &Arc<Engine>, origin: link::StressOrigin, when: &str, node_id: Option<&str>, sources: &[std::net::IpAddr], endpoints: &[String]) -> Result<Vec<link::StressReport>, String> {
     let link = link_handle().ok_or("linking isn't running")?;
-    let reports = link.stress_test().await?;
+    let reports = match origin {
+        link::StressOrigin::StartupIpOnly => link.startup_stress_test().await?,
+        link::StressOrigin::Manual if endpoints.is_empty() => link.stress_test(node_id, sources).await?,
+        link::StressOrigin::Manual => link.stress_test_selected(node_id, sources, endpoints).await?,
+    };
     if let Some(id) = engine.store.list().into_iter().find(|c| !peer_sync::is_mirror(&c.id)).map(|c| c.id) {
         for r in &reports {
             let _ = engine.note(&id, &r.summary(when));
@@ -763,9 +833,9 @@ async fn stress_test_and_post(engine: &Arc<Engine>, when: &str) -> Result<Vec<li
 
 /// The Communication stress test button (Settings → Multi-Computer Sync).
 #[tauri::command]
-async fn stress_test_link(state: State<'_, AppState>) -> Result<Vec<link::StressReport>, String> {
+async fn stress_test_link(state: State<'_, AppState>, node_id: Option<String>, sources: Option<Vec<std::net::IpAddr>>, endpoints: Option<Vec<String>>) -> Result<Vec<link::StressReport>, String> {
     let engine = state.engine.clone();
-    stress_test_and_post(&engine, "requested").await
+    stress_test_and_post(&engine, link::StressOrigin::Manual, "requested", node_id.as_deref(), sources.as_deref().unwrap_or_default(), endpoints.as_deref().unwrap_or_default()).await
 }
 
 /// After every start, once a linked computer is connected, runs the stress test and posts it.
@@ -780,7 +850,7 @@ fn stress_test_after_start(engine: Arc<Engine>) {
             if link.status().peers.iter().any(|p| p.connected) {
                 // A moment for the AIs' resumed work and the catch-up to settle first.
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                let _ = stress_test_and_post(&engine, "after restart").await;
+                let _ = stress_test_and_post(&engine, link::StressOrigin::StartupIpOnly, "after restart", None, &[], &[]).await;
                 return;
             }
         }
@@ -980,8 +1050,24 @@ fn import_ollama_model(model: ollama::OllamaTagModel, base_url: Option<String>) 
 
 /// Returns the newest host resources reported by each linked peer computer.
 #[tauri::command]
-fn get_peer_resources() -> Result<std::collections::HashMap<String, resources::HostResources>, String> {
-    Ok(peer_sync::peer_resources())
+fn get_peer_resources() -> Result<std::collections::HashMap<String, peer_sync::PeerResourceReport>, String> {
+    Ok(peer_sync::peer_resource_reports())
+}
+
+#[tauri::command]
+fn request_peer_resources() -> Result<String, String> {
+    let Some(link) = link_handle().filter(|link| link.enabled() && link.has_peers()) else {
+        return Err("No paired computers are available.".into());
+    };
+    link.send_connected(peer_protocol::PacketKind::Chat, serde_json::json!({
+        "conversation": "",
+        "title": "",
+        "id": uuid::Uuid::new_v4().to_string(),
+        "sender": "system",
+        "kind": "resources_request",
+        "to": [],
+        "text": "",
+    }))
 }
 
 /// Broadcasts this computer's host resources to linked peers.
@@ -1155,7 +1241,7 @@ async fn messaging_status() -> Vec<bridge::ConnectorStatus> {
     tauri::async_runtime::spawn_blocking(|| {
         let cfg = bridge::BridgeConfig::load(&bridge::config_path(None));
         vec![match cfg {
-            Ok(c) => bridge::probe_signal(&c, std::time::Duration::from_secs(2)),
+            Ok(c) => signal_setup::connector_status(&c, std::time::Duration::from_secs(2)),
             Err(_) => bridge::ConnectorStatus {
                 id: "signal",
                 name: "Signal",
@@ -1166,6 +1252,12 @@ async fn messaging_status() -> Vec<bridge::ConnectorStatus> {
     })
     .await
     .unwrap_or_default()
+}
+
+/// Cheap peer readiness snapshot; never probes a local Signal daemon.
+#[tauri::command]
+async fn signal_relay_status() -> Result<link::SignalRelayStatus, String> {
+    Ok(the_link()?.signal_relay_status())
 }
 
 /// Messaging settings for the setup panel, with the phone number masked.
@@ -1199,7 +1291,7 @@ fn messaging_setup(action: String) -> Result<String, String> {
     Ok(title.to_string())
 }
 
-/// Starts the in-app Signal setup: QR code, background daemon, then a Note to Self round trip.
+/// Starts Signal setup: QR code, background daemon, then a round trip in the Consilium group.
 #[tauri::command]
 fn signal_setup_begin() -> Result<signal_setup::SetupState, String> {
     signal_setup::begin(bridge::config_path(None))
@@ -1298,6 +1390,21 @@ async fn link_status() -> Result<link::LinkStatus, String> {
 }
 
 #[tauri::command]
+fn bluetooth_status() -> bluetooth::Status {
+    bluetooth::status()
+}
+
+#[tauri::command]
+fn bluetooth_set_enabled(enabled: bool) -> Result<bluetooth::Status, String> {
+    bluetooth::set_enabled(enabled)
+}
+
+#[tauri::command]
+async fn link_discover_lan(include_legacy: Option<bool>) -> Result<Vec<String>, String> {
+    the_link()?.discover(include_legacy.unwrap_or(true)).await
+}
+
+#[tauri::command]
 async fn link_set_enabled(on: bool) -> Result<link::LinkStatus, String> {
     let l = the_link()?;
     l.set_enabled(on)?;
@@ -1328,8 +1435,33 @@ async fn link_unpair(node_id: String) -> Result<link::LinkStatus, String> {
 }
 
 #[tauri::command]
-async fn link_test_peer(node_id: String) -> Result<link::PeerTestReport, String> {
-    the_link()?.test_peer(&node_id).await
+async fn link_test_peer(node_id: String, source: Option<std::net::IpAddr>, endpoints: Option<Vec<String>>) -> Result<link::PeerTestReport, String> {
+    let endpoints = endpoints.unwrap_or_default();
+    if endpoints.is_empty() {
+        the_link()?.test_peer(&node_id, source).await
+    } else {
+        the_link()?.test_peer_selected(&node_id, source, &endpoints).await
+    }
+}
+
+#[tauri::command]
+async fn link_transfer_trial(node_id: String, paths: Vec<link::TransferPath>) -> Result<link::TransferTrial, String> {
+    the_link()?.transfer_trial(&node_id, paths).await
+}
+
+#[tauri::command]
+fn link_probe_sources() -> Result<Vec<link::ProbeSource>, String> {
+    link::probe_sources()
+}
+
+#[tauri::command]
+async fn link_test_ai_handshake(node_id: String) -> Result<Vec<link::AiHandshake>, String> {
+    the_link()?.test_ai_handshake(&node_id).await
+}
+
+#[tauri::command]
+async fn link_test_ai_handshake_selected(node_id: String, endpoint: String) -> Result<link::AiHandshakeTestReport, String> {
+    the_link()?.test_ai_handshake_selected(&node_id, Some(&endpoint)).await
 }
 
 #[tauri::command]
@@ -1354,6 +1486,47 @@ async fn link_send(payload: serde_json::Value) -> Result<String, String> {
     the_link()?.send(peer_protocol::PacketKind::Chat, payload)
 }
 
+#[tauri::command]
+async fn link_lan_notes() -> Result<Vec<lan_notes::Note>, String> {
+    tokio::task::spawn_blocking(peer_sync::lan_notes).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn link_send_lan_note(node_id: String, text: String) -> Result<String, String> {
+    peer_sync::send_lan_note(the_link()?, &node_id, &text)
+}
+
+struct QuickSummon(bool);
+
+#[tauri::command]
+fn quick_summon_available(shortcut: State<QuickSummon>) -> bool {
+    shortcut.inner().0
+}
+
+fn register_quick_summon(app: &AppHandle) -> bool {
+    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+    let primary = if cfg!(target_os = "macos") { Modifiers::SUPER } else { Modifiers::CONTROL };
+    let shortcut = Shortcut::new(Some(primary | Modifiers::ALT), Code::Space);
+    let plugin = tauri_plugin_global_shortcut::Builder::new()
+        .with_handler(move |app, pressed, event| {
+            if pressed != &shortcut || event.state() != ShortcutState::Pressed {
+                return;
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+                let _ = window.emit("consilium://quick-summon", ());
+            }
+        })
+        .build();
+    if app.plugin(plugin).is_err() {
+        return false;
+    }
+    app.global_shortcut().register(shortcut).is_ok()
+}
+
 pub fn run() {
     let mut context = tauri::generate_context!();
     if let Some(data) = data_dir() {
@@ -1365,9 +1538,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         // Remembers the window's size, position, maximized and full-screen state across restarts.
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
+            bluetooth::initialize(app.handle().clone());
+            app.manage(QuickSummon(register_quick_summon(app.handle())));
             let handle = app.handle().clone();
             let _ = RESTART_HOOK.set(Box::new(move || {
                 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
@@ -1499,6 +1675,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             tasks_get,
             tasks_apply,
+            tasks_stage_plan,
             agents_status,
             agents_usage,
             set_member,
@@ -1534,6 +1711,7 @@ pub fn run() {
             security_scan_save,
             security_scan_run,
             messaging_status,
+            signal_relay_status,
             messaging_config,
             messaging_save,
             messaging_setup,
@@ -1545,14 +1723,17 @@ pub fn run() {
             ingest_repo,
             run_command,
             update_available,
+            update_download_status,
             update_now,
             stage_release_update,
+            request_draft_installers,
             linux_package_kind,
             ui_update_available,
             ui_update_apply,
             ui_loaded,
             self_check,
             unbench,
+            quick_summon_available,
             cli_status,
             install_cli,
             reset_forecast,
@@ -1571,30 +1752,45 @@ pub fn run() {
             request_peer_update,
             restart_app,
             agent_branches,
+            read_environment_audit,
             merge_agent_branch,
             discard_agent_branch,
             save_approval,
             tool_catalog,
+            local_tool_inventory,
+            runbooks::list_runbooks,
+            runbooks::read_runbook,
             forget_approval,
             attach_files,
             attach_data,
+            attach_clipboard_image,
             open_attachment,
             open_app,
             get_daily_wallpaper,
             link_status,
+            bluetooth_status,
+            bluetooth_set_enabled,
+            link_discover_lan,
             link_set_enabled,
             link_pair_host,
             link_pair_cancel,
             link_pair_join,
             link_unpair,
             link_test_peer,
+            link_transfer_trial,
+            link_probe_sources,
+            link_test_ai_handshake,
+            link_test_ai_handshake_selected,
             link_add_peer_route,
             link_refresh_routes,
             link_inbox,
             link_send,
+            link_lan_notes,
+            link_send_lan_note,
             session_safety_status,
             session_safety_restore,
             get_peer_resources,
+            request_peer_resources,
             broadcast_host_resources
         ])
         .build(context)

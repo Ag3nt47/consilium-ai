@@ -137,6 +137,61 @@ code {
   position: relative;
 }
 
+.app[data-backdrop] {
+  background: #080b10;
+}
+.telemetry-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.telemetry-grid {
+  background-image: repeating-linear-gradient(90deg, #a1bbcf12 0 1px, transparent 1px 24px),
+    repeating-linear-gradient(0deg, #a1bbcf12 0 1px, transparent 1px 24px);
+}
+.app[data-backdrop] > :is(.sidebar, .main) {
+  position: relative;
+  background: rgba(14, 19, 28, .48);
+}
+.app[data-backdrop] :is(.topbar, .composer) {
+  background: rgba(14, 19, 28, .78);
+  border-color: rgba(255, 255, 255, .11);
+}
+.app[data-backdrop="stealth"] > :is(.sidebar, .main),
+.app[data-backdrop="stealth"] :is(.topbar, .composer) {
+  background: #080b10;
+}
+.app[data-backdrop="stealth"] > .fx-scanlines {
+  display: none;
+}
+.telemetry-settings {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  min-inline-size: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.telemetry-settings label:not(.toggle) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+.telemetry-settings input[type="range"] {
+  width: min(40%, 180px);
+  padding: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .telemetry-backdrop {
+    background-image: repeating-linear-gradient(90deg, #a1bbcf12 0 1px, transparent 1px 24px),
+      repeating-linear-gradient(0deg, #a1bbcf12 0 1px, transparent 1px 24px);
+  }
+}
+
 /* ---------- sidebar ---------- */
 .sidebar {
   background: var(--bg-2);
@@ -160,6 +215,37 @@ code {
 .brand-icon {
   width: 40px;
   height: 40px;
+}
+
+.brand-icon.update-downloading {
+  animation: update-emblem-pulse 1.15s ease-in-out infinite;
+}
+
+@keyframes update-emblem-pulse {
+  50% {
+    opacity: 0.72;
+    transform: scale(0.91);
+    filter: drop-shadow(0 0 9px var(--accent));
+  }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-icon.update-downloading {
+    animation: none;
+    filter: drop-shadow(0 0 7px var(--accent));
+  }
 }
 
 .brand-name {
@@ -551,7 +637,6 @@ code {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  cursor: text;
   text-shadow: var(--glow);
   min-width: 0;
 }
@@ -2427,6 +2512,7 @@ button.attachment {
 .msg-input { min-width: 0; flex: 1 1 160px; max-width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: inherit; font: inherit; }
 .msg-advanced summary { cursor: pointer; font-size: 12px; }
 .msg-field { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 12px; }
+.msg-field > .msg-input { flex: none; }
 .msg-save-row { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 .msg-note { flex: 1; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
 .msg-note.ok { color: #16a34a; }
@@ -2799,6 +2885,8 @@ button.attachment {
   max-height: 85vh;
   overflow-y: auto;
 }
+.link-notes { max-height: 240px; overflow: auto; overflow-wrap: anywhere; }
+.link-notes p { white-space: pre-wrap; }
 .link-card {
   padding: 12px 14px;
   border: 1px solid var(--border);
@@ -3047,14 +3135,19 @@ button.attachment {
 }
 .test-route-row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 2px 8px;
   font-size: 11px;
 }
 .test-route-info {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .route-kind-badge {
   font-size: 9px;
@@ -3063,8 +3156,11 @@ button.attachment {
   background: rgba(255, 255, 255, 0.08);
   color: var(--muted);
 }
-.test-route-status.reachable {
+.test-route-status.authenticated {
   color: #4ade80;
+}
+.test-route-status.unconfirmed {
+  color: #fbbf24;
 }
 .test-route-status.unreachable {
   color: var(--muted);
@@ -3259,6 +3355,7 @@ button.attachment {
 .tool-state { font-size: 11px; opacity: .7; }
 .tool-state.on { color: var(--ok, #3fb950); opacity: 1; }
 .tool-cmd { display: block; margin-top: 4px; font-size: 11px; overflow-wrap: anywhere; opacity: .8; }
+.offline-skill-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; align-items: start; margin: 4px 0; }
 
 /* In-app Signal link: QR code and the verification code. */
 .msg-qr { flex-basis: 100%; display: flex; justify-content: center; padding: 6px 0; }
@@ -3321,13 +3418,18 @@ button.attachment {
 .task-meta .task-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
 .task-assign { flex: none; width: 26px; font-size: 11px; padding: 0; background: transparent; color: inherit; border: none; cursor: pointer; opacity: 0.6; }
 .task-assign:hover { opacity: 1; }
-.task-add input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 4px 6px; margin-top: 4px; }
+.task-add { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
+.task-add input { flex: 1; min-width: 0; font-size: 12px; padding: 4px 6px; }
+.task-add select { font-size: 12px; padding: 4px; }
+.task-stage { font-size: 12px; margin-top: 8px; }
+.task-stage textarea { box-sizing: border-box; resize: vertical; width: 100%; margin-bottom: 4px; }
 .task-error { color: #e5534b; font-size: 11px; }
 
 /* Click-to-rename conversation title. */
-.topbar h1 { cursor: text; }
+.title-rename { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0; border: 0; color: inherit; font: inherit; text-shadow: inherit; background: transparent; cursor: pointer; }
+.title-rename:focus-visible { outline-offset: -2px; }
 .title-pencil { font-size: 11px; opacity: 0; margin-left: 5px; transition: opacity 0.15s; }
-.topbar h1:hover .title-pencil { opacity: 0.6; }
+.title-rename:is(:hover, :focus-visible) .title-pencil { opacity: 0.6; }
 .title-edit { font: inherit; font-size: 14px; font-weight: 600; min-width: 120px; max-width: min(30vw, 280px); flex: 0 1 auto; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--accent); background: transparent; color: inherit; }
 
 /* Sidebar: the conversation list keeps a usable share of the panel and scrolls on its own;
@@ -3800,3 +3902,6 @@ button.attachment {
   justify-content: space-evenly;
 }
 .council-box-controls > .link { padding: 0 3px !important; line-height: 1 !important; }
+
+.add-choice { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; text-align: left; padding: 10px 12px; }
+.add-choice small { grid-column: 2; color: var(--muted); font-weight: normal; }

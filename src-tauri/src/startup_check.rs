@@ -1,6 +1,6 @@
 //! The startup check: each time Consilium starts, it checks every connection it depends on
 //! (Signal, linked computers, each council AI, the internet and GitHub's checks), posts the result
-//! as a Consilium note in the newest conversation and sends it to the phone's Note to Self.
+//! as a Consilium note in the newest conversation and sends it to the Consilium Signal group.
 //! It waits for Signal and linked computers to come up first, so something that is merely still
 //! starting isn't reported as broken.
 
@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::bridge::{self, BridgeConfig};
 use crate::engine::Engine;
+use crate::link::{SignalRelayReadiness, SignalRelayStatus};
 use crate::store::now_ms;
 
 /// Every startup report starts with this; Signal mirroring skips notes that start with it,
@@ -68,6 +69,8 @@ pub fn render(device: &str, version: &str, lines: &[Line]) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalState {
     NotSetUp,
+    /// Number saved, but the setup code hasn't been returned from the Consilium group.
+    Unverified,
     Off,
     Connected,
     NotConnected,
@@ -75,8 +78,11 @@ pub enum SignalState {
 
 fn signal_state() -> SignalState {
     let Ok(cfg) = BridgeConfig::load(&bridge::config_path(None)) else { return SignalState::NotSetUp };
-    if !bridge::valid_account(&cfg.account) || cfg.allowed_acis.is_empty() {
+    if !bridge::valid_account(&cfg.account) {
         return SignalState::NotSetUp;
+    }
+    if cfg.allowed_acis.is_empty() {
+        return SignalState::Unverified;
     }
     if !cfg.enabled {
         return SignalState::Off;
@@ -87,13 +93,51 @@ fn signal_state() -> SignalState {
 pub fn signal_line(s: SignalState) -> Line {
     match s {
         SignalState::NotSetUp => line(Mark::Info, "Signal: not set up (Settings → Signal)."),
+        SignalState::Unverified => line(
+            Mark::Warn,
+            "Signal: number saved but not verified. Open Settings → Signal, then send the code in the Consilium group.",
+        ),
         SignalState::Off => line(Mark::Info, "Signal: switched off in Settings."),
-        SignalState::Connected => line(Mark::Ok, "Signal: connected; phone messages reach the council."),
+        SignalState::Connected => line(Mark::Ok, "Signal: connected to signal-cli on this computer; its receive session is active."),
         SignalState::NotConnected => line(
             Mark::Bad,
             "Signal: set up but not connected to signal-cli. Phone messages won't arrive until it reconnects; Settings → Signal shows why.",
         ),
     }
+}
+
+fn signal_line_with_relay(local: SignalState, relay: SignalRelayReadiness<'_>) -> Line {
+    if local == SignalState::Connected {
+        return signal_line(local);
+    }
+    match relay {
+        SignalRelayReadiness::Available(name) => line(
+            Mark::Ok,
+            format!("Signal: via {name} over encrypted PeerSync; that paired computer reports its Signal connection active."),
+        ),
+        SignalRelayReadiness::Multiple => line(
+            Mark::Warn,
+            "Signal: multiple paired computers report active Signal connections; a single relay cannot be identified.",
+        ),
+        SignalRelayReadiness::Unavailable => signal_line(local),
+    }
+}
+
+fn signal_settled(local: SignalState, relay: SignalRelayReadiness<'_>) -> bool {
+    local != SignalState::NotConnected || relay != SignalRelayReadiness::Unavailable
+}
+
+fn relay_readiness(status: Option<&SignalRelayStatus>) -> SignalRelayReadiness<'_> {
+    status.map_or(SignalRelayReadiness::Unavailable, SignalRelayStatus::readiness)
+}
+
+fn current_signal_line() -> Line {
+    let local = signal_state();
+    if local == SignalState::Connected {
+        return signal_line(local);
+    }
+    let relay = crate::link_handle().map(|link| link.signal_relay_status());
+    signal_line_with_relay(local, relay_readiness(relay.as_ref()))
 }
 
 fn ago(ms: u64) -> String {
@@ -179,9 +223,10 @@ fn internet_line() -> Line {
     }
 }
 
-/// Whether Signal and every paired computer are up, so the report can go out early.
+/// Whether connection attempts have settled enough for the report to go out early.
 fn settled() -> bool {
-    let signal_ok = signal_state() != SignalState::NotConnected;
+    let relay = crate::link_handle().map(|link| link.signal_relay_status());
+    let signal_ok = signal_settled(signal_state(), relay_readiness(relay.as_ref()));
     let link_ok = crate::link_handle().is_none_or(|l| {
         let st = l.status();
         !st.enabled || st.peers.iter().all(|p| p.connected)
@@ -191,7 +236,7 @@ fn settled() -> bool {
 
 async fn gather(engine: &Arc<Engine>, data: &Path, workspace: Option<PathBuf>) -> Vec<Line> {
     let now = now_ms();
-    let mut lines = vec![signal_line(signal_state())];
+    let mut lines = Vec::new();
     if let Some(l) = crate::link_handle() {
         lines.extend(link_lines(&l.status(), now));
     }
@@ -228,6 +273,8 @@ async fn gather(engine: &Arc<Engine>, data: &Path, workspace: Option<PathBuf>) -
     if let Some(s) = crate::update::staged(data) {
         lines.push(line(Mark::Info, format!("Update Now · {} is ready to install (you have {}).", s.version, s.current)));
     }
+    // AI and internet checks can be slow. Sample the short Signal report lease last.
+    lines.insert(0, current_signal_line());
     lines
 }
 
@@ -268,7 +315,10 @@ mod tests {
             node_id: format!("node-{name}"),
             name: name.into(),
             connected,
+            supports_lan_notes: false,
             route: connected.then(|| "192.168.1.157:8470".into()),
+            local_interface: None,
+            route_evidence: None,
             rtt_ms: connected.then_some(3),
             last_seen_ms: Some(1_000),
             queued,
@@ -346,5 +396,42 @@ mod tests {
         assert_eq!(signal_line(SignalState::Connected).mark, Mark::Ok);
         assert_eq!(signal_line(SignalState::NotConnected).mark, Mark::Bad);
         assert_eq!(signal_line(SignalState::NotSetUp).mark, Mark::Info);
+        assert_eq!(signal_line(SignalState::Unverified).mark, Mark::Warn);
+        assert!(signal_line(SignalState::Unverified).text.contains("not verified"));
+    }
+
+    #[test]
+    fn fresh_named_relay_replaces_local_setup_warnings_without_claiming_delivery() {
+        for local in [SignalState::NotSetUp, SignalState::Unverified, SignalState::Off, SignalState::NotConnected] {
+            let result = signal_line_with_relay(local, SignalRelayReadiness::Available("Windows PC"));
+            assert_eq!(result.mark, Mark::Ok);
+            assert!(result.text.contains("via Windows PC over encrypted PeerSync"));
+            assert!(result.text.contains("reports its Signal connection active"));
+            assert!(!result.text.contains("messages reach"));
+        }
+    }
+
+    #[test]
+    fn direct_readiness_wins_and_absent_relay_preserves_local_diagnostics() {
+        for relay in [SignalRelayReadiness::Available("Windows PC"), SignalRelayReadiness::Multiple, SignalRelayReadiness::Unavailable] {
+            assert_eq!(signal_line_with_relay(SignalState::Connected, relay), signal_line(SignalState::Connected));
+        }
+        for local in [SignalState::NotSetUp, SignalState::Unverified, SignalState::Off, SignalState::NotConnected] {
+            assert_eq!(signal_line_with_relay(local, SignalRelayReadiness::Unavailable), signal_line(local));
+        }
+    }
+
+    #[test]
+    fn multiple_relays_are_a_warning_and_fresh_reports_finish_the_connection_wait() {
+        let result = signal_line_with_relay(SignalState::NotConnected, SignalRelayReadiness::Multiple);
+        assert_eq!(result.mark, Mark::Warn);
+        assert!(result.text.contains("multiple paired computers"));
+        assert!(result.text.contains("single relay cannot be identified"));
+        assert!(!signal_settled(SignalState::NotConnected, SignalRelayReadiness::Unavailable));
+        assert!(signal_settled(SignalState::NotConnected, SignalRelayReadiness::Available("Windows PC")));
+        assert!(signal_settled(SignalState::NotConnected, SignalRelayReadiness::Multiple));
+        for local in [SignalState::NotSetUp, SignalState::Unverified, SignalState::Off, SignalState::Connected] {
+            assert!(signal_settled(local, SignalRelayReadiness::Unavailable));
+        }
     }
 }

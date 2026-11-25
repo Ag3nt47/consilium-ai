@@ -30,3 +30,7 @@ SOFTWARE.
 ## Package dependencies
 
 React, Vite, Tauri and the Rust crates listed in `package.json` and `src-tauri/Cargo.toml` keep their own licenses (MIT, Apache-2.0 or both). Their license texts are included with the packages.
+
+The offline JavaScript and TypeScript outline worker includes Microsoft's TypeScript compiler,
+licensed under Apache 2.0. The distributed frontend includes the compiler's license and
+third-party notices in its `licenses` directory.

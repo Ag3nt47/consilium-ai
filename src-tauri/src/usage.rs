@@ -10,6 +10,7 @@ use crate::engine::Engine;
 use crate::store::now_ms;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
 
 /// A reading older than this is refreshed before a turn (in the background).
@@ -91,6 +92,36 @@ fn save(data: &Path, s: &Snapshot) {
 /// Reads every council member's usage from its CLI (at the same time), and the forecast when it's
 /// turned on and due, then saves and returns the reading.
 pub async fn refresh(engine: &Engine) -> Snapshot {
+    share_refresh(&engine.usage_refresh, sample(engine, false)).await
+}
+
+/// Concurrent callers share the reading produced by the in-flight caller. A canceled caller
+/// leaves the slot empty so a waiter can retry. A later explicit request starts a fresh read.
+async fn share_refresh(
+    gate: &tokio::sync::Mutex<Option<Snapshot>>,
+    sample: impl Future<Output = Snapshot>,
+) -> Snapshot {
+    let mut result = match gate.try_lock() {
+        Ok(result) => result,
+        Err(_) => {
+            let result = gate.lock().await;
+            if let Some(snapshot) = &*result {
+                return snapshot.clone();
+            }
+            result
+        }
+    };
+    *result = None;
+    let snapshot = sample.await;
+    *result = Some(snapshot.clone());
+    snapshot
+}
+
+async fn sample(engine: &Engine, skip_if_fresh: bool) -> Snapshot {
+    let before = load(&engine.data);
+    if skip_if_fresh && now_ms().saturating_sub(before.at) < STALE_MS {
+        return before;
+    }
     let last = engine.last_models();
     let mut tasks = tokio::task::JoinSet::new();
     for agent in agents::all().into_iter().filter(|a| engine.config.is_member(a.id)) {
@@ -103,9 +134,8 @@ pub async fn refresh(engine: &Engine) -> Snapshot {
             snapshot.agents.insert(id, usage);
         }
     }
-    let before = load(&engine.data).forecast;
     snapshot.forecast = if engine.config.get().reset_forecast {
-        match before {
+        match before.forecast {
             Some(f) if now_ms().saturating_sub(f.fetched_at) < FORECAST_EVERY_MS => Some(f),
             old => fetch_forecast().await.or(old),
         }
@@ -113,7 +143,7 @@ pub async fn refresh(engine: &Engine) -> Snapshot {
         None
     };
     snapshot.claude_resets = if engine.config.get().reset_forecast {
-        match load(&engine.data).claude_resets {
+        match before.claude_resets {
             Some(r) if now_ms().saturating_sub(r.fetched_at) < crate::claude_resets::EVERY_MS => Some(r),
             old => crate::claude_resets::fetch().await.or(old),
         }
@@ -132,7 +162,7 @@ pub fn refresh_if_stale(engine: &std::sync::Arc<Engine>) {
     }
     let e = engine.clone();
     engine.spawn_task(Box::pin(async move {
-        refresh(&e).await;
+        share_refresh(&e.usage_refresh, sample(&e, true)).await;
     }));
 }
 
@@ -277,6 +307,62 @@ splitting work, and tell the human when someone will be back if it matters.",
 mod tests {
     use super::*;
     use crate::agents::{UsageMeter, UsageWindow};
+
+    #[tokio::test]
+    async fn concurrent_usage_reads_share_one_sample_and_later_refresh_is_fresh() {
+        let gate = tokio::sync::Mutex::new(None);
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, finish) = tokio::sync::oneshot::channel();
+        let first = share_refresh(&gate, async {
+            started.send(()).unwrap();
+            finish.await.unwrap();
+            Snapshot { at: 11, ..Snapshot::default() }
+        });
+        let second = async {
+            waiting.await.unwrap();
+            let follower = share_refresh(&gate, async { panic!("duplicate provider usage read") });
+            tokio::pin!(follower);
+            tokio::select! {
+                biased;
+                _ = &mut follower => panic!("returned before the current sample finished"),
+                _ = std::future::ready(()) => release.send(()).unwrap(),
+            }
+            follower.await
+        };
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first, second);
+        let later = share_refresh(&gate, async { Snapshot { at: 12, ..Snapshot::default() } }).await;
+        assert_eq!(later.at, 12);
+    }
+
+    #[tokio::test]
+    async fn waiting_usage_read_retries_if_the_first_is_canceled() {
+        let gate = tokio::sync::Mutex::new(Some(Snapshot { at: 10, ..Snapshot::default() }));
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (cancel, canceled) = tokio::sync::oneshot::channel();
+        let owner = async {
+            tokio::select! {
+                _ = share_refresh(&gate, async {
+                    started.send(()).unwrap();
+                    std::future::pending::<Snapshot>().await
+                }) => panic!("usage read ended unexpectedly"),
+                _ = canceled => {}
+            }
+        };
+        let waiter = async {
+            waiting.await.unwrap();
+            let follower = share_refresh(&gate, async { Snapshot { at: 11, ..Snapshot::default() } });
+            tokio::pin!(follower);
+            tokio::select! {
+                biased;
+                _ = &mut follower => panic!("returned before cancellation"),
+                _ = std::future::ready(()) => cancel.send(()).unwrap(),
+            }
+            follower.await
+        };
+        let (_, result) = tokio::join!(owner, waiter);
+        assert_eq!(result.at, 11);
+    }
 
     fn meter(label: &str, pct: u8, resets: Option<u64>, shared: bool) -> UsageMeter {
         UsageMeter {

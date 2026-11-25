@@ -29,12 +29,15 @@ export interface OllamaModel {
 
 export const IN_APP = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+export type TaskPriority = "high" | "normal" | "low";
+
 /** One item on the conversation's shared task checklist. */
 export interface TaskItem {
   id: number;
   title: string;
   owner?: string | null;
   status: "todo" | "doing" | "blocked" | "done";
+  priority?: TaskPriority;
   note?: string | null;
   by: string;
   updated: number;
@@ -45,13 +48,16 @@ export interface TaskBoard {
   next: number;
 }
 
+export type TaskPlanReceipt = { added: number; skipped: number };
+
 export type TaskOp =
-  | { op: "add"; title: string; owner?: string }
+  | { op: "add"; title: string; owner?: string; priority?: TaskPriority }
   | { op: "take"; task: string }
   | { op: "done"; task: string }
   | { op: "block"; task: string; note?: string }
   | { op: "hand"; task: string; to: string }
   | { op: "reopen"; task: string }
+  | { op: "priority"; task: string; priority: TaskPriority }
   | { op: "drop"; task: string };
 
 export type Sender = "human" | "gpt" | "claude" | string;
@@ -134,6 +140,7 @@ export interface AgentInfo {
   member: boolean;
   access: Access;
   transport: string;
+  local_model?: boolean;
   /** An AI the person added themselves (it can be deleted). */
   custom?: boolean;
   tool: string;
@@ -260,12 +267,21 @@ export interface ConnectorStatus {
   detail: string;
 }
 
+export interface SignalRelayStatus {
+  state: "available" | "unavailable" | "multiple";
+  peer: { node_id: string; name: string } | null;
+  candidate_count: number;
+  valid_for_ms: number;
+  local_direct_active: boolean;
+}
+
 export interface SystemPressure {
   percent: number;
   cpu_percent: number;
   memory_percent: number;
   cores: number;
   total_memory_mb: number;
+  available_memory_mb?: number;
   label: string;
   hardware_profile: "conservative" | "balanced" | "performance";
   adaptive_mode: "eco" | "balanced" | "full";
@@ -297,6 +313,8 @@ export interface TokenUsage {
   cache_creation_tokens: number;
   thinking_tokens: number;
   total_tokens: number;
+  /** Provider-measured rate for one final reply, in thousandths of a token per second. */
+  output_rate_milli?: number;
 }
 
 export interface TokenUsageReport {
@@ -338,8 +356,11 @@ export type LinkPeer = {
   node_id: string;
   name: string;
   connected: boolean;
+  supports_lan_notes?: boolean;
   /** The address in use, e.g. "192.168.1.20:8470"; the fastest answering route wins. */
   route: string | null;
+  route_evidence?: RouteEvidence | null;
+  local_interface?: string | null;
   rtt_ms: number | null;
   last_seen_ms: number | null;
   /** Packets sent but not yet acknowledged; re-sent when the link comes back. */
@@ -356,12 +377,54 @@ export type LinkPeer = {
   addrs: string[];
 };
 
+export type LanNote = { id: string; source: string; text: string; sent_at: number };
+
+export type RouteEvidence =
+  | { kind: "tcp"; local_addr: string; remote_addr: string; local_interface: string | null }
+  | { kind: "bluetooth_rfcomm"; local_adapter: string; remote_device: string; service_uuid: string; channel: number };
+export type BluetoothStatus = { supported: boolean; enabled: boolean; endpoint: string | null; detail: string };
+
 export type RouteTest = {
   addr: string;
   kind: string;
   reachable: boolean;
   rtt_ms?: number;
+  authenticated_ms?: number | null;
+  local_ip?: string | null;
+  local_interface?: string | null;
+  route_evidence?: RouteEvidence | null;
   status: string;
+};
+
+export type ProbeSource = { address: string; interface: string };
+export type EnvironmentAudit = {
+  platform: string;
+  architecture: string;
+  project_set: boolean;
+  git_summary: string | null;
+  dependencies: {
+    name: string;
+    requested: string;
+    locked: string | null;
+    installed: string | null;
+    lockfile_matches: boolean | null;
+  }[];
+  dependency_note: string | null;
+  tools: [string, boolean][];
+  ollama_models: string[];
+  ollama_note: string | null;
+};
+export type TransferPath = { source: string | null; endpoint: string };
+export type TransferTrial = {
+  overlap_ms: number | null;
+  distinct_receiver_interfaces: boolean;
+  paths: {
+    source: ProbeSource | null;
+    route_evidence?: RouteEvidence | null;
+    endpoint: string;
+    receipts: { bytes: number; sha256: string; receiver_ip: string | null; receiver_interface?: string | null; route_evidence?: RouteEvidence | null; received_ms: number }[];
+    error: string | null;
+  }[];
 };
 
 export type PeerTestReport = {
@@ -372,6 +435,7 @@ export type PeerTestReport = {
   handshake_ok: boolean;
   rtt_ms: number | null;
   routes: RouteTest[];
+  source?: ProbeSource | null;
   queued_outgoing: number;
   summary: string;
 };
@@ -393,9 +457,10 @@ export type LinkStatus = {
 
 /** The communication stress test with one linked computer (src-tauri/src/link.rs). */
 export type StressReport = {
+  node_id: string;
   computer: string;
-  routes: { addr: string; kind: string; ok: boolean; ms: number | null; detail: string }[];
-  restored: string | null;
+  routes: { addr: string; kind: string; ok: boolean; ms: number | null; requested_source?: string | null; local_interface?: string | null; local_addr?: string | null; route_evidence?: RouteEvidence | null; detail: string }[];
+  restored: StressReport["routes"][number] | null;
 };
 
 /** One AI's side of the handshake with a linked computer (src-tauri/src/link.rs). */
@@ -408,6 +473,13 @@ export type AiHandshake = {
   reads: boolean;
   /** An AI on the other computer has read one of its messages and answered. */
   read: boolean;
+};
+
+export type AiHandshakeTestReport = {
+  handshake: AiHandshake[];
+  route: string;
+  route_evidence: RouteEvidence | null;
+  restored: StressReport["routes"][number] | null;
 };
 
 /** A Consilium build (src-tauri/src/build_id.rs): two builds of one version differ in `number`. */
@@ -464,24 +536,34 @@ const appApi = {
   attachFiles: (id: string, paths: string[]) => invoke<Attachment[]>("attach_files", { id, paths }),
   /** Saves pasted file contents (a screenshot, say) for the next message. */
   attachData: (id: string, name: string, data: number[]) => invoke<Attachment>("attach_data", { id, name, data }),
+  attachClipboardImage: (id: string) => invoke<Attachment>("attach_clipboard_image", { id }),
   openAttachment: (id: string, attachment: Attachment) => invoke<void>("open_attachment", { id, attachment }),
   /** Opens an installed app by name, after the human confirms a spoken "open <app>". */
   openApp: (name: string) => invoke<void>("open_app", { name }),
   /** Runs command box `index` of AI message `eventId` once; its output goes to that AI as your message. */
+  linkDiscoverLan: (includeLegacy = true) => invoke<string[]>("link_discover_lan", { includeLegacy }),
   linkStatus: () => invoke<LinkStatus>("link_status"),
+  bluetoothStatus: () => invoke<BluetoothStatus>("bluetooth_status"),
+  bluetoothSetEnabled: (enabled: boolean) => invoke<BluetoothStatus>("bluetooth_set_enabled", { enabled }),
   linkSetEnabled: (on: boolean) => invoke<LinkStatus>("link_set_enabled", { on }),
   /** Shows a one-time 6-digit code (valid 5 minutes, 3 tries) and turns the link on. */
   linkPairHost: () => invoke<{ code: string; expires_ms: number }>("link_pair_host"),
   linkPairCancel: () => invoke<void>("link_pair_cancel"),
   linkPairJoin: (address: string, code: string) => invoke<LinkPeer>("link_pair_join", { address, code }),
   linkUnpair: (nodeId: string) => invoke<LinkStatus>("link_unpair", { nodeId }),
-  linkTestPeer: (nodeId: string) => invoke<PeerTestReport>("link_test_peer", { nodeId }),
+  linkProbeSources: () => invoke<ProbeSource[]>("link_probe_sources"),
+  linkTestPeer: (nodeId: string, source?: string, endpoints?: string[]) => invoke<PeerTestReport>("link_test_peer", { nodeId, source, endpoints }),
+  linkTransferTrial: (nodeId: string, paths: TransferPath[]) => invoke<TransferTrial>("link_transfer_trial", { nodeId, paths }),
+  linkTestAiHandshake: (nodeId: string) => invoke<AiHandshake[]>("link_test_ai_handshake", { nodeId }),
+  linkTestAiHandshakeSelected: (nodeId: string, endpoint: string) => invoke<AiHandshakeTestReport>("link_test_ai_handshake_selected", { nodeId, endpoint }),
   linkAddPeerRoute: (nodeId: string, address: string) =>
     invoke<string[]>("link_add_peer_route", { nodeId, address }),
   linkRefreshRoutes: (nodeId: string) =>
     invoke<string[]>("link_refresh_routes", { nodeId }),
   linkInbox: () => invoke<unknown[]>("link_inbox"),
   linkSend: (payload: unknown) => invoke<string>("link_send", { payload }),
+  linkLanNotes: () => invoke<LanNote[]>("link_lan_notes"),
+  linkSendLanNote: (nodeId: string, text: string) => invoke<string>("link_send_lan_note", { nodeId, text }),
   runCommand: (id: string, eventId: string, index: number) => invoke<ChatEvent>("run_command", { id, eventId, index }),
   /** Shows the system file picker; returns the chosen files. */
   pickFiles: async (): Promise<string[]> => {
@@ -507,8 +589,9 @@ const appApi = {
   /** Restarts Consilium on this computer, targeted linked computers, or all computers. */
   restartApp: (targets: string[]) => invoke<void>("restart_app", { targets }),
   /** Moves the link onto each route in turn, verifies it, and posts the results in the chat. */
-  stressTestLink: () => invoke<StressReport[]>("stress_test_link"),
+  stressTestLink: (nodeId?: string, sources?: string[], endpoints?: string[]) => invoke<StressReport[]>("stress_test_link", { nodeId, sources, endpoints }),
   agentBranches: (conversation?: string) => invoke<AgentBranch[]>("agent_branches", { conversation }),
+  readEnvironmentAudit: (conversation?: string) => invoke<EnvironmentAudit>("read_environment_audit", { conversation }),
   mergeAgentBranch: (repo: string, agent: string, conversation?: string) =>
     invoke<string>("merge_agent_branch", { conversation, repo, agent }),
   discardAgentBranch: (repo: string, agent: string, conversation?: string) =>
@@ -517,11 +600,15 @@ const appApi = {
   tasksGet: (id: string) => invoke<TaskBoard>("tasks_get", { id }),
   /** A change by the human; Consilium also notes it in the chat. */
   tasksApply: (id: string, op: TaskOp) => invoke<TaskBoard>("tasks_apply", { id, op }),
+  tasksStagePlan: (id: string, plan: string, priority: TaskPriority) =>
+    invoke<TaskPlanReceipt>("tasks_stage_plan", { id, plan, priority }),
   saveApproval: (request: string) => invoke<Council>("save_approval", { request }),
   forgetApproval: (grant: string) => invoke<Council>("forget_approval", { grant }),
   /** Settings → Tools: not-bundled tools the AIs know about, with install state and pinned commands. */
   toolCatalog: () => invoke<CatalogTool[]>("tool_catalog"),
+  localToolInventory: () => invoke<string[]>("local_tool_inventory"),
   /** Whether the `consilium` terminal command is installed. */
+  quickSummonAvailable: () => invoke<boolean>("quick_summon_available"),
   cliStatus: () => invoke<CliInstall>("cli_status"),
   installCli: () => invoke<CliInstall>("install_cli"),
   /** Asks every council member for a one-word reply, in parallel. Uses a little of each AI's allowance. */
@@ -558,6 +645,18 @@ const appApi = {
     invoke<string>("import_ollama_model", { model, baseUrl }),
   /** Samples host PC CPU and memory pressure (0-100%). */
   systemPressure: () => invoke<SystemPressure>("system_pressure"),
+  requestPeerResources: () => invoke<string>("request_peer_resources"),
+  peerResources: () => invoke<Record<string, {
+    os?: string;
+    build_arch?: string;
+    total_memory_mb?: number;
+    available_memory_mb?: number;
+    memory_percent: number;
+    tools?: string[];
+    updated_at: number;
+    supports_request_id?: boolean;
+    request_id?: string | null;
+  }>>("get_peer_resources"),
   securityScanStatus: () => invoke<SecurityScanStatus>("security_scan_status"),
   securityScanSave: (settings: {
     enabled: boolean;
@@ -566,6 +665,7 @@ const appApi = {
   }) => invoke<SecurityScanStatus>("security_scan_save", { settings }),
   securityScanRun: () => invoke<SecurityScanStatus>("security_scan_run"),
   messagingStatus: () => invoke<ConnectorStatus[]>("messaging_status"),
+  signalRelayStatus: () => invoke<SignalRelayStatus>("signal_relay_status"),
   /** Messaging settings, phone number masked. */
   messagingConfig: () => invoke<MessagingSetup>("messaging_config"),
   /** Validates and saves messaging settings on this computer. */
@@ -578,9 +678,12 @@ const appApi = {
   signalSetupCancel: () => invoke<void>("signal_setup_cancel"),
   /** A newer build staged for Update Now, or null. */
   updateAvailable: () => invoke<StagedUpdate | null>("update_available"),
+  /** Whether a GitHub release installer is currently downloading. */
+  updateDownloadStatus: () => invoke<UpdateDownloadStatus>("update_download_status"),
+  requestDraftInstallers: () => invoke<string | null>("request_draft_installers"),
   /** Pauses the AIs, installs the staged build and relaunches; their turns resume afterwards. */
   updateNow: () => invoke<void>("update_now"),
-  /** Downloads and stages a release binary into `<data>/update/next`. */
+  /** Downloads, verifies and stages this platform's GitHub release installer. */
   stageReleaseUpdate: (version: string, url: string, digest: string) =>
     invoke<void>("stage_release_update", { version, url, digest }),
   /** "deb" or "rpm" when this Linux copy was installed from a system package, else null. */
@@ -625,6 +728,11 @@ export interface StagedUpdate {
   current: string;
 }
 
+export interface UpdateDownloadStatus {
+  active: boolean;
+  version: string;
+}
+
 export const api: typeof appApi = IN_APP ? appApi : (demoApi as unknown as typeof appApi);
 
 export function onEvent(fn: (e: ChatEvent) => void): Promise<UnlistenFn> {
@@ -662,4 +770,9 @@ export interface AgentBranch {
   uncommitted: number;
   /** "<short hash> <subject>", newest first, at most 20. */
   commits: string[];
+}
+
+
+export function onQuickSummon(fn: () => void): Promise<UnlistenFn> {
+  return listen("consilium://quick-summon", fn);
 }

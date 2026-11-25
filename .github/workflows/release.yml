@@ -3,7 +3,7 @@ name: Release
 # Publishes installers for macOS, Windows and Linux for every new version, so a copy of Consilium
 # on any computer can find and install it. It runs after the CI workflow passes on main: when
 # package.json's version has no GitHub release yet, it creates one, builds the installers into it
-# and publishes it. A pushed version tag (v1.2.3) or a manual run does the same for that version.
+# and publishes it. A pushed version tag (v1.2.3) also publishes. Manual runs default to a draft.
 on:
   workflow_run:
     workflows: ["CI"]
@@ -12,6 +12,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      draft_only:
+        description: Build installers and leave the release as a draft
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -26,23 +31,49 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # to create the release
+      actions: read # to verify the exact commit passed CI before a manual build
     outputs:
       tag: ${{ steps.v.outputs.tag }}
       sha: ${{ steps.v.outputs.sha }}
       id: ${{ steps.v.outputs.id }}
+      preview: ${{ steps.v.outputs.preview }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Confirm CI for manual build
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Build installers from main after the changes merge."
+            exit 1
+          fi
+          ci="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main \
+            --commit "$GITHUB_SHA" --event push --limit 1 --json status,conclusion \
+            --jq '.[0] | .status == "completed" and .conclusion == "success"')"
+          if [ "$ci" != "true" ]; then
+            echo "::error::The latest CI run for $GITHUB_SHA must pass before an installer build."
+            exit 1
+          fi
       - id: v
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          PREVIEW_ALLOWED: ${{ github.event_name == 'workflow_dispatch' && inputs.draft_only }}
         run: |
           set -euo pipefail
           tag="v$(node -p 'require("./package.json").version')"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null | grep -qx false; then
-            echo "$tag is already published; nothing to do."; exit 0
+            if [ "$PREVIEW_ALLOWED" = "true" ]; then
+              echo "$tag is already published; building workflow artifacts for $SHA."
+              { echo "tag=$tag"; echo "sha=$SHA"; echo "preview=true"; } >> "$GITHUB_OUTPUT"
+            else
+              echo "$tag is already published; nothing to do."
+            fi
+            exit 0
           fi
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$SHA" \
@@ -62,14 +93,14 @@ jobs:
 
   build:
     needs: prepare
-    if: needs.prepare.outputs.id != ''
+    if: needs.prepare.outputs.id != '' || needs.prepare.outputs.preview == 'true'
     permissions:
       contents: write # to create the draft release
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
+          - platform: macos-15-intel
             args: --target universal-apple-darwin
           - platform: windows-latest
             args: ""
@@ -89,7 +120,10 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
       - name: Linux system libraries
         if: runner.os == 'Linux'
         run: |
@@ -97,7 +131,16 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
       - run: node scripts/check-secrets.mjs
       - run: npm ci
+      - name: Build preview bundles
+        if: needs.prepare.outputs.preview == 'true'
+        shell: bash
+        env:
+          TAURI_ARGS: ${{ matrix.args }}
+        run: |
+          read -r -a build_args <<< "$TAURI_ARGS"
+          npm run app:build -- "${build_args[@]}"
       - uses: tauri-apps/tauri-action@v0
+        if: needs.prepare.outputs.id != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -105,11 +148,12 @@ jobs:
           args: ${{ matrix.args }}
       # Fixed-name copies, so the README's one-click links
       # (releases/latest/download/<name>) always fetch the newest installer.
-      - name: Attach one-click download names
+      - name: Collect named installers
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
+          PREVIEW: ${{ needs.prepare.outputs.preview }}
         run: |
           set -euo pipefail
           mkdir -p oneclick
@@ -126,10 +170,245 @@ jobs:
                      copy '*.deb' Consilium-Linux-amd64.deb
                      copy '*.rpm' Consilium-Linux-x86_64.rpm ;;
           esac
-          gh release upload "$TAG" oneclick/* --clobber --repo "$GITHUB_REPOSITORY"
+          if [ "$PREVIEW" != "true" ]; then
+            gh release upload "$TAG" oneclick/* --clobber --repo "$GITHUB_REPOSITORY"
+          fi
+      - name: Verify Windows preview installation
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Resolve-Path -LiteralPath 'oneclick/Consilium-Windows-Setup.exe'
+          $process = Start-Process -FilePath $installer.Path -ArgumentList '/S', '/UPDATE' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Preview installer exited with code $($process.ExitCode)."
+          }
+          $installed = Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Consilium/consilium.exe')
+          $expected = (Get-Content -LiteralPath 'package.json' -Raw | ConvertFrom-Json).version
+          if ($installed.VersionInfo.ProductVersion -ne $expected) {
+            throw "Expected Consilium $expected, found $($installed.VersionInfo.ProductVersion)."
+          }
+          Write-Output "Verified Windows preview installation of Consilium $expected."
+      - name: Verify Windows preview desktop launch
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:CONSILIUM_DATA = Join-Path $env:RUNNER_TEMP 'consilium-preview-desktop'
+          New-Item -ItemType Directory -Path $env:CONSILIUM_DATA -Force | Out-Null
+          '{"auto_install_updates":false,"members":[]}' |
+            Set-Content -LiteralPath (Join-Path $env:CONSILIUM_DATA 'council.json')
+          $installed = Join-Path $env:LOCALAPPDATA 'Consilium/consilium.exe'
+          $app = Start-Process -FilePath $installed -PassThru
+          try {
+            $deadline = [Diagnostics.Stopwatch]::StartNew()
+            while ($deadline.Elapsed.TotalSeconds -lt 30) {
+              $app.Refresh()
+              if ($app.HasExited) { throw "Consilium exited before opening a window ($($app.ExitCode))." }
+              if ($app.MainWindowHandle -ne [IntPtr]::Zero -and $app.Responding) {
+                Write-Output 'Verified a responsive Consilium desktop window.'
+                return
+              }
+              Start-Sleep -Milliseconds 250
+            }
+            throw 'Consilium did not open a responsive desktop window within 30 seconds.'
+          } finally {
+            if (-not $app.HasExited) { Stop-Process -Id $app.Id }
+          }
+      - name: Verify macOS preview installation
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="$(mktemp -d)"
+          mount="$staging/mount"
+          mkdir "$mount"
+          hdiutil attach oneclick/Consilium-macOS.dmg -readonly -nobrowse -mountpoint "$mount"
+          trap 'hdiutil detach "$mount"' EXIT
+          ditto "$mount/Consilium.app" "$staging/Consilium.app"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$staging/Consilium.app/Contents/Info.plist")"
+          binary="$staging/Consilium.app/Contents/MacOS/$executable"
+          lipo "$binary" -verify_arch arm64 x86_64
+          expected="$(node -p 'require("./package.json").version')"
+          actual="$("$binary" --version)"
+          if [[ "$actual" != "consilium $expected" ]]; then
+            echo "::error::Expected Consilium $expected, found $actual."
+            exit 1
+          fi
+          echo "Verified macOS preview bundle installation of Consilium $expected."
+          export CONSILIUM_DATA="$staging/profile"
+          mkdir -p "$CONSILIUM_DATA"
+          printf '%s\n' '{"auto_install_updates":false,"members":[]}' > "$CONSILIUM_DATA/council.json"
+          cat > "$staging/window.swift" <<'SWIFT'
+          import CoreGraphics
+          import Darwin
+          import Foundation
+
+          guard CommandLine.arguments.count == 2,
+                let pid = Int(CommandLine.arguments[1]) else { exit(2) }
+          for _ in 0..<60 {
+              guard kill(pid_t(pid), 0) == 0 else { exit(1) }
+              let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
+                  as? [[String: Any]] ?? []
+              if windows.contains(where: {
+                  ($0[kCGWindowOwnerPID as String] as? Int) == pid &&
+                  ($0[kCGWindowLayer as String] as? Int) == 0
+              }) { exit(0) }
+              Thread.sleep(forTimeInterval: 0.5)
+          }
+          exit(1)
+          SWIFT
+          swiftc "$staging/window.swift" -o "$staging/check-window"
+          "$binary" > "$staging/desktop.log" 2>&1 &
+          app=$!
+          trap 'kill "$app" 2>/dev/null || true; wait "$app" 2>/dev/null || true; hdiutil detach "$mount"' EXIT
+          if ! "$staging/check-window" "$app"; then
+            cat "$staging/desktop.log"
+            echo "::error::The staged Consilium bundle did not open an onscreen window within 30 seconds."
+            exit 1
+          fi
+          echo "Verified the staged Consilium bundle opened an onscreen macOS window."
+      - name: Verify Linux DEB preview installation
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=oneclick/Consilium-Linux-amd64.deb
+          sudo apt-get install -y "./$package"
+          package_name="$(dpkg-deb -f "$package" Package)"
+          dpkg-query -L "$package_name" | grep -Fx /usr/bin/consilium
+          expected="$(node -p 'require("./package.json").version')"
+          actual="$(/usr/bin/consilium --version)"
+          if [[ "$actual" != "consilium $expected" ]]; then
+            echo "::error::Expected Consilium $expected, found $actual."
+            exit 1
+          fi
+          echo "Verified Linux DEB preview installation of Consilium $expected."
+
+      - name: Verify Linux DEB and AppImage preview desktop launches
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y xvfb xauth x11-utils dbus libfuse2
+          check_desktop() {
+            local package="$1" executable="$2"
+            export CONSILIUM_DATA="$RUNNER_TEMP/consilium-preview-$package"
+            mkdir -p "$CONSILIUM_DATA"
+            printf '%s\n' '{"auto_install_updates":false,"members":[]}' > "$CONSILIUM_DATA/council.json"
+            xvfb-run -a dbus-run-session -- bash -euo pipefail -s -- "$package" "$executable" <<'DESKTOP'
+          package="$1"
+          "$2" > "$CONSILIUM_DATA/desktop.log" 2>&1 &
+          app=$!
+          trap 'kill "$app" 2>/dev/null || true; wait "$app" 2>/dev/null || true' EXIT
+          for ((attempt = 0; attempt < 60; attempt++)); do
+            if ! kill -0 "$app" 2>/dev/null; then
+              break
+            fi
+            if xwininfo -name Consilium 2>/dev/null | grep -Fq "Map State: IsViewable"; then
+              echo "Verified the Consilium $package opened a visible Linux desktop window."
+              exit 0
+            fi
+            sleep 0.5
+          done
+          xwininfo -root -tree || true
+          cat "$CONSILIUM_DATA/desktop.log"
+          echo "::error::The Consilium $package did not open a visible window within 30 seconds."
+          exit 1
+          DESKTOP
+          }
+          check_desktop DEB /usr/bin/consilium
+          unset APPIMAGE_EXTRACT_AND_RUN
+          check_desktop AppImage "$PWD/oneclick/Consilium-Linux-x86_64.AppImage"
+
+      - name: Verify Linux AppImage and RPM preview executables
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="consilium $(node -p 'require("./package.json").version')"
+          appimage="$PWD/oneclick/Consilium-Linux-x86_64.AppImage"
+          rpm="$PWD/oneclick/Consilium-Linux-x86_64.rpm"
+          scratch="$(mktemp -d)"
+          trap 'rm -rf -- "$scratch"' EXIT
+          cd "$scratch"
+          chmod +x "$appimage"
+          "$appimage" --appimage-extract > /dev/null
+          actual="$(./squashfs-root/AppRun --version)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::AppImage expected $expected, found $actual."
+            exit 1
+          fi
+          sudo apt-get install -y libarchive-tools
+          mkdir rpm-root
+          cd rpm-root
+          bsdtar -xf "$rpm"
+          echo 'Extracted RPM payload. Checking its executable.'
+          actual="$(./usr/bin/consilium --version)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::RPM expected $expected, found $actual."
+            exit 1
+          fi
+          echo "Verified AppImage entry point and RPM executable report $expected."
+
+      - name: Verify Fedora RPM preview installation and desktop launch
+        if: needs.prepare.outputs.preview == 'true' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(node -p 'require("./package.json").version')"
+          docker run --rm -i --mount "type=bind,src=$PWD/oneclick,dst=/preview,readonly" \
+            registry.fedoraproject.org/fedora:43@sha256:08bba635be5e58af81ae39d88fda4a311bcfe0d8b4b7e98e28c109f16c391d9b \
+            bash -euo pipefail -s -- "$expected" <<'FEDORA'
+              package=/preview/Consilium-Linux-x86_64.rpm
+              name="$(rpm -qp --queryformat "%{NAME}" "$package")"
+              dnf install -y "$package"
+              rpm -q "$name"
+              rpm -ql "$name" | grep -Fx /usr/bin/consilium
+              actual="$(/usr/bin/consilium --version)"
+              if [[ "$actual" != "consilium $1" ]]; then
+                printf "Expected Consilium %s, found %s.\n" "$1" "$actual" >&2
+                exit 1
+              fi
+              printf "Verified Fedora RPM package installation of Consilium %s.\n" "$1"
+          dnf install -y /usr/bin/Xvfb /usr/bin/xwininfo /usr/bin/dbus-run-session
+          export CONSILIUM_DATA="$(mktemp -d)"
+          printf '%s\n' '{"auto_install_updates":false,"members":[]}' > "$CONSILIUM_DATA/council.json"
+          export DISPLAY=:99
+          Xvfb "$DISPLAY" -screen 0 1280x1024x24 -nolisten tcp -ac > "$CONSILIUM_DATA/xvfb.log" 2>&1 &
+          xvfb=$!
+          trap 'kill "$xvfb" 2>/dev/null || true; wait "$xvfb" 2>/dev/null || true' EXIT
+          for ((attempt = 0; attempt < 20; attempt++)); do
+            if xwininfo -root >/dev/null 2>&1; then break; fi
+            sleep 0.25
+          done
+          if ! xwininfo -root >/dev/null 2>&1; then cat "$CONSILIUM_DATA/xvfb.log"; exit 1; fi
+          dbus-run-session -- bash -euo pipefail <<'DESKTOP'
+          /usr/bin/consilium > "$CONSILIUM_DATA/desktop.log" 2>&1 &
+          app=$!
+          trap 'kill "$app" 2>/dev/null || true; wait "$app" 2>/dev/null || true' EXIT
+          for ((attempt = 0; attempt < 60; attempt++)); do
+            if ! kill -0 "$app" 2>/dev/null; then break; fi
+            if xwininfo -name Consilium 2>/dev/null | grep -Fq 'Map State: IsViewable'; then
+              echo 'Verified the installed Fedora RPM opened a visible Consilium window.'
+              exit 0
+            fi
+            sleep 0.5
+          done
+          xwininfo -root -tree || true
+          cat "$CONSILIUM_DATA/desktop.log"
+          exit 1
+          DESKTOP
+          FEDORA
+
+      - uses: actions/upload-artifact@v7
+        if: needs.prepare.outputs.preview == 'true'
+        with:
+          name: Consilium-preview-${{ matrix.platform }}-${{ github.run_attempt }}
+          path: oneclick/
+          if-no-files-found: error
 
   publish:
     needs: [prepare, build]
+    if: needs.prepare.outputs.id != '' && (github.event_name != 'workflow_dispatch' || !inputs.draft_only)
     runs-on: ubuntu-latest
     permissions:
       contents: write # to publish the release
@@ -137,4 +416,18 @@ jobs:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
-        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+        run: |
+          set -euo pipefail
+          assets="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets)"
+          for name in Consilium-Windows-Setup.exe Consilium-macOS.dmg Consilium-Linux-x86_64.AppImage Consilium-Linux-amd64.deb Consilium-Linux-x86_64.rpm; do
+            if ! jq -e --arg name "$name" '
+              [.assets[] | select(.name == $name)] |
+              length == 1 and (.[0] |
+                .state == "uploaded" and .size > 0
+                and ((.digest // "") | test("^sha256:[0-9a-f]{64}$")))
+            ' <<< "$assets" > /dev/null; then
+              echo "::error::Release asset $name is incomplete or has no GitHub SHA-256 digest."
+              exit 1
+            fi
+          done
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

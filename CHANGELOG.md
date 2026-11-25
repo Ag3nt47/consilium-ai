@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+## 0.3.58
+
+- Avoid a lock-order deadlock between interrupted-turn recovery and sending or starting a new turn.
+- Bound the whole login-shell PATH check, including inherited output pipes, so a shell descendant cannot leave tool detection waiting indefinitely.
+- Keep concurrent tool lookups responsive during PATH refresh and retain previously known folders when a refresh fails.
+
+## 0.3.57
+
+- Keep Windows project-version and GitHub checks in the background without opening terminal windows or credential prompts.
+- Make Matrix code rain visible through glass surfaces, retain the selected frame rate, and discard expired or future-dated telemetry.
+- Detect missing Signal registration before starting a daemon, preserve account data on failed checks, and explain the phone linking and verification steps.
+- Stop timed-out Signal probes together with their owned children, and clear stale registration errors after genuine recovery.
+- Publish matching Windows, macOS, and Linux installers so paired computers can receive these fixes through the normal updater.
+
+## 0.3.56
+
+- Recheck for updates after reconnecting, returning to the app, or when cached release metadata expires. Use cached installers when GitHub metadata is unavailable and time out stalled metadata requests.
+- Log macOS bundle replacement and relaunch outcomes for update troubleshooting.
+- Read clipboard screenshots through the native desktop clipboard.
+- Estimate local model fit using measured available RAM from updated paired devices.
+- Map JavaScript and TypeScript symbols offline to reduce agent context.
+
+## 0.3.55
+
+- Estimate local model memory requirements and ask paired computers for current memory reports.
+- Run the same memory calculator offline from a source checkout with `node scripts/model-fit.mjs`.
+- Show GitHub update checks, download progress, and installer staging failures in Settings.
+- Request draft Windows, macOS, and Linux installers from Settings for a main commit that passed CI.
+- Use NSIS update mode on Windows and preserve staged installers when the expected version is missing after setup.
+- Use shorter task-board instructions to reduce repeated prompt text.
+
+## 0.3.54
+
+- Guide AI setup and device pairing from the Add menu.
+- Bring Consilium forward and focus the current draft with a global shortcut.
+- Attach clipboard screenshots and refresh the daily wallpaper after wake or a date change.
+- Set an optional daily Discuss token warning and skip background usage scans when the usage panel is closed.
+- View progress across the six upgrade documents in Settings. Council handoffs use a shorter format.
+- Show when Signal is still waiting for verification and stop a stale Signal daemon before relinking.
+
+## 0.3.53
+
+- Follow new chat messages while the reader is at the bottom, and keep their place when they scroll up.
+- Reduce prompt size with exact council-memory deduplication and previews of older successful command results.
+- Read replies from Signal subscriptions, including the reply used to verify setup.
+- Keep switched-off council members out of resumed turns, stand-in selection, and linked-computer requests.
+- Use source event IDs to prevent duplicate imports and preserve separate messages with identical text.
+- Follow published macOS installers and keep the Signal settings address field on one line.
+
+- Fixed: when a linked PC announced an update, macOS no longer starts a full source rebuild while
+  the GitHub release is still publishing. It checks every 30 minutes (and immediately after the
+  announcement), verifies the published DMG's SHA-256, stages its app bundle atomically, and lets
+  the existing automatic installer restart into it (#10).
+
+- Fixed: auto-continue went quiet with no note whenever any AI had a request open, even one it
+  had withdrawn or one from a linked computer's AI (answered there). Those no longer hold rounds
+  back, and when a request here really is waiting, it says so once and lists it (#21).
+
+- Fixed: a freeze of up to a minute (and a freeze-guard restart) when messages arrived while
+  AIs were answering. The turn table stayed locked while the window, linked computers, notes
+  and the council were told of a message; it is now held only to file the message (#14).
+
 - Fixed: the council list in the sidebar now fills the space down to PC pressure. With five or
   more AIs it was capped at 46% of the window (at most 480 px), leaving a gap above PC pressure
   and cutting cards off; it now takes the remaining height and scrolls inside it. Council card

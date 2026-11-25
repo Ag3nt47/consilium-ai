@@ -10,6 +10,35 @@ function askText(tool: CatalogTool): string {
   return `Please install ${tool.name} (${tool.source}) from the tool catalog. Find the official, pinned install command for this computer and ask me with an INSTALL_COMMAND_JSON request.`;
 }
 
+function LocalToolInventory() {
+  const [tools, setTools] = useState<string[]>();
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function scan() {
+    setBusy(true);
+    setError("");
+    try {
+      setTools(await api.localToolInventory());
+    } catch (failure) {
+      setTools(undefined);
+      setError(String(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <button className="btn small-btn" type="button" disabled={busy} onClick={() => void scan()}>
+        {busy ? "Checking…" : "Check local tools"}
+      </button>
+      {error && <p role="alert">{error}</p>}
+      {tools && <p role="status">{tools.length ? tools.join(", ") : "No known tools found."}</p>}
+    </div>
+  );
+}
+
 /**
  * Settings → Tools: tools Consilium knows about but doesn't ship. Nothing installs on its own:
  * Install sends the pinned command to one AI as the human's approval for that single install.
@@ -53,6 +82,7 @@ export function ToolsSettings({
 
   return (
     <div className="tools-settings">
+      <LocalToolInventory />
       <p className="muted small">
         Tools the AIs know about but Consilium doesn't download. <b>Install</b> sends the exact command shown to the AI
         you pick, as your approval for that one install. Admin rights still ask separately.

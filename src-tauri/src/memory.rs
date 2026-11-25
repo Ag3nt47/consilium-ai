@@ -14,6 +14,7 @@ use std::sync::Mutex;
 /// Characters of council memory and of project notes given to each AI.
 pub const MAX_CHARS: usize = 8_000;
 pub const PROJECT_NOTES: &str = "CONSILIUM.md";
+const LOCAL_PROJECT_NOTE_CHARS: usize = 2_400;
 
 pub struct Memory {
     path: PathBuf,
@@ -81,28 +82,89 @@ impl Memory {
 
     /// The memory as given to the AIs: the most recent part if it is too long.
     pub fn for_prompt(&self) -> Option<String> {
-        clip(&self.read())
+        self.for_prompt_within(MAX_CHARS)
+    }
+
+    /// Like `for_prompt`, but only the newest `max` characters: for local models' small windows.
+    pub fn for_prompt_within(&self, max: usize) -> Option<String> {
+        clip_to(&without_repeats(&self.read()), max)
     }
 }
 
 /// The project's CONSILIUM.md, if the folder has one.
-pub fn project_notes(folder: &Path) -> Option<String> {
-    clip(&std::fs::read_to_string(folder.join(PROJECT_NOTES)).ok()?)
+pub fn project_notes(folder: &Path, local: bool) -> Option<String> {
+    let notes = std::fs::read_to_string(folder.join(PROJECT_NOTES)).ok()?;
+    if !local {
+        return clip_to(&notes, MAX_CHARS);
+    }
+    local_project_notes(&notes)
 }
 
-/// Keeps the last MAX_CHARS characters (newest notes are at the end), trimmed to whole lines.
-fn clip(text: &str) -> Option<String> {
+fn local_project_notes(notes: &str) -> Option<String> {
+    let notes = notes.trim();
+    if notes.is_empty() {
+        return None;
+    }
+    if notes.chars().count() <= LOCAL_PROJECT_NOTE_CHARS {
+        return Some(notes.to_string());
+    }
+    const OMITTED: &str = "\n[Middle omitted. Read CONSILIUM.md before editing the project.]\n";
+    let available = LOCAL_PROJECT_NOTE_CHARS - OMITTED.len();
+    let head_budget = available * 2 / 3;
+    let tail_budget = available - head_budget;
+    let head_end = notes.char_indices().nth(head_budget)?.0;
+    let tail_start = notes.char_indices().rev().nth(tail_budget - 1)?.0;
+    let head = &notes[..head_end];
+    let tail = &notes[tail_start..];
+    let head = head.rsplit_once('\n').map_or(head, |(whole, _)| whole);
+    let tail = tail.split_once('\n').map_or(tail, |(_, whole)| whole);
+    Some(format!("{head}{OMITTED}{tail}"))
+}
+
+/// Keeps the newest notes, trimming to whole lines where possible.
+fn clip_to(text: &str, max: usize) -> Option<String> {
     let t = text.trim();
     if t.is_empty() {
         return None;
     }
-    if t.chars().count() <= MAX_CHARS {
+    if t.chars().count() <= max {
         return Some(t.to_string());
     }
-    let skip = t.chars().count() - MAX_CHARS;
+    let skip = t.chars().count() - max;
     let tail: String = t.chars().skip(skip).collect();
     let tail = tail.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap_or(tail);
     Some(format!("(earlier notes omitted)\n{tail}"))
+}
+
+/// Keeps the newest copy of each repeated note in the prompt. Match the exact
+/// note text apart from the recorded author and date. Similar notes can carry
+/// different decisions, so keep both unless the text matches.
+fn without_repeats(text: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut lines = Vec::new();
+    for line in text.lines().rev() {
+        if let Some(note) = line.trim_start().strip_prefix("- ") {
+            if !seen.insert(without_stamp(note.trim_end())) {
+                continue;
+            }
+        }
+        lines.push(line);
+    }
+    lines.reverse();
+    lines.join("\n")
+}
+
+fn without_stamp(note: &str) -> &str {
+    let Some((body, stamp)) = note.strip_suffix(')').and_then(|s| s.rsplit_once(" (")) else {
+        return note;
+    };
+    let Some((author, date)) = stamp.rsplit_once(", ") else {
+        return note;
+    };
+    let is_date = date.len() == 10 && date.bytes().enumerate().all(|(i, b)| {
+        if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() }
+    });
+    if !author.is_empty() && is_date { body } else { note }
 }
 
 /// Extracts an optional replacement target tag like `[replaces: needle]` or `[replace: needle]`
@@ -155,6 +217,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repeated_notes_are_left_out_of_the_prompt_newest_kept() {
+        let text = concat!(
+            "## Council memory\n",
+            "- Keep restart disabled on this host (Claude, 2026-11-14)\n",
+            "- Build installers on the Mac (Gemini, 2026-11-15)\n",
+            "- Keep restart enabled on this host (Gemini, 2026-11-18)\n",
+            "- Build installers on the Mac (Claude, 2026-11-19)\n",
+            "- Use local mode (old, separate)\n",
+            "- Use local mode (new, separate)\n",
+        );
+        let out = without_repeats(text);
+        assert!(out.starts_with("## Council memory\n"));
+        assert_eq!(out.matches("Build installers").count(), 1);
+        assert!(out.contains("Build installers on the Mac (Claude, 2026-11-19)"));
+        assert!(out.contains("Keep restart disabled") && out.contains("Keep restart enabled"));
+        assert_eq!(out.matches("Use local mode").count(), 2);
+    }
+
+    #[test]
     fn remember_lines_are_parsed_and_secrets_refused() {
         let r = remember_lines("ok\nREMEMBER: The human prefers short answers\nremember: Builds use npm run app:build\nREMEMBER: my API key is abc");
         assert_eq!(r, vec!["The human prefers short answers", "Builds use npm run app:build"]);
@@ -173,6 +254,9 @@ mod tests {
         let clipped = m.for_prompt().unwrap();
         assert!(clipped.starts_with("(earlier notes omitted)") && clipped.ends_with("newest line"));
         assert!(clipped.chars().count() <= MAX_CHARS + 30);
+        let recent = "- Keep the test command (Claude, 2026-11-19)";
+        m.write(&format!("- Keep the test command (Gemini, 2026-11-18)\n{recent}\n")).unwrap();
+        assert_eq!(m.for_prompt_within(50).as_deref(), Some(recent));
         let _ = std::fs::remove_file(p);
     }
 
@@ -180,9 +264,19 @@ mod tests {
     fn project_notes_come_from_consilium_md() {
         let dir = std::env::temp_dir().join(format!("consilium-proj-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(project_notes(&dir).is_none());
+        assert!(project_notes(&dir, false).is_none());
         std::fs::write(dir.join(PROJECT_NOTES), "# Rules\nRun cargo test before pushing.").unwrap();
-        assert!(project_notes(&dir).unwrap().contains("cargo test"));
+        assert_eq!(project_notes(&dir, true), project_notes(&dir, false));
+        let long_notes = format!("# Rules\nRun cargo test before pushing.\n{}\nNewest task notes.", "確認する ".repeat(1_300));
+        std::fs::write(dir.join(PROJECT_NOTES), &long_notes).unwrap();
+        let compact = project_notes(&dir, true).unwrap();
+        assert!(compact.starts_with("# Rules\nRun cargo test before pushing."));
+        assert!(compact.contains("Read CONSILIUM.md before editing the project."));
+        assert!(compact.ends_with("Newest task notes."));
+        assert!(compact.chars().count() <= LOCAL_PROJECT_NOTE_CHARS);
+        assert_eq!(project_notes(&dir, false).unwrap(), long_notes);
+        let one_line = "界".repeat(3_000);
+        assert_eq!(local_project_notes(&one_line).unwrap().chars().count(), LOCAL_PROJECT_NOTE_CHARS);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

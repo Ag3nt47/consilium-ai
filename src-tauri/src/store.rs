@@ -73,6 +73,9 @@ pub struct TokenUsage {
     pub thinking_tokens: u64,
     #[serde(default)]
     pub total_tokens: u64,
+    /// Provider-measured generation rate for this reply, in thousandths of a token per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_rate_milli: Option<u64>,
 }
 
 impl TokenUsage {
@@ -127,6 +130,9 @@ pub struct Event {
     /// Transport or bridge the message arrived through (e.g. "Signal"), if not sent directly in-app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+    /// Source node and event identity for a message imported from a linked computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -232,6 +238,10 @@ impl Store {
     /// Where this conversation's attached files are kept.
     pub fn files_dir(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.files"))
+    }
+
+    pub fn handoff_path(&self, id: &str) -> Option<PathBuf> {
+        valid_id(id).then(|| self.dir.join(format!("{id}.HANDOFF.md")))
     }
 
     fn stop_path(&self, id: &str) -> PathBuf {
@@ -438,6 +448,9 @@ impl Store {
         let _ = fs::remove_file(self.stop_path(id));
         let _ = fs::remove_dir_all(self.files_dir(id));
         let _ = fs::remove_file(self.dir.join(format!("{id}.tasks.json")));
+        if let Some(path) = self.handoff_path(id) {
+            let _ = fs::remove_file(path);
+        }
         Ok(())
     }
 
@@ -491,7 +504,7 @@ impl Store {
         attachments: Vec<crate::attach::Attachment>,
         via: Option<&str>,
     ) -> Result<Event, String> {
-        self.append_full(id, "human", "message", to, text, None, attachments, vec![], via.map(String::from), false)
+        self.append_full(id, "human", "message", to, text, None, attachments, vec![], via.map(String::from), false, None)
     }
 
     pub fn append_with_usage(
@@ -503,11 +516,12 @@ impl Store {
         text: &str,
         usage: Option<TokenUsage>,
     ) -> Result<Event, String> {
-        self.append_full(id, sender, kind, to, text, usage, vec![], vec![], None, false)
+        self.append_full(id, sender, kind, to, text, usage, vec![], vec![], None, false, None)
     }
 
     /// A message copied from a linked computer. Its REQUEST lines get no buttons here: the
     /// computer it came from owns that turn.
+    #[allow(clippy::too_many_arguments)]
     pub fn append_imported(
         &self,
         id: &str,
@@ -516,13 +530,14 @@ impl Store {
         to: Vec<String>,
         text: &str,
         via: Option<String>,
+        source_event: Option<String>,
     ) -> Result<Event, String> {
-        self.append_full(id, sender, kind, to, text, None, vec![], vec![], via, true)
+        self.append_full(id, sender, kind, to, text, None, vec![], vec![], via, true, source_event)
     }
 
     /// Records the messages that were handed to an AI in one compact, hidden receipt event.
     pub fn append_seen(&self, id: &str, sender: &str, seen: Vec<String>) -> Result<Event, String> {
-        self.append_full(id, sender, "seen", vec![], "", None, vec![], seen, None, false)
+        self.append_full(id, sender, "seen", vec![], "", None, vec![], seen, None, false, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -538,6 +553,7 @@ impl Store {
         seen: Vec<String>,
         via: Option<String>,
         foreign: bool,
+        source_event: Option<String>,
     ) -> Result<Event, String> {
         Self::check(id)?;
         // Everything in a conversation is sent to every AI's provider, so secrets are masked first.
@@ -575,6 +591,7 @@ impl Store {
             usage,
             attachments,
             via,
+            source_event,
         };
         let mut line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
         line.push('\n');
@@ -805,6 +822,7 @@ mod tests {
             output_tokens: 5,
             cache_read_tokens: 3,
             total_tokens: 15,
+            output_rate_milli: Some(48_200),
             ..TokenUsage::default()
         };
         s.append_with_usage(&one.id, "gpt", "message", vec![], "a", Some(usage))
@@ -816,6 +834,7 @@ mod tests {
 
         let report = s.token_usage_report(&one.id, 0).unwrap();
         assert_eq!(report.conversation["gpt"].total_tokens, 30);
+        assert_eq!(report.conversation["gpt"].output_rate_milli, None);
         assert_eq!(report.conversation["gpt"].cache_read_tokens, 6);
         assert_eq!(report.today["gpt"].total_tokens, 30);
         assert_eq!(report.today["claude"].total_tokens, 15);

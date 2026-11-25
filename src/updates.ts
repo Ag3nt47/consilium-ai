@@ -1,14 +1,16 @@
-// Checks GitHub Releases for a newer Consilium at most once a day (or when asked).
-// On Windows and Linux a newer release's installer is downloaded in the background and checked
-// against GitHub's published SHA-256; it only installs when the person clicks Update Now. Offline or rate-limited
-// checks fail quietly. Only the public releases API is contacted, with no identifying data.
+// Checks GitHub Releases for a newer Consilium every 30 minutes (or when asked). A newer release's
+// installer is downloaded in the background and checked against GitHub's published SHA-256. The
+// existing automatic installer applies it when enabled; Update Now remains available otherwise.
+// Only the public releases API is contacted, with no identifying data.
 import { getVersion } from "@tauri-apps/api/app";
 import { OS } from "./platform";
 import { api } from "./api";
 
 export const REPO = "Ag3nt47/consilium-ai";
 export const RELEASES_URL = `https://github.com/${REPO}/releases`;
-const DAY_MS = 24 * 60 * 60 * 1000;
+// Successful metadata checks remain fresh for 25 minutes across app restarts.
+const CACHE_FRESH_MS = 25 * 60 * 1000;
+const RELEASE_METADATA_TIMEOUT_MS = 15_000;
 const KEY = "consilium.updates";
 
 export interface UpdateInfo {
@@ -25,7 +27,18 @@ interface Cache {
   lastCheck: number;
   etag?: string;
   latest?: Omit<UpdateInfo, "current">;
+  /** The installer for this computer, retained so a failed or interrupted staging can retry. */
+  asset?: ReleaseAsset;
 }
+
+interface ReleaseAsset {
+  name: string;
+  url: string;
+  digest: string;
+}
+
+let stagingVersion: string | null = null;
+let queuedStage: { version: string; start: () => void } | null = null;
 
 function readCache(): Cache {
   try {
@@ -33,6 +46,12 @@ function readCache(): Cache {
   } catch {
     return { lastCheck: 0 };
   }
+}
+
+export function nextUpdateCheckDelay(): number {
+  const remaining = CACHE_FRESH_MS - (Date.now() - readCache().lastCheck);
+  // Back off after a failed check. For a usable cache, check again as soon as it expires.
+  return remaining > 0 && remaining <= CACHE_FRESH_MS ? Math.max(remaining, 1000) : 30 * 60 * 1000;
 }
 
 function writeCache(c: Cache) {
@@ -51,18 +70,86 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
+function releaseAsset(assets: unknown[], linuxPackage: string | null): ReleaseAsset | undefined {
+  const candidates = assets
+    .filter((a): a is Record<string, unknown> => !!a && typeof a === "object")
+    .map((a) => ({
+      name: String(a.name || ""),
+      url: typeof a.browser_download_url === "string" ? a.browser_download_url : "",
+      digest: typeof a.digest === "string" ? a.digest : "",
+    }))
+    .filter((a) => a.url && a.digest);
+  const matches = (a: ReleaseAsset) => {
+    const name = a.name.toLowerCase();
+    if (OS === "mac") return name.endsWith(".dmg");
+    if (OS === "windows") return name.endsWith("-setup.exe");
+    if (OS === "linux") return name.endsWith(linuxPackage ? `.${linuxPackage}` : ".appimage");
+    return false;
+  };
+  const matching = candidates.filter(matches);
+  if (OS === "mac") {
+    return matching.find((a) => a.name.toLowerCase() === "consilium-macos.dmg") ?? matching[0];
+  }
+  return matching[0];
+}
+
+/** Stages a release asset once and retains a newer release found during an active download. */
+function stageRelease(
+  current: string,
+  latest: Omit<UpdateInfo, "current"> | undefined,
+  asset: ReleaseAsset | undefined,
+  onStart?: (version: string) => void,
+  onFailure?: (error: unknown) => void,
+) {
+  if (!latest || !asset || compareVersions(latest.latest, current) <= 0) return;
+  const version = latest.latest;
+  const start = () => {
+    stagingVersion = version;
+    void (async () => {
+      const already = await api.updateAvailable().catch(() => null);
+      if (already && compareVersions(already.version, version) >= 0) return;
+      onStart?.(version);
+      await api.stageReleaseUpdate(version, asset.url, asset.digest);
+    })()
+      .catch((error: unknown) => { onFailure?.(error); })
+      .finally(() => {
+        stagingVersion = null;
+        const next = queuedStage;
+        queuedStage = null;
+        next?.start();
+      });
+  };
+  if (stagingVersion) {
+    if (compareVersions(version, stagingVersion) > 0 &&
+      (!queuedStage || compareVersions(version, queuedStage.version) > 0)) {
+      queuedStage = { version, start };
+    }
+    return;
+  }
+  start();
+}
+
 /** Returns update details when a newer release exists, otherwise null. */
-export async function checkForUpdate(force = false): Promise<UpdateInfo | null> {
+export async function checkForUpdate(
+  force = false,
+  onDownloadStart?: (version: string) => void,
+  onDownloadFailure?: (error: unknown) => void,
+): Promise<UpdateInfo | null> {
   const current = await getVersion();
   const cache = readCache();
-  const fresh = Date.now() - cache.lastCheck < DAY_MS;
+  const fresh = Date.now() - cache.lastCheck < CACHE_FRESH_MS;
   if (!force && fresh) {
+    stageRelease(current, cache.latest, cache.asset, onDownloadStart, onDownloadFailure);
     return cache.latest && compareVersions(cache.latest.latest, current) > 0 ? { current, ...cache.latest } : null;
   }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RELEASE_METADATA_TIMEOUT_MS);
   try {
     const headers: Record<string, string> = { Accept: "application/vnd.github+json" };
-    if (cache.etag && cache.latest) headers["If-None-Match"] = cache.etag;
-    const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers });
+    // Old caches lack the installer metadata. Fetch the full release once to fill it rather than
+    // accepting a 304 that would leave this computer unable to stage the known update.
+    if (cache.etag && cache.latest && cache.asset) headers["If-None-Match"] = cache.etag;
+    const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers, signal: controller.signal });
     if (res.status === 304 && cache.latest) {
       writeCache({ ...cache, lastCheck: Date.now() });
     } else if (res.ok) {
@@ -73,38 +160,32 @@ export async function checkForUpdate(force = false): Promise<UpdateInfo | null> 
         notes: String(r.body || "").slice(0, 4000),
         publishedAt: String(r.published_at || ""),
       };
-      writeCache({ lastCheck: Date.now(), etag: res.headers.get("ETag") || undefined, latest });
-      if (Array.isArray(r.assets) && compareVersions(latest.latest, current) > 0) {
-        const pkg = OS === "linux" ? await api.linuxPackageKind().catch(() => null) : null;
-        const asset = r.assets.find((a: Record<string, unknown>) => {
-          const name = String(a.name || "").toLowerCase();
-          if (OS === "windows") {
-            return name.endsWith("-setup.exe");
-          }
-          if (OS === "linux") {
-            return name.endsWith(pkg ? `.${pkg}` : ".appimage");
-          }
-          return false;
-        });
-        if (asset && typeof asset.browser_download_url === "string" && typeof asset.digest === "string") {
-          api.stageReleaseUpdate(latest.latest, asset.browser_download_url, asset.digest).catch(() => undefined);
-        }
-      }
+      const pkg = OS === "linux" ? await api.linuxPackageKind().catch(() => null) : null;
+      const asset = Array.isArray(r.assets) ? releaseAsset(r.assets, pkg) : undefined;
+      writeCache({ lastCheck: Date.now(), etag: res.headers.get("ETag") || undefined, latest, asset });
     } else {
-      // 404 (no releases yet), rate limits, etc.: remember we checked, try again tomorrow.
-      writeCache({ ...cache, lastCheck: Date.now() });
+      // Keep rate-limit and missing-release checks on schedule. Retry server failures on reconnect.
+      if (res.status < 500) writeCache({ ...cache, lastCheck: Date.now() });
+      if (force) throw new Error(`GitHub returned HTTP ${res.status}`);
     }
-  } catch {
-    return null; // offline: stay quiet
+  } catch (error) {
+    if (force) throw error;
+    // A cached installer can still be reachable when release metadata is unavailable.
+  } finally {
+    clearTimeout(timer);
   }
   const c = readCache();
+  stageRelease(current, c.latest, c.asset, onDownloadStart, onDownloadFailure);
   if (c.latest && compareVersions(c.latest.latest, current) > 0) return { current, ...c.latest };
   // Releases can lag behind the source: report a newer version on main too, marked unreleased,
   // so "up to date" is never claimed while GitHub has something newer.
   if (!force) return null;
+  const fallback = new AbortController();
+  const fallbackTimer = setTimeout(() => fallback.abort(), RELEASE_METADATA_TIMEOUT_MS);
   try {
     const res = await fetch(`https://api.github.com/repos/${REPO}/contents/package.json?ref=main`, {
       headers: { Accept: "application/vnd.github.raw+json" },
+      signal: fallback.signal,
     });
     if (!res.ok) return null;
     const main = String((await res.json()).version || "");
@@ -112,5 +193,7 @@ export async function checkForUpdate(force = false): Promise<UpdateInfo | null> 
     return { current, latest: main, url: `https://github.com/${REPO}`, notes: "", publishedAt: "", unreleased: true };
   } catch {
     return null;
+  } finally {
+    clearTimeout(fallbackTimer);
   }
 }

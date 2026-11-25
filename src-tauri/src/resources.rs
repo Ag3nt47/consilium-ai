@@ -11,10 +11,16 @@ use sysinfo::Disks;
 pub struct HostResources {
     pub computer: String,
     pub os: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_arch: Option<String>,
     pub free_disk_bytes: u64,
     pub total_disk_bytes: u64,
     pub cpu_percent: u8,
     pub memory_percent: u8,
+    #[serde(default)]
+    pub total_memory_mb: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_memory_mb: Option<u64>,
     pub cores: usize,
     pub tools: Vec<String>,
     pub updated_at: u64,
@@ -41,10 +47,13 @@ impl HostResources {
         Self {
             computer: computer.to_string(),
             os,
+            build_arch: Some(std::env::consts::ARCH.into()),
             free_disk_bytes,
             total_disk_bytes,
             cpu_percent: pressure.cpu_percent,
             memory_percent: pressure.memory_percent,
+            total_memory_mb: pressure.total_memory_mb,
+            available_memory_mb: Some(pressure.available_memory_mb),
             cores: pressure.cores,
             tools,
             updated_at,
@@ -107,10 +116,18 @@ mod tests {
         let r = HostResources::sample("lukes-mbp", Some(Path::new("/tmp")));
         assert_eq!(r.computer, "lukes-mbp");
         assert!(!r.os.is_empty());
+        assert!(r.total_memory_mb > 0);
+        assert!(r.available_memory_mb.is_some_and(|available| available <= r.total_memory_mb));
         assert!(r.cores >= 1);
         let summary = r.format_summary();
         assert!(summary.contains("lukes-mbp"));
         assert!(summary.contains("GB free"));
+        let mut old_report = serde_json::to_value(&r).unwrap();
+        old_report.as_object_mut().unwrap().remove("total_memory_mb");
+        old_report.as_object_mut().unwrap().remove("available_memory_mb");
+        let old: HostResources = serde_json::from_value(old_report).unwrap();
+        assert_eq!(old.total_memory_mb, 0);
+        assert_eq!(old.available_memory_mb, None);
     }
 
     #[test]
@@ -118,10 +135,13 @@ mod tests {
         let r = HostResources {
             computer: "msi-agent47".into(),
             os: "windows".into(),
+            build_arch: None,
             free_disk_bytes: 12 * 1024 * 1024 * 1024,
             total_disk_bytes: 512 * 1024 * 1024 * 1024,
             cpu_percent: 25,
             memory_percent: 45,
+            total_memory_mb: 16384,
+            available_memory_mb: Some(9000),
             cores: 16,
             tools: vec!["cargo".into(), "git".into(), "rea".into()],
             updated_at: 12345678,

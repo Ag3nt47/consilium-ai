@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import { api, type TaskBoard, type TaskItem, type TaskOp } from "./api";
+import { api, type TaskBoard, type TaskItem, type TaskOp, type TaskPriority } from "./api";
 
 const STATUS_LABEL: Record<TaskItem["status"], string> = {
   todo: "open",
@@ -7,6 +7,58 @@ const STATUS_LABEL: Record<TaskItem["status"], string> = {
   blocked: "blocked",
   done: "done",
 };
+const PRIORITY_RANK: Record<TaskPriority, number> = { high: 0, normal: 1, low: 2 };
+const PRIORITIES = ["high", "normal", "low"] as const;
+
+function StageTaskPlan({ conversation, onStaged }: { conversation: string; onStaged: () => void }) {
+  const [plan, setPlan] = useState("");
+  const [priority, setPriority] = useState<TaskPriority>("normal");
+  const [running, setRunning] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  async function stage() {
+    if (running || !plan.trim()) return;
+    setRunning(true);
+    setNotice("");
+    setError("");
+    try {
+      const { added, skipped } = await api.tasksStagePlan(conversation, plan, priority);
+      setPlan("");
+      setNotice(`${added} staged${skipped ? ` · ${skipped} ${skipped === 1 ? "duplicate" : "duplicates"} skipped` : ""}.`);
+      if (added) onStaged();
+    } catch (failure) {
+      setError(String(failure));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <details className="task-stage">
+      <summary>Stage a task list</summary>
+      <p className="muted small">Paste up to 100 tasks, one per line. Tasks stay unassigned when staged.</p>
+      <textarea aria-label="Task plan" rows={4} value={plan} disabled={running}
+        onChange={(event) => setPlan(event.target.value)} />
+      <div className="row gap-sm">
+        <select aria-label="Task plan priority" value={priority} disabled={running}
+          onChange={(event) => {
+            const selected = PRIORITIES.find((entry) => entry === event.target.value);
+            if (selected) setPriority(selected);
+          }}>
+          <option value="high">High</option>
+          <option value="normal">Normal</option>
+          <option value="low">Low</option>
+        </select>
+        <button className="btn small" type="button" onClick={stage} disabled={running || !plan.trim()}>
+          {running ? "Staging…" : "Stage tasks"}
+        </button>
+      </div>
+      {notice && <p role="status">{notice}</p>}
+      {error && <p className="task-error" role="alert">{error}</p>}
+    </details>
+  );
+}
 
 /**
  * The conversation's shared checklist. AIs change it with TASK: lines; the human changes it here.
@@ -29,32 +81,44 @@ export function TaskBoardPanel({
   // click really closes it instead of leaving the hover peek showing.
   const [closed, setClosed] = useState(false);
   const [title, setTitle] = useState("");
+  const [priority, setPriority] = useState<TaskPriority>("normal");
+  const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
+  const [refresh, setRefresh] = useState(0);
 
   useEffect(() => {
     if (!conversation) return;
-    api.tasksGet(conversation).then(setBoard).catch(() => undefined);
-  }, [conversation, changeKey]);
+    let active = true;
+    api.tasksGet(conversation).then((snapshot) => {
+      if (active) setBoard(snapshot);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [conversation, changeKey, refresh]);
 
   if (!conversation) return null;
 
   const apply = (op: TaskOp) =>
     api
       .tasksApply(conversation, op)
-      .then((b) => {
-        setBoard(b);
+      .then(() => {
+        setRefresh((value) => value + 1);
         setError("");
+        return true;
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => {
+        setError(String(e));
+        return false;
+      });
 
   const nameOf = (id?: string | null) => (id ? people.find((p) => p.id === id)?.name ?? (id === "human" ? "You" : id) : "");
   const done = board.tasks.filter((t) => t.status === "done").length;
   const total = board.tasks.length;
   const pct = total ? Math.round((done * 100) / total) : 0;
-  // Open work first, newest finished last.
-  const order = { doing: 0, blocked: 1, todo: 2, done: 3 } as const;
-  const tasks = [...board.tasks].sort((a, b) => order[a.status] - order[b.status] || a.id - b.id);
-  const current = tasks.find((t) => t.status === "doing") ?? tasks.find((t) => t.status === "blocked") ?? tasks.find((t) => t.status === "todo");
+  const order = { doing: 0, todo: 1, blocked: 2, done: 3 } as const;
+  const tasks = [...board.tasks].sort((a, b) => order[a.status] - order[b.status]
+    || (a.status === "done" ? 0 : PRIORITY_RANK[a.priority ?? "normal"] - PRIORITY_RANK[b.priority ?? "normal"])
+    || a.id - b.id);
+  const current = tasks.find((t) => t.status !== "done");
 
   return (
     <div
@@ -123,6 +187,7 @@ export function TaskBoardPanel({
                   <span className="task-meta">
                     {t.owner && <span className="task-dot" style={{ backgroundColor: `var(--c-${t.owner}, var(--accent))` }} />}
                     {STATUS_LABEL[t.status]}
+                    {t.priority && t.priority !== "normal" ? ` · ${t.priority} priority` : ""}
                     {t.owner ? ` · ${nameOf(t.owner)}` : ""}
                   </span>
                 </span>
@@ -132,9 +197,12 @@ export function TaskBoardPanel({
                   onChange={(e) => {
                     const v = e.target.value;
                     if (v === "__drop") apply({ op: "drop", task: `#${t.id}` });
-                    else if (v) apply({ op: "hand", task: `#${t.id}`, to: v });
+                    else if (v.startsWith("__priority_")) {
+                      const priority = PRIORITIES.find((entry) => v === `__priority_${entry}`);
+                      if (priority) apply({ op: "priority", task: `#${t.id}`, priority });
+                    } else if (v) apply({ op: "hand", task: `#${t.id}`, to: v });
                   }}
-                  title="Give this task to someone, or remove it"
+                  title="Assign, prioritize, or remove this task"
                   aria-label={`Change task ${t.id}`}
                 >
                   <option value="">⋯</option>
@@ -143,6 +211,9 @@ export function TaskBoardPanel({
                       Give to {p.name}
                     </option>
                   ))}
+                  {PRIORITIES.filter((priority) => priority !== (t.priority ?? "normal")).map((priority) => (
+                    <option key={priority} value={`__priority_${priority}`}>Set {priority} priority</option>
+                  ))}
                   <option value="__drop">Remove</option>
                 </select>
               </li>
@@ -150,21 +221,34 @@ export function TaskBoardPanel({
           </ul>
           <form
             className="task-add"
-            onSubmit={(e) => {
+            onSubmit={async (e) => {
               e.preventDefault();
               const t = title.trim();
-              if (!t) return;
-              apply({ op: "add", title: t });
-              setTitle("");
+              if (!t || adding) return;
+              setAdding(true);
+              if (await apply({ op: "add", title: t, priority })) setTitle("");
+              setAdding(false);
             }}
           >
             <input
               value={title}
+              disabled={adding}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Add a task…"
               title="Add a task for any AI to take; they see the list every turn"
             />
+            <select aria-label="New task priority" value={priority} disabled={adding}
+              onChange={(e) => {
+                const selected = PRIORITIES.find((entry) => entry === e.target.value);
+                if (selected) setPriority(selected);
+              }}>
+              <option value="high">High</option>
+              <option value="normal">Normal</option>
+              <option value="low">Low</option>
+            </select>
+            <button className="btn small" type="submit" disabled={adding || !title.trim()}>Add</button>
           </form>
+          <StageTaskPlan key={conversation} conversation={conversation} onStaged={() => setRefresh((value) => value + 1)} />
           {error && <div className="task-error">{error}</div>}
         </>
       </div>
