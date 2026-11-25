@@ -207,6 +207,7 @@ fn swap_paths(data: &Path, exe: &Path, appimage: Option<&Path>) -> Result<(PathB
     Ok((staged, target))
 }
 
+#[cfg(any(unix, test))]
 fn quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
 }
@@ -218,6 +219,7 @@ pub(crate) fn ps_quote(p: &Path) -> String {
 
 /// The macOS helper: wait for `pid` to exit (30 s, then force it), swap, relaunch. On a failed
 /// swap the old app is put back and reopened, so the human is never left without Consilium.
+#[cfg(any(unix, test))]
 pub fn helper_script(pid: u32, staged: &Path, target: &Path, log: &Path) -> String {
     let (s, t, g) = (quote(staged), quote(target), quote(log));
     let old = quote(&target.with_extension("app.old"));
@@ -249,6 +251,7 @@ pub fn helper_script(pid: u32, staged: &Path, target: &Path, log: &Path) -> Stri
 }
 
 /// The Linux helper: as on macOS, for a single program file, then starts it detached.
+#[cfg(any(unix, test))]
 pub fn linux_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &Path) -> String {
     let (s, t, l) = (quote(staged), quote(target), quote(leftover));
     let old = quote(&PathBuf::from(format!("{}.old", target.display())));
@@ -268,6 +271,7 @@ pub fn linux_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &Pa
 /// The Linux helper for a .deb or .rpm install: after the app exits, the system's package
 /// manager installs the staged package through pkexec, which shows the system's own password
 /// prompt. If it is cancelled or fails, the old install is untouched and is reopened.
+#[cfg(any(unix, test))]
 pub fn linux_package_script(pid: u32, staged: &Path, target: &Path, leftover: &Path) -> String {
     let (s, t, l) = (quote(staged), quote(target), quote(leftover));
     let install = if staged.extension().and_then(|e| e.to_str()) == Some("rpm") {
