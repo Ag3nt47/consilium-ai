@@ -6,6 +6,14 @@ export function isRecentCompletion(timestamp, now) {
     && timestamp >= 0 && now >= timestamp && now - timestamp < COMPLETION_TTL_MS;
 }
 
+/** Keep the rain dense while bounding the number of painted pixels. */
+export function rainLayout(width, height, deviceRatio, eco) {
+  const count = Math.min(eco ? 64 : 96, Math.max(1, Math.floor(width / (eco ? 32 : 22))));
+  const budget = eco ? 1_000_000 : 3_000_000;
+  const ratio = Math.min(deviceRatio || 1, eco ? 1 : 2, Math.sqrt(budget / Math.max(1, width * height)));
+  return { count, ratio };
+}
+
 export class RainClock {
   #lastSeen = null;
   #lastPaint = null;

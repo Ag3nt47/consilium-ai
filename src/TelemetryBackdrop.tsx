@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { AgentInfo, ChatEvent } from "./api";
-import { COMPLETION_TTL_MS, isRecentCompletion, RainClock } from "./telemetry-rain.mjs";
+import { COMPLETION_TTL_MS, isRecentCompletion, RainClock, rainLayout } from "./telemetry-rain.mjs";
 
 export type BackdropMode = "rain" | "static" | "stealth";
 export type BackdropPrefs = {
@@ -12,9 +12,10 @@ export type BackdropPrefs = {
   fps: 15 | 30 | 60;
 };
 
-type BackdropSample = { kind: "local" | "cloud" | "mesh" | "alert" | "host"; text: string; active?: boolean };
+type BackdropSample = { kind: "idle" | "local" | "cloud" | "mesh" | "alert" | "host"; text: string; active?: boolean };
 type CompletionSample = { sample: BackdropSample; until: number; rate: number };
 const inks = {
+  idle: ["#B9FFDA", "#32ED84"],
   local: ["#00F0FF", "rgba(0, 240, 255, .55)"],
   cloud: ["#A78BFA", "rgba(138, 92, 246, .55)"],
   mesh: ["#00FF9D", "rgba(0, 230, 140, .50)"],
@@ -22,13 +23,14 @@ const inks = {
   host: ["#A1BBCF", "rgba(161, 187, 207, .45)"],
 };
 // Decorative glyphs contain no source code, prompts or simulated telemetry.
-const idle: BackdropSample = { kind: "host", text: "01ABCDEFGHIJKLMNOPQRSTUVWXYZ<>/{}[]=+" };
+const idle: BackdropSample = { kind: "idle", text: "01ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆABCDEFGHIJKLMNOPQRSTUVWXYZ<>/{}[]=+" };
 
-export default function TelemetryBackdrop({ prefs, agents, workers, events, meshPeers, memory, paused }: {
+export default function TelemetryBackdrop({ prefs, agents, workers, events, meshPeers, memory, paused, eco }: {
   prefs: BackdropPrefs; agents: AgentInfo[]; workers: string[]; events: ChatEvent[];
-  meshPeers: number; memory?: number; paused: boolean;
+  meshPeers: number; memory?: number; paused: boolean; eco: boolean;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const drops = useRef(new Float32Array(0));
   const snapshot = useRef<BackdropSample[]>([]);
   const settings = useRef(prefs);
   const completion = useRef<CompletionSample | null>(null);
@@ -79,66 +81,79 @@ export default function TelemetryBackdrop({ prefs, agents, workers, events, mesh
     const brush = element?.getContext("2d");
     if (!element || !brush) return;
     const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-    const cell = 18;
+    const cell = 16;
     let width = 0;
     let height = 0;
-    let positions = new Float32Array(0);
+    let ratio = 0;
+    let positions = drops.current;
     let frame = 0;
     const clock = new RainClock();
 
-    function resize() {
-      width = element!.clientWidth;
-      height = element!.clientHeight;
-      const ratio = Math.min(devicePixelRatio || 1, 2, Math.sqrt(3_000_000 / Math.max(1, width * height)));
-      element!.width = Math.max(1, Math.floor(width * ratio));
-      element!.height = Math.max(1, Math.floor(height * ratio));
-      brush!.setTransform(ratio, 0, 0, ratio, 0, 0);
-      brush!.font = "12px ui-monospace, Consolas, monospace";
-      positions = new Float32Array(Math.min(96, Math.floor(width / (cell * 2))));
-      for (let column = 0; column < positions.length; column++) positions[column] = (column * 83) % Math.max(height, 1);
-    }
+    const trailLength = (column: number) => 8 + (column * 11) % 10;
+    const resize = () => {
+      const nextWidth = element.clientWidth;
+      const nextHeight = element.clientHeight;
+      const { count, ratio: nextRatio } = rainLayout(nextWidth, nextHeight, devicePixelRatio, eco);
+      if (width === nextWidth && height === nextHeight && ratio === nextRatio) return;
+      width = nextWidth;
+      height = nextHeight;
+      ratio = nextRatio;
+      element.width = Math.max(1, Math.floor(width * ratio));
+      element.height = Math.max(1, Math.floor(height * ratio));
+      brush.setTransform(ratio, 0, 0, ratio, 0, 0);
+      brush.font = "14px ui-monospace, Consolas, monospace";
+      brush.textBaseline = "top";
+      const previous = positions;
+      positions = Float32Array.from({ length: count }, (_, column) =>
+        previous[column] ?? ((column * .61803398875 + .08) % 1) * (height + trailLength(column) * cell));
+      drops.current = positions;
+    };
 
-    function draw(now: number) {
+    const draw = (now: number) => {
       frame = requestAnimationFrame(draw);
       const { fps, opacity, speed } = settings.current;
-      const elapsed = clock.advance(now, fps);
-      if (elapsed === null) return;
+      const elapsed = clock.advance(now, eco ? Math.min(30, fps) : fps);
+      if (elapsed === null || !width || !height) return;
       const entries = snapshot.current;
       const lastCompletion = completion.current;
       const recentCompletion = lastCompletion && isRecentCompletion(lastCompletion.until - COMPLETION_TTL_MS, Date.now())
         ? lastCompletion : null;
       let active = 0;
       for (const sample of entries) if (sample.active) active++;
-      const stride = active ? 1 : 2;
-      brush!.clearRect(0, 0, width, height);
+      const spacing = width / positions.length;
+      const alpha = Math.min(.35, Math.max(.05, opacity / 100)) * 2.15;
+      brush.clearRect(0, 0, width, height);
       for (let column = 0; column < positions.length; column++) {
         const measured = column === 0 ? recentCompletion : null;
-        const velocity = 14 + (measured ? Math.min(measured.rate * .5, 90) : Math.min(active, 12) * 6);
-        positions[column] = (positions[column] + elapsed * velocity * speed / 100) % (height + 90);
-        if (column % stride) continue;
-        const sample = measured?.sample ?? (entries.length ? entries[Math.floor(column / stride) % entries.length] : idle);
+        const velocity = 38 + (column * 13) % 35 + (measured ? Math.min(measured.rate * .35, 40) : Math.min(active, 8) * 3);
+        const length = trailLength(column);
+        const y = (positions[column] + elapsed * velocity * speed / 100) % (height + length * cell);
+        positions[column] = y;
+        const accent = column % 5 === 2 && entries.length ? entries[Math.floor(column / 5) % entries.length] : idle;
+        const sample = measured?.sample ?? accent;
         const [head, trail] = inks[sample.kind];
-        const row = Math.floor(positions[column] / cell);
-        const x = column * cell * 2 + 8;
-        const alpha = Math.min(.35, Math.max(.05, opacity / 100));
+        const row = Math.floor(y / cell);
+        const x = (column + .24) * spacing;
         const pulse = sample.kind === "alert" ? .78 + .22 * Math.sin(now / 450) : 1;
-        const length = 10 + column % 5;
-        for (let depth = length; depth >= 0; depth--) {
+        const firstVisible = Math.max(0, Math.ceil((y - height) / cell));
+        const lastVisible = Math.min(length, Math.floor(y / cell) + 1);
+        for (let depth = lastVisible; depth >= firstVisible; depth--) {
           const alphabet = depth ? idle.text : sample.text;
-          const glyph = alphabet[(row + column * 7 + depth * 11) % alphabet.length];
-          brush!.globalAlpha = alpha * pulse * (1 - depth / (length + 1));
-          brush!.fillStyle = depth ? trail : head;
-          brush!.fillText(glyph, x, (row - depth) * cell);
+          const glyph = alphabet[(row + column * 7 + length - depth) % alphabet.length];
+          brush.globalAlpha = alpha * pulse * (1 - depth / (length + 1)) ** 1.45;
+          brush.fillStyle = depth ? trail : head;
+          brush.fillText(glyph, x, y - depth * cell);
         }
       }
-    }
+      brush.globalAlpha = 1;
+    };
 
-    function sync() {
+    const sync = () => {
       cancelAnimationFrame(frame);
       clock.reset();
       if (!document.hidden && !reducedMotion.matches) frame = requestAnimationFrame(draw);
-      else brush!.clearRect(0, 0, width, height);
-    }
+      else brush.clearRect(0, 0, width, height);
+    };
     const observer = new ResizeObserver(resize);
     observer.observe(element);
     resize();
@@ -151,7 +166,7 @@ export default function TelemetryBackdrop({ prefs, agents, workers, events, mesh
       document.removeEventListener("visibilitychange", sync);
       reducedMotion.removeEventListener("change", sync);
     };
-  }, [rain]);
+  }, [rain, eco]);
 
   if (!rain) return <div className="telemetry-backdrop telemetry-grid" aria-hidden="true" />;
   return <canvas className="telemetry-backdrop" ref={canvas} aria-hidden="true" />;
@@ -182,7 +197,7 @@ export function BackdropSettings({ prefs, modes, update }: {
                 </select>
               </label>
               <label>Rain opacity <input type="range" min="5" max="35" value={prefs.opacity} onChange={(event) => update({ opacity: event.target.valueAsNumber })} /> {prefs.opacity}%</label>
-              <label>Velocity sensitivity <input type="range" min="0" max="200" value={prefs.speed} onChange={(event) => update({ speed: event.target.valueAsNumber })} /> {prefs.speed}%</label>
+              <label>Rain speed <input type="range" min="0" max="200" value={prefs.speed} onChange={(event) => update({ speed: event.target.valueAsNumber })} /> {prefs.speed}%</label>
               <label>Frame rate
                 <select value={prefs.fps} onChange={(event) => update({ fps: Number(event.target.value) as BackdropPrefs["fps"] })}>
                   <option value="15">15 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option>

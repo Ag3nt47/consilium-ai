@@ -1,6 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { COMPLETION_TTL_MS, isRecentCompletion, RainClock } from "../src/telemetry-rain.mjs";
+import { COMPLETION_TTL_MS, isRecentCompletion, RainClock, rainLayout } from "../src/telemetry-rain.mjs";
+
+test("rain fills narrow and standard screens even when running in Eco mode", () => {
+  for (const [width, normal, eco] of [[420, 19, 13], [1200, 54, 37]]) {
+    assert.equal(rainLayout(width, 720, 1, false).count, normal);
+    assert.equal(rainLayout(width, 720, 1, true).count, eco);
+  }
+  assert.equal(rainLayout(20, 720, 1, true).count, 1);
+});
+
+test("wide high-DPI displays keep a bounded animated backing surface", () => {
+  for (const [eco, maxColumns, maxPixels] of [[false, 96, 3_000_000], [true, 64, 1_000_000]]) {
+    const { count, ratio } = rainLayout(3840, 2160, 2, eco);
+    assert.equal(count, maxColumns);
+    assert.ok(Math.floor(3840 * ratio) * Math.floor(2160 * ratio) <= maxPixels);
+  }
+});
 
 for (const refresh of [60, 120, 144]) {
   for (const fps of [15, 30, 60]) {

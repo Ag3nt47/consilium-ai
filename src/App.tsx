@@ -2977,7 +2977,7 @@ export default function App() {
       {prefs.backdrop.enabled && prefs.backdrop.mode !== "stealth" && (
         <Suspense fallback={null}>
           <TelemetryBackdrop prefs={prefs.backdrop} agents={agents} workers={thinkingIds} events={events} meshPeers={meshPeers}
-            memory={pressure?.memory_percent} paused={!prefs.effects || adaptiveMode === "eco"} />
+            memory={pressure?.memory_percent} paused={!prefs.effects} eco={adaptiveMode === "eco"} />
         </Suspense>
       )}
       <div className="fx-scanlines" aria-hidden />
