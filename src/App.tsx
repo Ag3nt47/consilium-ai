@@ -3645,6 +3645,7 @@ export default function App() {
           )}
           {pendingItems.length > 0 && (council?.auto_run_commands || chatAutoRunFor === current) && (
             <RequestTray
+              key={current ?? ""}
               items={pendingItems}
               index={trayIndex}
               agents={agents}
