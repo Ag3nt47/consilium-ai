@@ -3620,6 +3620,9 @@ button.attachment {
 .modal.confirm-modal { width: min(420px, 92vw); gap: 12px; }
 .confirm-modal p { margin: 0; line-height: 1.45; overflow-wrap: anywhere; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.btn.ghost.danger-ghost { color: var(--danger, #f87171); }
+.btn.ghost.danger-ghost:hover:not(:disabled) { border-color: var(--danger, #f87171); }
+.delete-all-input { width: 100%; box-sizing: border-box; letter-spacing: 0.08em; }
 
 /* Restart modal */
 .restart-prompt-question { font-size: 15px; margin: 2px 0 6px; }

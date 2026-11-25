@@ -2602,6 +2602,53 @@ export default function App() {
     }
   }
 
+  // Delete all: two dialogs in a row, the second needing the word DELETE typed, so a stray click
+  // can't wipe every chat. Conversations with a turn running are skipped (the engine refuses them).
+  const [deleteAllStep, setDeleteAllStep] = useState<0 | 1 | 2>(0);
+  const [deleteAllText, setDeleteAllText] = useState("");
+  const [deletingAll, setDeletingAll] = useState(false);
+  function closeDeleteAll() {
+    if (deletingAll) return;
+    setDeleteAllStep(0);
+    setDeleteAllText("");
+  }
+  async function deleteAllConfirmed() {
+    if (deleteAllText.trim().toUpperCase() !== "DELETE" || deletingAll) return;
+    setDeletingAll(true);
+    let deleted = 0;
+    let skipped = 0;
+    try {
+      const running = new Set(await api.running().catch(() => [] as string[]));
+      const all = await api.list();
+      for (const c of all) {
+        if (running.has(c.id)) {
+          skipped++;
+          continue;
+        }
+        try {
+          await api.remove(c.id);
+          deleted++;
+        } catch {
+          skipped++;
+        }
+      }
+      const list = await refreshList();
+      if (list.length) setCurrent(list[0].id);
+      else await newConversation();
+      setToast(
+        `Deleted ${deleted} conversation${deleted === 1 ? "" : "s"}` +
+          (skipped ? `; kept ${skipped} that couldn't be deleted (a turn was running)` : ""),
+      );
+      setTimeout(() => setToast(null), 4000);
+    } catch (e) {
+      setError(`Couldn't delete all conversations: ${e}`);
+    } finally {
+      setDeletingAll(false);
+      setDeleteAllStep(0);
+      setDeleteAllText("");
+    }
+  }
+
   // Restart dialog: confirmation prompt with computer picker and Restart All
   type RestartTarget = { id: string; name: string; connected: boolean; isSelf: boolean };
   const [showRestartModal, setShowRestartModal] = useState(false);
@@ -3276,6 +3323,15 @@ export default function App() {
             }}
           >
             Settings
+          </button>
+          <button
+            type="button"
+            className="btn ghost danger-ghost"
+            title="Delete every conversation on this computer (asks twice)"
+            disabled={!conversations.length}
+            onClick={() => setDeleteAllStep(1)}
+          >
+            Delete all
           </button>
         </div>
         </div>
@@ -4365,6 +4421,77 @@ export default function App() {
               </button>
               <button className="btn danger" onClick={deleteConfirmed} title="Delete the conversation permanently">
                 Delete permanently
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deleteAllStep === 1 && (
+        <div className="modal-backdrop" onClick={closeDeleteAll}>
+          <div
+            className="modal confirm-modal"
+            role="alertdialog"
+            aria-labelledby="confirm-delete-all-title"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") closeDeleteAll();
+            }}
+          >
+            <h2 id="confirm-delete-all-title">Delete all conversations?</h2>
+            <p>
+              All <strong>{conversations.length}</strong> conversation{conversations.length === 1 ? "" : "s"} on this
+              computer and every message in them will be deleted. Conversations with a turn still running are kept.
+            </p>
+            <div className="confirm-actions">
+              <button className="btn" autoFocus onClick={closeDeleteAll} title="Keep every conversation">
+                Cancel
+              </button>
+              <button className="btn danger" onClick={() => setDeleteAllStep(2)} title="Go to the final confirmation">
+                Continue…
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deleteAllStep === 2 && (
+        <div className="modal-backdrop" onClick={closeDeleteAll}>
+          <div
+            className="modal confirm-modal"
+            role="alertdialog"
+            aria-labelledby="confirm-delete-all-final"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") closeDeleteAll();
+            }}
+          >
+            <h2 id="confirm-delete-all-final">Are you absolutely sure?</h2>
+            <p>
+              This permanently erases <strong>all {conversations.length}</strong> conversation
+              {conversations.length === 1 ? "" : "s"}. It can't be undone. Type <strong>DELETE</strong> to confirm.
+            </p>
+            <input
+              className="delete-all-input"
+              autoFocus
+              value={deleteAllText}
+              disabled={deletingAll}
+              placeholder="DELETE"
+              aria-label="Type DELETE to confirm"
+              onChange={(e) => setDeleteAllText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") deleteAllConfirmed();
+              }}
+            />
+            <div className="confirm-actions">
+              <button className="btn" onClick={closeDeleteAll} disabled={deletingAll} title="Keep every conversation">
+                Cancel
+              </button>
+              <button
+                className="btn danger"
+                onClick={deleteAllConfirmed}
+                disabled={deletingAll || deleteAllText.trim().toUpperCase() !== "DELETE"}
+                title="Delete every conversation permanently"
+              >
+                {deletingAll ? "Deleting…" : "Delete everything"}
               </button>
             </div>
           </div>
