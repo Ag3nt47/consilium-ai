@@ -180,7 +180,6 @@ impl Replay {
     }
 }
 
-#[cfg(windows)]
 fn remember(
     timestamps: &mut Vec<u64>,
     timestamp: u64,
@@ -201,6 +200,7 @@ fn remember(
     true
 }
 
+#[cfg(windows)]
 pub(crate) fn worker_running(data: &Path) -> Result<bool, String> {
     try_profile_lock(data, Mode::Desktop).map(|lock| lock.is_none())
 }
