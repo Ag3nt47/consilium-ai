@@ -1107,6 +1107,13 @@ async fn run_command(state: State<'_, AppState>, id: String, event_id: String, i
     run_block(state.engine.clone(), &id, &event_id, index).await
 }
 
+/// Which command boxes are running on this computer now (`{event_id}#{index}`), whether a Run
+/// click or auto-run started them.
+#[tauri::command]
+fn running_commands() -> Vec<String> {
+    runcmd::running_keys()
+}
+
 /// "Always run" (Settings): once the human turned it on, command boxes in a reply from a
 /// Full-capacity AI run without a Run click, one after another, each reporting back as Run does.
 /// Boxes that need admin rights, install software or that Consilium refuses still wait for the
@@ -1734,6 +1741,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            running_commands,
             tasks_get,
             tasks_apply,
             tasks_stage_plan,

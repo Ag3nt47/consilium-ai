@@ -536,6 +536,8 @@ export function buildCompare(b: Build, mine: Build): "newer" | "older" | "same" 
 
 const appApi = {
   agents: () => invoke<AgentInfo[]>("agents_status"),
+  /** Keys (`eventId#index`) of command boxes running on this computer, including auto-run ones. */
+  runningCommands: () => invoke<string[]>("running_commands"),
   /** Remaining plan usage per council member id; members that don't report it are absent. */
   usage: () => invoke<Record<string, UsageStatus>>("agents_usage"),
   list: () => invoke<Conversation[]>("list_conversations"),
