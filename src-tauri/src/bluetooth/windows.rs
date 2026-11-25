@@ -21,7 +21,7 @@ const CONNECT_LIMIT: Duration = Duration::from_secs(20);
 const WAIT_MS: u32 = 100;
 
 /// Resolves the custom service on exactly `address`, then connects its assigned
-/// channel. No discovery inquiry, shell helper, or unencrypted fallback is used.
+/// channel. The bounded discovery worker contacts only that device's service.
 pub async fn connect(address: &str, token: CancellationToken) -> Result<LinkConnection, String> {
     let address = parse_address(address)?;
     initialize_winsock()?;
@@ -133,7 +133,11 @@ fn bluetooth_error(error: io::Error) -> String {
 }
 
 fn open_rfcomm(address: u64, pump: &NativePump, wake: &Event, token: &CancellationToken) -> Result<(Socket, Event, RouteEvidence), String> {
-    if pump.is_closed() || token.is_cancelled() { return Err("Bluetooth connection cancelled.".into()); }
+    let cancelled = || pump.is_closed() || token.is_cancelled();
+    let deadline = Instant::now() + CONNECT_LIMIT;
+    let channel = super::sdp::resolve_channel(address, deadline, cancelled)?;
+    if cancelled() { return Err("Bluetooth connection cancelled.".into()); }
+    if Instant::now() >= deadline { return Err("Bluetooth connection timed out.".into()); }
     // SAFETY: these parameters select the native Windows RFCOMM provider.
     let raw = unsafe { socket(AF_BTH as i32, SOCK_STREAM, BTHPROTO_RFCOMM as i32) };
     if raw == INVALID_SOCKET { return Err(bluetooth_error(last_error())); }
@@ -149,12 +153,11 @@ fn open_rfcomm(address: u64, pump: &NativePump, wake: &Event, token: &Cancellati
     let remote = SOCKADDR_BTH {
         addressFamily: AF_BTH,
         btAddr: address,
-        serviceClassId: windows_sys::core::GUID::from_u128(uuid::Uuid::parse_str(super::SERVICE_UUID)
-            .map_err(|_| "The Consilium Bluetooth service UUID is invalid.")?.as_u128()),
-        // Windows resolves this custom UUID's live SDP record; never guess a channel.
-        port: 0,
+        // Some providers return port zero in getpeername after a UUID-only dial.
+        // Use the exact channel discovered for this device and service instead.
+        serviceClassId: windows_sys::core::GUID::from_u128(0),
+        port: channel,
     };
-    let deadline = Instant::now() + CONNECT_LIMIT;
     // SAFETY: remote is a complete packed SOCKADDR_BTH. WSAEventSelect made the
     // socket nonblocking, including the connect operation.
     let result = unsafe { windows_sys::Win32::Networking::WinSock::connect(raw, (&remote as *const SOCKADDR_BTH).cast(), size_of::<SOCKADDR_BTH>() as i32) };
@@ -164,8 +167,8 @@ fn open_rfcomm(address: u64, pump: &NativePump, wake: &Event, token: &Cancellati
             return Err(bluetooth_error(error));
         }
         loop {
-            if pump.is_closed() || token.is_cancelled() { return Err("Bluetooth connection cancelled.".into()); }
-            if Instant::now() >= deadline { return Err("Bluetooth connection timed out while resolving or opening the selected service.".into()); }
+            if cancelled() { return Err("Bluetooth connection cancelled.".into()); }
+            if Instant::now() >= deadline { return Err("Bluetooth connection timed out while opening the selected RFCOMM channel.".into()); }
             let network = wait_events(raw, &events, wake).map_err(bluetooth_error)?;
             if network.lNetworkEvents & FD_CONNECT as i32 != 0 {
                 let error = network.iErrorCode[FD_CONNECT_BIT as usize];
@@ -180,19 +183,24 @@ fn open_rfcomm(address: u64, pump: &NativePump, wake: &Event, token: &Cancellati
     socket_error(raw).map_err(bluetooth_error)?;
     let local = socket_address(raw, false).map_err(bluetooth_error)?;
     let peer = socket_address(raw, true).map_err(bluetooth_error)?;
-    // Copy packed fields by value before formatting or comparing them.
-    let peer_address = peer.btAddr;
-    let channel = peer.port;
-    if peer_address != address || !(1..=30).contains(&channel) {
-        return Err("Windows did not report the selected device's assigned RFCOMM channel.".into());
-    }
+    let channel = verified_channel(peer, address, channel)?;
     let evidence = RouteEvidence::BluetoothRfcomm {
         local_adapter: format_address(local.btAddr),
-        remote_device: format_address(peer_address),
+        remote_device: format_address(peer.btAddr),
         service_uuid: super::SERVICE_UUID.into(),
-        channel: channel as u8,
+        channel,
     };
     Ok((socket, events, evidence))
+}
+
+fn verified_channel(peer: SOCKADDR_BTH, address: u64, resolved: u32) -> Result<u8, String> {
+    // Copy packed fields by value before checking the socket's observed route.
+    let peer_address = peer.btAddr;
+    let port = peer.port;
+    if peer_address != address || port != resolved || !(1..=30).contains(&port) {
+        return Err("The connected Bluetooth radio or RFCOMM channel did not match the selected service.".into());
+    }
+    Ok(port as u8)
 }
 
 fn socket_address(socket: SOCKET, peer: bool) -> io::Result<SOCKADDR_BTH> {
@@ -295,6 +303,22 @@ fn pump_write(socket: SOCKET, pump: &NativePump) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_evidence_requires_the_exact_resolved_channel_and_radio() {
+        let address = 0x020000000001;
+        let peer = |bt_addr, port| SOCKADDR_BTH {
+            addressFamily: AF_BTH,
+            btAddr: bt_addr,
+            port,
+            ..Default::default()
+        };
+        assert_eq!(verified_channel(peer(address, 1), address, 1), Ok(1));
+        assert!(verified_channel(peer(address, 0), address, 1).is_err());
+        assert!(verified_channel(peer(address, 2), address, 1).is_err());
+        assert!(verified_channel(peer(address + 1, 1), address, 1).is_err());
+        assert!(verified_channel(peer(address, 31), address, 31).is_err());
+    }
     use super::super::stream::NativeStream;
     use std::os::windows::io::IntoRawSocket;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

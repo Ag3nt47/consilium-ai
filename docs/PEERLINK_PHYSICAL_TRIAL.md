@@ -135,6 +135,17 @@ the lookup for the Consilium service UUID returned no result. The Mac listener n
 service ID and public browse group in its SDP record. Repeat the targeted lookup on the updated
 Mac before treating the physical Bluetooth data route as verified.
 
+After both apps updated to 0.3.58 build #626, an uncached Windows SDP lookup found the
+Consilium service on the paired Mac and reported RFCOMM channel 1. Two secured socket
+probes reached the correct radio. The service-UUID dial reported port 0 through
+`getpeername()`. The dial to the freshly resolved channel reported port 1 through the
+same API. Consilium's connection test stopped at the port-0 validation check.
+
+The Windows dial now resolves the service on the selected radio before opening the
+authenticated and encrypted socket to its explicit channel. Its route evidence requires
+the connected socket to report the same radio and channel. Run the three app tests on an
+updated matching preview to verify PeerLink over this physical route.
+
 For parallel payload trials, choose **Native Bluetooth** as one path's local
 adapter and match its RFCOMM endpoint. Native paths have no source/receiver IP;
 receipts must identify the reversed radio endpoints and service/channel instead.
