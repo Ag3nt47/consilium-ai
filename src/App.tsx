@@ -1,6 +1,7 @@
 import { TypedText, TYPED_THEMES } from "./typed";
 import { clock, clockShort, day, num } from "./fmt";
 import { commandElementId, fencedBlocks, handledCommands, needsAdmin, pendingCommands, runsOn, shellName, shellSystem, deniedText, type Fence } from "./commands";
+import { hiddenFromTray } from "./tray-filter.mjs";
 import { OS, dictationHint, paletteKey, paletteKeyWords, terminalName } from "./platform";
 import { forwardRef, lazy, memo, Suspense, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -2458,10 +2459,31 @@ export default function App() {
       .catch((err) => setError(`Couldn't turn off auto-run: ${err}`));
   };
   const [runningCommands, setRunningCommands] = useState<Set<string>>(() => new Set());
+  // Boxes the backend is running right now, including ones auto-run started without a Run click
+  // (runcmd::running_keys). Polled only while auto-run is on, so the tray and its count leave them out.
+  const [backendRunning, setBackendRunning] = useState<Set<string>>(() => new Set());
+  const autoRunOn = !!council?.auto_run_commands || chatAutoRun;
+  useEffect(() => {
+    setBackendRunning(new Set());
+    if (!current || !autoRunOn) return;
+    let live = true;
+    const poll = () => api.runningCommands()
+      .then((keys) => {
+        if (live) setBackendRunning((prev) => (prev.size === keys.length && keys.every((k) => prev.has(k)) ? prev : new Set(keys)));
+      })
+      .catch(() => {});
+    poll();
+    const timer = window.setInterval(poll, 2000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [current, autoRunOn]);
+  const busyCommands = useMemo(
+    () => (backendRunning.size ? new Set([...runningCommands, ...backendRunning]) : runningCommands),
+    [runningCommands, backendRunning],
+  );
   const ranCommands = useMemo(() => handledCommands(events), [events]);
   const commandActions = useMemo<CommandActions>(() => ({
     handled: ranCommands,
-    running: runningCommands,
+    running: busyCommands,
     canAlwaysRun: (sender: string) =>
       !council?.auto_run_commands && agents.some((a) => a.id === sender && a.access === "unrestricted"),
     alwaysRun: (eventId: string, index: number) => {
@@ -2491,7 +2513,7 @@ export default function App() {
       const to = members.some((m) => m.id === sender) ? [sender] : [];
       api.send(current, deniedText(senderName(sender, agents), eventId, index), to, 1).catch((e) => setError(String(e)));
     },
-  }), [ranCommands, runningCommands, current, members, agents, council?.auto_run_commands, chatAutoRun]);
+  }), [ranCommands, busyCommands, current, members, agents, council?.auto_run_commands, chatAutoRun]);
   const answered = useMemo(() => answeredRequests(events), [events]);
   const unanswered = useMemo(() => pendingRequests(events, answered, requestFloor), [events, answered, requestFloor]);
   const unansweredCmds = useMemo(() => pendingCommands(events, ranCommands, requestFloor, OS), [events, ranCommands, requestFloor]);
@@ -2520,12 +2542,12 @@ export default function App() {
       }
       fencedBlocks(e.text).forEach((fence, index) => {
         const key = `${e.id}#${index}`;
-        if (cmd.has(key)) found.push([fence.start, { kind: "command", key, event: e, index, fence }]);
+        if (cmd.has(key) && !hiddenFromTray(key, backendRunning, runningCommands)) found.push([fence.start, { kind: "command", key, event: e, index, fence }]);
       });
       found.sort((a, b) => a[0] - b[0]).forEach(([, item]) => out.push(item));
     }
     return out;
-  }, [events, unanswered, unansweredCmds, requestFloor, autoApproves]);
+  }, [events, unanswered, unansweredCmds, requestFloor, autoApproves, backendRunning, runningCommands]);
   const totalUnanswered = pendingItems.length;
 
   // The tray shows one item at a time. When the shown one is answered, the next one slides in.

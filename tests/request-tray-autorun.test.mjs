@@ -18,3 +18,9 @@ test("the tray waits for a chat's auto-run setting so it never flashes open", ()
 test("each chat gets its own tray, so a manual expand doesn't carry into the next auto-run chat", () => {
   assert.match(app, /<RequestTray\n\s+key=\{current \?\? ""\}/);
 });
+
+test("the tray leaves out boxes auto-run is running but keeps ones the human started", () => {
+  assert.match(app, /api\.runningCommands\(\)/);
+  assert.match(app, /if \(cmd\.has\(key\) && !hiddenFromTray\(key, backendRunning, runningCommands\)\) found\.push/);
+  assert.match(app, /running: busyCommands,/);
+});
