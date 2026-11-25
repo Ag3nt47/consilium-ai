@@ -1,5 +1,9 @@
 use super::*;
 
+// Cold native process startup can exceed two seconds on a loaded macOS CI runner.
+// Positive progress fixtures run for six seconds, crossing this idle budget.
+const FIXTURE_IDLE: Duration = Duration::from_secs(5);
+
 fn native_fixture() -> &'static Path {
     static PROGRAM: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     PROGRAM
@@ -81,7 +85,7 @@ async fn fixture_reply(
 
 #[tokio::test]
 async fn final_result_survives_a_cli_that_does_not_exit() {
-    // The result arrives immediately, so even a short activity budget must no longer apply.
+    // A completed result must survive a CLI that stays alive beyond the activity budget.
     // Compile the fixture before starting the bound on the runner itself.
     native_fixture();
     for mode in ["final-stall", "final-split-stall", "final-legacy-stall"] {
@@ -91,7 +95,7 @@ async fn final_result_survives_a_cli_that_does_not_exit() {
             Duration::from_secs(20),
             fixture_reply(
                 mode,
-                Duration::from_secs(1),
+                FIXTURE_IDLE,
                 &CancellationToken::new(),
                 None,
                 Some(&pid_file),
@@ -127,12 +131,7 @@ async fn final_result_does_not_hide_provider_or_process_errors() {
     ] {
         let error = tokio::time::timeout(
             Duration::from_secs(20),
-            fixture(
-                mode,
-                Duration::from_secs(1),
-                &CancellationToken::new(),
-                None,
-            ),
+            fixture(mode, FIXTURE_IDLE, &CancellationToken::new(), None),
         )
         .await
         .expect("a final provider error must be delivered promptly")
@@ -150,7 +149,7 @@ async fn stop_still_wins_after_a_final_result() {
             on_result.cancel();
         }
     });
-    let error = fixture("final-stall", Duration::from_secs(1), &cancel, Some(sink))
+    let error = fixture("final-stall", FIXTURE_IDLE, &cancel, Some(sink))
         .await
         .unwrap_err();
     assert_eq!(error, "stopped");
@@ -164,19 +163,14 @@ async fn nonterminal_output_cannot_claim_a_completed_result() {
         "partial-final-stall",
     ] {
         let error = tokio::time::timeout(
-            Duration::from_secs(15),
-            fixture(
-                mode,
-                Duration::from_secs(1),
-                &CancellationToken::new(),
-                None,
-            ),
+            Duration::from_secs(20),
+            fixture(mode, FIXTURE_IDLE, &CancellationToken::new(), None),
         )
         .await
         .expect("nested, stderr and partial results must still time out")
         .unwrap_err();
         assert!(
-            error.starts_with("no activity for 1 seconds"),
+            error.starts_with("no activity for 5 seconds"),
             "{mode}: {error}"
         );
     }
@@ -184,14 +178,9 @@ async fn nonterminal_output_cannot_claim_a_completed_result() {
 
 #[tokio::test]
 async fn tool_progress_renews_the_deadline_without_a_ui_sink() {
-    let reply = fixture(
-        "progress",
-        Duration::from_secs(2),
-        &CancellationToken::new(),
-        None,
-    )
-    .await
-    .unwrap();
+    let reply = fixture("progress", FIXTURE_IDLE, &CancellationToken::new(), None)
+        .await
+        .unwrap();
     assert_eq!(reply, "finished");
 }
 
@@ -199,7 +188,7 @@ async fn tool_progress_renews_the_deadline_without_a_ui_sink() {
 async fn large_tool_results_still_renew_the_deadline() {
     let reply = fixture(
         "large-progress",
-        Duration::from_secs(2),
+        FIXTURE_IDLE,
         &CancellationToken::new(),
         None,
     )
@@ -212,7 +201,7 @@ async fn large_tool_results_still_renew_the_deadline() {
 async fn stderr_between_stdout_chunks_does_not_break_progress() {
     let reply = fixture(
         "split-progress",
-        Duration::from_secs(2),
+        FIXTURE_IDLE,
         &CancellationToken::new(),
         None,
     )
@@ -224,40 +213,30 @@ async fn stderr_between_stdout_chunks_does_not_break_progress() {
 #[tokio::test]
 async fn raw_output_does_not_keep_a_stalled_turn_alive() {
     let error = tokio::time::timeout(
-        Duration::from_secs(10),
-        fixture(
-            "noise",
-            Duration::from_secs(1),
-            &CancellationToken::new(),
-            None,
-        ),
+        Duration::from_secs(20),
+        fixture("noise", FIXTURE_IDLE, &CancellationToken::new(), None),
     )
     .await
     .expect("raw output must not renew the deadline")
     .unwrap_err();
     assert_eq!(
         error,
-        "no activity for 1 seconds; no provider activity received"
+        "no activity for 5 seconds; no provider activity received"
     );
 }
 
 #[tokio::test]
 async fn continuous_progress_still_reaches_the_total_runtime_cap() {
     let error = tokio::time::timeout(
-        Duration::from_secs(15),
-        fixture(
-            "continuous",
-            Duration::from_secs(2),
-            &CancellationToken::new(),
-            None,
-        ),
+        Duration::from_secs(30),
+        fixture("continuous", FIXTURE_IDLE, &CancellationToken::new(), None),
     )
     .await
     .expect("recognized progress must not permit an unlimited turn")
     .unwrap_err();
     assert_eq!(
         error,
-        "no answer within 8 seconds total runtime; last activity: Checking tool result"
+        "no answer within 20 seconds total runtime; last activity: Checking tool result"
     );
 }
 
@@ -266,7 +245,7 @@ async fn stop_still_ends_an_active_turn() {
     let cancel = CancellationToken::new();
     let on_progress = cancel.clone();
     let sink: ActivitySink = Arc::new(move |_| on_progress.cancel());
-    let error = fixture("continuous", Duration::from_secs(2), &cancel, Some(sink))
+    let error = fixture("continuous", FIXTURE_IDLE, &cancel, Some(sink))
         .await
         .unwrap_err();
     assert_eq!(error, "stopped");

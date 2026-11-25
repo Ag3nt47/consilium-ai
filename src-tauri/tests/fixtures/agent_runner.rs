@@ -73,14 +73,14 @@ fn main() {
             std::thread::sleep(Duration::from_secs(30));
         }
         Some("progress") => {
-            for _ in 0..6 {
+            for _ in 0..12 {
                 progress();
                 std::thread::sleep(Duration::from_millis(500));
             }
             println!(r#"{{"type":"result","is_error":false,"result":"finished"}}"#);
         }
         Some(mode @ ("large-progress" | "split-progress")) => {
-            for _ in 0..6 {
+            for _ in 0..12 {
                 framed_progress(mode == "large-progress", mode == "split-progress");
                 std::thread::sleep(Duration::from_millis(500));
             }
