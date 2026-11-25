@@ -213,6 +213,7 @@ fn quote(p: &Path) -> String {
 }
 
 /// PowerShell single-quoted string: a quote is written twice.
+#[cfg(any(windows, test))]
 pub(crate) fn ps_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', "''"))
 }
@@ -322,6 +323,7 @@ pub fn linux_package_kind() -> Option<&'static str> {
 /// and the app is reopened from where the installer put it (its uninstall entry's DisplayIcon),
 /// which can differ from the copy that was running. Every step goes to `log`, so a failed
 /// update can be explained afterwards.
+#[cfg(any(windows, test))]
 pub fn windows_helper_script(pid: u32, staged: &Path, target: &Path, leftover: &Path, log: &Path) -> String {
     let (s, t, l, g) = (ps_quote(staged), ps_quote(target), ps_quote(leftover), ps_quote(log));
     let old = ps_quote(&PathBuf::from(format!("{}.old", target.display())));
@@ -711,6 +713,7 @@ fn stage_non_macos_download(data: &Path, version: &str, url: &str, bytes: &[u8])
 /// A PowerShell script that asks WMI to start a Windows helper with no window, and
 /// prints `WMI <ReturnValue> <ProcessId>`. WMI creates the process under WmiPrvSE, so it is
 /// outside every job Consilium is in and needs no breakaway (which that job refuses).
+#[cfg(any(windows, test))]
 fn wmi_launch_script(helper: &Path) -> String {
     let line = format!(
         "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
@@ -728,7 +731,7 @@ fn wmi_launch_script(helper: &Path) -> String {
 }
 
 /// Reads `wmi_launch_script`'s output: the helper's process id, or why it didn't start.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(any(windows, test))]
 fn wmi_launch_result(out: &str) -> Result<u32, String> {
     let line = out
         .lines()
