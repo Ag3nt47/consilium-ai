@@ -3571,9 +3571,35 @@ button.attachment {
 }
 [data-theme="glass"] .main.has-wallpaper :is(.msg, .thinking),
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.msg, .thinking) {
-  background: rgba(16, 20, 34, 0.5);
+  background: rgba(16, 20, 34, 0.65);
   backdrop-filter: blur(14px) saturate(1.2);
   -webkit-backdrop-filter: blur(14px) saturate(1.2);
+}
+/* The prompt box is 15 points more opaque than the shared panel colour, and frosted, so typing
+   stays readable over a bright wallpaper. */
+[data-theme="glass"] .main.has-wallpaper .composer textarea,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer textarea {
+  background: rgba(22, 27, 44, 0.7);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+/* Consilium's own notes (status lines, startup checks) are small muted text, so they get the
+   darkest pane and brighter text; errors keep their red. */
+[data-theme="glass"] .main.has-wallpaper .note,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .note {
+  background: rgba(12, 15, 26, 0.82);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+[data-theme="glass"] .main.has-wallpaper .note:not(.note-error),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .note:not(.note-error) {
+  color: #c9cedb;
+}
+/* The audit (explainability) drawer sits over the conversation, so it is 15 points more
+   opaque than the shared 55% panel colour. */
+[data-theme="glass"] .audit-drawer {
+  background: rgba(22, 27, 44, 0.7);
+  -webkit-backdrop-filter: blur(14px);
 }
 [data-theme="glass"] .main.has-wallpaper .request,
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .request {
