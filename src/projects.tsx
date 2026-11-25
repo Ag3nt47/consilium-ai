@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { IN_APP } from "./api";
 
@@ -20,7 +20,8 @@ const label = (version: string | null, commit: string | null) =>
   version ? `v${version}` : commit ? `@${commit}` : "—";
 
 function matches(p: ProjectVersion) {
-  return p.ahead === 0 && p.behind === 0 && p.local_version === p.remote_version && !p.remote_error;
+  return p.ahead === 0 && p.behind === 0 && p.dirty === 0 &&
+    p.local_version === p.remote_version && p.local_commit === p.remote_commit && !p.remote_error;
 }
 
 function syncNote(p: ProjectVersion) {
@@ -29,17 +30,41 @@ function syncNote(p: ProjectVersion) {
   if (p.behind) parts.push(`${p.behind} commit${p.behind > 1 ? "s" : ""} on GitHub not on this PC`);
   if (p.dirty) parts.push(`${p.dirty} uncommitted file${p.dirty > 1 ? "s" : ""}`);
   if (p.remote_error) parts.push(p.remote_error);
+  if (!parts.length && p.local_commit !== p.remote_commit) parts.push("Local commit differs from GitHub");
+  if (!parts.length && p.local_version !== p.remote_version) parts.push("Local version differs from GitHub");
   return parts.length ? parts.join(" · ") : "In sync with GitHub";
 }
 
-/** Title-bar tab, next to the project name: each active project's version on this PC and on
- *  GitHub. It hides itself when no project in the folder has been worked on recently. */
+/** Compact source status. Repository versions stay in the details, separate from app builds. */
 export function ProjectVersions({ workspace }: { workspace: string | null }) {
   const [list, setList] = useState<ProjectVersion[]>([]);
   const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const detailsId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      trigger.current?.focus();
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
 
   useEffect(() => {
     let live = true;
+    setList([]);
+    setOpen(false);
     const check = async () => {
       if (!workspace) return setList([]);
       if (!IN_APP) {
@@ -79,27 +104,28 @@ export function ProjectVersions({ workspace }: { workspace: string | null }) {
   }, [workspace]);
 
   if (!list.length) return null;
-  const first = list[0];
   const allMatch = list.every(matches);
+  const summary = list.some((p) => p.remote_error) ? "Source unavailable" : allMatch ? "Source synced" : "Source changes";
 
   return (
-    <div className="project-versions">
+    <div className="project-versions" ref={root}>
       <button
+        type="button"
+        ref={trigger}
         className={`pv-tab ${allMatch ? "pv-ok" : "pv-diff"}`}
         onClick={() => setOpen(!open)}
-        title={list.length > 1 ? `${first.name}, plus ${list.length - 1} more project${list.length > 2 ? "s" : ""} being worked on. Click for details.` : `${first.name}: version on this PC and on GitHub. Click for details.`}
+        title="Project source status. Click for local checkout and GitHub versions."
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={open ? detailsId : undefined}
       >
-        <span className="pv-k">PC</span> {label(first.local_version, first.local_commit)}
-        <span className="pv-sep">·</span>
-        <span className="pv-k">GitHub</span> {label(first.remote_version, first.remote_commit)}
-        {list.length > 1 && (
-          <>
-            <span className="pv-sep">·</span>+{list.length - 1}
-          </>
-        )}
+        <span className={allMatch ? "pv-dot ok" : "pv-dot diff"} aria-hidden="true" />
+        {summary}
       </button>
       {open && (
-        <div className="pv-pop" onMouseLeave={() => setOpen(false)}>
+        <div className="pv-pop" id={detailsId} role="dialog" aria-label="Project source versions">
+          <div className="pv-heading">Project source</div>
+          <div className="pv-note">Local checkouts compared with GitHub. App builds are shown in Settings → Multi-Computer Sync.</div>
           {list.map((p) => (
             <div key={p.path} className="pv-row" title={p.path}>
               <div className="pv-name">
@@ -108,7 +134,7 @@ export function ProjectVersions({ workspace }: { workspace: string | null }) {
               </div>
               <div className="pv-cols">
                 <span>
-                  <span className="pv-k">PC</span> {label(p.local_version, p.local_commit)}
+                  <span className="pv-k">Local</span> {label(p.local_version, p.local_commit)}
                   {p.local_version && p.local_commit ? <small> @{p.local_commit}</small> : null}
                 </span>
                 <span>
