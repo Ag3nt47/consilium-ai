@@ -280,13 +280,13 @@ impl Engine {
             targets
         };
         let rounds = rounds.clamp(1, MAX_ROUNDS);
-        // The turn table is held only to file the message and look up the turn; the window, notes,
-        // linked computers and the council are told after it's let go (see #14: a freeze guard
-        // restart while the table stayed taken).
+        // Appending can wait for another process's file lock. Keep the turn table free while
+        // the send waits. Hold mine through the write so sent_elsewhere cannot see a local
+        // message in the log before it has been marked as local.
         let event = {
-            let _running = self.running.lock().unwrap();
+            let mut mine = self.mine.lock().unwrap();
             let event = self.store.append_with_attachments_via(id, targets.clone(), text, attachments, via)?;
-            self.mine.lock().unwrap().insert(event.id.clone());
+            mine.insert(event.id.clone());
             event
         };
         self.ui.event(&event);
@@ -686,10 +686,19 @@ impl Engine {
         }
     }
 
-    /// Whether the turn table's lock is free right now (it's only ever held for moments; see
-    /// `stall`, which restarts the app when it stays taken).
+    /// What prevents the stall watchdog from reading the turn table, if anything.
+    pub fn turn_lock_issue(&self) -> Option<&'static str> {
+        use std::sync::TryLockError;
+        match self.running.try_lock() {
+            Ok(_) => None,
+            Err(TryLockError::WouldBlock) => Some("the turn table's lock stayed taken"),
+            Err(TryLockError::Poisoned(_)) => Some("the turn table's lock was poisoned"),
+        }
+    }
+
+    #[cfg(test)]
     pub fn turns_lock_free(&self) -> bool {
-        self.running.try_lock().is_ok()
+        self.turn_lock_issue().is_none()
     }
 
     /// Whether this process runs a turn in `id`.
@@ -1565,6 +1574,48 @@ mod tests {
         let humans: Vec<_> = app.store.load(&conv).unwrap().into_iter().filter(|event| event.sender == "human").collect();
         assert_eq!(humans.len(), 1);
         assert_eq!(humans[0].id, sent.id);
+        drop(app);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_send_waiting_for_its_append_lock_leaves_the_turn_table_free() {
+        let dir = std::env::temp_dir().join(format!("consilium-engine-append-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("council.json"), r#"{"members":["gpt"]}"#).unwrap();
+        let app = Arc::new(Engine::open(&dir, Arc::new(Quiet), Box::new(drop)).unwrap());
+        let conv = app.store.create("blocked append").unwrap().id;
+        let append_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(app.store.dir().join(format!("{conv}.append.lock")))
+            .unwrap();
+        append_lock.lock().unwrap();
+        let sending = app.clone();
+        let target = conv.clone();
+        let send = std::thread::spawn(move || sending.send(&target, "@gpt file this message", vec!["gpt".into()], 1));
+
+        // Either guard marks entry into the append path. The running guard would be held here
+        // by the old implementation while waiting for the file lock.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut reached_append = false;
+        let mut turn_table_free = false;
+        while std::time::Instant::now() < deadline {
+            turn_table_free = app.turns_lock_free();
+            if app.mine.try_lock().is_err() || !turn_table_free {
+                reached_append = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(append_lock);
+
+        let event = send.join().unwrap().unwrap();
+        assert!(reached_append, "the send did not wait for the append lock");
+        assert!(turn_table_free, "the send held the turn table while waiting for disk");
+        assert!(app.mine.lock().unwrap().contains(&event.id));
+        assert!(app.sent_elsewhere(&conv, 0).0.is_empty(), "a local send was treated as external");
         drop(app);
         let _ = std::fs::remove_dir_all(dir);
     }

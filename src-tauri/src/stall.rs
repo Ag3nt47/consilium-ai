@@ -27,14 +27,14 @@ const HELPER_RETRY_MS: u64 = 60_000;
 /// What one check found.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Probe {
-    pub lock_free: bool,
+    pub lock_issue: Option<&'static str>,
     pub beat_age_ms: u64,
 }
 
 impl Probe {
     pub fn stuck(&self) -> Option<&'static str> {
-        if !self.lock_free {
-            Some("the turn table's lock stayed taken")
+        if self.lock_issue.is_some() {
+            self.lock_issue
         } else if self.beat_age_ms > BEAT_STALE_MS {
             Some("the background runtime stopped running tasks")
         } else {
@@ -115,7 +115,7 @@ pub fn start(app: tauri::AppHandle, engine: Arc<crate::engine::Engine>, data: Pa
         loop {
             std::thread::sleep(CHECK);
             let now = crate::store::now_ms();
-            if let Some(link) = crate::link_handle().filter(|link| link.enabled()) {
+            if let Some(link) = crate::link_handle().filter(|link| link.enabled_for_watchdog()) {
                 let repaired = link.repair_stale_sessions(now, SYNC_SESSION_STALE_MS);
                 if !repaired.is_empty() {
                     log(&data, &format!(
@@ -142,7 +142,7 @@ pub fn start(app: tauri::AppHandle, engine: Arc<crate::engine::Engine>, data: Pa
                     continue;
                 }
             }
-            let probe = Probe { lock_free: engine.turns_lock_free(), beat_age_ms: now.saturating_sub(beat.load(Ordering::Relaxed)) };
+            let probe = Probe { lock_issue: engine.turn_lock_issue(), beat_age_ms: now.saturating_sub(beat.load(Ordering::Relaxed)) };
             let Some(why) = judge.check(probe) else { continue };
             if now < retry_after {
                 continue;
@@ -163,9 +163,9 @@ mod tests {
 
     #[test]
     fn restarts_only_after_a_minute_of_being_stuck_and_not_twice_in_ten_minutes() {
-        let ok = Probe { lock_free: true, beat_age_ms: 5_000 };
-        let locked = Probe { lock_free: false, beat_age_ms: 5_000 };
-        let stale = Probe { lock_free: true, beat_age_ms: 90_000 };
+        let ok = Probe { lock_issue: None, beat_age_ms: 5_000 };
+        let locked = Probe { lock_issue: Some("the turn table's lock stayed taken"), beat_age_ms: 5_000 };
+        let stale = Probe { lock_issue: None, beat_age_ms: 90_000 };
         let mut j = Judge::default();
         for _ in 0..STRIKES - 1 {
             assert_eq!(j.check(locked), None);

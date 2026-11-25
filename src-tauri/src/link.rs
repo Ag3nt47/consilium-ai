@@ -930,6 +930,11 @@ impl Link {
         self.0.cfg.lock().unwrap().enabled
     }
 
+    /// The watchdog can still check the atomic delivery counters while a link lock is busy.
+    pub(crate) fn enabled_for_watchdog(&self) -> bool {
+        self.0.cfg.try_lock().map_or(true, |cfg| cfg.enabled)
+    }
+
     /// Turns the link on or off and remembers the choice.
     pub fn set_enabled(&self, on: bool) -> Result<(), String> {
         {
@@ -1168,18 +1173,13 @@ impl Link {
     /// last-resort guard for a wedged session task; an ordinary outage is already disconnected and
     /// therefore is not touched here.
     pub fn repair_stale_sessions(&self, now: u64, stale_after_ms: u64) -> Vec<String> {
-        let names: HashMap<String, String> = self
-            .0
-            .cfg
-            .lock()
-            .unwrap()
-            .peers
-            .iter()
-            .map(|peer| (peer.node_id.clone(), peer.name.clone()))
-            .collect();
+        let names: HashMap<String, String> = match self.0.cfg.try_lock() {
+            Ok(cfg) => cfg.peers.iter().map(|peer| (peer.node_id.clone(), peer.name.clone())).collect(),
+            Err(_) => return vec![],
+        };
         let mut repaired = Vec::new();
         {
-            let mut states = self.0.peers.lock().unwrap();
+            let Ok(mut states) = self.0.peers.try_lock() else { return vec![] };
             for (id, state) in states.iter_mut() {
                 if state.tx.is_none() || state.last_seen_ms == 0 || now.saturating_sub(state.last_seen_ms) <= stale_after_ms {
                     continue;
