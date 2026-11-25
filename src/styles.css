@@ -269,6 +269,12 @@ code {
   min-height: 0;
 }
 
+.delete-all-conversations {
+  align-self: flex-start;
+  margin: -2px 8px 6px;
+  font-size: 11px;
+}
+
 .conv {
   text-align: left;
   background: none;

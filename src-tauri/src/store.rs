@@ -454,6 +454,22 @@ impl Store {
         Ok(())
     }
 
+    /// Deletes a group of conversations only when none of them is running. Checking every turn
+    /// lock before removing the first file prevents a bulk cleanup from stopping halfway because
+    /// one of the conversations is still being answered in the app or terminal.
+    pub fn delete_many(&self, ids: &[String]) -> Result<usize, String> {
+        for id in ids {
+            Self::check(id)?;
+        }
+        if ids.iter().any(|id| self.turn_locked(id)) {
+            return Err("stop every running conversation before deleting them all".into());
+        }
+        for id in ids {
+            self.delete(id)?;
+        }
+        Ok(ids.len())
+    }
+
     pub fn load(&self, id: &str) -> Result<Vec<Event>, String> {
         Self::check(id)?;
         Ok(read_events(&self.log_path(id)))
@@ -762,6 +778,33 @@ mod tests {
         drop(lock);
         assert!(!b.turn_locked(&c.id));
         assert!(b.try_turn_lock(&c.id).is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bulk_delete_is_all_or_nothing_while_a_conversation_is_running() {
+        let (store, dir) = temp_store();
+        let one = store.create("one").unwrap();
+        let two = store.create("two").unwrap();
+        store.append(&one.id, "human", "message", vec![], "first").unwrap();
+        store.append(&two.id, "human", "message", vec![], "second").unwrap();
+        fs::create_dir_all(store.files_dir(&one.id)).unwrap();
+        fs::write(store.files_dir(&one.id).join("attachment.txt"), "kept until confirmed").unwrap();
+        fs::write(store.dir.join(format!("{}.tasks.json", one.id)), "{}").unwrap();
+        fs::write(store.handoff_path(&one.id).unwrap(), "handoff").unwrap();
+        let ids = vec![one.id.clone(), two.id.clone()];
+
+        let running = store.try_turn_lock(&two.id).unwrap();
+        assert!(store.delete_many(&ids).is_err());
+        assert_eq!(store.list().len(), 2, "a busy conversation leaves every conversation intact");
+        assert!(store.files_dir(&one.id).is_dir());
+
+        drop(running);
+        assert_eq!(store.delete_many(&ids).unwrap(), 2);
+        assert!(store.list().is_empty());
+        assert!(!store.files_dir(&one.id).exists());
+        assert!(!store.dir.join(format!("{}.tasks.json", one.id)).exists());
+        assert!(!store.handoff_path(&one.id).unwrap().exists());
         fs::remove_dir_all(dir).unwrap();
     }
 

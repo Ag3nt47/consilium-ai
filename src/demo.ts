@@ -284,6 +284,7 @@ export const demoApi = {
     return { ...chat, title };
   },
   remove: async () => undefined,
+  removeAll: async () => listedConversations().length,
   exportMarkdown: async () => "",
   setVoice: async (_id: string, on: boolean) =>
     ev("consilium", on ? "Voice chat is on." : "Voice chat is off.", 6, "system"),

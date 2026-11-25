@@ -461,6 +461,16 @@ fn delete_conversation(state: State<AppState>, id: String) -> Result<(), String>
     state.engine.store.delete(&id)
 }
 
+#[tauri::command]
+fn delete_all_conversations(state: State<AppState>) -> Result<usize, String> {
+    let conversations = state.engine.store.list();
+    let ids: Vec<String> = conversations.into_iter().map(|conversation| conversation.id).collect();
+    if ids.iter().any(|id| state.engine.busy(id)) {
+        return Err("stop every running conversation before deleting them all".into());
+    }
+    state.engine.store.delete_many(&ids)
+}
+
 /// Voice chat changes how every AI should answer, so switching it posts a Consilium note that all
 /// of them read. The UI works out whether voice is on from the latest of these notes.
 const VOICE_ON: &str = "Voice chat is on: the human hears your replies read aloud and speaks their messages, \
@@ -1722,6 +1732,7 @@ pub fn run() {
             token_usage_report,
             rename_conversation,
             delete_conversation,
+            delete_all_conversations,
             export_markdown,
             set_voice,
             send_message,

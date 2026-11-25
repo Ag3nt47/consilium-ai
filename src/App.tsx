@@ -2602,6 +2602,30 @@ export default function App() {
     }
   }
 
+  // Bulk cleanup is deliberately protected by two separate in-app prompts. The backend checks
+  // every conversation before deleting the first one, so a running chat cannot leave a partial
+  // cleanup behind.
+  const [deleteAllStep, setDeleteAllStep] = useState<0 | 1 | 2>(0);
+  const [deletingAll, setDeletingAll] = useState(false);
+  async function deleteAllConfirmed() {
+    if (deletingAll) return;
+    setDeletingAll(true);
+    try {
+      const removed = await api.removeAll();
+      const fresh = await api.create();
+      await refreshList();
+      setCurrent(fresh.id);
+      setDeleteAllStep(0);
+      setToast(`${removed} conversation${removed === 1 ? "" : "s"} deleted`);
+      setTimeout(() => setToast(null), 2500);
+    } catch (e) {
+      setDeleteAllStep(0);
+      setError(`Couldn't delete all conversations: ${e}`);
+    } finally {
+      setDeletingAll(false);
+    }
+  }
+
   // Restart dialog: confirmation prompt with computer picker and Restart All
   type RestartTarget = { id: string; name: string; connected: boolean; isSelf: boolean };
   const [showRestartModal, setShowRestartModal] = useState(false);
@@ -3014,6 +3038,15 @@ export default function App() {
             </button>
           ))}
         </nav>
+        <button
+          type="button"
+          className="link danger-link delete-all-conversations"
+          title="Delete every conversation and its attachments"
+          onClick={() => setDeleteAllStep(1)}
+          disabled={!conversations.length}
+        >
+          Delete all conversations…
+        </button>
         <div className={`agents${members.length >= 5 ? " many" : ""}`}>
           <div className="section-label">
             Council
@@ -4365,6 +4398,60 @@ export default function App() {
               </button>
               <button className="btn danger" onClick={deleteConfirmed} title="Delete the conversation permanently">
                 Delete permanently
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteAllStep === 1 && (
+        <div className="modal-backdrop" onClick={() => setDeleteAllStep(0)}>
+          <div
+            className="modal confirm-modal"
+            role="alertdialog"
+            aria-labelledby="confirm-delete-all-title"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setDeleteAllStep(0);
+            }}
+          >
+            <h2 id="confirm-delete-all-title">Delete all conversations?</h2>
+            <p>
+              This will delete all <strong>{conversations.length}</strong> conversation{conversations.length === 1 ? "" : "s"},
+              including their messages, attachments, task boards and handoff notes.
+            </p>
+            <p className="muted small">A second confirmation is required before anything is deleted.</p>
+            <div className="confirm-actions">
+              <button className="btn" autoFocus onClick={() => setDeleteAllStep(0)} title="Keep every conversation">
+                Cancel
+              </button>
+              <button className="btn danger" onClick={() => setDeleteAllStep(2)} title="Continue to the final confirmation">
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteAllStep === 2 && (
+        <div className="modal-backdrop" onClick={() => !deletingAll && setDeleteAllStep(0)}>
+          <div
+            className="modal confirm-modal"
+            role="alertdialog"
+            aria-labelledby="final-delete-all-title"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && !deletingAll) setDeleteAllStep(0);
+            }}
+          >
+            <h2 id="final-delete-all-title">Permanently delete every conversation?</h2>
+            <p><strong>Final confirmation:</strong> this can't be undone. A new empty conversation will open afterwards.</p>
+            <div className="confirm-actions">
+              <button className="btn" autoFocus disabled={deletingAll} onClick={() => setDeleteAllStep(0)} title="Keep every conversation">
+                Cancel
+              </button>
+              <button className="btn danger" disabled={deletingAll} onClick={deleteAllConfirmed} title="Delete every conversation permanently">
+                {deletingAll ? "Deleting…" : "Delete all permanently"}
               </button>
             </div>
           </div>
