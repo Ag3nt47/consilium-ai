@@ -10,9 +10,10 @@
 //!   to click Deny first) and work goes on, every time, with no limit;
 //! - after `MAX_ROUNDS` automatic rounds since the human's last message;
 //! - when `IDLE_ROUNDS` automatic rounds in a row changed nothing on the board, which is what
-//!   waiting on a build, or every AI being out of usage, looks like. Not in a chat where the human
-//!   turned on "Auto-run this chat" (`auto_run`): there commands report back by themselves, so
-//!   quiet rounds keep going and only the other stops apply.
+//!   waiting on a build, or every AI being out of usage, looks like. In a chat where the human
+//!   turned on "Auto-run this chat" (`auto_run`) it takes `AUTO_RUN_IDLE_ROUNDS`, and a command
+//!   box reporting back during a round counts as progress, since commands there report back by
+//!   themselves. Otherwise 25 rounds of every AI saying "still waiting" burn everyone's usage.
 //!
 //! The decision is worked out from the conversation and its board alone, so it survives restarts.
 //! Any message from the human starts the count again; the human's Stop button never continues.
@@ -27,6 +28,8 @@ pub const PREFIX: &str = "Auto-continue";
 pub const MAX_ROUNDS: usize = 8;
 /// Automatic rounds in a row that changed nothing on the task board before it pauses.
 pub const IDLE_ROUNDS: usize = 2;
+/// The same in a chat where the human turned on Auto-run.
+pub const AUTO_RUN_IDLE_ROUNDS: usize = 3;
 /// How long after a turn ends before the next round starts, so the human can step in first.
 pub const DELAY_SECS: u64 = 20;
 /// The same in a chat where the human turned on Auto-run: they chose not to step in each time.
@@ -192,10 +195,23 @@ pub fn decide_with(events: &[Event], board: &Board, auto_run: bool, boxes_pendin
     }
     // Rounds that changed nothing: count back from the newest note while no task changed after it.
     let last_change = board.tasks.iter().map(|t| t.updated).max().unwrap_or(0);
-    let idle = rounds.iter().rev().take_while(|n| last_change < n.ts).count();
-    if !auto_run && idle >= IDLE_ROUNDS {
+    // In an auto-run chat a command reporting back (in the human's name) is progress too.
+    let last_report = if auto_run {
+        since_human
+            .iter()
+            .filter(|e| e.sender == "human" && (e.text.starts_with(RAN) || e.text.starts_with(DENIED)))
+            .map(|e| e.ts)
+            .max()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let last_progress = last_change.max(last_report);
+    let idle = rounds.iter().rev().take_while(|n| last_progress < n.ts).count();
+    let idle_rounds = if auto_run { AUTO_RUN_IDLE_ROUNDS } else { IDLE_ROUNDS };
+    if idle >= idle_rounds {
         return Decision::Pause(format!(
-            "{PREFIX} paused: the last {IDLE_ROUNDS} rounds changed nothing on the task board, so the AIs are \
+            "{PREFIX} paused: the last {idle_rounds} rounds changed nothing on the task board, so the AIs are \
              probably waiting on a build, a reset or you. {} task(s) are still open; send any message to carry on.",
             open.len()
         ));
@@ -382,11 +398,20 @@ mod tests {
     }
 
     #[test]
-    fn auto_run_chats_keep_going_through_quiet_rounds_but_keep_the_other_stops() {
-        let events = vec![ev(1, 10, "human", "message", "go", vec![]), auto(2, 30), auto(3, 40)];
+    fn auto_run_chats_allow_more_quiet_rounds_but_keep_the_other_stops() {
+        let mut events = vec![ev(1, 10, "human", "message", "go", vec![]), auto(2, 30), auto(3, 40)];
         let b = board(Status::Doing, 20);
         assert!(matches!(decide(&events, &b, false), Decision::Pause(_)), "a normal chat pauses");
-        assert!(matches!(decide(&events, &b, true), Decision::Continue(_)), "an auto-run chat keeps going");
+        assert!(matches!(decide(&events, &b, true), Decision::Continue(_)), "an auto-run chat allows one more");
+        events.push(auto(4, 50));
+        assert!(
+            matches!(decide(&events, &b, true), Decision::Pause(t) if t.contains("changed nothing")),
+            "three quiet rounds pause an auto-run chat too"
+        );
+        // A command reporting back during a round is progress in an auto-run chat.
+        let mut ran = events.clone();
+        ran.insert(3, ev(9, 45, "human", "message", "Ran command from Claude's message (exit 0, succeeded, 1.0 s):\nok", vec![]));
+        assert!(matches!(decide(&ran, &b, true), Decision::Continue(_)), "a command report counts as progress");
         let mut capped = vec![ev(1, 10, "human", "message", "go", vec![])];
         for i in 0..MAX_ROUNDS as u64 {
             capped.push(auto(2 + i, 20 + i));
