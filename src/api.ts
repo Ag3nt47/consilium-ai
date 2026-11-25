@@ -464,6 +464,10 @@ export type LinkStatus = {
   pairing_code_expires_ms: number | null;
   peers: LinkPeer[];
   error: string | null;
+  /** Durable peer packets waiting for the serialized local conversation/UI worker. */
+  sync_pending?: number;
+  /** Age of the oldest pending packet; the engine restarts if this worker stays stuck. */
+  sync_oldest_ms?: number;
   /** The build this computer runs, and what it is doing to match the newest linked computer. */
   build?: Build;
   follow?: FollowStatus;

@@ -340,6 +340,8 @@ mod tests {
             pairing_code_expires_ms: None,
             peers,
             error: None,
+            sync_pending: 0,
+            sync_oldest_ms: 0,
             build: crate::build_id::Build::this(),
             follow: crate::follow::status(),
         }

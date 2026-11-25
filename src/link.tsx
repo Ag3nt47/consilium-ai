@@ -74,6 +74,7 @@ export function LinkIndicator({ onConnectedCount }: { onConnectedCount?: (count:
   const enabled = status.enabled;
   const peers = status.peers || [];
   const connectedPeers = peers.filter((p) => p.connected);
+  const syncDelayed = (status.sync_pending ?? 0) > 0 && (status.sync_oldest_ms ?? 0) > 10_000;
   const knownEndpoints = new Set(peers.flatMap((peer) => peer.addrs ?? []));
   const candidate = enabled && discoveryAlerts
     ? candidates.find((address) => !knownEndpoints.has(address) && !dismissed.includes(address))
@@ -91,6 +92,10 @@ export function LinkIndicator({ onConnectedCount }: { onConnectedCount?: (count:
     state = "idle";
     label = "Not paired";
     mark = "◌";
+  } else if (syncDelayed) {
+    state = "idle";
+    label = `Recovering chat sync · ${status.sync_pending}`;
+    mark = "●";
   } else if (connectedPeers.length > 0) {
     state = "ok";
     const primary = connectedPeers[0];
@@ -103,7 +108,9 @@ export function LinkIndicator({ onConnectedCount }: { onConnectedCount?: (count:
     mark = "●";
   }
 
-  const tip = !enabled
+  const tip = syncDelayed
+    ? `${status.sync_pending} received chat packet(s) are waiting for the local conversation worker. Consilium will recover them automatically and restart safely if the worker remains stuck.`
+    : !enabled
     ? "Multi-computer sync is turned off. Click to configure."
     : peers.length === 0
     ? `Listening on port ${status.port}. Click to pair with your other computer (Mac/Windows).`

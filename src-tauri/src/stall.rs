@@ -15,6 +15,12 @@ const CHECK: Duration = Duration::from_secs(15);
 const STRIKES: u32 = 4;
 /// The runtime heartbeat is stale after this long.
 const BEAT_STALE_MS: u64 = 60_000;
+/// A live PeerLink session normally receives an authenticated heartbeat every 1.5 seconds. Give
+/// it ample room for sleep/wake and a busy machine before forcing a clean redial.
+const SYNC_SESSION_STALE_MS: u64 = 15_000;
+/// A packet waiting this long in the local filing worker means chats are durable but invisible.
+/// Restarting recovers inbox.jsonl before acknowledging any new work to the user.
+const SYNC_DELIVERY_STALE_MS: u64 = 60_000;
 const MIN_GAP_MS: u64 = 10 * 60_000;
 
 /// What one check found.
@@ -67,6 +73,10 @@ pub fn may_restart(data: &Path, now: u64) -> bool {
     now.saturating_sub(last) >= MIN_GAP_MS
 }
 
+fn sync_delivery_stuck(health: crate::link::DeliveryHealth) -> bool {
+    health.pending > 0 && health.oldest_age_ms > SYNC_DELIVERY_STALE_MS
+}
+
 fn log(data: &Path, line: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data.join("stall.log")) {
@@ -89,6 +99,32 @@ pub fn start(app: tauri::AppHandle, engine: Arc<crate::engine::Engine>, data: Pa
         loop {
             std::thread::sleep(CHECK);
             let now = crate::store::now_ms();
+            if let Some(link) = crate::link_handle().filter(|link| link.enabled()) {
+                let repaired = link.repair_stale_sessions(now, SYNC_SESSION_STALE_MS);
+                if !repaired.is_empty() {
+                    log(&data, &format!(
+                        "peer sync stopped receiving authenticated traffic; redialing {}",
+                        repaired.join(", ")
+                    ));
+                }
+                let delivery = link.delivery_health(now);
+                if sync_delivery_stuck(delivery) {
+                    if may_restart(&data, now) {
+                        log(&data, &format!(
+                            "peer sync filing worker stalled with {} durable packet(s) for {} ms; restarting Consilium",
+                            delivery.pending, delivery.oldest_age_ms
+                        ));
+                        let _ = std::fs::write(last_restart_path(&data), now.to_string());
+                        app.restart();
+                    } else {
+                        log(&data, &format!(
+                            "peer sync filing worker is stalled with {} durable packet(s), but Consilium restarted less than 10 min ago",
+                            delivery.pending
+                        ));
+                    }
+                    continue;
+                }
+            }
             let probe = Probe { lock_free: engine.turns_lock_free(), beat_age_ms: now.saturating_sub(beat.load(Ordering::Relaxed)) };
             let Some(why) = judge.check(probe) else { continue };
             if !may_restart(&data, now) {
@@ -128,6 +164,15 @@ mod tests {
         std::fs::write(last_restart_path(&d), "1000000").unwrap();
         assert!(!may_restart(&d, 1_000_000 + MIN_GAP_MS - 1));
         assert!(may_restart(&d, 1_000_000 + MIN_GAP_MS));
+        assert!(!sync_delivery_stuck(crate::link::DeliveryHealth {
+            pending: 0, oldest_age_ms: SYNC_DELIVERY_STALE_MS + 1, last_completed_ms: 0,
+        }));
+        assert!(!sync_delivery_stuck(crate::link::DeliveryHealth {
+            pending: 1, oldest_age_ms: SYNC_DELIVERY_STALE_MS, last_completed_ms: 0,
+        }));
+        assert!(sync_delivery_stuck(crate::link::DeliveryHealth {
+            pending: 1, oldest_age_ms: SYNC_DELIVERY_STALE_MS + 1, last_completed_ms: 0,
+        }));
         let _ = std::fs::remove_dir_all(d);
     }
 }

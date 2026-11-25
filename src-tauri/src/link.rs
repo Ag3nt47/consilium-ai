@@ -30,7 +30,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -506,6 +506,10 @@ pub struct LinkStatus {
     pub pairing_code_expires_ms: Option<u64>,
     pub peers: Vec<PeerView>,
     pub error: Option<String>,
+    /// Chat packets durably received and waiting for the local conversation store/UI worker.
+    pub sync_pending: usize,
+    /// How long the oldest pending chat packet has waited. Zero when the worker is caught up.
+    pub sync_oldest_ms: u64,
     /// The build this computer runs, and what it is doing to match the others (see `follow`).
     pub build: crate::build_id::Build,
     pub follow: crate::follow::Status,
@@ -754,7 +758,8 @@ struct Inner {
     inbox_write: Mutex<()>,
     pending: Mutex<Option<Pending>>,
     peers: Mutex<HashMap<String, PeerState>>,
-    handler: Handler,
+    delivery: std::sync::mpsc::Sender<PeerPacket>,
+    delivery_progress: Arc<DeliveryProgress>,
     port: u16,
     seq: AtomicU64,
     running: Mutex<Option<CancellationToken>>,
@@ -762,6 +767,58 @@ struct Inner {
     wake_dial: Notify,
     stress_test_lock: Arc<tokio::sync::Mutex<()>>,
     discovery: Mutex<Option<Arc<discovery::Discovery>>>,
+}
+
+/// Progress is separate from the network session. Filing a chat can touch the filesystem and the
+/// window; it must never hold up authenticated heartbeats or acknowledgements on that session.
+#[derive(Default)]
+struct DeliveryProgress {
+    pending: AtomicUsize,
+    oldest_ms: AtomicU64,
+    completed_ms: AtomicU64,
+}
+
+impl DeliveryProgress {
+    fn queued(&self, now: u64) {
+        if self.pending.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.oldest_ms.store(now, Ordering::SeqCst);
+        }
+    }
+
+    fn completed(&self, now: u64) {
+        let before = self.pending.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(before > 0);
+        self.completed_ms.store(now, Ordering::SeqCst);
+        // If more work is queued, start a fresh bound from this completed item. This is
+        // conservative: it gives the next item a full watchdog interval instead of restarting
+        // the app because one large preceding message took most of that interval.
+        self.oldest_ms.store(if before <= 1 { 0 } else { now }, Ordering::SeqCst);
+    }
+
+    fn cancelled(&self) {
+        let before = self.pending.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(before > 0);
+        if before <= 1 {
+            self.oldest_ms.store(0, Ordering::SeqCst);
+        }
+    }
+
+    fn health(&self, now: u64) -> DeliveryHealth {
+        let pending = self.pending.load(Ordering::SeqCst);
+        let oldest = self.oldest_ms.load(Ordering::SeqCst);
+        DeliveryHealth {
+            pending,
+            oldest_age_ms: if pending == 0 || oldest == 0 { 0 } else { now.saturating_sub(oldest) },
+            last_completed_ms: self.completed_ms.load(Ordering::SeqCst),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeliveryHealth {
+    pub pending: usize,
+    pub oldest_age_ms: u64,
+    pub last_completed_ms: u64,
 }
 
 #[derive(Clone)]
@@ -818,6 +875,36 @@ impl Link {
             .filter(|(id, _)| cfg.peers.iter().any(|p| &p.node_id == id))
             .map(|(id, q)| (id, PeerState { outbox: q.into_iter().collect(), ..Default::default() }))
             .collect();
+        let (delivery, received) = std::sync::mpsc::channel::<PeerPacket>();
+        let delivery_progress = Arc::new(DeliveryProgress::default());
+        let worker_progress = delivery_progress.clone();
+        std::thread::Builder::new()
+            .name("consilium-peer-sync".into())
+            .spawn(move || {
+                while let Ok(packet) = received.recv() {
+                    // One malformed packet or UI callback must not kill the delivery worker and
+                    // strand every later chat. The packet is already in inbox.jsonl, so a process
+                    // crash before this point is also recovered on the next start.
+                    let mut failures = 0u32;
+                    loop {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&packet)));
+                        let error = match result {
+                            Ok(Ok(())) => break,
+                            Ok(Err(error)) => error,
+                            Err(_) => "local delivery panicked".into(),
+                        };
+                        failures += 1;
+                        if failures == 1 || failures.is_multiple_of(15) {
+                            eprintln!("peer sync: {error}; retrying durable packet ({failures})");
+                        }
+                        // Keep it pending. The sync guard restarts the app if this cannot recover
+                        // within a minute, and startup replay then offers the durable packet again.
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                    worker_progress.completed(now_ms());
+                }
+            })
+            .map_err(|error| format!("couldn't start the peer-sync delivery worker: {error}"))?;
         Ok(Link(Arc::new(Inner {
             outbox_path,
             inbox_path: dir.join("inbox.jsonl"),
@@ -827,7 +914,8 @@ impl Link {
             cfg: Mutex::new(cfg),
             pending: Mutex::new(None),
             peers: Mutex::new(peers),
-            handler,
+            delivery,
+            delivery_progress,
             port,
             seq: AtomicU64::new(now_ms()),
             running: Mutex::new(None),
@@ -1069,10 +1157,55 @@ impl Link {
             .collect()
     }
 
+    /// Progress of the serialized local chat-filing worker. Network receipt and acknowledgement
+    /// stay independent, so a slow disk/UI callback cannot make the authenticated link look dead.
+    pub fn delivery_health(&self, now: u64) -> DeliveryHealth {
+        self.0.delivery_progress.health(now)
+    }
+
+    /// Drops sessions which still claim to be connected despite receiving no authenticated frame
+    /// for `stale_after_ms`. The normal supervisor immediately redials saved routes. This is a
+    /// last-resort guard for a wedged session task; an ordinary outage is already disconnected and
+    /// therefore is not touched here.
+    pub fn repair_stale_sessions(&self, now: u64, stale_after_ms: u64) -> Vec<String> {
+        let names: HashMap<String, String> = self
+            .0
+            .cfg
+            .lock()
+            .unwrap()
+            .peers
+            .iter()
+            .map(|peer| (peer.node_id.clone(), peer.name.clone()))
+            .collect();
+        let mut repaired = Vec::new();
+        {
+            let mut states = self.0.peers.lock().unwrap();
+            for (id, state) in states.iter_mut() {
+                if state.tx.is_none() || state.last_seen_ms == 0 || now.saturating_sub(state.last_seen_ms) <= stale_after_ms {
+                    continue;
+                }
+                if let Some(session) = state.session_cancel.take() {
+                    session.cancel();
+                }
+                state.tx = None;
+                state.generation = state.generation.wrapping_add(1);
+                state.down_since_ms = now;
+                state.reset_signal_report();
+                state.bluetooth_advertisement = None;
+                repaired.push(names.get(id).cloned().unwrap_or_else(|| id.clone()));
+            }
+        }
+        if !repaired.is_empty() {
+            self.0.wake_dial.notify_waiters();
+        }
+        repaired
+    }
+
     pub fn status(&self) -> LinkStatus {
         let cfg = self.0.cfg.lock().unwrap().clone();
         let peers = self.0.peers.lock().unwrap();
         let pending = self.0.pending.lock().unwrap();
+        let delivery = self.delivery_health(now_ms());
         LinkStatus {
             build: crate::build_id::Build::this(),
             follow: crate::follow::status(),
@@ -1111,6 +1244,15 @@ impl Link {
                 })
                 .collect(),
             error: self.0.error.lock().unwrap().clone(),
+            sync_pending: delivery.pending,
+            sync_oldest_ms: delivery.oldest_age_ms,
+        }
+    }
+
+    fn dispatch(&self, packet: PeerPacket) {
+        self.0.delivery_progress.queued(now_ms());
+        if self.0.delivery.send(packet).is_err() {
+            self.0.delivery_progress.cancelled();
         }
     }
 
@@ -2520,7 +2662,7 @@ impl Link {
                     match self.0.ledger.commit(&packet) {
                         // Two active routes can both reserve the same packet before either commits.
                         // The first successful commit owns the notification.
-                        Ok(true) => { let _ = (self.0.handler)(&packet); }
+                        Ok(true) => self.dispatch(packet.clone()),
                         Ok(false) => {}
                         Err(_) => return,
                     }
@@ -3163,6 +3305,89 @@ mod tests {
         assert_eq!(nickname("bbbb2222", &p), "desktop · bbbb");
         assert_eq!(nickname("cccc3333", &p), "MacBook 2");
         assert_eq!(nickname("dddd4444", &p), "linked computer · dddd");
+    }
+
+    #[test]
+    fn local_chat_filing_is_serial_and_never_blocks_the_link_session() {
+        let dir = std::env::temp_dir().join(format!("link-delivery-worker-{}", uuid::Uuid::new_v4()));
+        let gate = Arc::new((std::sync::Mutex::new((false, false)), std::sync::Condvar::new()));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler: Handler = {
+            let gate = gate.clone();
+            let seen = seen.clone();
+            Arc::new(move |packet: &PeerPacket| {
+                let (lock, ready) = &*gate;
+                let mut state = lock.lock().unwrap();
+                state.0 = true;
+                ready.notify_all();
+                while !state.1 {
+                    state = ready.wait(state).unwrap();
+                }
+                drop(state);
+                seen.lock().unwrap().push(packet.id.clone());
+                Ok(())
+            })
+        };
+        let link = Link::open(&dir, free_port(), handler).unwrap();
+        let key = [7u8; 32];
+        let first = PeerPacket::signed("node-delivery", 1, PacketKind::Chat, 1, json!({"n": 1}), &key).unwrap();
+        let second = PeerPacket::signed("node-delivery", 2, PacketKind::Chat, 2, json!({"n": 2}), &key).unwrap();
+        let expected = vec![first.id.clone(), second.id.clone()];
+
+        link.dispatch(first);
+        {
+            let (lock, ready) = &*gate;
+            let state = lock.lock().unwrap();
+            let (state, timeout) = ready.wait_timeout_while(state, Duration::from_secs(2), |state| !state.0).unwrap();
+            assert!(!timeout.timed_out(), "the delivery worker starts");
+            drop(state);
+        }
+        // This call returns while the first packet's handler is deliberately blocked.
+        link.dispatch(second);
+        let health = link.delivery_health(now_ms() + 100);
+        assert_eq!(health.pending, 2);
+        assert!(seen.lock().unwrap().is_empty());
+
+        {
+            let (lock, ready) = &*gate;
+            let mut state = lock.lock().unwrap();
+            state.1 = true;
+            ready.notify_all();
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while link.delivery_health(now_ms()).pending != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(*seen.lock().unwrap(), expected, "one worker preserves packet order");
+        assert_eq!(link.delivery_health(now_ms()).pending, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_failsafe_drops_only_connected_sessions_with_stale_authenticated_traffic() {
+        let dir = std::env::temp_dir().join(format!("link-stale-repair-{}", uuid::Uuid::new_v4()));
+        let link = Link::open(&dir, free_port(), Arc::new(|_: &PeerPacket| Ok(()))).unwrap();
+        let id = "node-stale".to_string();
+        link.0.cfg.lock().unwrap().peers.push(Peer {
+            node_id: id.clone(), name: "Windows PC".into(), key: "42".repeat(32), addrs: vec!["127.0.0.1:8470".into()],
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = CancellationToken::new();
+        link.0.peers.lock().unwrap().insert(id.clone(), PeerState {
+            tx: Some(tx), session_cancel: Some(session.clone()), generation: 4, last_seen_ms: 100,
+            ..Default::default()
+        });
+
+        assert!(link.repair_stale_sessions(10_000, 15_000).is_empty(), "a fresh session stays up");
+        assert_eq!(link.repair_stale_sessions(20_000, 15_000), vec!["Windows PC"]);
+        let state = link.0.peers.lock().unwrap();
+        assert!(state[&id].tx.is_none());
+        assert_eq!(state[&id].generation, 5);
+        assert_eq!(state[&id].down_since_ms, 20_000);
+        assert!(session.is_cancelled());
+        drop(state);
+        assert!(!link.status().peers[0].connected);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
