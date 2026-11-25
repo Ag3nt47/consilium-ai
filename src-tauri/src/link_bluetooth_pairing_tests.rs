@@ -54,9 +54,11 @@ fn pairing_announcement_expires_independently_of_other_packet_activity() {
     report(&link, announcement(), now);
     let (binding, _) = link.bluetooth_pairing_binding_at("saved-mac", now).unwrap();
     assert!(link.0.peers.lock().unwrap().get_mut("saved-mac").unwrap().record_packet(3, now_ms() + 60_000));
-    assert!(link.bluetooth_pairing_is_current_at(&binding, now + BLUETOOTH_ADVERTISEMENT_TTL - Duration::from_nanos(1)));
+    // Windows Instant can round a one-nanosecond offset back to the same tick.
+    let clock_margin = Duration::from_millis(1);
+    assert!(link.bluetooth_pairing_is_current_at(&binding, now + BLUETOOTH_ADVERTISEMENT_TTL - clock_margin));
     assert!(!link.bluetooth_pairing_is_current_at(&binding, now + BLUETOOTH_ADVERTISEMENT_TTL));
-    assert!(!link.bluetooth_pairing_is_current_at(&binding, now - Duration::from_nanos(1)));
+    assert!(!link.bluetooth_pairing_is_current_at(&binding, now - clock_margin));
     report(&link, announcement(), now + Duration::from_secs(2));
     assert!(link.bluetooth_pairing_is_current_at(&binding, now + Duration::from_secs(5)));
 }
