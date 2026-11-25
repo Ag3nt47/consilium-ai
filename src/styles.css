@@ -4063,7 +4063,7 @@ button.attachment {
 }
 :is(.btn, .chip, .pv-tab, .task-pill, .conv, textarea, select,
     input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"])):hover:not(:disabled),
-:is(.msg, .note, .thinking, .request):hover:not(:has(:is(.btn, .chip, a, button, textarea, input, select):hover)) {
+:is(.msg, .note, .thinking, .request):hover:not(:has(:is(.btn, .chip, .request, .task-pill, a, button, textarea, input, select):hover)) {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent),
     0 0 14px color-mix(in srgb, var(--accent) 55%, transparent);
@@ -4082,8 +4082,8 @@ button.attachment {
   color: #e6e9f2;
   font-weight: 600;
 }
-[data-theme="glass"] .main.has-wallpaper :is(.topbar, .composer) :is(.chip:not(.on), .btn:not(.request-update):not(.autorun-toggle):not(.update-now):not(.respond-request)),
-[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.topbar, .composer) :is(.chip:not(.on), .btn:not(.request-update):not(.autorun-toggle):not(.update-now):not(.respond-request)) {
+[data-theme="glass"] .main.has-wallpaper :is(.topbar, .composer) :is(.chip:not(.on), .btn:not(:is(.primary, .stop, .danger, .approve, .deny, .on, .request-update, .autorun-toggle, .update-now, .respond-request))),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.topbar, .composer) :is(.chip:not(.on), .btn:not(:is(.primary, .stop, .danger, .approve, .deny, .on, .request-update, .autorun-toggle, .update-now, .respond-request))) {
   background: rgba(16, 20, 34, 0.72);
   color: #e6e9f2;
   backdrop-filter: blur(12px);
@@ -4110,9 +4110,9 @@ button.attachment {
 
 /* The explainability boxes (the activity line, task pills and the audit drawer) use the same
    dark frosted glass as the chat messages, in every Glass mode, with brighter text. */
-[data-theme="glass"] :is(.thinking, .task-pill, .task-claim),
-[data-theme="glass"] .main.has-wallpaper :is(.thinking, .task-pill, .task-claim),
-[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.thinking, .task-pill, .task-claim) {
+[data-theme="glass"] :is(.thinking, .task-pill, .task-claim-italic),
+[data-theme="glass"] .main.has-wallpaper :is(.thinking, .task-pill, .task-claim-italic),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.thinking, .task-pill, .task-claim-italic) {
   background: rgba(16, 20, 34, 0.65);
   color: #d5d9e3;
   backdrop-filter: blur(14px) saturate(1.2);
