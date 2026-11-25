@@ -168,9 +168,15 @@ fn should_fetch(dir: &Path) -> bool {
     }
 }
 
-fn inspect(dir: &Path) -> Option<ProjectVersion> {
+/// Uncommitted files, or `None` when `dir` isn't a working git checkout.
+fn dirty_count(dir: &Path) -> Option<u32> {
     let status = git(dir, &["status", "--porcelain"])?;
-    let dirty = status.lines().filter(|l| !l.trim().is_empty()).count() as u32;
+    Some(status.lines().filter(|l| !l.trim().is_empty()).count() as u32)
+}
+
+/// Whether a checkout has been worked on lately: uncommitted changes, or a recent commit or
+/// index update.
+fn is_active(dir: &Path, dirty: u32) -> bool {
     let recent_commit = git(dir, &["log", "-1", "--format=%ct"])
         .and_then(|s| s.trim().parse::<u64>().ok())
         .and_then(|t| {
@@ -181,8 +187,32 @@ fn inspect(dir: &Path) -> Option<ProjectVersion> {
             Some(now.saturating_sub(t) < ACTIVE_FOR.as_secs())
         })
         .unwrap_or(false);
-    let active = dirty > 0 || recent_commit || modified_recently(&dir.join(".git/index"));
-    if !active {
+    dirty > 0 || recent_commit || modified_recently(&dir.join(".git/index"))
+}
+
+/// The repository a checkout belongs to. Every worktree of one repo shares it.
+fn repo_key(dir: &Path) -> PathBuf {
+    git(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .map(|s| PathBuf::from(s.trim()))
+    .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
+    .unwrap_or_else(|| dir.join(".git"))
+}
+
+/// The main checkout (its `.git` is a folder, not a worktree's pointer file), else the first.
+fn main_checkout(members: &[PathBuf]) -> &PathBuf {
+    members
+        .iter()
+        .find(|d| d.join(".git").is_dir())
+        .unwrap_or(&members[0])
+}
+
+/// Reports `dir`, if it or (with `sibling_active`) another worktree of its repo is active.
+fn inspect(dir: &Path, sibling_active: bool) -> Option<ProjectVersion> {
+    let dirty = dirty_count(dir)?;
+    if !sibling_active && !is_active(dir, dirty) {
         return None;
     }
 
@@ -241,11 +271,33 @@ fn inspect(dir: &Path) -> Option<ProjectVersion> {
     })
 }
 
-/// Active projects in `workspace`, sorted by folder name.
+/// Groups checkouts by repository, so a repo's extra git worktrees (for example
+/// `consilium-autorun` beside `consilium-ai`) don't each show up as another project.
+fn group_by_repo(dirs: Vec<PathBuf>, key: impl Fn(&Path) -> PathBuf) -> Vec<Vec<PathBuf>> {
+    let mut groups: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
+    for d in dirs {
+        let k = key(&d);
+        match groups.iter_mut().find(|(g, _)| *g == k) {
+            Some((_, members)) => members.push(d),
+            None => groups.push((k, vec![d])),
+        }
+    }
+    groups.into_iter().map(|(_, m)| m).collect()
+}
+
+/// Active projects in `workspace`, one per repository, sorted by folder name. A repo counts as
+/// active when any of its worktrees is, and is reported from its main checkout.
 pub fn active(workspace: &Path) -> Vec<ProjectVersion> {
-    candidates(workspace)
+    let groups = group_by_repo(candidates(workspace), repo_key);
+    groups
         .iter()
-        .filter_map(|d| inspect(d))
+        .filter_map(|members| {
+            let main = main_checkout(members);
+            let sibling_active = members.iter().filter(|m| *m != main).any(|m| {
+                dirty_count(m).is_some_and(|dirty| is_active(m, dirty))
+            });
+            inspect(main, sibling_active)
+        })
         .take(MAX_PROJECTS)
         .collect()
 }
@@ -275,6 +327,48 @@ mod tests {
             Some("2.0".into())
         );
         assert_eq!(version_from(|_| None), None);
+    }
+
+    #[test]
+    fn worktrees_of_one_repo_are_one_project() {
+        let key = |d: &Path| {
+            let name = d.file_name().unwrap().to_string_lossy().into_owned();
+            PathBuf::from(if name.starts_with("consilium") { "repo-a" } else { "repo-b" })
+        };
+        let dirs = ["consilium-ai", "consilium-autorun", "other", "consilium-retro"]
+            .map(PathBuf::from)
+            .to_vec();
+        let groups = group_by_repo(dirs, key);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].len(), 3);
+        assert_eq!(groups[0][0], PathBuf::from("consilium-ai"));
+        assert_eq!(groups[1], vec![PathBuf::from("other")]);
+    }
+
+    #[test]
+    fn a_linked_worktree_is_folded_into_its_main_checkout() {
+        let dir =
+            std::env::temp_dir().join(format!("consilium-projects-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let main = dir.join("app");
+        std::fs::create_dir_all(&main).unwrap();
+        if git(&main, &["init", "-q"]).is_none() {
+            return; // no git on this machine
+        }
+        std::fs::write(main.join("package.json"), r#"{"version":"0.2.0"}"#).unwrap();
+        let committed = git(&main, &["add", "-A"]).is_some()
+            && git(
+                &main,
+                &["-c", "user.name=t", "-c", "user.email=test", "commit", "-qm", "init"],
+            )
+            .is_some()
+            && git(&main, &["worktree", "add", "-q", "../app-feature", "-b", "feature"]).is_some();
+        if committed {
+            let found = active(&dir);
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].name, "app");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

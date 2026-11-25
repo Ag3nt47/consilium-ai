@@ -269,6 +269,18 @@ code {
   min-height: 0;
 }
 
+.delete-all-conversations {
+  align-self: flex-start;
+  margin: -2px 8px 6px;
+  font-size: 11px;
+}
+
+.delete-all-input {
+  width: 100%;
+  box-sizing: border-box;
+  letter-spacing: 0.08em;
+}
+
 .conv {
   text-align: left;
   background: none;
@@ -2418,9 +2430,10 @@ button.attachment {
 @keyframes agent-voice-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .agent-voice { animation: none; } }
 
-/* Project versions tab, next to the project name: this PC against GitHub. */
+/* Compact source status; repository versions appear only in its details. */
 .project-versions { position: relative; display: inline-flex; min-width: 0; }
 .pv-tab {
+  display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; white-space: nowrap;
   border: 1px solid var(--border); background: var(--panel, transparent); color: var(--text);
   overflow: hidden; text-overflow: ellipsis; max-width: 260px;
@@ -2428,13 +2441,14 @@ button.attachment {
 .pv-tab.pv-ok { border-color: color-mix(in srgb, #22c55e 55%, var(--border)); }
 .pv-tab.pv-diff { border-color: color-mix(in srgb, #f59e0b 60%, var(--border)); }
 .pv-k { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
-.pv-sep { margin: 0 5px; color: var(--muted); }
 .pv-pop {
   position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); z-index: 60;
   min-width: 260px; max-width: min(380px, 90vw); padding: 8px; border-radius: 10px;
-  background: var(--panel); border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 96%, transparent); border: 1px solid var(--border);
   box-shadow: 0 10px 30px rgba(0,0,0,.35); display: flex; flex-direction: column; gap: 8px;
+  max-height: 65vh; overflow-y: auto;
 }
+.pv-heading { font-size: 12px; font-weight: 600; }
 .pv-row { display: flex; flex-direction: column; gap: 2px; font-size: 12px; min-width: 0; }
 .pv-name { font-weight: 600; display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
 .pv-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
@@ -2601,6 +2615,10 @@ button.attachment {
     repeating-linear-gradient(to right, #00ff6608 0 1px, #0000 1px 48px),
     repeating-linear-gradient(to bottom, #00ff6606 0 1px, #0000 1px 48px),
     #000;
+}
+
+.app[data-backdrop="rain"] > .main {
+  background-color: rgba(14, 19, 28, .48);
 }
 
 [data-effects="on"][data-theme="netrunner"] .body,
@@ -3348,6 +3366,28 @@ button.attachment {
   text-shadow: 0 0 4px #000, 0 0 8px #000;
 }
 
+/* Retro '84 uses the same glass-over-wallpaper treatment as Netrunner while keeping its
+   magenta/cyan horizon and wider grid. Without this theme-specific background stack, the
+   opaque CRT effect hides the daily wallpaper whenever visual effects are enabled. */
+[data-effects="on"][data-theme="retro84"] .main.has-wallpaper {
+  background:
+    linear-gradient(to bottom, #0000 62%, #ff3cac10 62%, #0000 100%),
+    repeating-linear-gradient(to right, #8b5cf614 0 1px, #0000 1px 64px),
+    linear-gradient(to bottom, #0000 60%, #20e3ff0a),
+    var(--bing-wallpaper) center / cover no-repeat fixed,
+    #080b1a;
+}
+[data-theme="retro84"] .main.has-wallpaper .topbar {
+  background: rgba(8, 11, 26, 0.28);
+  backdrop-filter: blur(6px) saturate(1.1);
+  -webkit-backdrop-filter: blur(6px) saturate(1.1);
+  border-bottom-color: #3a2a6e99;
+}
+[data-theme="retro84"] .main.has-wallpaper .topbar h1,
+[data-theme="retro84"] .main.has-wallpaper .topbar .btn {
+  text-shadow: 0 0 4px #080b1a, 0 0 8px #080b1a;
+}
+
 /* Compact composer: tighter rows so the conversation gets more of the window. */
 .composer { padding: 6px 18px 10px; gap: 5px; }
 .composer-controls { gap: 6px; }
@@ -3458,9 +3498,10 @@ button.attachment {
 .agent-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .agent-list.scrolls { max-height: min(46vh, 480px); overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 3px; scrollbar-gutter: stable; }
 
-/* Netrunner over the wallpaper: the conversation panel is fully see-through; each message
-   stays on its own dark glass so it reads clearly. */
-[data-theme="netrunner"] .main.has-wallpaper .messages {
+/* Neon themes over the wallpaper: the conversation panel is fully see-through; each message
+   stays on its own theme-tinted glass so it reads clearly. */
+[data-theme="netrunner"] .main.has-wallpaper .messages,
+[data-theme="retro84"] .main.has-wallpaper .messages {
   background: transparent;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -3477,7 +3518,109 @@ button.attachment {
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
 }
+[data-theme="retro84"] .main.has-wallpaper .msg,
+[data-theme="retro84"] .main.has-wallpaper .thinking {
+  background: rgba(8, 11, 26, 0.68);
+  backdrop-filter: blur(14px) saturate(1.15);
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
+}
+[data-theme="retro84"] .main.has-wallpaper .composer {
+  background: rgba(8, 11, 26, 0.32);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
 
+/* The live rain and static telemetry backdrops deserve the same Retro glass treatment as the
+   wallpaper. Stealth is deliberately excluded because that mode promises an opaque, quiet UI. */
+[data-theme="retro84"] .app[data-backdrop]:not([data-backdrop="stealth"]) .messages {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-color: transparent;
+}
+[data-theme="retro84"] .app[data-backdrop]:not([data-backdrop="stealth"]) .msg,
+[data-theme="retro84"] .app[data-backdrop]:not([data-backdrop="stealth"]) .thinking {
+  background: rgba(8, 11, 26, 0.68);
+  backdrop-filter: blur(14px) saturate(1.15);
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
+}
+[data-theme="retro84"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.topbar, .composer) {
+  background: rgba(8, 11, 26, 0.32);
+  backdrop-filter: blur(6px) saturate(1.1);
+  -webkit-backdrop-filter: blur(6px) saturate(1.1);
+}
+[data-theme="retro84"] .app[data-backdrop]:not([data-backdrop="stealth"]) .request {
+  background: rgba(24, 7, 24, 0.96);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* visionOS Glass over the wallpaper or a live backdrop: the main pane has no fill at all, so
+   the background shows through edge to edge. Only the messages (and the thinking rows) keep a
+   light pane of frosted glass so they stay readable. The top bar and composer float on clear
+   glass with a soft text shadow. REQUEST boxes stay solid so Approve/Deny never fades. Stealth
+   is excluded because that mode promises an opaque, quiet UI. */
+[data-theme="glass"] .main.has-wallpaper .messages,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .messages {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-color: transparent;
+  box-shadow: none;
+}
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) > .main {
+  background: transparent;
+}
+[data-theme="glass"] .main.has-wallpaper :is(.topbar, .composer),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.topbar, .composer) {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-color: transparent;
+  box-shadow: none;
+}
+[data-theme="glass"] .main.has-wallpaper :is(.topbar, .composer) :is(h1, .btn, .chip, label, span),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.topbar, .composer) :is(h1, .btn, .chip, label, span) {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 10px rgba(0, 0, 0, 0.6);
+}
+[data-theme="glass"] .main.has-wallpaper :is(.msg, .thinking),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.msg, .thinking) {
+  background: rgba(16, 20, 34, 0.65);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+}
+/* The prompt box is 15 points more opaque than the shared panel colour, and frosted, so typing
+   stays readable over a bright wallpaper. */
+[data-theme="glass"] .main.has-wallpaper .composer textarea,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer textarea {
+  background: rgba(22, 27, 44, 0.7);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+/* Consilium's own notes (status lines, startup checks) are small muted text, so they get the
+   darkest pane and brighter text; errors keep their red. */
+[data-theme="glass"] .main.has-wallpaper .note,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .note {
+  background: rgba(12, 15, 26, 0.82);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+[data-theme="glass"] .main.has-wallpaper .note:not(.note-error),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .note:not(.note-error) {
+  color: #c9cedb;
+}
+/* The audit (explainability) drawer sits over the conversation, so it is 15 points more
+   opaque than the shared 55% panel colour. */
+[data-theme="glass"] .audit-drawer {
+  background: rgba(22, 27, 44, 0.7);
+  -webkit-backdrop-filter: blur(14px);
+}
+[data-theme="glass"] .main.has-wallpaper .request,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .request {
+  background: rgba(36, 10, 14, 0.95);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 .theme-hint {
   margin: 6px 0 10px;
   font-size: 12px;
@@ -3922,3 +4065,73 @@ button.attachment {
 
 .add-choice { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; text-align: left; padding: 10px 12px; }
 .add-choice small { grid-column: 2; color: var(--muted); font-weight: normal; }
+
+/* Hover glow: the box or button under the pointer gets a glowing outline in the theme's accent
+   colour. A box that contains a hovered button or chip stays quiet, so only the item under the
+   pointer glows. Disabled buttons don't glow. */
+:is(.btn, .chip, .pv-tab, .task-pill, .conv, .msg, .note, .thinking, .request, textarea, select,
+    input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"])) {
+  transition: box-shadow 0.15s ease, border-color 0.15s ease, background 0.15s, transform 0.05s;
+}
+:is(.btn, .chip, .pv-tab, .task-pill, .conv, textarea, select,
+    input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"])):hover:not(:disabled),
+:is(.msg, .note, .thinking, .request):hover:not(:has(:is(.btn, .chip, .request, .task-pill, a, button, textarea, input, select):hover)) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent),
+    0 0 14px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  :is(.btn, .chip, .pv-tab, .task-pill, .conv, .msg, .note, .thinking, .request, textarea, select, input) {
+    transition: none;
+  }
+}
+
+/* Glass over the wallpaper or a live backdrop: the composer's labels, chips and buttons float on
+   clear glass, so on a bright picture (snow, sky) their pale text vanished. Each gets its own
+   dark frosted pill, and the section labels (Ask, Persona) get bright text. */
+[data-theme="glass"] .main.has-wallpaper .composer .section-label,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer .section-label {
+  color: #e6e9f2;
+  font-weight: 600;
+}
+[data-theme="glass"] .main.has-wallpaper :is(.topbar, .composer) :is(.chip:not(.on), .btn:not(:is(.primary, .stop, .danger, .approve, .deny, .on, .request-update, .autorun-toggle, .update-now, .respond-request))),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.topbar, .composer) :is(.chip:not(.on), .btn:not(:is(.primary, .stop, .danger, .approve, .deny, .on, .request-update, .autorun-toggle, .update-now, .respond-request))) {
+  background: rgba(16, 20, 34, 0.72);
+  color: #e6e9f2;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+[data-theme="glass"] .main.has-wallpaper :is(.topbar, .composer) .chip.on,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.topbar, .composer) .chip.on {
+  background: color-mix(in srgb, var(--accent) 30%, rgba(16, 20, 34, 0.8));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+/* "Next request" with nothing waiting was a faded grey on clear glass; keep it visibly off but
+   readable. */
+[data-theme="glass"] .main.has-wallpaper .composer .btn.respond-request:disabled,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer .btn.respond-request:disabled {
+  opacity: 0.85;
+  background: rgba(16, 20, 34, 0.72);
+  color: #aab1c2;
+}
+[data-theme="glass"] .main.has-wallpaper .composer .rounds,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer .rounds {
+  color: #e6e9f2;
+}
+
+/* The explainability boxes (the activity line, task pills and the audit drawer) use the same
+   dark frosted glass as the chat messages, in every Glass mode, with brighter text. */
+[data-theme="glass"] :is(.thinking, .task-pill, .task-claim-italic),
+[data-theme="glass"] .main.has-wallpaper :is(.thinking, .task-pill, .task-claim-italic),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) :is(.thinking, .task-pill, .task-claim-italic) {
+  background: rgba(16, 20, 34, 0.65);
+  color: #d5d9e3;
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+}
+[data-theme="glass"] .audit-drawer {
+  background: rgba(16, 20, 34, 0.65);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+}

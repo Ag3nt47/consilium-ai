@@ -18,6 +18,10 @@ mod controller;
 pub mod pairing;
 #[cfg(windows)]
 mod pairing_worker;
+#[cfg(windows)]
+mod sdp;
+#[cfg(windows)]
+mod worker_process;
 use controller::Controller;
 #[cfg(windows)]
 use controller::SessionRelay;
@@ -31,6 +35,17 @@ mod stream;
 
 pub const SERVICE_UUID: &str = "6c4d9403-81a6-4ab0-98b8-57fba7325481";
 static CONTROL: OnceLock<Controller> = OnceLock::new();
+
+pub(crate) fn sdp_worker_main() -> i32 {
+    #[cfg(windows)]
+    {
+        sdp::run_worker()
+    }
+    #[cfg(not(windows))]
+    {
+        2
+    }
+}
 
 #[derive(Default, Deserialize, Serialize)]
 struct Settings {

@@ -464,6 +464,10 @@ export type LinkStatus = {
   pairing_code_expires_ms: number | null;
   peers: LinkPeer[];
   error: string | null;
+  /** Durable peer packets waiting for the serialized local conversation/UI worker. */
+  sync_pending?: number;
+  /** Age of the oldest pending packet; the engine restarts if this worker stays stuck. */
+  sync_oldest_ms?: number;
   /** The build this computer runs, and what it is doing to match the newest linked computer. */
   build?: Build;
   follow?: FollowStatus;
@@ -541,6 +545,7 @@ const appApi = {
   tokenUsage: (id: string, dayStart: number) => invoke<TokenUsageReport>("token_usage_report", { id, dayStart }),
   rename: (id: string, title: string) => invoke<Conversation>("rename_conversation", { id, title }),
   remove: (id: string) => invoke<void>("delete_conversation", { id }),
+  removeAll: () => invoke<number>("delete_all_conversations"),
   exportMarkdown: (id: string) => invoke<string>("export_markdown", { id }),
   setVoice: (id: string, on: boolean) => invoke<ChatEvent>("set_voice", { id, on }),
   /** Sent while the AIs are answering, the message joins the running turn; it never stops it. */

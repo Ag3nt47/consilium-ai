@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const COMMANDS: &[&str] =
-    &["chat", "ask", "say", "log", "list", "new", "stop", "status", "check", "install-cli", "help", "--help", "-h", "--version", "-V", "--watchdog", "watchdog", "--bluetooth-pairing-worker"];
+    &["chat", "ask", "say", "log", "list", "new", "stop", "status", "check", "install-cli", "help", "--help", "-h", "--version", "-V", "--watchdog", "watchdog", "--bluetooth-pairing-worker", "--bluetooth-sdp-worker"];
 
 /// Whether the program was started as the terminal command rather than to open the window.
 pub fn wants_cli(args: &[String]) -> bool {
@@ -380,6 +380,9 @@ pub fn main(args: Vec<String>) -> i32 {
     // Private inherited-pipe worker: never attach or allocate a console.
     if args.first().is_some_and(|a| a == "--bluetooth-pairing-worker") {
         return if args.len() == 1 { crate::bluetooth::pairing::worker_main() } else { 2 };
+    }
+    if args.first().is_some_and(|a| a == "--bluetooth-sdp-worker") {
+        return if args.len() == 1 { crate::bluetooth::sdp_worker_main() } else { 2 };
     }
     if args.first().is_some_and(|a| a == "--watchdog" || a == "watchdog") {
         return crate::watchdog::main_watchdog(&args);

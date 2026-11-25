@@ -2,10 +2,8 @@
 use super::{
     read_frame, write_frame, PairingStatus, PairingTarget, Snapshot, WorkerCommand, WorkerEvent,
 };
+use super::super::worker_process::OwnedChild;
 use std::io::BufReader;
-use std::mem::size_of;
-use std::os::windows::{io::AsRawHandle, process::CommandExt};
-use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, SyncSender},
@@ -13,12 +11,6 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-};
 
 static CURRENT: OnceLock<Mutex<Option<Arc<Attempt>>>> = OnceLock::new();
 struct Attempt {
@@ -152,77 +144,12 @@ pub(super) fn cancel(id: &str) -> Result<PairingStatus, String> {
     Ok(result)
 }
 
-struct Job(usize);
-impl Job {
-    fn assign(child: &Child) -> std::io::Result<Self> {
-        // SAFETY: unnamed job is private; all structures/handles have SDK layouts.
-        let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if raw.is_null() {
-            return Err(std::io::Error::last_os_error());
-        }
-        let job = Self(raw as usize);
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: limits is the exact structure selected by this information class.
-        if unsafe {
-            SetInformationJobObject(
-                raw,
-                JobObjectExtendedLimitInformation,
-                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        } == 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: both the child and job remain owned until the worker has exited.
-        if unsafe { AssignProcessToJobObject(raw, child.as_raw_handle() as HANDLE) } == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(job)
-    }
-}
-impl Drop for Job {
-    fn drop(&mut self) {
-        unsafe {
-            CloseHandle(self.0 as HANDLE);
-        }
-    }
-}
-struct OwnedChild {
-    child: Child,
-    _job: Job,
-}
-impl Drop for OwnedChild {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 fn run(
     attempt: &Arc<Attempt>,
     address: String,
     commands: mpsc::Receiver<WorkerCommand>,
 ) -> Result<(), ()> {
-    let mut child = Command::new(std::env::current_exe().map_err(|_| ())?)
-        .arg("--bluetooth-pairing-worker")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .creation_flags(0x0800_0000)
-        .spawn()
-        .map_err(|_| ())?;
-    // Until the job is assigned, the worker can only wait for its start frame.
-    let job = match Job::assign(&child) {
-        Ok(job) => job,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(());
-        }
-    };
-    let mut owner = OwnedChild { child, _job: job };
+    let mut owner = OwnedChild::spawn("--bluetooth-pairing-worker").map_err(|_| ())?;
     let input = owner.child.stdin.take().ok_or(())?;
     let output = owner.child.stdout.take().ok_or(())?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -333,7 +260,11 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::super::worker_process::Job;
     use std::io::{BufRead, Write};
+    use std::os::windows::{io::AsRawHandle, process::CommandExt};
+    use std::process::{Command, Stdio};
+    use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
 

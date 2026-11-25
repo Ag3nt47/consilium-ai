@@ -2602,6 +2602,38 @@ export default function App() {
     }
   }
 
+  // Bulk cleanup is deliberately protected by two separate in-app prompts. The backend checks
+  // every conversation before deleting the first one, so a running chat cannot leave a partial
+  // cleanup behind.
+  const [deleteAllStep, setDeleteAllStep] = useState<0 | 1 | 2>(0);
+  const [deleteAllText, setDeleteAllText] = useState("");
+  const [deletingAll, setDeletingAll] = useState(false);
+  function closeDeleteAll() {
+    if (deletingAll) return;
+    setDeleteAllStep(0);
+    setDeleteAllText("");
+  }
+  async function deleteAllConfirmed() {
+    if (deletingAll || deleteAllText.trim().toUpperCase() !== "DELETE") return;
+    setDeletingAll(true);
+    try {
+      const removed = await api.removeAll();
+      const fresh = await api.create();
+      await refreshList();
+      setCurrent(fresh.id);
+      setDeleteAllStep(0);
+      setDeleteAllText("");
+      setToast(`${removed} conversation${removed === 1 ? "" : "s"} deleted`);
+      setTimeout(() => setToast(null), 2500);
+    } catch (e) {
+      setDeleteAllStep(0);
+      setDeleteAllText("");
+      setError(`Couldn't delete all conversations: ${e}`);
+    } finally {
+      setDeletingAll(false);
+    }
+  }
+
   // Restart dialog: confirmation prompt with computer picker and Restart All
   type RestartTarget = { id: string; name: string; connected: boolean; isSelf: boolean };
   const [showRestartModal, setShowRestartModal] = useState(false);
@@ -2977,7 +3009,7 @@ export default function App() {
       {prefs.backdrop.enabled && prefs.backdrop.mode !== "stealth" && (
         <Suspense fallback={null}>
           <TelemetryBackdrop prefs={prefs.backdrop} agents={agents} workers={thinkingIds} events={events} meshPeers={meshPeers}
-            memory={pressure?.memory_percent} paused={!prefs.effects || adaptiveMode === "eco"} />
+            memory={pressure?.memory_percent} paused={!prefs.effects} eco={adaptiveMode === "eco"} />
         </Suspense>
       )}
       <div className="fx-scanlines" aria-hidden />
@@ -3014,6 +3046,15 @@ export default function App() {
             </button>
           ))}
         </nav>
+        <button
+          type="button"
+          className="link danger-link delete-all-conversations"
+          title="Delete every conversation and its attachments"
+          onClick={() => setDeleteAllStep(1)}
+          disabled={!conversations.length}
+        >
+          Delete all conversations…
+        </button>
         <div className={`agents${members.length >= 5 ? " many" : ""}`}>
           <div className="section-label">
             Council
@@ -4365,6 +4406,80 @@ export default function App() {
               </button>
               <button className="btn danger" onClick={deleteConfirmed} title="Delete the conversation permanently">
                 Delete permanently
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteAllStep === 1 && (
+        <div className="modal-backdrop" onClick={closeDeleteAll}>
+          <div
+            className="modal confirm-modal"
+            role="alertdialog"
+            aria-labelledby="confirm-delete-all-title"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") closeDeleteAll();
+            }}
+          >
+            <h2 id="confirm-delete-all-title">Delete all conversations?</h2>
+            <p>
+              This will delete all <strong>{conversations.length}</strong> conversation{conversations.length === 1 ? "" : "s"},
+              including their messages, attachments, task boards and handoff notes.
+            </p>
+            <p className="muted small">A second confirmation is required before anything is deleted.</p>
+            <div className="confirm-actions">
+              <button className="btn" autoFocus onClick={closeDeleteAll} title="Keep every conversation">
+                Cancel
+              </button>
+              <button className="btn danger" onClick={() => setDeleteAllStep(2)} title="Continue to the final confirmation">
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteAllStep === 2 && (
+        <div className="modal-backdrop" onClick={closeDeleteAll}>
+          <div
+            className="modal confirm-modal"
+            role="alertdialog"
+            aria-labelledby="final-delete-all-title"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") closeDeleteAll();
+            }}
+          >
+            <h2 id="final-delete-all-title">Permanently delete every conversation?</h2>
+            <p>
+              <strong>Final confirmation:</strong> this can't be undone. Type <strong>DELETE</strong> to confirm.
+              A new empty conversation will open afterwards.
+            </p>
+            <input
+              className="delete-all-input"
+              autoFocus
+              value={deleteAllText}
+              disabled={deletingAll}
+              placeholder="DELETE"
+              aria-label="Type DELETE to confirm"
+              onChange={(e) => setDeleteAllText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") deleteAllConfirmed();
+              }}
+            />
+            <div className="confirm-actions">
+              <button className="btn" disabled={deletingAll} onClick={closeDeleteAll} title="Keep every conversation">
+                Cancel
+              </button>
+              <button
+                className="btn danger"
+                disabled={deletingAll || deleteAllText.trim().toUpperCase() !== "DELETE"}
+                onClick={deleteAllConfirmed}
+                title="Delete every conversation permanently"
+              >
+                {deletingAll ? "Deleting…" : "Delete all permanently"}
               </button>
             </div>
           </div>

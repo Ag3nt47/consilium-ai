@@ -1,7 +1,7 @@
 {
   "name": "consilium",
   "private": true,
-  "version": "0.3.58",
+  "version": "0.3.59",
   "description": "A council of minds: a desktop app where several AIs and a human work in one conversation.",
   "license": "MIT",
   "type": "module",
@@ -17,6 +17,8 @@
     "update:stage": "node scripts/stage-update.mjs",
     "update:ui": "node scripts/stage-ui.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
+    "sync:check": "node scripts/peer-sync-doctor.mjs",
+    "sync:repair": "node scripts/peer-sync-doctor.mjs --repair",
     "test": "node --test \"tests/*.test.mjs\""
   },
   "dependencies": {
