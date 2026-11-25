@@ -3482,6 +3482,50 @@ button.attachment {
   -webkit-backdrop-filter: blur(6px);
 }
 
+/* Retro '84 over the wallpaper, like Netrunner: the neon grid sits on top of the wallpaper,
+   the conversation panel is see-through, and each message keeps its own dark indigo glass. */
+[data-effects="on"][data-theme="retro84"] .main.has-wallpaper {
+  background:
+    linear-gradient(to bottom, #0000 62%, #ff3cac10 62%, #0000 100%),
+    repeating-linear-gradient(to right, #8b5cf614 0 1px, #0000 1px 64px),
+    var(--bing-wallpaper) center / cover no-repeat fixed,
+    #080b1a;
+}
+[data-theme="retro84"] .main.has-wallpaper .topbar {
+  background: rgba(8, 11, 26, 0.3);
+  backdrop-filter: blur(6px) saturate(1.1);
+  -webkit-backdrop-filter: blur(6px) saturate(1.1);
+  border-bottom-color: #3a2a6e99;
+}
+[data-theme="retro84"] .main.has-wallpaper .topbar h1,
+[data-theme="retro84"] .main.has-wallpaper .topbar .btn {
+  text-shadow: 0 0 4px #000, 0 0 8px #000;
+}
+[data-theme="retro84"] .main.has-wallpaper .messages {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-color: transparent;
+}
+[data-theme="retro84"] .main.has-wallpaper .msg,
+[data-theme="retro84"] .main.has-wallpaper .thinking {
+  background: rgba(8, 11, 26, 0.68);
+  backdrop-filter: blur(14px) saturate(1.15);
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
+}
+[data-theme="retro84"] .main.has-wallpaper .composer {
+  background: rgba(8, 11, 26, 0.32);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+/* With the Matrix rain backdrop, Retro '84 messages are glass too, so the rain shows around the text. */
+[data-theme="retro84"] .app[data-backdrop="rain"] .msg,
+[data-theme="retro84"] .app[data-backdrop="rain"] .thinking {
+  background: rgba(8, 11, 26, 0.68);
+  backdrop-filter: blur(14px) saturate(1.15);
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
+}
+
 .theme-hint {
   margin: 6px 0 10px;
   font-size: 12px;
