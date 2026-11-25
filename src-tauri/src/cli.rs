@@ -216,7 +216,7 @@ fn render(p: Paint, e: &Event) -> String {
             }
             for line in e.text.lines() {
                 let t = line.trim_start();
-                if t.len() >= 8 && t[..8].eq_ignore_ascii_case("REQUEST:") {
+                if crate::store::strip_prefix_ignore_ascii_case(t, "REQUEST:").is_some() {
                     out.push_str(&format!("  {}\n", p.c("1;31", line)));
                 } else {
                     out.push_str(&format!("  {line}\n"));

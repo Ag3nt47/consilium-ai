@@ -412,7 +412,7 @@ impl Engine {
                     }
                     joined
                 } else if !addressed.is_empty() {
-                    council.mentioned(event, &addressed)
+                    council.mentioned(event, &addressed, self.spawn.as_ref())
                 } else {
                     council.heard(event)
                 };

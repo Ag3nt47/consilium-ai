@@ -1660,11 +1660,15 @@ pub fn run() {
             // Direct link to the user's other paired computers. Off until they pair or turn it on.
             let emitter = app.handle().clone();
             let handler: link::Handler = Arc::new(move |p: &peer_protocol::PeerPacket| {
-                // Chat from another computer goes into its mirror conversation, then the window.
-                if let Some(e) = peer_sync::receive(p) {
-                    let _ = emitter.emit(EVENT, &e);
+                // The conversation journal is authoritative. Queue the visual notification
+                // without putting WebView dispatch on the serial peer delivery worker.
+                if let Some(event) = peer_sync::receive(p) {
+                    let window = emitter.clone();
+                    let _ = emitter.run_on_main_thread(move || {
+                        let _ = window.emit(EVENT, &event);
+                    });
                 }
-                emitter.emit("link-packet", p).map_err(|e| e.to_string())
+                Ok(())
             });
             match link::Link::open(&data.join("link"), link::PORT, handler) {
                 Ok(l) => {

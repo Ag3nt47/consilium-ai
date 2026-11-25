@@ -15,6 +15,56 @@ function Get-RelaunchBlock {
     return $null
 }
 
+function Get-RetryBlock {
+    $block = Get-RelaunchBlock
+    if ($block) { return $block }
+
+    $name = [IO.Path]::GetFileNameWithoutExtension($target)
+    foreach ($process in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+        try {
+            if (!$process.HasExited -and [String]::Equals($process.Path, $target, [StringComparison]::OrdinalIgnoreCase)) {
+                return 'another instance of the same executable is running'
+            }
+        } catch {
+            # A process that exited during enumeration has no live window to protect.
+        } finally {
+            $process.Dispose()
+        }
+    }
+    return $null
+}
+
+function Save-StartupFailureLog([string]$pending, [int]$attempt) {
+    if (!(Test-Path -LiteralPath $pending)) { return }
+    $failed = [IO.Path]::ChangeExtension($readyPath, "launch$attempt.stderr.log")
+    try {
+        Move-Item -LiteralPath $pending -Destination $failed -ErrorAction Stop
+        Write-RelaunchLog "retained stderr in $([IO.Path]::GetFileName($failed))"
+    } catch {
+        # A child process may still hold the inherited file. Copy a bounded tail if we can read it.
+        try {
+            $stream = [IO.File]::Open($pending, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            try {
+                $stream.Position = [Math]::Max(0, $stream.Length - 65536)
+                $bytes = New-Object byte[] 65536
+                $count = $stream.Read($bytes, 0, $bytes.Length)
+                $saved = [IO.File]::Open($failed, [IO.FileMode]::CreateNew)
+                try { $saved.Write($bytes, 0, $count) } finally { $saved.Dispose() }
+            } finally {
+                $stream.Dispose()
+            }
+            Write-RelaunchLog "retained stderr tail in $([IO.Path]::GetFileName($failed))"
+        } catch {
+            Write-RelaunchLog "stderr is still in the active file $([IO.Path]::GetFileName($pending))"
+        }
+    }
+}
+
+$logDir = [IO.Path]::GetDirectoryName($logPath)
+$startupLogs = @(
+    (Join-Path $logDir 'relaunch-attempt-1.stderr.pending.log')
+    (Join-Path $logDir 'relaunch-attempt-2.stderr.pending.log')
+)
 $oldProcess = $null
 $replacement = $null
 $finished = $false
@@ -89,12 +139,47 @@ try {
     }
     $env:CONSILIUM_DATA = $profile
     $workDir = [IO.Path]::GetDirectoryName($target)
-    $replacement = Start-Process -FilePath $target -WorkingDirectory $workDir -WindowStyle Normal -PassThru
-    Write-RelaunchLog "started replacement process $($replacement.Id)"
-    if ($replacement.WaitForExit(5000)) {
-        $code = $replacement.ExitCode
-        Write-RelaunchLog "replacement process $($replacement.Id) exited within 5 s with code $code"
-        if ($code -ne 0) { exit 1 }
+
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $stderrPath = $startupLogs[$attempt - 1]
+        # Windows keeps redirected stderr open for the process lifetime. Reuse a slot only
+        # after its previous owner releases the handle.
+        Remove-Item -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $stderrPath) {
+            Write-RelaunchLog "startup stderr slot $attempt is busy; launching without capture"
+            $replacement = Start-Process -FilePath $target -WorkingDirectory $workDir -WindowStyle Normal -PassThru
+            $stderrPath = $null
+        } else {
+            $replacement = Start-Process -FilePath $target -WorkingDirectory $workDir -WindowStyle Normal -PassThru -RedirectStandardError $stderrPath
+        }
+        # PowerShell 5.1 can otherwise lose the exit code when a process exits quickly.
+        try { $null = $replacement.Handle } catch { }
+        Write-RelaunchLog "started replacement process $($replacement.Id) on attempt $attempt"
+        $earlyExit = $replacement.WaitForExit(5000)
+        $code = if ($earlyExit) { $replacement.ExitCode } else { $null }
+        $replacement.Dispose()
+        $replacement = $null
+
+        if ($earlyExit -and $null -ne $code) {
+            Write-RelaunchLog "replacement on attempt $attempt exited within 5 s with code $code"
+        } elseif ($earlyExit) {
+            Write-RelaunchLog "replacement on attempt $attempt exited early with no available exit code"
+        }
+        if ($null -eq $code -or $code -eq 0) {
+            if ($stderrPath) { Remove-Item -LiteralPath $stderrPath -ErrorAction SilentlyContinue }
+            break
+        }
+        if ($stderrPath) { Save-StartupFailureLog $stderrPath $attempt }
+        if ($attempt -eq 2) {
+            $finished = $true
+            exit 1
+        }
+        Start-Sleep -Seconds 4
+        $block = Get-RetryBlock
+        if ($block) {
+            Write-RelaunchLog "canceled the replacement retry ($block)"
+            break
+        }
     }
     $finished = $true
 } catch {
@@ -105,5 +190,8 @@ try {
     if ($null -ne $oldProcess) { $oldProcess.Dispose() }
     if ($finished) {
         Remove-Item -LiteralPath $readyPath, $armPath, $PSCommandPath -ErrorAction SilentlyContinue
+        # Remove any unlocked capture from a nonfailing process. A live child's fixed slot
+        # is eligible for cleanup once it exits and releases the operating-system handle.
+        Remove-Item -LiteralPath $startupLogs -ErrorAction SilentlyContinue
     }
 }

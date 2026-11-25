@@ -197,11 +197,7 @@ pub fn is_verified(fact: &str) -> bool {
 pub fn remember_lines(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| {
-            let t = line.trim_start();
-            if t.len() < 9 || !t[..9].eq_ignore_ascii_case("REMEMBER:") {
-                return None;
-            }
-            let fact = t[9..].trim();
+            let fact = crate::store::strip_prefix_ignore_ascii_case(line.trim_start(), "REMEMBER:")?.trim();
             (!fact.is_empty() && !looks_secret(fact)).then(|| fact.chars().take(300).collect())
         })
         .collect()

@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Puts the finished temporary file `tmp` in place of `path`. A rename can fail for a moment on
@@ -162,17 +161,18 @@ pub fn valid_id(id: &str) -> bool {
         })
 }
 
+/// Matches an ASCII directive while keeping the prefix and suffix on UTF-8 boundaries.
+pub(crate) fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let (head, rest) = text.split_at_checked(prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then_some(rest)
+}
+
 /// Lines starting with `REQUEST:` (case-insensitive), which ask the human for a decision or action.
 pub fn requests_in(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| {
-            let t = line.trim_start();
-            if t.len() >= 8 && t[..8].eq_ignore_ascii_case("REQUEST:") {
-                let rest = t[8..].trim();
-                (!rest.is_empty()).then(|| rest.to_string())
-            } else {
-                None
-            }
+            let rest = strip_prefix_ignore_ascii_case(line.trim_start(), "REQUEST:")?.trim();
+            (!rest.is_empty()).then(|| rest.to_string())
         })
         .collect()
 }
@@ -181,11 +181,8 @@ pub fn requests_in(text: &str) -> Vec<String> {
 pub fn add_ai_in(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
-        let t = line.trim_start();
-        if t.len() < 7 || !t[..7].eq_ignore_ascii_case("ADD_AI:") {
-            continue;
-        }
-        for word in t[7..].split(|c: char| c == ',' || c.is_whitespace()) {
+        let Some(rest) = strip_prefix_ignore_ascii_case(line.trim_start(), "ADD_AI:") else { continue };
+        for word in rest.split(|c: char| c == ',' || c.is_whitespace()) {
             let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
             if let Some(a) = crate::agents::all().into_iter().find(|a| a.id == w || a.name.to_lowercase() == w) {
                 if !out.iter().any(|x| x == a.id) {
@@ -199,8 +196,6 @@ pub fn add_ai_in(text: &str) -> Vec<String> {
 
 pub struct Store {
     dir: PathBuf,
-    /// Serializes this process's appends; the file lock serializes them with other processes.
-    appending: Mutex<()>,
 }
 
 enum TurnProbe {
@@ -218,7 +213,7 @@ pub struct TurnLock {
 impl Store {
     pub fn new(dir: PathBuf) -> std::io::Result<Self> {
         fs::create_dir_all(&dir)?;
-        Ok(Store { dir, appending: Mutex::new(()) })
+        Ok(Store { dir })
     }
 
     pub fn dir(&self) -> &Path {
@@ -574,7 +569,8 @@ impl Store {
         Self::check(id)?;
         // Everything in a conversation is sent to every AI's provider, so secrets are masked first.
         let text = &crate::redact::scrub(text);
-        let appending = self.appending.lock().unwrap();
+        // The conversation's OS lock serializes same-log writers, in this process and across
+        // processes. Waiting for it must leave appends to other conversations independent.
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -615,7 +611,6 @@ impl Store {
         f.sync_data().map_err(|e| e.to_string())?;
         drop(f);
         drop(lock);
-        drop(appending);
         if let Ok(mut meta) = self.meta(id) {
             meta.updated = event.ts;
             if meta.title == "New conversation" && sender == "human" {
@@ -739,6 +734,59 @@ mod tests {
         let mine = store.append(&c.id, "human", "error", vec![], "REQUEST: not an AI").unwrap();
         assert!(mine.requests.is_empty());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn blocked_append_leaves_other_conversations_writable() {
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+
+        let (store, dir) = temp_store();
+        let blocked_id = store.create("Held").unwrap().id;
+        let available_id = store.create("Independent").unwrap().id;
+        let held = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(store.append_lock_path(&blocked_id))
+            .unwrap();
+        held.lock().unwrap();
+        let store = Arc::new(store);
+
+        let (entered, waiting) = mpsc::channel();
+        let (writer, id) = (store.clone(), blocked_id.clone());
+        let blocked = std::thread::spawn(move || {
+            let _ = entered.send(());
+            writer.append(&id, "human", "message", vec![], "Wait for this conversation")
+        });
+        let started = waiting.recv_timeout(Duration::from_secs(5)).is_ok();
+        // Give the first writer time to reach the deliberately held OS lock.
+        std::thread::sleep(Duration::from_millis(100));
+
+        let (completed, finished) = mpsc::channel();
+        let (writer, id) = (store.clone(), available_id.clone());
+        let independent = std::thread::spawn(move || {
+            let result = writer.append(&id, "human", "message", vec![], "This can be written");
+            let _ = completed.send(result);
+        });
+        let other_append = finished.recv_timeout(Duration::from_secs(5));
+        let first_still_waiting = !blocked.is_finished();
+
+        // Release the lock and finish both workers before asserting, even on a regression.
+        drop(held);
+        let first = blocked.join().unwrap();
+        independent.join().unwrap();
+        for id in [&blocked_id, &available_id] {
+            let _ = fs::remove_file(store.log_path(id));
+            let _ = fs::remove_file(store.meta_path(id));
+            let _ = fs::remove_file(store.append_lock_path(id));
+        }
+        let _ = fs::remove_dir(dir);
+
+        assert!(started, "the first append did not start");
+        assert!(first_still_waiting, "the first append bypassed its held file lock");
+        assert_eq!(first.unwrap().seq, 1);
+        assert_eq!(other_append.expect("the unrelated append was blocked").unwrap().seq, 1);
     }
 
     #[test]
@@ -917,6 +965,20 @@ mod tests {
     fn add_ai_lines_are_parsed_by_id_or_name() {
         assert_eq!(add_ai_in("Let's bring in help.\nADD_AI: Gemini\nadd_ai: claude, nobody"), vec!["gemini", "claude"]);
         assert!(add_ai_in("we could ADD_AI: gemini later").is_empty(), "only at the start of a line");
+    }
+
+    #[test]
+    fn unicode_lines_and_directives_append_without_interrupting_conversations() {
+        let (store, dir) = temp_store();
+        let chat = store.create("Unicode test").unwrap();
+        let message = "abcdefg🚀 ordinary text\nabcdefé ordinary text\n  request: Verify café\nADD_AI: Gemini";
+        let event = store.append(&chat.id, "claude", "message", vec![], message).unwrap();
+        assert_eq!(event.requests, vec!["Verify café"]);
+        assert_eq!(event.add_ai, vec!["gemini"]);
+
+        let following = store.append(&chat.id, "human", "message", vec![], "Continue").unwrap();
+        assert_eq!(following.seq, event.seq + 1);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

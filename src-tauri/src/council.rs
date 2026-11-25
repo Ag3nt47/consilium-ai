@@ -380,7 +380,8 @@ impl Council {
     /// Another computer's AI addressed `ids` (this computer's AIs) by handle in `message`. Like an
     /// @mention between AIs here: each gets one more answer and joins in if it isn't taking part,
     /// within the turn's limit on AIs brought in this way. Returns false if the turn has ended.
-    pub fn mentioned(&self, message: &Event, ids: &[String]) -> bool {
+    /// The injected executor also lets synchronous PeerLink delivery start a worker.
+    pub fn mentioned(&self, message: &Event, ids: &[String], spawn: &crate::engine::Spawn) -> bool {
         let s = &self.shared;
         let rounds = s.turn.rounds;
         let mut start = Vec::new();
@@ -426,7 +427,7 @@ impl Council {
             }
         }
         for m in start {
-            tokio::spawn(worker(s.clone(), m, Some(message.seq.saturating_sub(1))));
+            spawn(Box::pin(worker(s.clone(), m, Some(message.seq.saturating_sub(1)))));
         }
         s.wake.notify_waiters();
         true
@@ -875,6 +876,10 @@ mod tests {
     use std::time::Duration;
 
     type Script = dyn Fn(&str, u32, &[Event]) -> Result<String, String> + Send + Sync;
+
+    fn spawn_here(task: crate::engine::Task) {
+        tokio::spawn(task);
+    }
 
     #[derive(Clone)]
     struct AnswerGate {
@@ -1434,7 +1439,7 @@ mod tests {
         let done = tokio::spawn(async move { runner.run().await });
         tokio::time::timeout(Duration::from_secs(5), exit.reached.notified()).await.expect("the worker reaches its exit");
         let ask = store.append_imported(&c, "claude", "message", vec![], "arrived at exit", Some("MacBook".into()), None).unwrap();
-        assert!(council.mentioned(&ask, &ids(&["gpt"])));
+        assert!(council.mentioned(&ask, &ids(&["gpt"]), &spawn_here));
         assert_eq!(*host.allowance_updates.lock().unwrap(), vec![(HashMap::from([("gpt".to_string(), 1)]), 1)]);
         exit.release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), done).await.expect("the follow-up is answered").unwrap();
@@ -1460,7 +1465,7 @@ mod tests {
                 assert!(council.stop_agent("gpt"));
             }
             let ask = store.append_imported(&c, "claude", "message", vec![], "peer follow-up", Some("MacBook".into()), None).unwrap();
-            assert!(council.mentioned(&ask, &ids(&["gpt"])));
+            assert!(council.mentioned(&ask, &ids(&["gpt"]), &spawn_here));
             exit.release.notify_one();
             tokio::time::timeout(Duration::from_secs(5), done).await.expect("the halted turn ends").unwrap();
             assert_eq!(*host.asked.lock().unwrap(), vec![("gpt".into(), 1)], "{outcome} must remain stopped");
@@ -1487,7 +1492,7 @@ mod tests {
         gates[0].wait_started().await;
         for text in ["first request", "second request"] {
             let ask = store.append_imported(&c, "claude", "message", vec![], text, Some("MacBook".into()), None).unwrap();
-            assert!(council.mentioned(&ask, &ids(&["gpt"])));
+            assert!(council.mentioned(&ask, &ids(&["gpt"]), &spawn_here));
         }
         {
             let state = council.shared.state.lock().unwrap();
@@ -1497,11 +1502,11 @@ mod tests {
         gates[0].release.notify_one();
         gates[1].wait_started().await;
         let ask = store.append_imported(&c, "claude", "message", vec![], "third request", Some("MacBook".into()), None).unwrap();
-        assert!(council.mentioned(&ask, &ids(&["gpt"])));
+        assert!(council.mentioned(&ask, &ids(&["gpt"]), &spawn_here));
         gates[1].release.notify_one();
         gates[2].wait_started().await;
         let ask = store.append_imported(&c, "claude", "message", vec![], "past the cap", Some("MacBook".into()), None).unwrap();
-        assert!(council.mentioned(&ask, &ids(&["gpt"])));
+        assert!(council.mentioned(&ask, &ids(&["gpt"]), &spawn_here));
         gates[2].release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), done).await.expect("the bounded turn ends").unwrap();
         assert_eq!(*host.asked.lock().unwrap(), vec![("gpt".into(), 1), ("gpt".into(), 2), ("gpt".into(), 3)]);
@@ -1528,7 +1533,7 @@ mod tests {
         let human = store.append(&c, "human", "message", vec![], "follow-up").unwrap();
         assert!(council.join(&human, &ids(&["gpt"]), &|task| { tokio::spawn(task); }));
         let ask = store.append_imported(&c, "claude", "message", vec![], "peer detail", Some("MacBook".into()), None).unwrap();
-        assert!(council.mentioned(&ask, &ids(&["gpt"])));
+        assert!(council.mentioned(&ask, &ids(&["gpt"]), &spawn_here));
         {
             let state = council.shared.state.lock().unwrap();
             assert!(state.extra.is_empty(), "the old in-flight answer does not consume a fresh slot");
@@ -1552,11 +1557,55 @@ mod tests {
         let done = tokio::spawn(async move { runner.run().await });
         tokio::time::sleep(Duration::from_millis(100)).await;
         let ask = store.append_imported(&c, "claude", "message", vec![], "@gemini-pc can you check?", Some("MacBook".into()), None).unwrap();
-        assert!(council.mentioned(&ask, &ids(&["gemini"])));
+        assert!(council.mentioned(&ask, &ids(&["gemini"]), &spawn_here));
         tokio::time::timeout(Duration::from_secs(10), done).await.expect("the turn ends").unwrap();
         let s = said(&store.load(&c).unwrap());
         assert_eq!(s.iter().filter(|(a, _)| a == "gemini").count(), 1, "gemini was brought in once: {s:?}");
         assert_eq!(s.iter().filter(|(a, _)| a == "gpt").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_plain_thread_can_deliver_a_peer_mention_and_start_the_addressed_ai() {
+        let (store, conversation) = setup();
+        let gate = AnswerGate::new("gpt", 1);
+        let mut host = fake(|id, _, events| {
+            let heard = events.iter().any(|event| event.via.as_deref() == Some("MacBook")
+                && event.text == "@gemini-pc check the peer details");
+            Ok(format!("{id} {} the peer details", if heard { "heard" } else { "missed" }))
+        });
+        host.answer_gates.push(gate.clone());
+        let cancel = CancellationToken::new();
+        let _cancel_on_drop = cancel.clone().drop_guard();
+        let turn = Turn {
+            conversation: conversation.clone(),
+            targets: ids(&["gpt"]),
+            rounds: 1,
+            members: ids(&["gpt", "gemini"]),
+        };
+        let council = Arc::new(Council::new(turn, store.clone(), Arc::new(Bench::new()), Arc::new(host), cancel));
+        let runner = council.clone();
+        let done = tokio::spawn(async move { runner.run().await });
+        gate.wait_started().await;
+
+        let mention = store.append_imported(
+            &conversation, "claude", "message", vec![], "@gemini-pc check the peer details", Some("MacBook".into()), None,
+        ).unwrap();
+        let runtime = tokio::runtime::Handle::current();
+        let delivery = std::thread::spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().is_err(), "PeerLink delivery is a plain thread");
+            let spawn = move |task| { runtime.spawn(task); };
+            council.mentioned(&mention, &ids(&["gemini"]), &spawn)
+        });
+        let delivered = delivery.join();
+        gate.release.notify_one();
+        assert!(delivered.expect("Delivering a peer mention from a plain thread must not panic"));
+        tokio::time::timeout(Duration::from_secs(10), done).await.expect("the turn ends").unwrap();
+
+        let events = said(&store.load(&conversation).unwrap());
+        assert_eq!(
+            events.iter().filter(|(id, _)| id == "gemini").map(|(_, text)| text.as_str()).collect::<Vec<_>>(),
+            vec!["gemini heard the peer details"],
+        );
     }
 
     #[tokio::test]

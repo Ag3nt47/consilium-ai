@@ -1074,7 +1074,7 @@ pub fn open_requests(events: &[Event], now: u64, stale_ms: u64) -> Vec<(String, 
 }
 
 fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
-    (line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix)).then(|| line[prefix.len()..].trim())
+    crate::store::strip_prefix_ignore_ascii_case(line, prefix).map(str::trim)
 }
 
 /// Requests and command boxes waiting longer than this leave the request tray, and the AIs stop
