@@ -3605,9 +3605,22 @@ button.attachment {
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
 }
+[data-theme="glass"] .main.has-wallpaper .composer .chip:not(.on),
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer .chip:not(.on) {
+  background: rgba(16, 20, 32, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+[data-theme="glass"] .main.has-wallpaper .composer .chip.on,
+[data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .composer .chip.on {
+  background: color-mix(in srgb, var(--accent) 22%, rgba(16, 20, 32, 0.7));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
 [data-theme="glass"] .main.has-wallpaper .note:not(.note-error),
 [data-theme="glass"] .app[data-backdrop]:not([data-backdrop="stealth"]) .note:not(.note-error) {
   color: #c9cedb;
+  border: 1px solid rgba(255, 255, 255, 0.14);
 }
 /* The audit (explainability) drawer sits over the conversation, so it is 15 points more
    opaque than the shared 55% panel colour. */
