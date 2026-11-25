@@ -2424,13 +2424,20 @@ export default function App() {
   // sends the output to the AI that suggested it. Deny tells that AI not to run it.
   // "Auto-run this chat": on only in chats where the human accepted its warning (auto_run.rs).
   const [chatAutoRun, setChatAutoRunState] = useState(false);
+  // The chat whose auto-run setting has arrived. Until it matches `current` the request tray stays
+  // hidden, so switching into an auto-run chat never flashes the tray open before it minimizes.
+  const [chatAutoRunFor, setChatAutoRunFor] = useState<string | null>(null);
   const [autoRunAsk, setAutoRunAsk] = useState<{ eventId: string; index: number } | null>(null);
   useEffect(() => {
     setChatAutoRunState(false);
+    setChatAutoRunFor(null);
     setAutoRunAsk(null);
     if (!current) return;
     let live = true;
-    api.chatAutoRun(current).then((on) => { if (live) setChatAutoRunState(on); }).catch(() => {});
+    api.chatAutoRun(current)
+      .then((on) => { if (live) setChatAutoRunState(on); })
+      .catch(() => {})
+      .finally(() => { if (live) setChatAutoRunFor(current); });
     return () => { live = false; };
   }, [current]);
   const confirmAutoRun = () => {
@@ -3636,7 +3643,7 @@ export default function App() {
               {error}
             </div>
           )}
-          {pendingItems.length > 0 && (
+          {pendingItems.length > 0 && (council?.auto_run_commands || chatAutoRunFor === current) && (
             <RequestTray
               items={pendingItems}
               index={trayIndex}

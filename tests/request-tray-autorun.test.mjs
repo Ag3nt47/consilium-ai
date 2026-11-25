@@ -9,3 +9,8 @@ test("the request tray starts minimized and follows auto-run", () => {
   assert.match(app, /useEffect\(\(\) => setCollapsed\(autoRun\), \[autoRun\]\);/);
   assert.match(app, /autoRun=\{!!council\?\.auto_run_commands \|\| chatAutoRun\}/);
 });
+
+test("the tray waits for a chat's auto-run setting so it never flashes open", () => {
+  assert.match(app, /\.finally\(\(\) => \{ if \(live\) setChatAutoRunFor\(current\); \}\)/);
+  assert.match(app, /pendingItems\.length > 0 && \(council\?\.auto_run_commands \|\| chatAutoRunFor === current\) && \(/);
+});
