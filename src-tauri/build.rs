@@ -34,7 +34,7 @@ fn fingerprint() -> String {
         .into_iter()
         .map(|p| (p.to_string_lossy().replace('\\', "/"), p))
         .collect();
-    hash(names)
+    hash(names, true)
 }
 
 /// The same FNV-1a over the built page in `../dist` (paths relative to it, `ui.json` left out), so
@@ -50,10 +50,12 @@ fn page_fingerprint() -> String {
             (rel != "ui.json").then_some((rel, p))
         })
         .collect();
-    hash(names)
+    hash(names, false)
 }
 
-fn hash(mut names: Vec<(String, PathBuf)>) -> String {
+/// `text_eol`: CRLF becomes LF in text files (engine sources, which checkouts may convert); the
+/// built page is hashed byte for byte.
+fn hash(mut names: Vec<(String, PathBuf)>, text_eol: bool) -> String {
     names.sort();
     let mut h: u64 = 0xcbf29ce484222325;
     let mut feed = |bytes: &[u8]| {
@@ -63,7 +65,10 @@ fn hash(mut names: Vec<(String, PathBuf)>) -> String {
         }
     };
     for (name, path) in names {
-        let mut body = lf_only(&std::fs::read(&path).unwrap());
+        let mut body = std::fs::read(&path).unwrap();
+        if text_eol && is_text(&body) {
+            body = lf_only(&body);
+        }
         if name == "tauri.conf.json" {
             let text = String::from_utf8_lossy(&body).into_owned();
             body = text
@@ -79,6 +84,11 @@ fn hash(mut names: Vec<(String, PathBuf)>) -> String {
         feed(&[0]);
     }
     format!("{h:016x}")
+}
+
+/// Git's own test for text: no NUL byte in the first 8000 bytes. Binary files are never converted.
+fn is_text(bytes: &[u8]) -> bool {
+    !bytes[..bytes.len().min(8000)].contains(&0)
 }
 
 /// The bytes with every CRLF turned into LF. Windows checkouts (GitHub's Windows runners among them)
