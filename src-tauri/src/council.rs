@@ -50,6 +50,8 @@ pub trait Host: Send + Sync + 'static {
     fn tasks(&self, _agent: &'static Agent, _reply: &str) -> Option<String> {
         None
     }
+    /// Persists granted answer slots before a worker can consume them.
+    fn extra_answers(&self, _extra: &HashMap<String, u32>, _pulled_in: usize) {}
 }
 
 pub struct Turn {
@@ -67,8 +69,8 @@ struct State {
     live: HashSet<String>,
     /// Of those, the ones waiting for something new to react to.
     waiting: HashSet<String>,
-    /// AIs working on an answer, with its number.
-    thinking: Vec<(String, u32)>,
+    /// AIs working on an answer, with its number and the human-message generation it answers.
+    thinking: Vec<(String, u32, u64)>,
     /// Every AI that has taken part in this turn, so a stand-in is someone new.
     joined: HashSet<String>,
     answered: HashMap<String, u32>,
@@ -152,6 +154,7 @@ fn alarm(s: &Arc<Shared>, failed: &'static Agent, why: &str) {
             start.push(id);
         }
     }
+    s.host.extra_answers(&st.extra, st.pulled_in);
     drop(st);
     for id in start {
         tokio::spawn(worker(s.clone(), id, Some(e.seq - 1)));
@@ -167,6 +170,16 @@ struct Shared {
     cancel: CancellationToken,
     state: Mutex<State>,
     wake: Notify,
+    #[cfg(test)]
+    before_worker_exit: Mutex<Option<WorkerExitGate>>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct WorkerExitGate {
+    agent: String,
+    reached: Arc<Notify>,
+    release: Arc<Notify>,
 }
 
 /// Where a turn has got to, read from the conversation itself: what each AI has said since the
@@ -186,10 +199,15 @@ fn starts_turn(e: &Event) -> bool {
 }
 
 pub fn progress(events: &[Event]) -> Progress {
+    progress_after(events, None)
+}
+
+fn progress_after(events: &[Event], after: Option<u64>) -> Progress {
     let start = events.iter().rposition(starts_turn).map_or(0, |i| i + 1);
     let mut p = Progress::default();
-    for e in &events[start..] {
-        if e.sender == "human" || e.sender == CONSILIUM {
+    for e in events[start..].iter().filter(|e| after.is_none_or(|seq| e.seq > seq)) {
+        // A namesake on another computer never uses this computer's answers or passes.
+        if e.sender == "human" || e.sender == CONSILIUM || e.via.is_some() {
             continue;
         }
         if e.kind == "message" {
@@ -218,19 +236,65 @@ pub struct Council {
 
 impl Council {
     pub fn new(turn: Turn, store: Arc<Store>, bench: Arc<Bench>, host: Arc<dyn Host>, cancel: CancellationToken) -> Self {
+        Self::new_after(turn, store, bench, host, cancel, None)
+    }
+
+    /// Starts or resumes a turn whose answer accounting begins after `after`. The complete
+    /// conversation remains visible; an earlier turn's answers don't consume this turn's budget.
+    pub fn new_after(
+        turn: Turn,
+        store: Arc<Store>,
+        bench: Arc<Bench>,
+        host: Arc<dyn Host>,
+        cancel: CancellationToken,
+        after: Option<u64>,
+    ) -> Self {
+        Self::new_with_allowance(turn, store, bench, host, cancel, after, (HashMap::new(), 0))
+    }
+
+    /// Restores the durable answer grants and the turn's use of its mention cap.
+    pub fn new_with_allowance(
+        turn: Turn,
+        store: Arc<Store>,
+        bench: Arc<Bench>,
+        host: Arc<dyn Host>,
+        cancel: CancellationToken,
+        after: Option<u64>,
+        allowance: (HashMap<String, u32>, usize),
+    ) -> Self {
         let events = store.load(&turn.conversation).unwrap_or_default();
-        let done = progress(&events);
+        let done = match after {
+            Some(_) => progress_after(&events, after),
+            None => progress(&events),
+        };
         let mut state = State::default();
         for e in events.iter().filter(|e| e.kind == "message" || starts_turn(e)) {
-            state.latest.insert(e.sender.clone(), e.seq);
+            let who = match &e.via {
+                Some(via) => format!("{}@{via}", e.sender),
+                None => e.sender.clone(),
+            };
+            state.latest.insert(who, e.seq);
         }
         state.answered = done.answered.clone();
         state.passed = done.passed.clone();
+        (state.extra, state.pulled_in) = allowance;
         // Everyone addressed, plus anyone who joined in before a restart cut the turn short.
         let mut who: Vec<(String, Option<u64>)> = turn.targets.iter().map(|t| (t.clone(), done.last.get(t).copied())).collect();
         for (a, seq) in &done.last {
             if !turn.targets.contains(a) && turn.members.contains(a) {
                 who.push((a.clone(), Some(*seq)));
+            }
+        }
+        for a in state.extra.keys() {
+            if turn.members.contains(a) && !who.iter().any(|(id, _)| id == a) {
+                who.push((a.clone(), done.last.get(a).copied()));
+            }
+        }
+        for (a, seen) in &mut who {
+            if state.extra.get(a).is_some_and(|extra| done.answered.get(a).copied().unwrap_or(0) < turn.rounds + *extra) {
+                // A peer can ask during an answer that is persisted after the request.
+                // The durable unused grant still needs an answer despite that newer reply.
+                *seen = None;
             }
         }
         // An AI switched off in this chat isn't asked, even when a turn recorded before it was
@@ -244,7 +308,11 @@ impl Council {
             state.live.insert(a.clone());
             state.joined.insert(a.clone());
         }
-        let shared = Arc::new(Shared { turn, store, bench, host, cancel, state: Mutex::new(state), wake: Notify::new() });
+        let shared = Arc::new(Shared {
+            turn, store, bench, host, cancel, state: Mutex::new(state), wake: Notify::new(),
+            #[cfg(test)]
+            before_worker_exit: Mutex::new(None),
+        });
         Council { shared, first: Mutex::new(who) }
     }
 
@@ -265,6 +333,7 @@ impl Council {
             st.extra.clear();
             st.passed.clear();
             st.pulled_in = 0;
+            s.host.extra_answers(&st.extra, st.pulled_in);
             st.paused = false;
             st.generation += 1;
             st.latest.insert(message.sender.clone(), message.seq);
@@ -324,6 +393,7 @@ impl Council {
             st.latest.insert(who, message.seq);
             let limit = MAX_PULLED_IN * rounds as usize;
             let now = now_ms();
+            let mut allowance_changed = false;
             for m in ids {
                 if st.pulled_in >= limit {
                     break;
@@ -334,17 +404,25 @@ impl Council {
                 {
                     continue;
                 }
-                let used = st.answered.get(m).copied().unwrap_or(0);
-                if used >= rounds + st.extra.get(m).copied().unwrap_or(0) {
-                    *st.extra.entry(m.clone()).or_default() += 1;
+                let used = committed_answers(&st, m);
+                let budget = rounds + st.extra.get(m).copied().unwrap_or(0);
+                if st.passed.contains(m) || used >= budget || !st.live.contains(m) {
+                    let extra = st.extra.entry(m.clone()).or_default();
+                    if used >= budget {
+                        *extra += 1;
+                    }
+                    st.passed.remove(m);
+                    st.pulled_in += 1;
+                    allowance_changed = true;
+                    if !st.live.contains(m) {
+                        st.live.insert(m.clone());
+                        st.joined.insert(m.clone());
+                        start.push(m.clone());
+                    }
                 }
-                st.passed.remove(m);
-                st.pulled_in += 1;
-                if !st.live.contains(m) {
-                    st.live.insert(m.clone());
-                    st.joined.insert(m.clone());
-                    start.push(m.clone());
-                }
+            }
+            if allowance_changed {
+                s.host.extra_answers(&st.extra, st.pulled_in);
             }
         }
         for m in start {
@@ -416,9 +494,25 @@ fn note_as(s: &Shared, sender: &str, text: &str) -> Option<Event> {
 }
 
 fn emit_thinking(s: &Shared, st: &State) {
-    let agents: Vec<String> = st.thinking.iter().map(|(a, _)| a.clone()).collect();
-    let round = st.thinking.iter().map(|(_, n)| *n).max().unwrap_or(0);
+    let agents: Vec<String> = st.thinking.iter().map(|(a, _, _)| a.clone()).collect();
+    let round = st.thinking.iter().map(|(_, n, _)| *n).max().unwrap_or(0);
     s.host.thinking(agents, round);
+}
+
+/// An answer already in flight needs its slot too: a later mention must reserve a follow-up,
+/// while several mentions before that follow-up starts can share it.
+fn committed_answers(st: &State, id: &str) -> u32 {
+    let answered = st.answered.get(id).copied().unwrap_or(0);
+    st.thinking
+        .iter()
+        .filter(|(a, _, generation)| a == id && *generation == st.generation)
+        .map(|(_, n, _)| *n)
+        .fold(answered, u32::max)
+}
+
+fn finish_thinking(s: &Shared, st: &mut State, id: &str) {
+    st.thinking.retain(|(a, _, _)| a != id);
+    emit_thinking(s, st);
 }
 
 fn about(ms: u64) -> String {
@@ -504,7 +598,8 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
             if n > rounds + st.extra.get(&id).copied().unwrap_or(0) {
                 break;
             }
-            st.thinking.push((id.clone(), n));
+            let generation = st.generation;
+            st.thinking.push((id.clone(), n, generation));
             emit_thinking(&s, &st);
             let mine = st.own_cancel.entry(id.clone()).or_insert_with(|| s.cancel.child_token()).clone();
             (n, st.generation, mine)
@@ -546,11 +641,6 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                 }
             }
         }
-        {
-            let mut st = s.state.lock().unwrap();
-            st.thinking.retain(|(a, _)| a != &id);
-            emit_thinking(&s, &st);
-        }
         match result {
             Ok(reply) if rounds > 1 && prompt::is_pass(&reply.text) => {
                 s.bench.clear(&id);
@@ -566,6 +656,7 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                     *st.answered.entry(id.clone()).or_default() += 1;
                     st.passed.insert(id.clone());
                 }
+                finish_thinking(&s, &mut st, &id);
                 drop(st);
                 break;
             }
@@ -575,6 +666,7 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                 let to = prompt::mentioned_agents(&reply.text);
                 let Ok(ev) = s.store.append_with_usage(&s.turn.conversation, &id, "message", to.clone(), &reply.text, reply.usage)
                 else {
+                    finish_thinking(&s, &mut s.state.lock().unwrap(), &id);
                     break;
                 };
                 s.host.event(&ev);
@@ -592,6 +684,7 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                     if st.generation == asked_in {
                         *st.answered.entry(id.clone()).or_default() += 1;
                     }
+                    finish_thinking(&s, &mut st, &id);
                     st.latest.insert(id.clone(), ev.seq);
                     if !ev.requests.is_empty() {
                         st.paused = true;
@@ -599,6 +692,7 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                     // @mentioned members get another answer, and join in if they aren't taking part.
                     let limit = MAX_PULLED_IN * rounds as usize;
                     let now = now_ms();
+                    let mut allowance_changed = false;
                     for m in to.iter().filter(|m| {
                         **m != id
                             && s.turn.members.contains(m)
@@ -609,20 +703,25 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                         if st.pulled_in >= limit {
                             break;
                         }
-                        let used = st.answered.get(m).copied().unwrap_or(0);
+                        let used = committed_answers(&st, m);
                         let budget = rounds + st.extra.get(m).copied().unwrap_or(0);
                         if st.passed.contains(m) || used >= budget || !st.live.contains(m) {
+                            let extra = st.extra.entry(m.clone()).or_default();
                             if used >= budget {
-                                *st.extra.entry(m.clone()).or_default() += 1;
+                                *extra += 1;
                             }
                             st.passed.remove(m);
                             st.pulled_in += 1;
+                            allowance_changed = true;
                             if !st.live.contains(m) {
                                 st.live.insert(m.clone());
                                 st.joined.insert(m.clone());
                                 start.push(m.clone());
                             }
                         }
+                    }
+                    if allowance_changed {
+                        s.host.extra_answers(&st.extra, st.pulled_in);
                     }
                 }
                 for m in start {
@@ -631,10 +730,12 @@ async fn answer(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) -> (bool
                 s.wake.notify_waiters();
             }
             Err(why) if why == "stopped" => {
+                finish_thinking(&s, &mut s.state.lock().unwrap(), &id);
                 note_as(&s, &id, &format!("Stopped {}.", agent.name));
                 break;
             }
             Err(why) => {
+                finish_thinking(&s, &mut s.state.lock().unwrap(), &id);
                 let now = now_ms();
                 if let Some(until) = bench::usage_limit(&why, now) {
                     let when = match s.bench.bench(&id, until, bench::reset_reported(&why, now)) {
@@ -669,11 +770,36 @@ async fn work(s: Arc<Shared>, id: String, mut last_seen: Option<u64>) {
     loop {
         let (failed, seen) = answer(s.clone(), id.clone(), last_seen).await;
         last_seen = seen;
+        #[cfg(test)]
+        {
+            let gate = {
+                let mut gate = s.before_worker_exit.lock().unwrap();
+                if gate.as_ref().is_some_and(|gate| gate.agent == id) { gate.take() } else { None }
+            };
+            if let Some(gate) = gate {
+                gate.reached.notify_one();
+                gate.release.notified().await;
+            }
+        }
         let stand_in = {
             let mut st = s.state.lock().unwrap();
             // The human said something new while this AI was finishing: stay and read it.
             if !failed && !s.cancel.is_cancelled() && st.generation != generation {
                 generation = st.generation;
+                continue;
+            }
+            // A mention can grant an answer after answer() decides to leave but before this
+            // worker leaves `live`. Check under the same lock used to grant or start workers.
+            let budget = s.turn.rounds + st.extra.get(&id).copied().unwrap_or(0);
+            let unread = last_seen.is_some_and(|seen| st.latest.iter().any(|(who, seq)| who != &id && *seq > seen));
+            if !failed
+                && !s.cancel.is_cancelled()
+                && !st.paused
+                && !st.stopped.contains(&id)
+                && st.answered.get(&id).copied().unwrap_or(0) < budget
+                && unread
+                && !crate::switched::is_off(s.store.dir(), &s.turn.conversation, &id)
+            {
                 continue;
             }
             st.live.remove(&id);
@@ -750,11 +876,37 @@ mod tests {
 
     type Script = dyn Fn(&str, u32, &[Event]) -> Result<String, String> + Send + Sync;
 
+    #[derive(Clone)]
+    struct AnswerGate {
+        agent: &'static str,
+        answer: u32,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl AnswerGate {
+        fn new(agent: &'static str, answer: u32) -> Self {
+            Self { agent, answer, started: Arc::new(Notify::new()), release: Arc::new(Notify::new()) }
+        }
+
+        async fn wait_started(&self) {
+            tokio::time::timeout(Duration::from_secs(5), self.started.notified()).await.expect("the answer starts");
+        }
+    }
+
+    fn hold_worker_exit(council: &Council, agent: &str) -> WorkerExitGate {
+        let gate = WorkerExitGate { agent: agent.into(), reached: Arc::new(Notify::new()), release: Arc::new(Notify::new()) };
+        *council.shared.before_worker_exit.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
     struct Fake {
         script: Box<Script>,
         /// How long each AI takes to answer, in ms.
         delay: HashMap<&'static str, u64>,
         wait_for_gpt: Option<Arc<tokio::sync::Notify>>,
+        answer_gates: Vec<AnswerGate>,
+        allowance_updates: Mutex<Vec<(HashMap<String, u32>, usize)>>,
         asked: Mutex<Vec<(String, u32)>>,
         installed: HashSet<&'static str>,
         local: Option<&'static Agent>,
@@ -770,8 +922,13 @@ mod tests {
             let r = (self.script)(agent.id, answer, &events).map(|text| AgentReply { text, usage: None, model: None });
             let d = self.delay.get(agent.id).copied().unwrap_or(10);
             let gate = self.wait_for_gpt.clone().filter(|_| agent.id == "claude");
+            let answer_gate = self.answer_gates.iter().find(|gate| gate.agent == agent.id && gate.answer == answer).cloned();
             Box::pin(async move {
                 let ready = async {
+                    if let Some(gate) = answer_gate {
+                        gate.started.notify_one();
+                        gate.release.notified().await;
+                    }
                     if let Some(gate) = gate {
                         gate.notified().await;
                     }
@@ -797,6 +954,9 @@ mod tests {
         fn remember(&self, _agent: &'static Agent, _reply: &str) -> Option<String> {
             None
         }
+        fn extra_answers(&self, extra: &HashMap<String, u32>, pulled_in: usize) {
+            self.allowance_updates.lock().unwrap().push((extra.clone(), pulled_in));
+        }
     }
 
     fn fake(script: impl Fn(&str, u32, &[Event]) -> Result<String, String> + Send + Sync + 'static) -> Fake {
@@ -804,6 +964,8 @@ mod tests {
             script: Box::new(script),
             delay: HashMap::new(),
             wait_for_gpt: None,
+            answer_gates: vec![],
+            allowance_updates: Mutex::new(vec![]),
             asked: Mutex::new(vec![]),
             installed: ["gpt", "claude", "gemini"].into_iter().collect(),
             local: None,
@@ -1176,6 +1338,210 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_fresh_bounded_turn_has_new_answers_and_keeps_the_full_transcript() {
+        let (store, c) = setup();
+        store.append(&c, "gpt", "message", vec![], "earlier local answer").unwrap();
+        store.append(&c, "claude", "system", vec![], "Claude had nothing to add.").unwrap();
+        let ask = store.append_imported(
+            &c, "gpt", "message", vec![], "new peer request", Some("MacBook".into()), None,
+        ).unwrap();
+        let boundary = store.append(&c, "gpt", "message", vec![], "late answer from the previous turn").unwrap();
+        assert!(boundary.seq > ask.seq);
+        let host = Arc::new(fake(|id, n, events| {
+            assert!(events.iter().any(|e| e.text == "earlier local answer"));
+            assert!(events.iter().any(|e| e.text == "new peer request"));
+            assert!(events.iter().any(|e| e.text == "late answer from the previous turn"));
+            Ok(format!("{id} fresh #{n}"))
+        }));
+        let turn = Turn { conversation: c.clone(), targets: ids(&["gpt", "claude"]), rounds: 1, members: ids(&["gpt", "claude"]) };
+        let council = Council::new_after(
+            turn, store.clone(), Arc::new(Bench::new()), host.clone(), CancellationToken::new(), Some(boundary.seq),
+        );
+        tokio::time::timeout(Duration::from_secs(5), council.run()).await.expect("the fresh turn ends");
+        let mut asked = host.asked.lock().unwrap().clone();
+        asked.sort();
+        assert_eq!(asked, vec![("claude".into(), 1), ("gpt".into(), 1)]);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_bounded_turn_keeps_only_its_own_completed_answers() {
+        let (store, c) = setup();
+        store.append(&c, "gpt", "message", vec![], "earlier turn").unwrap();
+        let boundary = store.append_imported(
+            &c, "gpt", "message", vec![], "start this turn", Some("MacBook".into()), None,
+        ).unwrap();
+        store.append(&c, "gpt", "message", vec![], "completed in this turn").unwrap();
+        store.append(&c, "claude", "system", vec![], "Claude had nothing to add.").unwrap();
+        store.append_imported(&c, "gpt", "message", vec![], "peer follow-up", Some("MacBook".into()), None).unwrap();
+        let host = Arc::new(fake(|id, n, _| Ok(format!("{id} resumed #{n}"))));
+        let turn = Turn { conversation: c.clone(), targets: ids(&["gpt", "claude"]), rounds: 2, members: ids(&["gpt", "claude"]) };
+        let council = Council::new_after(
+            turn, store.clone(), Arc::new(Bench::new()), host.clone(), CancellationToken::new(), Some(boundary.seq),
+        );
+        tokio::time::timeout(Duration::from_secs(5), council.run()).await.expect("the resumed turn ends");
+        assert_eq!(*host.asked.lock().unwrap(), vec![("gpt".into(), 2)]);
+        let events = store.load(&c).unwrap();
+        assert_eq!(events.iter().filter(|e| e.text == "completed in this turn").count(), 1);
+        assert!(events.iter().any(|e| e.text == "gpt resumed #2"));
+    }
+
+    #[tokio::test]
+    async fn a_resumed_one_round_turn_restores_extra_answers_and_unstarted_recipients() {
+        // First run alone: another AI's reply must not mask a lost pending request by waking GPT.
+        for include_unstarted in [false, true] {
+            let (store, c) = setup();
+            let boundary = store.load(&c).unwrap().last().unwrap().seq;
+            store.append_imported(&c, "claude", "message", vec![], "peer follow-up", Some("MacBook".into()), None).unwrap();
+            store.append(&c, "gpt", "message", vec![], "completed answer").unwrap();
+            let mut extra = HashMap::from([("gpt".to_string(), 1)]);
+            if include_unstarted {
+                extra.insert("gemini".to_string(), 0);
+            }
+            let host = Arc::new(fake(|id, n, events| {
+                assert!(events.iter().any(|e| e.text == "peer follow-up"));
+                Ok(format!("{id} restored #{n}"))
+            }));
+            let members = if include_unstarted { ids(&["gpt", "gemini"]) } else { ids(&["gpt"]) };
+            let turn = Turn { conversation: c.clone(), targets: ids(&["gpt"]), rounds: 1, members };
+            let pulled_in = if include_unstarted { 2 } else { 1 };
+            let council = Council::new_with_allowance(
+                turn, store.clone(), Arc::new(Bench::new()), host.clone(), CancellationToken::new(), Some(boundary), (extra.clone(), pulled_in),
+            );
+            tokio::time::timeout(Duration::from_secs(5), council.run()).await.expect("the restored turn ends");
+            let mut asked = host.asked.lock().unwrap().clone();
+            asked.sort();
+            let expected = if include_unstarted { vec![("gemini".into(), 1), ("gpt".into(), 2)] } else { vec![("gpt".into(), 2)] };
+            assert_eq!(asked, expected);
+            let state = council.shared.state.lock().unwrap();
+            assert_eq!(state.extra, extra);
+            assert_eq!(state.pulled_in, pulled_in);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peer_mention_after_the_answer_loop_exits_is_persisted_and_read() {
+        let (store, c) = setup();
+        let host = Arc::new(fake(|_, n, events| {
+            if n == 2 {
+                assert!(events.iter().any(|e| e.text == "arrived at exit"));
+            }
+            Ok(format!("answer #{n}"))
+        }));
+        let turn = Turn { conversation: c.clone(), targets: ids(&["gpt"]), rounds: 1, members: ids(&["gpt"]) };
+        let council = Arc::new(Council::new(turn, store.clone(), Arc::new(Bench::new()), host.clone(), CancellationToken::new()));
+        let exit = hold_worker_exit(&council, "gpt");
+        let runner = council.clone();
+        let done = tokio::spawn(async move { runner.run().await });
+        tokio::time::timeout(Duration::from_secs(5), exit.reached.notified()).await.expect("the worker reaches its exit");
+        let ask = store.append_imported(&c, "claude", "message", vec![], "arrived at exit", Some("MacBook".into()), None).unwrap();
+        assert!(council.mentioned(&ask, &ids(&["gpt"])));
+        assert_eq!(*host.allowance_updates.lock().unwrap(), vec![(HashMap::from([("gpt".to_string(), 1)]), 1)]);
+        exit.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), done).await.expect("the follow-up is answered").unwrap();
+        assert_eq!(*host.asked.lock().unwrap(), vec![("gpt".into(), 1), ("gpt".into(), 2)]);
+    }
+
+    #[tokio::test]
+    async fn a_peer_mention_at_worker_exit_does_not_resume_a_stop_pause_or_failure() {
+        for outcome in ["stop", "pause", "failure"] {
+            let (store, c) = setup();
+            let host = Arc::new(fake(move |_, _, _| match outcome {
+                "pause" => Ok("REQUEST: choose a database".into()),
+                "failure" => Err("provider unavailable".into()),
+                _ => Ok("completed answer".into()),
+            }));
+            let turn = Turn { conversation: c.clone(), targets: ids(&["gpt"]), rounds: 1, members: ids(&["gpt"]) };
+            let council = Arc::new(Council::new(turn, store.clone(), Arc::new(Bench::new()), host.clone(), CancellationToken::new()));
+            let exit = hold_worker_exit(&council, "gpt");
+            let runner = council.clone();
+            let done = tokio::spawn(async move { runner.run().await });
+            tokio::time::timeout(Duration::from_secs(5), exit.reached.notified()).await.expect("the worker reaches its exit");
+            if outcome == "stop" {
+                assert!(council.stop_agent("gpt"));
+            }
+            let ask = store.append_imported(&c, "claude", "message", vec![], "peer follow-up", Some("MacBook".into()), None).unwrap();
+            assert!(council.mentioned(&ask, &ids(&["gpt"])));
+            exit.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), done).await.expect("the halted turn ends").unwrap();
+            assert_eq!(*host.asked.lock().unwrap(), vec![("gpt".into(), 1)], "{outcome} must remain stopped");
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_mentions_during_the_final_answer_reserve_one_follow_up_and_obey_the_cap() {
+        let (store, c) = setup();
+        let snapshots = Arc::new(Mutex::new(Vec::new()));
+        let recorded = snapshots.clone();
+        let mut host = fake(move |_, n, events| {
+            let peer_texts: Vec<String> = events.iter().filter(|e| e.via.is_some()).map(|e| e.text.clone()).collect();
+            recorded.lock().unwrap().push((n, peer_texts));
+            Ok(format!("answer #{n}"))
+        });
+        let gates = [AnswerGate::new("gpt", 1), AnswerGate::new("gpt", 2), AnswerGate::new("gpt", 3)];
+        host.answer_gates = gates.to_vec();
+        let host = Arc::new(host);
+        let turn = Turn { conversation: c.clone(), targets: ids(&["gpt"]), rounds: 1, members: ids(&["gpt"]) };
+        let council = Arc::new(Council::new(turn, store.clone(), Arc::new(Bench::new()), host.clone(), CancellationToken::new()));
+        let runner = council.clone();
+        let done = tokio::spawn(async move { runner.run().await });
+        gates[0].wait_started().await;
+        for text in ["first request", "second request"] {
+            let ask = store.append_imported(&c, "claude", "message", vec![], text, Some("MacBook".into()), None).unwrap();
+            assert!(council.mentioned(&ask, &ids(&["gpt"])));
+        }
+        {
+            let state = council.shared.state.lock().unwrap();
+            assert_eq!(state.extra.get("gpt"), Some(&1), "requests share the pending follow-up");
+            assert_eq!(state.pulled_in, 1);
+        }
+        gates[0].release.notify_one();
+        gates[1].wait_started().await;
+        let ask = store.append_imported(&c, "claude", "message", vec![], "third request", Some("MacBook".into()), None).unwrap();
+        assert!(council.mentioned(&ask, &ids(&["gpt"])));
+        gates[1].release.notify_one();
+        gates[2].wait_started().await;
+        let ask = store.append_imported(&c, "claude", "message", vec![], "past the cap", Some("MacBook".into()), None).unwrap();
+        assert!(council.mentioned(&ask, &ids(&["gpt"])));
+        gates[2].release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), done).await.expect("the bounded turn ends").unwrap();
+        assert_eq!(*host.asked.lock().unwrap(), vec![("gpt".into(), 1), ("gpt".into(), 2), ("gpt".into(), 3)]);
+        assert_eq!(*snapshots.lock().unwrap(), vec![
+            (1, vec![]),
+            (2, vec!["first request".to_string(), "second request".to_string()]),
+            (3, vec!["first request".to_string(), "second request".to_string(), "third request".to_string()]),
+        ]);
+        assert_eq!(council.shared.state.lock().unwrap().pulled_in, MAX_PULLED_IN);
+    }
+
+    #[tokio::test]
+    async fn a_peer_mention_after_the_human_joins_uses_the_fresh_answer_already_available() {
+        let (store, c) = setup();
+        let gate = AnswerGate::new("gpt", 1);
+        let mut host = fake(|_, _, _| Ok("answer".into()));
+        host.answer_gates.push(gate.clone());
+        let host = Arc::new(host);
+        let turn = Turn { conversation: c.clone(), targets: ids(&["gpt"]), rounds: 1, members: ids(&["gpt"]) };
+        let council = Arc::new(Council::new(turn, store.clone(), Arc::new(Bench::new()), host.clone(), CancellationToken::new()));
+        let runner = council.clone();
+        let done = tokio::spawn(async move { runner.run().await });
+        gate.wait_started().await;
+        let human = store.append(&c, "human", "message", vec![], "follow-up").unwrap();
+        assert!(council.join(&human, &ids(&["gpt"]), &|task| { tokio::spawn(task); }));
+        let ask = store.append_imported(&c, "claude", "message", vec![], "peer detail", Some("MacBook".into()), None).unwrap();
+        assert!(council.mentioned(&ask, &ids(&["gpt"])));
+        {
+            let state = council.shared.state.lock().unwrap();
+            assert!(state.extra.is_empty(), "the old in-flight answer does not consume a fresh slot");
+            assert_eq!(state.pulled_in, 0);
+        }
+        gate.release.notify_one();
+        gate.wait_started().await;
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), done).await.expect("the turn ends after the fresh answer").unwrap();
+        assert_eq!(*host.asked.lock().unwrap(), vec![("gpt".into(), 1), ("gpt".into(), 1)]);
+    }
+
+    #[tokio::test]
     async fn an_ai_addressed_by_handle_from_another_computer_joins_and_answers_once() {
         let (store, c) = setup();
         let mut f = fake(|id, _, _| Ok(format!("{id} here")));
@@ -1345,5 +1711,19 @@ mod tests {
         store.append(&c, "gpt", "message", vec![], "b").unwrap();
         store.append(&c, CONSILIUM, "system", vec!["gpt".into()], "Auto-continue").unwrap();
         assert_eq!(progress(&store.load(&c).unwrap()), Progress::default());
+    }
+
+    #[test]
+    fn progress_ignores_imported_answers_and_passes_after_a_signal_human_message() {
+        let (store, c) = setup();
+        store.append(&c, "gpt", "message", vec![], "before the human follow-up").unwrap();
+        store.append_imported(&c, "human", "message", vec![], "from the phone", Some("Signal".into()), None).unwrap();
+        let local = store.append(&c, "claude", "message", vec![], "local answer").unwrap();
+        store.append_imported(&c, "gpt", "message", vec![], "remote answer", Some("MacBook".into()), None).unwrap();
+        store.append_imported(&c, "gemini", "system", vec![], "Gemini had nothing to add.", Some("MacBook".into()), None).unwrap();
+        let p = progress(&store.load(&c).unwrap());
+        assert_eq!(p.answered, HashMap::from([("claude".to_string(), 1)]));
+        assert_eq!(p.last, HashMap::from([("claude".to_string(), local.seq)]));
+        assert!(p.passed.is_empty());
     }
 }
