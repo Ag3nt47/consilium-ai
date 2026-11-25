@@ -177,13 +177,18 @@ unsafe extern "system" fn callback(
         if target != context.target {
             return;
         }
-        let incoming = (parameters.authenticationMethod
-            == BLUETOOTH_AUTHENTICATION_METHOD_NUMERIC_COMPARISON)
-            .then(|| Identity {
+        let incoming = if parameters.authenticationMethod
+            == BLUETOOTH_AUTHENTICATION_METHOD_NUMERIC_COMPARISON
+        {
+            Some(Identity {
+                // SAFETY: This method selects the numeric-comparison member of the SDK union.
                 number: unsafe { parameters.Anonymous.Numeric_Value },
                 io: parameters.ioCapability,
                 requirements: parameters.authenticationRequirements,
-            });
+            })
+        } else {
+            None
+        };
         match observe(&context.identity, &context.invalid, incoming) {
             Observation::Duplicate => {} // Never reject/approve the same pending callback twice.
             Observation::Invalidated => context.invalidate(),
