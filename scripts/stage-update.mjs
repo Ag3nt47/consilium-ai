@@ -85,6 +85,7 @@ function ensureSigningKeychain() {
   const pass = randomBytes(24).toString("hex");
   const work = mkdtempSync(join(tmpdir(), "consilium-sign-"));
   try {
+    writeFileSync(join(work, ".consilium-temp-owner"), "io.github.ag3nt47.consilium\n", { mode: 0o600 });
     const cnf = join(work, "c.cnf");
     writeFileSync(cnf, `[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=${SIGN_NAME}\n[ext]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,codeSigning\n`);
     const key = join(work, "k.pem"), crt = join(work, "c.pem"), p12 = join(work, "c.p12");

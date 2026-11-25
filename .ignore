@@ -1,0 +1,9 @@
+# Generated output excluded from searches that honor .ignore.
+/node_modules/
+/dist/
+/.build-tmp/
+/src-tauri/target/
+/src-tauri/gen/schemas/
+/coverage/
+/playwright-report/
+/test-results/
