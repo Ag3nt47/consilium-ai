@@ -44,7 +44,7 @@ The [physical PeerLink trial](PEERLINK_PHYSICAL_TRIAL.md) records the Windows–
 | MCP client layer | 🕓 | The CLIs already speak MCP themselves |
 | Live terminal watcher drawer | 🕓 | Live activity line above replies ✅ |
 | Rate-limit benching, cooldown, re-routing, 2-model consensus | ✅ | `bench.rs`, `council.rs` |
-| Stall detection (silence + CPU), state lights | ✅ | Working / Stalled lights |
+| Stall detection (silence + CPU), state lights | ✅ | Working / Stalled lights. PR #322 renews a 15-minute inactivity deadline on recognized provider activity, with a separate one-hour cap per CLI invocation; raw output cannot keep a stalled turn alive. Timeout errors identify the last activity. Owner: ChatGPT; scope: runner deadlines and offline native fixtures in `agents.rs`, `run_deadline.rs`, `agent_deadline_tests.rs`, and `tests/fixtures/agent_runner.rs`. Verification: four deadline policy tests and six native fixtures cover active work, large/split records, raw chatter, the total cap and Stop; a saturated-output harness checks immediate expiry. Three-platform CI and peer approval are required before integration. |
 | Freeze controls: interrupt, kill & restart | 🕓 | Stop and Retry exist |
 | Night shift, red/blue team, TDD self-healing, electoral routing, ideation, self-profiling | 🕓 | |
 | Speculative decoding, digital twins, Lean/Coq | 🕓 | Research items |
@@ -122,12 +122,29 @@ is translated to Consilium's Rust/Tauri engine; the protocol requirements are ke
 | Auto-choose best channel and seamless failover | 🔨 | PeerLink races configured TCP endpoints during redial with a 1.5 s heartbeat and a 4 s silence threshold. Hosted tests verify automatic reconnection and single delivery of queued chat across loopback endpoints. The stress check counts authenticated traffic only from the current session, with a stale-session regression verified on Windows, macOS and Linux ([PR #255](https://github.com/Ag3nt47/consilium-ai/pull/255)). A separate branch adds recovery after four seconds without socket write progress ([PR #257](https://github.com/Ag3nt47/consilium-ai/pull/257)). The combined branch passed 364 Windows Rust tests with four ignored. Windows–Mac Ethernet is verified. The per-peer connection test distinguishes TCP reachability from a successful encrypted probe at each endpoint, and reports the elapsed time only for authenticated probes. The browser fixture checks verified, TCP-only, and unreachable results. Failover between physical interfaces and simultaneous transport use remain open. |
 | Test connection button and route diagnostics | ✅ | Settings reports endpoint reachability, probe time, source address and local adapter ([PR #272](https://github.com/Ag3nt47/consilium-ai/pull/272)). Test connection authenticates reachable endpoints concurrently while keeping the active session in place ([PR #273](https://github.com/Ag3nt47/consilium-ai/pull/273)). Test AI handshake separately waits for a fresh council status report on the active session and counts confirmations in both directions without sending AI prompts. The browser fixture and Windows, macOS and Linux CI passed ([PR #280](https://github.com/Ag3nt47/consilium-ai/pull/280)). |
 | What syncs | 🔨 | Built (Claude, 0.3.28 and 0.3.30, `peer_sync.rs`): new chat messages copy to linked computers as a per-computer copy of the conversation; REQUEST decisions and replies typed in a copy go back to the owning computer and are applied once there; AIs from another computer are nicknamed by computer; copied lines never run requests, tasks or notes; 40-per-minute flood stop. Only one linked computer answers each Signal message (0.3.27). Each heartbeat also carries which AIs are answering on that computer ("Claude in Plans") and a one-line git summary of its project folder ("consilium-ai · main · 2 changed"), shown per computer in Settings → Linked computers; both are cleaned and size-capped on arrival (Claude, 0.3.33). The first time a conversation is shared, up to 200 earlier messages go first as one packet, filed once and never duplicated; link-local 169.254 routes are accepted so a direct cable, Thunderbolt bridge or Bluetooth network works without a router (Claude, peer-history branch). Unit-tested only; never run between two real computers |
-| Bluetooth BLE/RFCOMM fallback | 🕓 | Rust BLE (`btleplug`) is central-only on macOS/Windows, so a Mac↔PC GATT server needs native per-OS code; built after the TCP link proves out, with MTU chunking + reassembly as specified |
+| Bluetooth BLE/RFCOMM fallback | 🔨 | External Codex owns native Classic RFCOMM: a transient Mac SDP service and an authenticated/encrypted Windows socket carry the existing PeerLink protocol. Native streams have bounded queues, cancellation and actual adapter/service/channel evidence; endpoint and diagnostic JSON remain compatible with TCP peers. Local checks passed 36 production PeerLink tests, 30 controller/socket/stream checks, four Mac listener-lifecycle checks and 11 browser checks. Mac provider binding checks and lints passed. Hosted platform checks, paired-device transfer, outage recovery and the three installed diagnostic controls remain verification steps. |
 | Phone bots (Telegram/Matrix) as out-of-band control | 🕓 | Shares the Signal receiver's safeguards (allowlist, replay, freshness); Telegram row in Document 2 |
 | Cloud AI apps → local (Custom GPT Actions, Claude MCP via tunnel) | 🕓 | Exposes this computer to the internet; needs the human's explicit approval, an authenticated Cloudflare/Tailscale Funnel tunnel, an allowlisted command set and no shell access |
 | "UI integration" (PySide6 signals) | ✅ | Topbar `LinkIndicator` with status LEDs (connected/disconnected/syncing/offline), `LinkSettings` in Settings, pairing code countdown, candidate subnet discovery, route & RTT meters, and Cmd+K palette hook |
 
 ## Document 4: Consilium app improvements.docx
+
+Mac send/restart recovery follow-up: 0.3.58 snapshots the running-turn table
+before filtering the recovery journal, removing the opposite lock order between
+startup resumption and a new send. Login-shell PATH probing now drains output
+while the child runs, bounds the entire exit/EOF operation and cleans up its
+owned process group. Shared PATH snapshots stay available during refresh and
+retain prior folders on failure. Regression checks cover forced startup/send
+contention, concurrent PATH lookups, inherited output pipes and pipe saturation.
+All 20 focused Windows engine/journal/PATH tests, the production front-end build
+and privacy gate passed. Unix production code passed macOS cross-compilation;
+Unix subprocess fixtures remain hosted-runtime checks. The observed Mac hang
+has not been captured in a live thread sample; hosted
+platform checks and installed Mac window/send verification remain deployment
+steps. Native Bluetooth work is isolated from this repair.
+The Mac CI/build jobs use GitHub's standard `macos-15-intel` runner after repeated
+Apple Silicon runner allocation stalls. The release still installs both Rust
+targets and builds the universal Intel/Apple Silicon installer.
 
 Matrix rain follow-up: decorative code trails remain visible through the glass
 surfaces, frame pacing preserves the selected 15/30/60 FPS cadence, and completion

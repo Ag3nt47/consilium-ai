@@ -252,7 +252,8 @@ impl Council {
     /// fresh set of answers, those waiting read it at once, one in the middle of an answer reads it
     /// as soon as it has finished, and anyone in `targets` who isn't taking part joins in.
     /// Returns false if the turn has already ended, so the message needs a turn of its own.
-    pub fn join(&self, message: &Event, targets: &[String]) -> bool {
+    /// New workers use the process's injected executor, including from synchronous callers.
+    pub fn join(&self, message: &Event, targets: &[String], spawn: &crate::engine::Spawn) -> bool {
         let s = &self.shared;
         let mut start = Vec::new();
         {
@@ -280,7 +281,8 @@ impl Council {
             }
         }
         for t in start {
-            tokio::spawn(worker(s.clone(), t, Some(message.seq.saturating_sub(1))));
+            // Signal and other synchronous callers need not be inside an async runtime.
+            spawn(Box::pin(worker(s.clone(), t, Some(message.seq.saturating_sub(1)))));
         }
         s.wake.notify_waiters();
         true
@@ -1218,6 +1220,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_plain_thread_can_join_a_live_council_and_start_an_addressed_ai() {
+        let (store, c) = setup();
+        let mut f = fake(|id, _, events| {
+            let text = events.iter().rev().find(|event| event.sender == "human").unwrap().text.as_str();
+            Ok(format!("{id} heard: {text}"))
+        });
+        f.delay.insert("gpt", 30_000);
+        let host = Arc::new(f);
+        let cancel = CancellationToken::new();
+        let _cancel_on_drop = cancel.clone().drop_guard();
+        let turn = Turn { conversation: c.clone(), targets: ids(&["gpt"]), rounds: 1, members: ids(&["gpt", "claude"]) };
+        let council = Arc::new(Council::new(turn, store.clone(), Arc::new(Bench::new()), host.clone(), cancel.clone()));
+        let runner = council.clone();
+        let done = tokio::spawn(async move { runner.run().await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !host.asked.lock().unwrap().iter().any(|(id, _)| id == "gpt") {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("The first AI must be active before the phone message arrives");
+
+        let message = store.append(&c, "human", "message", ids(&["claude"]), "phone follow-up").unwrap();
+        let runtime = tokio::runtime::Handle::current();
+        // This is the same injected executor the engine supplies, callable outside its runtime.
+        let spawn: Box<crate::engine::Spawn> = Box::new(move |task| { runtime.spawn(task); });
+        let intake = std::thread::spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().is_err(), "Signal's intake thread has no runtime context");
+            council.join(&message, &ids(&["claude"]), spawn.as_ref())
+        });
+        assert!(intake.join().expect("Joining from Signal's plain thread must not panic"));
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(reply) = store.load(&c).unwrap().into_iter().find(|event| event.sender == "claude" && event.kind == "message") {
+                    break reply;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), done).await.expect("The fake council must stop promptly").unwrap();
+        assert_eq!(reply.expect("The newly addressed AI must record a real reply").text, "claude heard: phone follow-up");
+        assert_eq!(store.load(&c).unwrap().iter().filter(|event| event.sender == "claude" && event.kind == "message").count(), 1);
+    }
+
+    #[tokio::test]
     async fn a_message_sent_mid_turn_is_read_without_interrupting_anyone() {
         let (store, c) = setup();
         // Each AI answers whatever the human said last.
@@ -1252,7 +1299,7 @@ mod tests {
         let msg = store
             .append(&c, "human", "message", ids(&["gemini"]), "also this")
             .unwrap();
-        assert!(council.join(&msg, &ids(&["gpt", "claude", "gemini"])));
+        assert!(council.join(&msg, &ids(&["gpt", "claude", "gemini"]), &|task| { tokio::spawn(task); }));
         tokio::time::timeout(Duration::from_secs(10), done)
             .await
             .expect("the turn ends")
@@ -1277,7 +1324,7 @@ mod tests {
             .append(&c, "human", "message", vec![], "after")
             .unwrap();
         assert!(
-            !council.join(&late, &ids(&["gpt"])),
+            !council.join(&late, &ids(&["gpt"]), &|task| { tokio::spawn(task); }),
             "an ended turn takes no more messages"
         );
     }

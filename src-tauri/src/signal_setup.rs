@@ -1,6 +1,6 @@
 //! Guided Signal setup that runs inside Consilium instead of a terminal window:
 //! link this computer (QR code shown in the app), start signal-cli's daemon in the background,
-//! then prove the round trip by sending a code to the user's Note to Self and waiting for it
+//! then prove the round trip by sending a code to the Consilium group and waiting for it
 //! to come back from their phone.
 //!
 //! Only fixed arguments reach signal-cli: a phone number that passed `bridge::valid_account`,
@@ -14,6 +14,10 @@ use std::net::{SocketAddr, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+#[path = "signal_verification.rs"]
+mod verification;
+use verification::RecentReplies;
 
 #[cfg(test)]
 #[path = "signal_registration_tests.rs"]
@@ -37,6 +41,7 @@ static STATE: Mutex<Option<SetupState>> = Mutex::new(None);
 static LINK_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 /// Bumped whenever a new setup run starts, so a superseded run's thread stops writing state.
 static RUN: Mutex<u64> = Mutex::new(0);
+static RECENT_VERIFICATION_REPLIES: Mutex<RecentReplies> = Mutex::new(RecentReplies::new());
 
 const VERIFY_WINDOW: Duration = Duration::from_secs(10 * 60);
 const LINK_WINDOW: Duration = Duration::from_secs(5 * 60);
@@ -47,6 +52,22 @@ pub fn state() -> SetupState {
         device_name: device_name(),
         ..Default::default()
     })
+}
+
+/// Call only after the incoming parser has checked the configured owner and group.
+pub(crate) fn is_verification_reply(group: &str, timestamp: u64, text: &str, council_group: &str) -> bool {
+    let setup = state();
+    let active_code = if setup.phase == "verifying" { setup.code.as_deref() } else { None };
+    RECENT_VERIFICATION_REPLIES.lock().unwrap().matches(group, timestamp, text, active_code.map(|code| (council_group, code)), Instant::now())
+}
+
+fn remember_verification_reply(value: &serde_json::Value, group: &str) {
+    if let Some(timestamp) = crate::signal_chat::receive_envelope(value)
+        .and_then(|envelope| envelope.pointer("/syncMessage/sentMessage/timestamp"))
+        .and_then(serde_json::Value::as_u64)
+    {
+        RECENT_VERIFICATION_REPLIES.lock().unwrap().remember(group, timestamp, Instant::now());
+    }
 }
 
 fn set(run: u64, f: impl FnOnce(&mut SetupState)) {
@@ -101,7 +122,7 @@ fn quiet(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-const LINK_REQUIRED: &str = "Signal has no registered link for this computer. Open messaging setup and scan a new QR code from Signal on your phone, then complete Note to Self verification. Existing account data has been kept.";
+const LINK_REQUIRED: &str = "Signal has no registered link for this computer. Open messaging setup and scan a new QR code from Signal on your phone, then confirm in the Consilium group. Existing account data has been kept.";
 const CHECK_UNAVAILABLE: &str = "Consilium could not check Signal's registered accounts. No account data was changed and no new link was started. Check signal-cli and try again.";
 const CHECK_TIMED_OUT: &str = "Checking Signal's registered accounts timed out. No account data was changed and no new link was started. Close any other account setup and try again.";
 const INVALID_ACCOUNTS: &str = "signal-cli returned an unreadable registered-account list. No account data was changed and no new link was started. Update signal-cli and try again.";
@@ -237,17 +258,21 @@ fn background_failure(run: u64, detail: String) {
 
 /// UI readiness is separate from the raw daemon probe used during setup/startup.
 pub fn connector_status(cfg: &BridgeConfig, timeout: Duration) -> bridge::ConnectorStatus {
-    setup_connector_status(cfg, bridge::probe_signal(cfg, timeout), &state())
+    let status = bridge::probe_signal(cfg, timeout);
+    setup_connector_status(cfg, status, &state(), crate::link::signal_on())
 }
 
-fn setup_connector_status(cfg: &BridgeConfig, mut status: bridge::ConnectorStatus, setup: &SetupState) -> bridge::ConnectorStatus {
+fn setup_connector_status(cfg: &BridgeConfig, mut status: bridge::ConnectorStatus, setup: &SetupState, receiving: bool) -> bridge::ConnectorStatus {
     if !cfg.enabled {
         return status;
     }
     if status.state == "ok" {
         if cfg.allowed_acis.is_empty() {
             status.state = "down";
-            status.detail = "Signal's daemon is running, but phone verification is not complete. Open messaging setup and finish Note to Self verification.".into();
+            status.detail = "Signal's daemon is running, but phone verification is not complete. Open messaging setup and confirm in the Consilium group.".into();
+        } else if !receiving {
+            status.state = "down";
+            status.detail = "Signal's daemon is responding. Consilium is reconnecting its message listener; your phone link is still saved.".into();
         }
     } else if setup.phase == "failed" && [LINK_REQUIRED, CHECK_UNAVAILABLE, CHECK_TIMED_OUT, INVALID_ACCOUNTS].contains(&setup.detail.as_str()) {
         status.state = "down";
@@ -409,12 +434,17 @@ fn run_setup(run: u64, cli: std::path::PathBuf, cfg_path: std::path::PathBuf, cf
     if let Err(e) = ensure_daemon(&cli, &cfg) {
         return fail(run, e);
     }
+    // Reuse the saved council group, or create it before asking for a phone reply.
+    let cfg = match crate::signal_chat::ensure_groups(&cfg_path, &[]) {
+        Ok(cfg) => cfg,
+        Err(e) => return fail(run, format!("Couldn't open the Consilium Signal group: {e}")),
+    };
     let code = format!("{:04}", rand_u32() % 10_000);
     set(run, |s| {
         s.phase = "verifying".into();
         s.code = Some(code.clone());
         s.detail = format!(
-            "Sent a test message to your Signal \"Note to Self\" chat. Reply there with {code} to confirm it works."
+            "Open the Consilium group in Signal and send just {code} to confirm it works."
         );
     });
     match verify(&cfg, &code, run) {
@@ -641,26 +671,28 @@ fn ensure_daemon(cli: &std::path::Path, cfg: &BridgeConfig) -> Result<(), String
     Err("signal-cli started but isn't answering. Its log is consilium-signal-daemon.log in the temp folder.".into())
 }
 
-/// Sends the code to Note to Self, then waits for a message from the user's own account
-/// containing it. Returns the sender's Signal account ID (ACI) when the daemon reports one.
+/// Sends a code to the council group and accepts the exact code from the owner's phone there.
 fn verify(cfg: &BridgeConfig, code: &str, run: u64) -> Result<Option<String>, String> {
     let addr = endpoint_addr(cfg)?;
     let s = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| e.to_string())?;
     s.set_read_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;
+    s.set_write_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;
     let mut w = s.try_clone().map_err(|e| e.to_string())?;
     let msg = format!(
-        "Consilium ({}) is linked. Reply to this Note to Self chat with {code} to confirm it works.",
+        "Consilium ({}) is linked. Send just {code} in this group to confirm it works.",
         device_name()
     );
     let req = serde_json::json!({
         "jsonrpc": "2.0", "id": "consilium-verify", "method": "send",
-        "params": { "noteToSelf": true, "message": msg }
+        "params": crate::signal_chat::group_send_params(&cfg.groups.main, &msg, &[])
     });
     w.write_all(crate::signal_chat::SUBSCRIBE.as_bytes()).map_err(|e| e.to_string())?;
     w.write_all(format!("{req}\n").as_bytes()).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(s);
     let started = Instant::now();
     let mut buf = Vec::new();
+    let mut sent = false;
+    let mut reply = None;
     while started.elapsed() < VERIFY_WINDOW {
         if *RUN.lock().unwrap() != run {
             return Err("Setup was restarted".into());
@@ -675,30 +707,35 @@ fn verify(cfg: &BridgeConfig, code: &str, run: u64) -> Result<Option<String>, St
                 let m = e.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
                 return Err(format!("Couldn't send the test message: {}", crate::redact::scrub(m)));
             }
-            continue;
+            // The reply authenticates the owner, including links whose ACI is still unknown.
+            if !v.get("result").is_some_and(|result| crate::signal_chat::group_send_accepted(None, &cfg.groups.main, result)) {
+                return Err("Signal did not accept the test message in the Consilium group.".into());
+            }
+            sent = true;
+        } else if let Some(aci) = reply_with_code(&v, &cfg.account, &cfg.groups.main, code) {
+            // Remember the exact event before verified/failed state can clear the active code.
+            remember_verification_reply(&v, &cfg.groups.main);
+            reply = Some(aci);
         }
-        if let Some(aci) = reply_with_code(&v, &cfg.account, code) {
+        if let Some(aci) = reply.take_if(|_| sent) {
             return Ok(aci);
         }
     }
     Err("No reply with the code arrived within 10 minutes. Click Try again.".into())
 }
 
-/// A `receive` notification counts if it's from the user's own account (their phone typing in
-/// Note to Self arrives as a sync "sent" message) and its text contains the code.
+/// The phone's sync "sent" message must be in the configured group and contain only the code.
 /// Returns Some(aci) on a match; the inner value is None when the daemon gave no account ID.
-pub fn reply_with_code(v: &serde_json::Value, account: &str, code: &str) -> Option<Option<String>> {
+pub fn reply_with_code(v: &serde_json::Value, account: &str, group: &str, code: &str) -> Option<Option<String>> {
     let env = crate::signal_chat::receive_envelope(v)?;
-    let from_self = env.get("sourceNumber").and_then(|n| n.as_str()) == Some(account)
-        || env.get("source").and_then(|n| n.as_str()) == Some(account);
+    let from_self = !account.is_empty() && (env.get("sourceNumber").and_then(|n| n.as_str()) == Some(account)
+        || env.get("source").and_then(|n| n.as_str()) == Some(account));
     if !from_self {
         return None;
     }
-    let text = env
-        .pointer("/syncMessage/sentMessage/message")
-        .or_else(|| env.pointer("/dataMessage/message"))
-        .and_then(|m| m.as_str())?;
-    if !text.split(|c: char| !c.is_ascii_digit()).any(|w| w == code) {
+    let sent = env.pointer("/syncMessage/sentMessage")?;
+    let sent_group = sent.pointer("/groupInfo/groupId").and_then(|id| id.as_str());
+    if group.is_empty() || sent_group != Some(group) || sent.get("message").and_then(|m| m.as_str())?.trim() != code {
         return None;
     }
     let aci = env
@@ -755,13 +792,20 @@ mod tests {
         let aci = "8f0c6e1a-1111-4222-8333-944455556666";
         let sync = serde_json::json!({"method":"receive","params":{"envelope":{
             "sourceNumber": acc, "sourceUuid": aci,
-            "syncMessage": {"sentMessage": {"message": "ok 4821"}}}}});
-        assert_eq!(reply_with_code(&sync, acc, "4821"), Some(Some(aci.to_string())));
-        assert_eq!(reply_with_code(&sync, acc, "1234"), None);
-        assert_eq!(reply_with_code(&sync, acc, "482"), None, "a partial code doesn't count");
+            "syncMessage": {"sentMessage": {"message": " 4821 ", "groupInfo":{"groupId":"MAIN="}}}}}});
+        assert_eq!(reply_with_code(&sync, acc, "MAIN=", "4821"), Some(Some(aci.to_string())));
+        assert_eq!(reply_with_code(&sync, acc, "MAIN=", "1234"), None);
+        assert_eq!(reply_with_code(&sync, acc, "MAIN=", "482"), None, "a partial code doesn't count");
+        assert_eq!(reply_with_code(&sync, acc, "WRONG=", "4821"), None);
+        let mut quote = sync.clone();
+        quote["params"]["envelope"]["syncMessage"]["sentMessage"]["message"] = serde_json::json!("Send 4821 to confirm");
+        assert_eq!(reply_with_code(&quote, acc, "MAIN=", "4821"), None);
+        let mut note_to_self = sync.clone();
+        note_to_self["params"]["envelope"]["syncMessage"]["sentMessage"] = serde_json::json!({"message":"4821","destinationNumber":acc});
+        assert_eq!(reply_with_code(&note_to_self, acc, "MAIN=", "4821"), None);
         let stranger = serde_json::json!({"method":"receive","params":{"envelope":{
             "sourceNumber": "+15559999999", "dataMessage": {"message": "4821"}}}});
-        assert_eq!(reply_with_code(&stranger, acc, "4821"), None);
+        assert_eq!(reply_with_code(&stranger, acc, "MAIN=", "4821"), None);
     }
 
     #[test]
@@ -772,11 +816,11 @@ mod tests {
         let sub = |env: serde_json::Value| serde_json::json!({"jsonrpc":"2.0","method":"receive",
             "params":{"subscription":0,"result":{"account":acc,"envelope":env}}});
         let mine = sub(serde_json::json!({"sourceNumber": acc, "sourceUuid": aci,
-            "syncMessage": {"sentMessage": {"message": "8575", "destinationNumber": acc}}}));
-        assert_eq!(reply_with_code(&mine, acc, "8575"), Some(Some(aci.to_string())));
-        assert_eq!(reply_with_code(&mine, acc, "1234"), None);
+            "syncMessage": {"sentMessage": {"message": "8575", "groupInfo":{"groupId":"MAIN="}}}}));
+        assert_eq!(reply_with_code(&mine, acc, "MAIN=", "8575"), Some(Some(aci.to_string())));
+        assert_eq!(reply_with_code(&mine, acc, "MAIN=", "1234"), None);
         let stranger = sub(serde_json::json!({"sourceNumber": "+15559999999", "dataMessage": {"message": "8575"}}));
-        assert_eq!(reply_with_code(&stranger, acc, "8575"), None);
+        assert_eq!(reply_with_code(&stranger, acc, "MAIN=", "8575"), None);
     }
 }
 

@@ -7,6 +7,7 @@ mod apiagent;
 mod attach;
 mod autocontinue;
 mod bench;
+mod bluetooth;
 mod build_id;
 mod ci;
 pub mod auto_run;
@@ -634,7 +635,7 @@ fn open_app(name: String) -> Result<(), String> {
 }
 
 /// Shown to the human and the AIs after an update to this version.
-const WHATS_NEW: &str = "What's new: background project and GitHub checks stay quiet on Windows. Matrix code rain is clearer and follows its selected frame rate. Signal setup detects missing phone links and keeps account data when a check fails; complete the phone verification step to confirm the connection.";
+const WHATS_NEW: &str = "What's new: startup recovery and tool detection are more reliable when sending messages or starting the AIs. Slow login-shell checks no longer hold up other tool lookups.";
 
 /// The version that last ran is kept in the app's data folder; after an update, a note in the
 /// conversations with a turn to resume, and in the most recent one, tells the human and the AIs
@@ -817,9 +818,13 @@ fn start_auto_install(app: AppHandle, engine: Arc<Engine>) {
 
 /// Runs the communication stress test with the requested linked computer(s) and posts the results in the
 /// newest conversation as a status note. `when` says what started it.
-async fn stress_test_and_post(engine: &Arc<Engine>, when: &str, node_id: Option<&str>, sources: &[std::net::IpAddr]) -> Result<Vec<link::StressReport>, String> {
+async fn stress_test_and_post(engine: &Arc<Engine>, origin: link::StressOrigin, when: &str, node_id: Option<&str>, sources: &[std::net::IpAddr], endpoints: &[String]) -> Result<Vec<link::StressReport>, String> {
     let link = link_handle().ok_or("linking isn't running")?;
-    let reports = link.stress_test(node_id, sources).await?;
+    let reports = match origin {
+        link::StressOrigin::StartupIpOnly => link.startup_stress_test().await?,
+        link::StressOrigin::Manual if endpoints.is_empty() => link.stress_test(node_id, sources).await?,
+        link::StressOrigin::Manual => link.stress_test_selected(node_id, sources, endpoints).await?,
+    };
     if let Some(id) = engine.store.list().into_iter().find(|c| !peer_sync::is_mirror(&c.id)).map(|c| c.id) {
         for r in &reports {
             let _ = engine.note(&id, &r.summary(when));
@@ -830,9 +835,9 @@ async fn stress_test_and_post(engine: &Arc<Engine>, when: &str, node_id: Option<
 
 /// The Communication stress test button (Settings → Multi-Computer Sync).
 #[tauri::command]
-async fn stress_test_link(state: State<'_, AppState>, node_id: Option<String>, sources: Option<Vec<std::net::IpAddr>>) -> Result<Vec<link::StressReport>, String> {
+async fn stress_test_link(state: State<'_, AppState>, node_id: Option<String>, sources: Option<Vec<std::net::IpAddr>>, endpoints: Option<Vec<String>>) -> Result<Vec<link::StressReport>, String> {
     let engine = state.engine.clone();
-    stress_test_and_post(&engine, "requested", node_id.as_deref(), sources.as_deref().unwrap_or_default()).await
+    stress_test_and_post(&engine, link::StressOrigin::Manual, "requested", node_id.as_deref(), sources.as_deref().unwrap_or_default(), endpoints.as_deref().unwrap_or_default()).await
 }
 
 /// After every start, once a linked computer is connected, runs the stress test and posts it.
@@ -847,7 +852,7 @@ fn stress_test_after_start(engine: Arc<Engine>) {
             if link.status().peers.iter().any(|p| p.connected) {
                 // A moment for the AIs' resumed work and the catch-up to settle first.
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                let _ = stress_test_and_post(&engine, "after restart", None, &[]).await;
+                let _ = stress_test_and_post(&engine, link::StressOrigin::StartupIpOnly, "after restart", None, &[], &[]).await;
                 return;
             }
         }
@@ -1250,6 +1255,12 @@ async fn messaging_status() -> Vec<bridge::ConnectorStatus> {
     .unwrap_or_default()
 }
 
+/// Cheap peer readiness snapshot; never probes a local Signal daemon.
+#[tauri::command]
+async fn signal_relay_status() -> Result<link::SignalRelayStatus, String> {
+    Ok(the_link()?.signal_relay_status())
+}
+
 /// Messaging settings for the setup panel, with the phone number masked.
 #[tauri::command]
 fn messaging_config() -> Result<bridge::SetupView, String> {
@@ -1281,7 +1292,7 @@ fn messaging_setup(action: String) -> Result<String, String> {
     Ok(title.to_string())
 }
 
-/// Starts the in-app Signal setup: QR code, background daemon, then a Note to Self round trip.
+/// Starts Signal setup: QR code, background daemon, then a round trip in the Consilium group.
 #[tauri::command]
 fn signal_setup_begin() -> Result<signal_setup::SetupState, String> {
     signal_setup::begin(bridge::config_path(None))
@@ -1380,6 +1391,16 @@ async fn link_status() -> Result<link::LinkStatus, String> {
 }
 
 #[tauri::command]
+fn bluetooth_status() -> bluetooth::Status {
+    bluetooth::status()
+}
+
+#[tauri::command]
+fn bluetooth_set_enabled(enabled: bool) -> Result<bluetooth::Status, String> {
+    bluetooth::set_enabled(enabled)
+}
+
+#[tauri::command]
 async fn link_discover_lan(include_legacy: Option<bool>) -> Result<Vec<String>, String> {
     the_link()?.discover(include_legacy.unwrap_or(true)).await
 }
@@ -1415,8 +1436,13 @@ async fn link_unpair(node_id: String) -> Result<link::LinkStatus, String> {
 }
 
 #[tauri::command]
-async fn link_test_peer(node_id: String, source: Option<std::net::IpAddr>) -> Result<link::PeerTestReport, String> {
-    the_link()?.test_peer(&node_id, source).await
+async fn link_test_peer(node_id: String, source: Option<std::net::IpAddr>, endpoints: Option<Vec<String>>) -> Result<link::PeerTestReport, String> {
+    let endpoints = endpoints.unwrap_or_default();
+    if endpoints.is_empty() {
+        the_link()?.test_peer(&node_id, source).await
+    } else {
+        the_link()?.test_peer_selected(&node_id, source, &endpoints).await
+    }
 }
 
 #[tauri::command]
@@ -1432,6 +1458,11 @@ fn link_probe_sources() -> Result<Vec<link::ProbeSource>, String> {
 #[tauri::command]
 async fn link_test_ai_handshake(node_id: String) -> Result<Vec<link::AiHandshake>, String> {
     the_link()?.test_ai_handshake(&node_id).await
+}
+
+#[tauri::command]
+async fn link_test_ai_handshake_selected(node_id: String, endpoint: String) -> Result<link::AiHandshakeTestReport, String> {
+    the_link()?.test_ai_handshake_selected(&node_id, Some(&endpoint)).await
 }
 
 #[tauri::command]
@@ -1512,6 +1543,7 @@ pub fn run() {
         // Remembers the window's size, position, maximized and full-screen state across restarts.
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
+            bluetooth::initialize(app.handle().clone());
             app.manage(QuickSummon(register_quick_summon(app.handle())));
             let handle = app.handle().clone();
             let _ = RESTART_HOOK.set(Box::new(move || {
@@ -1680,6 +1712,7 @@ pub fn run() {
             security_scan_save,
             security_scan_run,
             messaging_status,
+            signal_relay_status,
             messaging_config,
             messaging_save,
             messaging_setup,
@@ -1736,6 +1769,8 @@ pub fn run() {
             open_app,
             get_daily_wallpaper,
             link_status,
+            bluetooth_status,
+            bluetooth_set_enabled,
             link_discover_lan,
             link_set_enabled,
             link_pair_host,
@@ -1746,6 +1781,7 @@ pub fn run() {
             link_transfer_trial,
             link_probe_sources,
             link_test_ai_handshake,
+            link_test_ai_handshake_selected,
             link_add_peer_route,
             link_refresh_routes,
             link_inbox,
