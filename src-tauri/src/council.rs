@@ -1387,26 +1387,35 @@ mod tests {
 
     #[tokio::test]
     async fn a_resumed_one_round_turn_restores_extra_answers_and_unstarted_recipients() {
-        let (store, c) = setup();
-        let boundary = store.load(&c).unwrap().last().unwrap().seq;
-        store.append_imported(&c, "claude", "message", vec![], "peer follow-up", Some("MacBook".into()), None).unwrap();
-        store.append(&c, "gpt", "message", vec![], "completed answer").unwrap();
-        let extra = HashMap::from([("gpt".to_string(), 1), ("gemini".to_string(), 0)]);
-        let host = Arc::new(fake(|id, n, events| {
-            assert!(events.iter().any(|e| e.text == "peer follow-up"));
-            Ok(format!("{id} restored #{n}"))
-        }));
-        let turn = Turn { conversation: c.clone(), targets: ids(&["gpt"]), rounds: 1, members: ids(&["gpt", "gemini"]) };
-        let council = Council::new_with_allowance(
-            turn, store.clone(), Arc::new(Bench::new()), host.clone(), CancellationToken::new(), Some(boundary), (extra.clone(), 2),
-        );
-        tokio::time::timeout(Duration::from_secs(5), council.run()).await.expect("the restored turn ends");
-        let mut asked = host.asked.lock().unwrap().clone();
-        asked.sort();
-        assert_eq!(asked, vec![("gemini".into(), 1), ("gpt".into(), 2)]);
-        let state = council.shared.state.lock().unwrap();
-        assert_eq!(state.extra, extra);
-        assert_eq!(state.pulled_in, 2);
+        // First run alone: another AI's reply must not mask a lost pending request by waking GPT.
+        for include_unstarted in [false, true] {
+            let (store, c) = setup();
+            let boundary = store.load(&c).unwrap().last().unwrap().seq;
+            store.append_imported(&c, "claude", "message", vec![], "peer follow-up", Some("MacBook".into()), None).unwrap();
+            store.append(&c, "gpt", "message", vec![], "completed answer").unwrap();
+            let mut extra = HashMap::from([("gpt".to_string(), 1)]);
+            if include_unstarted {
+                extra.insert("gemini".to_string(), 0);
+            }
+            let host = Arc::new(fake(|id, n, events| {
+                assert!(events.iter().any(|e| e.text == "peer follow-up"));
+                Ok(format!("{id} restored #{n}"))
+            }));
+            let members = if include_unstarted { ids(&["gpt", "gemini"]) } else { ids(&["gpt"]) };
+            let turn = Turn { conversation: c.clone(), targets: ids(&["gpt"]), rounds: 1, members };
+            let pulled_in = if include_unstarted { 2 } else { 1 };
+            let council = Council::new_with_allowance(
+                turn, store.clone(), Arc::new(Bench::new()), host.clone(), CancellationToken::new(), Some(boundary), (extra.clone(), pulled_in),
+            );
+            tokio::time::timeout(Duration::from_secs(5), council.run()).await.expect("the restored turn ends");
+            let mut asked = host.asked.lock().unwrap().clone();
+            asked.sort();
+            let expected = if include_unstarted { vec![("gemini".into(), 1), ("gpt".into(), 2)] } else { vec![("gpt".into(), 2)] };
+            assert_eq!(asked, expected);
+            let state = council.shared.state.lock().unwrap();
+            assert_eq!(state.extra, extra);
+            assert_eq!(state.pulled_in, pulled_in);
+        }
     }
 
     #[tokio::test]
