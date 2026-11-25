@@ -1520,11 +1520,14 @@ async fn execute(
     let mut watchdog = RunDeadline::new(std::time::Instant::now(), timeout);
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
+    let completion_grace = tokio::time::sleep(PIPE_GRACE);
+    tokio::pin!(completion_grace);
+    let mut final_result_received = false;
     let mut recent_output = String::new();
     let mut activity_output = String::new();
     let mut watch_output = true;
 
-    let mut check_stream = |line: &str, watchdog: &mut RunDeadline| -> Result<(), String> {
+    let mut check_stream = |line: &str, watchdog: &mut RunDeadline| -> Result<bool, String> {
         // Read access only reads files; plan mode isn't documented to block shell tools, so stop here.
         if access == Access::Read && kind == Kind::Antigravity {
             if let Some(command) = streamed_command(kind, line) {
@@ -1598,10 +1601,11 @@ async fn execute(
                 sink(signal);
             }
         }
-        Ok(())
+        Ok(kind == Kind::ClaudeCode && is_claude_final_result(line))
     };
 
-    let mut process_chunk = |pipe: OutputPipe, chunk: &[u8], watchdog: &mut RunDeadline| -> Result<(), String> {
+    let mut process_chunk = |pipe: OutputPipe, chunk: &[u8], watchdog: &mut RunDeadline| -> Result<bool, String> {
+        let mut completed = false;
         recent_output.push_str(&String::from_utf8_lossy(chunk));
         keep_tail(&mut recent_output, 8_192);
         // Parse progress even without a UI sink (terminal turns and tests). Arbitrary stderr,
@@ -1613,7 +1617,13 @@ async fn execute(
             while let Some(end) = activity_output.find('\n') {
                 let line = activity_output[..end].trim_end_matches('\r').to_string();
                 activity_output.drain(..=end);
-                check_stream(&line, watchdog)?;
+                completed |= check_stream(&line, watchdog)?;
+            }
+            // Older JSON-mode CLIs can flush a complete result without a trailing newline.
+            // Only a whole top-level record qualifies; partial JSON and tool results do not.
+            if kind == Kind::ClaudeCode && is_claude_final_result(&activity_output) {
+                completed |= check_stream(&activity_output, watchdog)?;
+                activity_output.clear();
             }
         }
         if let Some(line) = interactive_prompt(&recent_output) {
@@ -1623,21 +1633,30 @@ async fn execute(
                 path.display(),
             ));
         }
-        Ok(())
+        Ok(completed)
     };
 
     let outcome = 'watch: loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break Err("stopped".to_string()),
-            _ = &mut deadline => break Err(watchdog.message(std::time::Instant::now())),
+            _ = &mut completion_grace, if final_result_received => break Ok(child.try_wait()),
+            _ = &mut deadline, if !final_result_received => break Err(watchdog.message(std::time::Instant::now())),
             chunk = chunk_rx.recv(), if watch_output => {
                 let Some((pipe, chunk)) = chunk else {
                     watch_output = false;
                     continue;
                 };
-                if let Err(why) = process_chunk(pipe, &chunk, &mut watchdog) {
-                    break 'watch Err(why);
+                match process_chunk(pipe, &chunk, &mut watchdog) {
+                    Err(why) => break 'watch Err(why),
+                    Ok(true) if !final_result_received => {
+                        final_result_received = true;
+                        completion_grace.as_mut().reset(tokio::time::Instant::now() + PIPE_GRACE);
+                    }
+                    _ => {}
+                }
+                if final_result_received {
+                    continue;
                 }
                 let now = std::time::Instant::now();
                 let remaining = watchdog.remaining(now);
@@ -1647,7 +1666,7 @@ async fn execute(
                 }
                 deadline.as_mut().reset(tokio::time::Instant::now() + remaining);
             }
-            status = child.wait() => break Ok(status),
+            status = child.wait() => break Ok(status.map(Some)),
         }
     };
     let status = match outcome {
@@ -1660,6 +1679,11 @@ async fn execute(
             return Err(why);
         }
     };
+    if status.is_none() {
+        // The provider has answered, but its CLI (or Windows wrapper) is stuck shutting down.
+        // Reap this owned turn rather than discarding its result at the inactivity deadline.
+        kill_tree(pid, &mut child).await;
+    }
     writer.abort();
     // A program the AI started in the background (a dev server, a watcher) can keep the output
     // pipes open after the CLI itself has exited. Waiting for them to close would hang the turn,
@@ -1669,9 +1693,10 @@ async fn execute(
         let _ = err_task.await;
     };
     tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err("stopped".to_string()),
         _ = pipes_closed => {}
         _ = tokio::time::sleep(PIPE_GRACE) => {}
-        _ = cancel.cancelled() => return Err("stopped".to_string()),
     }
     while let Ok((pipe, chunk)) = chunk_rx.try_recv() {
         if let Err(why) = process_chunk(pipe, &chunk, &mut watchdog) {
@@ -1723,20 +1748,28 @@ async fn execute(
         if let Some(e) = claude_stream_error(&stdout) {
             return Err(e);
         }
-        let code = status.code().map_or_else(|| "killed".to_string(), |c| format!("exit {c}"));
+        let code = status.and_then(|s| s.code()).map_or_else(|| "killed".to_string(), |c| format!("exit {c}"));
         let err = stderr.trim();
         let why = if err.is_empty() { String::new() } else { format!(": {}", clip_middle(err, ERROR_TAIL_CHARS)) };
         return Err(format!("Claude CLI ended before reporting a final result ({code}){why}"));
     }
-    if !status.success() || reply.trim().is_empty() {
+    if status.is_some_and(|s| !s.success()) || reply.trim().is_empty() {
         let detail = if stderr.trim().is_empty() { stdout } else { stderr };
-        return Err(format!("exit {}: {}", status.code().unwrap_or(-1), tail(&detail)));
+        return Err(format!("exit {}: {}", status.and_then(|s| s.code()).unwrap_or(-1), tail(&detail)));
     }
     Ok(AgentReply {
         text: reply.trim().to_string(),
         usage,
         model,
     })
+}
+
+fn is_claude_final_result(record: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(record) else {
+        return false;
+    };
+    value["type"] == "result"
+        || (value.get("type").is_none() && value["result"].is_string())
 }
 
 /// The model that wrote a reply, when the CLI's output says: Claude Code's JSON result lists the
