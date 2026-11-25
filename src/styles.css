@@ -1069,6 +1069,13 @@ pre {
   max-width: 90%;
 }
 
+.thinking-slot {
+  flex: none;
+  block-size: 56px;
+  padding: 2px clamp(12px, 3vw, 24px) 6px;
+  display: flex;
+}
+
 .thinking {
   width: fit-content;
   max-width: min(820px, 92%);
@@ -1076,19 +1083,29 @@ pre {
   border: 1px solid var(--border);
   border-left: 3px solid var(--sender, var(--accent));
   border-radius: var(--radius);
-  padding: 8px 12px;
+  padding: 4px 12px;
   color: var(--muted);
   font-size: 13px;
   display: inline-flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  align-self: flex-start;
   min-width: 0;
   word-break: break-word;
   overflow-wrap: anywhere;
   animation: rise 0.18s ease-out;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
+
+.thinking-text {
+  min-width: 0;
+  align-self: stretch;
+  overflow: auto;
+  overscroll-behavior: contain;
+  line-height: 18px;
+  scrollbar-width: thin;
+}
+
+.thinking .pulse { margin-top: 5px; }
 
 .pulse {
   width: 8px;

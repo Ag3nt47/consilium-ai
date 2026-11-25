@@ -1792,7 +1792,7 @@ export default function App() {
     } else if (shown > 0) {
       setUnseen((n) => n + shown);
     }
-  }, [events, turn, prefs.effects]);
+  }, [events, prefs.effects]);
 
   // Shows the floating jump-to-latest button whenever the chat is scrolled off the bottom.
   const [awayFromLatest, setAwayFromLatest] = useState(false);
@@ -3561,13 +3561,6 @@ export default function App() {
               </div>
             ),
           )}
-          {busy && (
-            <div className={`thinking ${turn?.agent ? `from-${turn.agent}` : ""}`}>
-              <span className="pulse" /> <TypedText text={thinking ?? "Working"} enabled={typedActivity} />
-              {turn && turn.rounds > 1 ? ` · round ${turn.round} of ${turn.rounds}` : ""}
-              <span className="cursor">▍</span>
-            </div>
-          )}
           <div ref={endRef} />
           {awayFromLatest && (
             <div className="jump-latest-wrap">
@@ -3578,6 +3571,19 @@ export default function App() {
             </div>
           )}
         </section>
+
+        <div className="thinking-slot">
+          {busy && (
+            <div className={`thinking ${turn?.agent ? `from-${turn.agent}` : ""}`}>
+              <span className="pulse" aria-hidden="true" />
+              <div className="thinking-text" tabIndex={0} role="region" aria-label="AI activity">
+                <TypedText text={thinking ?? "Working"} enabled={typedActivity} />
+                {turn && turn.rounds > 1 ? ` · round ${turn.round} of ${turn.rounds}` : ""}
+                <span className="cursor" aria-hidden="true">▍</span>
+              </div>
+            </div>
+          )}
+        </div>
 
         <footer className={`composer ${dropping ? "dropping" : ""}`}>
           {error && (
