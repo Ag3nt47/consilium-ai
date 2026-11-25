@@ -154,7 +154,7 @@ the peer's PAN address is required before an outage or simultaneous transfer tri
 
 ## Simultaneous transfer trial
 
-After the individual routes pass, test with Ethernet, Wi-Fi and Bluetooth PAN active. Open
+After the individual routes pass, test with Ethernet, Wi-Fi and the verified Bluetooth path active. Open
 **Test parallel payload transfer**, choose one computer, then match each local adapter with
 its peer endpoint. Use both computers' network settings to confirm the selected addresses
 belong to distinct physical adapters. Run the test and record the bound source interface,
@@ -179,6 +179,20 @@ with the same payload and computers. To pass the physical overlap trial, authent
 bytes must arrive over each claimed path during overlapping receipt windows. Repeat while
 disconnecting each path in turn. Check payload integrity and record whether the trial returned
 a partial result. Live chat and model traffic use their own routing and recovery logic.
+
+### Live dual-route check on November 24, 2026
+
+The Windows and Mac apps both ran 0.3.58 build #606. Windows joined the previously tested Wi-Fi
+network while Ethernet stayed active. The transfer test returned all four checksum receipts on
+each route, totaling 32 KiB per route. The Mac reported distinct receiving adapters and 258 ms
+of overlap between authenticated payload receipts. The existing PeerLink session remained on
+Ethernet throughout the parallel transfer. This run measured payloads over two IP routes.
+
+The source-bound communication stress test then confirmed authenticated traffic after switching
+to each Windows adapter. Ethernet switched in 107 ms and confirmed traffic in 1,625 ms. Wi-Fi
+switched in 109 ms and confirmed traffic in 1,639 ms. The default route reconnected in 104 ms,
+confirmed traffic in 1,638 ms, and the live link returned to Ethernet. Windows Wi-Fi went back
+to its original disconnected state. The established PeerLink socket stayed on Ethernet.
 
 ## Split-model inference trial
 

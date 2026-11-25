@@ -3632,6 +3632,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("link-startup-stress-{}", uuid::Uuid::new_v4()));
         let (host, _) = node(&dir, "host");
         let (client, _) = node(&dir, "client");
+        struct Cleanup { host: Link, client: Link, dir: PathBuf }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.host.stop();
+                self.client.stop();
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+        let _cleanup = Cleanup { host: host.clone(), client: client.clone(), dir: dir.clone() };
         let code = host.begin_pairing().unwrap();
         let ip = format!("127.0.0.1:{}", host.0.port);
         client.join(&ip, &code.code).await.unwrap();
@@ -3652,7 +3661,22 @@ mod tests {
         assert_eq!(reports[0].routes[0].addr, ip);
         assert!(reports[0].restored.as_ref().is_some_and(|route| route.ok && route.addr == ip));
 
-        let running = client.0.running.lock().unwrap().clone().unwrap();
+        // The TCP policy phase above is genuine. Isolate the controlled
+        // publication race below from both ordinary reconnect supervisors:
+        // cancelling their parents also fences any already queued auto-dial.
+        host.stop();
+        client.stop();
+        let running = CancellationToken::new();
+        *client.0.running.lock().unwrap() = Some(running.clone());
+        // Keep only a live placeholder for registering the startup owner.
+        // Actual late TCP/native publication still uses production session().
+        let (tx, _current_tcp) = mpsc::unbounded_channel();
+        {
+            let mut states = client.0.peers.lock().unwrap();
+            let state = states.get_mut(&host_id).unwrap();
+            state.tx = Some(tx);
+            state.session_cancel = Some(running.child_token());
+        }
         let startup = client.startup_stress_scope(&host_id, &running).unwrap();
         let startup_token = startup.stop.as_ref().clone();
         // Pause a TCP session just before publication, as if its startup
@@ -3668,13 +3692,22 @@ mod tests {
         let owner = client.clone();
         let (release, paused) = oneshot::channel();
         let queued_tcp = tokio::spawn(async move {
-            paused.await.unwrap();
-            owner.session(peer, key, BufReader::new(read), write, route, evidence, None, startup_token).await;
+            // An earlier assertion dropping the sender is teardown, not an
+            // independent fixture panic or a reason to publish a session.
+            if paused.await.is_ok() {
+                owner.session(peer, key, BufReader::new(read), write, route, evidence, None, startup_token).await;
+            }
         });
         let native_token = running.child_token();
         let (receiving, sending) = memory_session(&host, &client, native_token.clone()).await;
-        assert!(wait_for(|| client.status().peers[0].route_evidence.as_ref()
-            .is_some_and(|evidence| matches!(evidence, RouteEvidence::BluetoothRfcomm { .. }))).await);
+        let published = wait_for(|| client.0.peers.lock().unwrap().get(&host_id).is_some_and(|state|
+            state.tx.is_some() && matches!(state.route_evidence.as_ref(), Some(RouteEvidence::BluetoothRfcomm { .. })))).await;
+        let (observed_generation, connected) = {
+            let states = client.0.peers.lock().unwrap();
+            let state = &states[&host_id];
+            (state.generation, state.tx.is_some())
+        };
+        assert!(published, "Controlled native publication failed: generation={observed_generation}, connected={connected}, sender_finished={}, receiver_finished={}", sending.is_finished(), receiving.is_finished());
         assert!(startup.stop.is_cancelled(), "Native publication preempts only the startup child");
         let (generation, native_session) = {
             let peers = client.0.peers.lock().unwrap();
@@ -3684,15 +3717,13 @@ mod tests {
         release.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(2), queued_tcp).await.unwrap().unwrap();
         drop(startup);
-        assert_eq!(client.0.peers.lock().unwrap()[&host_id].generation, generation);
+        let final_generation = client.0.peers.lock().unwrap()[&host_id].generation;
+        assert_eq!(final_generation, generation);
         assert!(!native_session.is_cancelled(), "Neither late TCP publication nor startup restoration replaces native");
         native_token.cancel();
         tokio::time::timeout(Duration::from_secs(2), sending).await.unwrap().unwrap();
         tokio::time::timeout(Duration::from_secs(2), receiving).await.unwrap().unwrap().unwrap();
         drop(held);
-        client.stop();
-        host.stop();
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]
