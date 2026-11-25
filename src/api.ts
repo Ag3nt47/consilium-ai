@@ -383,6 +383,18 @@ export type RouteEvidence =
   | { kind: "tcp"; local_addr: string; remote_addr: string; local_interface: string | null }
   | { kind: "bluetooth_rfcomm"; local_adapter: string; remote_device: string; service_uuid: string; channel: number };
 export type BluetoothStatus = { supported: boolean; enabled: boolean; endpoint: string | null; detail: string };
+export type BluetoothPairingStatus = {
+  attempt_id: string;
+  node_id: string;
+  peer_name: string;
+  challenge_id: string | null;
+  state: "starting" | "awaiting_code" | "confirming" | "paired" | "cancelled" | "expired" | "failed";
+  code: string | null;
+  remaining_ms: number;
+  authenticated: boolean;
+  remembered: boolean;
+  detail: string;
+};
 
 export type RouteTest = {
   addr: string;
@@ -418,11 +430,13 @@ export type TransferPath = { source: string | null; endpoint: string };
 export type TransferTrial = {
   overlap_ms: number | null;
   distinct_receiver_interfaces: boolean;
+  compute_routes?: { primary_ip: number | null; additional_ip: number[]; bluetooth_control: number | null };
   paths: {
     source: ProbeSource | null;
     route_evidence?: RouteEvidence | null;
     endpoint: string;
     receipts: { bytes: number; sha256: string; receiver_ip: string | null; receiver_interface?: string | null; route_evidence?: RouteEvidence | null; received_ms: number }[];
+    median_probe_ms?: number | null;
     error: string | null;
   }[];
 };
@@ -545,6 +559,11 @@ const appApi = {
   linkStatus: () => invoke<LinkStatus>("link_status"),
   bluetoothStatus: () => invoke<BluetoothStatus>("bluetooth_status"),
   bluetoothSetEnabled: (enabled: boolean) => invoke<BluetoothStatus>("bluetooth_set_enabled", { enabled }),
+  bluetoothPairingBegin: (nodeId: string) => invoke<BluetoothPairingStatus>("bluetooth_pairing_begin", { nodeId }),
+  bluetoothPairingStatus: (attemptId: string) => invoke<BluetoothPairingStatus>("bluetooth_pairing_status", { attemptId }),
+  bluetoothPairingConfirm: (attemptId: string, challengeId: string, code: string) =>
+    invoke<BluetoothPairingStatus>("bluetooth_pairing_confirm", { attemptId, challengeId, code }),
+  bluetoothPairingCancel: (attemptId: string) => invoke<BluetoothPairingStatus>("bluetooth_pairing_cancel", { attemptId }),
   linkSetEnabled: (on: boolean) => invoke<LinkStatus>("link_set_enabled", { on }),
   /** Shows a one-time 6-digit code (valid 5 minutes, 3 tries) and turns the link on. */
   linkPairHost: () => invoke<{ code: string; expires_ms: number }>("link_pair_host"),
@@ -555,7 +574,8 @@ const appApi = {
   linkTestPeer: (nodeId: string, source?: string, endpoints?: string[]) => invoke<PeerTestReport>("link_test_peer", { nodeId, source, endpoints }),
   linkTransferTrial: (nodeId: string, paths: TransferPath[]) => invoke<TransferTrial>("link_transfer_trial", { nodeId, paths }),
   linkTestAiHandshake: (nodeId: string) => invoke<AiHandshake[]>("link_test_ai_handshake", { nodeId }),
-  linkTestAiHandshakeSelected: (nodeId: string, endpoint: string) => invoke<AiHandshakeTestReport>("link_test_ai_handshake_selected", { nodeId, endpoint }),
+  linkTestAiHandshakeSelected: (nodeId: string, endpoint: string, source?: string) =>
+    invoke<AiHandshakeTestReport>("link_test_ai_handshake_selected", { nodeId, endpoint, source }),
   linkAddPeerRoute: (nodeId: string, address: string) =>
     invoke<string[]>("link_add_peer_route", { nodeId, address }),
   linkRefreshRoutes: (nodeId: string) =>

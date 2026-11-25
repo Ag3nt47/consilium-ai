@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Auto-run chats pause when nothing is happening**: auto-continue in an "Auto-run this chat"
+  conversation now pauses after 3 rounds in a row that changed nothing on the task board, instead of
+  running all 25 rounds with every AI replying "still waiting". A command box reporting back during
+  a round counts as progress, so command-driven work keeps going.
+
 ## 0.3.58
 
 - Avoid a lock-order deadlock between interrupted-turn recovery and sending or starting a new turn.

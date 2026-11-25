@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type BluetoothStatus } from "./api";
+import { OS } from "./platform";
 
 export function NativeBluetooth({ directEnabled }: { directEnabled: boolean }) {
   const [status, setStatus] = useState<BluetoothStatus | null>(null);
@@ -55,7 +56,9 @@ export function NativeBluetooth({ directEnabled }: { directEnabled: boolean }) {
           onChange={(event) => void change(event.target.checked)} />
         Native Bluetooth · Windows and Mac
       </label>
-      <p className="muted">Pair your computers in their Bluetooth settings, then enable this on both. Keep the direct computer link enabled.</p>
+      <p className="muted">Enable this on both computers and keep the direct computer link enabled. {OS === "windows"
+        ? "To pair with a linked Mac, open its card below and select Show Bluetooth code."
+        : "On the linked Windows computer, open this Mac’s card and select Show Bluetooth code. Confirm the matching number in the macOS pairing prompt."}</p>
       <p role="status">{busy ? "Saving Bluetooth setting…" : status.detail}</p>
       {!directEnabled && <p className="muted">Turn on the direct computer link above to use Bluetooth.</p>}
       {error && <p role="alert">{error}</p>}

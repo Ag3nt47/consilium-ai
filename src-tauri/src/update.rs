@@ -561,6 +561,37 @@ fn stage_macos_app(data: &Path, version: &str, source: &Path) -> Result<(), Stri
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+struct SystemRunner;
+
+#[cfg(target_os = "macos")]
+impl crate::mac_signing::Runner for SystemRunner {
+    fn run(&mut self, program: &str, args: &[std::ffi::OsString]) -> bool {
+        use std::process::{Command, Stdio};
+        // Output is discarded and only the exit status is used, so the keychain password passed
+        // to `unlock-keychain` can never reach a log through an error message.
+        Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn search_list(&mut self) -> Option<Vec<String>> {
+        let out = std::process::Command::new("/usr/bin/security")
+            .args(["list-keychains", "-d", "user"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(crate::mac_signing::parse_list(&String::from_utf8_lossy(&out.stdout)))
+    }
+}
+
 /// Stable local signing when this Mac has the private key, matching `scripts/stage-update.mjs`;
 /// otherwise a required ad-hoc signature keeps GitHub's unsigned release launchable.
 #[cfg(target_os = "macos")]
@@ -569,51 +600,18 @@ fn sign_macos_app(data: &Path, app: &Path) -> Result<(), String> {
 
     let signing = data.join("signing");
     let keychain = signing.join("consilium-signing.keychain-db");
-    let password_file = signing.join("keychain-password");
-    let password = std::fs::read_to_string(password_file).ok();
-    let unlocked = keychain.is_file()
-        && password.as_deref().is_some_and(|password| {
-            Command::new("/usr/bin/security")
-                .args(["unlock-keychain", "-p", password.trim()])
-                .arg(&keychain)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        });
-    let mut signed = unlocked
-        && Command::new("/usr/bin/codesign")
-            .args(["--force", "--deep", "--sign", "Consilium Local Signing", "--keychain"])
-            .arg(&keychain)
-            .arg(app)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-    if !signed {
-        signed = Command::new("/usr/bin/codesign")
-            .args(["--force", "--deep", "--sign", "-"])
-            .arg(app)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+    let password = keychain
+        .is_file()
+        .then(|| std::fs::read_to_string(signing.join("keychain-password")).ok())
+        .flatten();
+    let report = crate::mac_signing::sign(&mut SystemRunner, &keychain, password.as_deref(), app);
+    if let Some(why) = report.stable_failure {
+        eprintln!("Consilium update: signed ad-hoc because {why}; macOS may ask for permissions again.");
     }
-    if unlocked {
-        let _ = Command::new("/usr/bin/security")
-            .arg("lock-keychain")
-            .arg(&keychain)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    if let Some(why) = report.restore_failure {
+        eprintln!("Consilium update: {why}; remove it in Keychain Access if it stays listed.");
     }
+    let signed = report.signed;
     if !signed {
         return Err("sign the app from the update DMG: codesign failed".into());
     }
@@ -839,7 +837,6 @@ pub fn start_install(data: &Path) -> Result<Staged, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn the_wmi_launcher_quotes_the_helper_path_for_powershell() {
         let s = wmi_launch_script(Path::new("C:\\Users\\O'Neil\\update\\install-helper.ps1"));
