@@ -4,8 +4,9 @@ import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { once } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { performance } from "node:perf_hooks";
 import test, { after, before } from "node:test";
 import tls from "node:tls";
 import { startRpcTunnel } from "../scripts/llama-rpc-tunnel.mjs";
@@ -131,6 +132,16 @@ function clientOptions(workerPort, overrides = {}) {
     peerFingerprint: credentials.worker.fingerprint.replaceAll(":", "").toLowerCase(),
     serverName: "tunnel.test", handshakeMs: 1000, connectMs: 1000, maxConnections: 8, ...overrides,
   };
+}
+
+function workerRoute(port, overrides = {}) {
+  return { target: { host: loopback, port }, source: loopback, serverName: "tunnel.test",
+    peerFingerprint: credentials.worker.fingerprint, ...overrides };
+}
+
+function routedClientOptions(routes, overrides = {}) {
+  const { target: _target, serverName: _name, peerFingerprint: _pin, ...options } = clientOptions(1);
+  return { ...options, routes, ...overrides };
 }
 
 async function tunnel(t, options) {
@@ -444,4 +455,161 @@ test("configuration restricts plaintext endpoints and requires explicit usable p
   ]) {
     await assert.rejects(startRpcTunnel(options));
   }
+});
+
+test("a bound source must work before an alternative route can forward RPC bytes", async (t) => {
+  const target = await targetServer(t, (socket) => socket.pipe(socket));
+  const worker = await tunnel(t, workerOptions(target.port));
+  const assigned = new Set(Object.values(networkInterfaces()).flat().filter(Boolean).map(({ address }) => address));
+  const unassigned = ["10.255.255.253", "172.31.255.253", "192.168.255.253"].find((address) => !assigned.has(address));
+  assert.ok(unassigned);
+  const events = [];
+  const client = await tunnel(t, routedClientOptions([
+    workerRoute(worker.address.port, { source: unassigned }), workerRoute(worker.address.port),
+  ], { onEvent: (event) => events.push(event) }));
+  const payload = randomBytes(128 * 1024 + 17);
+  assert.deepEqual(await exchange(t, client.address.port, payload), payload);
+  assert.equal(target.accepts, 1);
+  assert.deepEqual(events.filter(({ type }) => type === "route-attempt-failed").map(({ route }) => route), [0]);
+  assert.deepEqual(events.filter(({ type }) => type === "route-selected"), [
+    { type: "route-selected", route: 1, source_bound: true },
+  ]);
+});
+
+test("ordered alternatives keep buffered input private until that route's TLS pin matches", async (t) => {
+  const rejected = await targetServer(t);
+  const accepted = await targetServer(t, (socket) => socket.pipe(socket));
+  const first = await tunnel(t, workerOptions(rejected.port));
+  const second = await tunnel(t, workerOptions(accepted.port));
+  const events = [];
+  const client = await tunnel(t, routedClientOptions([
+    workerRoute(first.address.port, { peerFingerprint: credentials.other.fingerprint }),
+    workerRoute(second.address.port),
+  ], { onEvent: (event) => events.push(event) }));
+  const payload = randomBytes(64 * 1024 + 9);
+  assert.deepEqual(await exchange(t, client.address.port, payload), payload);
+  assert.equal(rejected.bytes, 0, "A rejected pin must never receive queued RPC bytes.");
+  assert.equal(accepted.accepts, 1);
+  assert.equal(accepted.bytes, payload.length);
+  assert.deepEqual(events.filter(({ type }) => type === "route-selected").map(({ route }) => route), [1]);
+  assert.ok(events.some(({ type, route, code }) => type === "route-attempt-failed" && route === 0 && code === "EPEERREJECTED"));
+});
+
+test("independent concurrent streams spread by load and keep each byte sequence on its chosen route", async (t) => {
+  let release;
+  const bothAccepted = new Promise((resolve) => { release = resolve; });
+  let accepts = 0;
+  const handler = (socket) => {
+    if (++accepts === 2) release();
+    const chunks = [];
+    socket.on("data", (chunk) => chunks.push(chunk));
+    socket.once("end", () => { void bothAccepted.then(() => socket.end(Buffer.concat(chunks).reverse())); });
+  };
+  const firstTarget = await targetServer(t, handler);
+  const secondTarget = await targetServer(t, handler);
+  const firstWorker = await tunnel(t, workerOptions(firstTarget.port));
+  const secondWorker = await tunnel(t, workerOptions(secondTarget.port));
+  const events = [];
+  const client = await tunnel(t, routedClientOptions([
+    workerRoute(firstWorker.address.port), workerRoute(secondWorker.address.port),
+  ], { onEvent: (event) => events.push(event) }));
+  const payloads = [randomBytes(256 * 1024 + 1), randomBytes(256 * 1024 + 3)];
+  const received = await Promise.all(payloads.map((payload) => exchange(t, client.address.port, payload)));
+  for (const [index, payload] of payloads.entries()) assert.deepEqual(received[index], Buffer.from(payload).reverse());
+  assert.equal(firstTarget.accepts, 1);
+  assert.equal(secondTarget.accepts, 1);
+  assert.deepEqual(events.filter(({ type }) => type === "route-selected").map(({ route }) => route).sort(), [0, 1]);
+});
+
+test("failure after authenticated RPC data closes that stream without replaying to an alternative", async (t) => {
+  const failed = await targetServer(t, (socket) => socket.once("data", () => socket.destroy()));
+  const untouched = await targetServer(t, (socket) => socket.pipe(socket));
+  const first = await tunnel(t, workerOptions(failed.port));
+  const second = await tunnel(t, workerOptions(untouched.port));
+  const events = [];
+  const client = await tunnel(t, routedClientOptions([
+    workerRoute(first.address.port), workerRoute(second.address.port),
+  ], { onEvent: (event) => events.push(event) }));
+  const socket = await rawConnection(client.address.port);
+  t.after(() => socket.destroy());
+  socket.resume();
+  socket.write("one ordered request");
+  await closed(socket);
+  assert.ok(failed.bytes > 0);
+  assert.equal(untouched.accepts, 0);
+  assert.equal(untouched.bytes, 0);
+  assert.deepEqual(events.filter(({ type }) => type === "route-selected").map(({ route }) => route), [0]);
+  assert.equal(events.some(({ type }) => type === "route-attempt-failed"), false);
+});
+
+test("closing during the first pending TLS attempt does not start any alternative", async (t) => {
+  let sawHello;
+  const hello = new Promise((resolve) => { sawHello = resolve; });
+  const stalled = await targetServer(t, (socket) => socket.once("data", sawHello));
+  const untouched = await targetServer(t);
+  const worker = await tunnel(t, workerOptions(untouched.port));
+  const client = await tunnel(t, routedClientOptions([
+    workerRoute(stalled.port), workerRoute(worker.address.port),
+  ], { handshakeMs: 5000 }));
+  const socket = await rawConnection(client.address.port);
+  t.after(() => socket.destroy());
+  socket.write("input stays paused");
+  await deadline(hello);
+  await deadline(client.close(), 1000);
+  await closed(socket);
+  assert.equal(untouched.accepts, 0);
+});
+
+test("a failed route cooldown expires and allows a later new stream to use the preferred route", async (t) => {
+  let now = 100;
+  t.mock.method(performance, "now", () => now);
+  const reservation = await targetServer(t);
+  const retryPort = reservation.port;
+  await reservation.close();
+  const preferred = await targetServer(t, (socket) => socket.pipe(socket));
+  const backup = await targetServer(t, (socket) => socket.pipe(socket));
+  const backupWorker = await tunnel(t, workerOptions(backup.port));
+  const events = [];
+  const client = await tunnel(t, routedClientOptions([
+    workerRoute(retryPort), workerRoute(backupWorker.address.port),
+  ], { routeCooldownMs: 1000, onEvent: (event) => events.push(event) }));
+  assert.equal((await exchange(t, client.address.port, Buffer.from("first"))).toString(), "first");
+  await tunnel(t, workerOptions(preferred.port, { listen: { host: loopback, port: retryPort } }));
+  assert.equal((await exchange(t, client.address.port, Buffer.from("during cooldown"))).toString(), "during cooldown");
+  assert.equal(preferred.accepts, 0);
+  now = 1101;
+  assert.equal((await exchange(t, client.address.port, Buffer.from("after cooldown"))).toString(), "after cooldown");
+  assert.equal(preferred.accepts, 1);
+  assert.deepEqual(events.filter(({ type }) => type === "route-attempt-failed").map(({ route }) => route), [0]);
+  assert.deepEqual(events.filter(({ type }) => type === "route-selected").map(({ route }) => route), [1, 1, 0]);
+});
+
+test("route lists are bounded, fully pinned, distinct and unambiguous before listening", async () => {
+  const route = workerRoute(12345);
+  for (const options of [
+    routedClientOptions([]),
+    routedClientOptions(Array.from({ length: 5 }, (_, index) => workerRoute(12345 + index))),
+    routedClientOptions([route, route]),
+    routedClientOptions([workerRoute(12345, { source: "0.0.0.0" })]),
+    routedClientOptions([workerRoute(12345, { source: "localhost" })]),
+    routedClientOptions([workerRoute(12345, { serverName: "" })]),
+    routedClientOptions([workerRoute(12345, { peerFingerprint: undefined })]),
+    routedClientOptions([route], { target: { host: loopback, port: 12345 } }),
+    routedClientOptions([route], { routeCooldownMs: 60001 }),
+    clientOptions(12345, { source: "8.8.8.8" }),
+    workerOptions(12345, { source: loopback }),
+    workerOptions(12345, { routes: [route] }),
+  ]) await assert.rejects(startRpcTunnel(options));
+});
+
+test("the existing single-target client retries immediately for a fresh caller after a failed dial", async (t) => {
+  const reservation = await targetServer(t);
+  const retryPort = reservation.port;
+  await reservation.close();
+  const client = await tunnel(t, clientOptions(retryPort));
+  await rejectedConnection(t, client.address.port);
+  const target = await targetServer(t, (socket) => socket.pipe(socket));
+  await tunnel(t, workerOptions(target.port, { listen: { host: loopback, port: retryPort } }));
+  assert.equal((await exchange(t, client.address.port, Buffer.from("fresh caller"))).toString(), "fresh caller");
+  assert.equal(target.accepts, 1);
 });
