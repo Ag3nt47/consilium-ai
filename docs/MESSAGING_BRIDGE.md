@@ -75,6 +75,8 @@ From the primary Signal phone, send one of these messages in **Consilium Watchdo
 
 The watchdog accepts only these commands from the verified primary phone in the private group. It uses the existing linked Signal account and needs Signal service connectivity. If the local daemon stops, the watchdog can start it with the saved registration. It can replace an unresponsive daemon only when it owns that process.
 
+Consilium acknowledges accepted Signal messages in the group that received them before it waits for the desktop to post them or an AI to answer. The Watchdog acknowledges a verified command before it runs, then reports the outcome in a separate reply.
+
 While the desktop is unavailable, the listener can save up to 64 ordinary Consilium group messages locally for 15 minutes. Verification, approval, and launcher commands need the live desktop conversation.
 
 App relaunch attempts are recorded in `watchdog/relaunch.log` inside the Consilium data folder. The helper confirms its own startup before the app exits, then waits for the original process before reopening the app.

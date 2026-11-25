@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc};
 use std::time::{Duration, Instant};
 
 #[path = "signal_subscriber.rs"]
@@ -26,12 +26,13 @@ pub(crate) mod subscriber;
 
 /// Longest text sent in one Signal message; longer replies are cut with a pointer to Consilium.
 const MAX_OUT: usize = 3500;
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Ready-made messages sent to the phone, so the human always hears back, even when something
 /// goes wrong before any AI answers.
 pub mod notice {
-    /// Sent as soon as a phone message is posted to the conversation.
-    pub const RECEIVED: &str = "Consilium: Message received. Please wait for the AI response.";
+    /// Sent as soon as the Signal listener accepts a message for the conversation.
+    pub const RECEIVED: &str = "Consilium: Message received from Signal.";
     /// Sent when a phone "Approve" or "Deny" answered a pending request.
     pub const DECISION: &str = "Consilium: Decision received and passed to the AI that asked.";
     /// No AI in the council can take the message right now.
@@ -186,6 +187,33 @@ pub fn parse_incoming(v: &Value, account: &str, groups: &bridge::SignalGroups) -
     Some(Incoming { origin, text: text.chars().take(8000).collect(), timestamp, files, group: group.into() })
 }
 
+/// On current signal-cli envelopes, require the verified ACI in addition to the linked number.
+/// Older notifications may omit the ACI. Keep those own-account messages and allow ordinary
+/// messages from the user's other Signal clients, without accepting our own generated replies.
+pub(crate) fn verified_incoming(value: &Value, cfg: &BridgeConfig) -> Option<Incoming> {
+    let envelope = receive_envelope(value)?;
+    let aci = envelope.get("sourceUuid").and_then(Value::as_str)
+        .or_else(|| envelope.get("sourceAci").and_then(Value::as_str));
+    if aci.is_some_and(|aci| !cfg.is_sender_allowed(aci)) {
+        return None;
+    }
+    let message = parse_incoming(value, &cfg.account, &cfg.groups)?;
+    let primary_phone = envelope.get("sourceDevice").and_then(Value::as_u64) == Some(1);
+    if !primary_phone && generated_notice(&message.text) {
+        return None;
+    }
+    Some(message)
+}
+
+fn generated_notice(text: &str) -> bool {
+    matches!(text, notice::RECEIVED | notice::DECISION | notice::NO_AI | notice::NOT_POSTED
+        | notice::NO_CONVERSATION | notice::BACK_ONLINE
+        | "Consilium: Message received. Please wait for the AI response.")
+        || text.starts_with("Consilium: Message received. Assigned to ")
+        || text.starts_with("Consilium: Decision received and passed to ")
+        || text.starts_with("Startup check on Consilium (")
+}
+
 /// REQUESTs in `events` not yet answered with "Approved:", "Denied:" or "Response to request:",
 /// with the AI that asked each one.
 pub fn pending_requests(events: &[Event]) -> Vec<(String, String)> {
@@ -309,6 +337,11 @@ pub(crate) fn send_group(cfg: &BridgeConfig, group: &str, text: &str) -> Result<
     send_group_files(cfg, group, text, &[])
 }
 
+/// Receipts use the same acceptance check as other sends, with a short RPC deadline.
+pub(crate) fn send_group_receipt(cfg: &BridgeConfig, group: &str, text: &str) -> Result<(), String> {
+    send_group_files_with_timeout(cfg, group, text, &[], RECEIPT_TIMEOUT)
+}
+
 /// Sends a Consilium report to the council group when the phone link is active.
 pub fn send_to_phone(text: &str) -> Result<(), String> {
     let cfg = BridgeConfig::load(&bridge::config_path(None))?;
@@ -353,10 +386,14 @@ pub(crate) fn group_send_accepted(cfg: Option<&BridgeConfig>, group: &str, resul
 }
 
 fn send_group_files(cfg: &BridgeConfig, group: &str, text: &str, files: &[String]) -> Result<(), String> {
+    send_group_files_with_timeout(cfg, group, text, files, Duration::from_secs(30))
+}
+
+fn send_group_files_with_timeout(cfg: &BridgeConfig, group: &str, text: &str, files: &[String], timeout: Duration) -> Result<(), String> {
     if group.is_empty() {
         return Err("The Consilium Signal group has not been set up".into());
     }
-    let result = call(cfg, "send", group_send_params(group, text, files))?;
+    let result = call_with_timeout(cfg, "send", group_send_params(group, text, files), timeout)?;
     if !group_send_accepted(Some(cfg), group, &result) {
         return Err("Signal did not accept this group message for your account".into());
     }
@@ -440,11 +477,14 @@ pub fn read_whole_line(r: &mut impl BufRead, buf: &mut Vec<u8>) -> Result<Option
 }
 
 pub fn run(engine: Arc<Engine>, cfg_path: PathBuf) {
-    std::thread::spawn(move || loop {
-        if let Err(e) = session(&engine, &cfg_path) {
-            eprintln!("signal chat: {e}");
+    std::thread::spawn(move || {
+        let mut seen = RecentInbound::default();
+        loop {
+            if let Err(e) = session(&engine, &cfg_path, &mut seen) {
+                eprintln!("signal chat: {e}");
+            }
+            std::thread::sleep(Duration::from_secs(5));
         }
-        std::thread::sleep(Duration::from_secs(5));
     });
 }
 
@@ -506,13 +546,34 @@ struct Outbox {
     origins: HashMap<String, Origin>,
 }
 
+#[derive(Default)]
+struct RecentInbound {
+    order: VecDeque<(String, u64)>,
+    seen: HashSet<(String, u64)>,
+}
+
+impl RecentInbound {
+    fn first(&mut self, msg: &Incoming) -> bool {
+        if msg.timestamp == 0 { return true; }
+        let key = (msg.group.clone(), msg.timestamp);
+        if !self.seen.insert(key.clone()) { return false; }
+        self.order.push_back(key);
+        if self.order.len() > 2000 {
+            if let Some(old) = self.order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+        true
+    }
+}
+
 fn same_receiver_config(now: &BridgeConfig, expected: &BridgeConfig) -> bool {
     now.enabled && now.account == expected.account && now.endpoint == expected.endpoint
         && now.groups == expected.groups && now.allowed_acis == expected.allowed_acis
         && !now.allowed_acis.is_empty()
 }
 
-fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), String> {
+fn session(engine: &Arc<Engine>, cfg_path: &Path, seen: &mut RecentInbound) -> Result<(), String> {
     crate::link::set_signal_on(false);
     let cfg = BridgeConfig::load(cfg_path)?;
     if cfg.enabled && bridge::valid_account(&cfg.account) && cfg.allowed_acis.is_empty() {
@@ -535,28 +596,33 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
             return Err(e);
         }
     };
-    let mut out = Outbox::default();
-    // Seed the cursors before receiving: an immediate reply to the first phone message
-    // must not be mistaken for old desktop history.
-    forward(engine, &cfg, &mut out);
     let expected = cfg.clone();
     let current_path = cfg_path.to_path_buf();
     let decode_cfg = cfg.clone();
     let data = crate::data_dir();
     let restarts = data.as_deref().map(ListenerRestarts::new);
+    let ready = Arc::new(AtomicBool::new(false));
+    let receive_ready = ready.clone();
     let subscription = subscriber::start_with_restart(addr(&cfg)?, move || {
         BridgeConfig::load(&current_path).map(|now| same_receiver_config(&now, &expected))
     }, move |value| {
-        let msg = parse_incoming(value, &decode_cfg.account, &decode_cfg.groups)?;
+        let msg = verified_incoming(value, &decode_cfg)?;
         // The setup code is consumed by the verifier, not sent to the council.
         if crate::signal_setup::is_verification_reply(&msg.group, msg.timestamp, &msg.text, &decode_cfg.groups.main) {
             return None;
         }
         Some(msg)
-    }, crate::link::set_signal_on, restarts)?;
-    let mut seen: VecDeque<u64> = VecDeque::new();
-    let mut seen_set: HashSet<u64> = HashSet::new();
-    static ANNOUNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    }, move |active| {
+        receive_ready.store(active, Ordering::Release);
+        crate::link::set_signal_on(active);
+    }, restarts)?;
+    let (post, incoming) = mpsc::sync_channel(64);
+    let post_engine = engine.clone();
+    let post_config = cfg.clone();
+    let post_path = cfg_path.to_path_buf();
+    let delivery = std::thread::Builder::new().name("signal-chat-post".into())
+        .spawn(move || post_messages(&post_engine, &post_config, &post_path, &ready, incoming))
+        .map_err(|e| format!("couldn't start Signal chat posting: {e}"))?;
     loop {
         // Stop if Signal was switched off or re-set up; the outer loop starts again.
         let now = match BridgeConfig::load(cfg_path) {
@@ -566,9 +632,7 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
             Err(_) => { std::thread::sleep(Duration::from_millis(250)); continue; }
         };
         if !same_receiver_config(&now, &cfg) { return Ok(()); }
-        if engine.config.get().members.iter().any(|m| !cfg.groups.agents.contains_key(m)) {
-            return Ok(()); // a new member needs its own group
-        }
+        if delivery.is_finished() { return Ok(()); }
         if subscription.take_daemon_unresponsive() {
             request_daemon_recovery(cfg_path);
         }
@@ -577,38 +641,63 @@ fn session(engine: &Arc<Engine>, cfg_path: &std::path::Path) -> Result<(), Strin
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err("Signal subscriber stopped".into()),
         };
-        let Some(msg) = receive_from_watchdog_inbox(data.as_deref(), &cfg, first) else {
-            if subscription.is_ready() {
-                if ANNOUNCED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    forward(engine, &cfg, &mut out);
-                } else {
-                    let _ = send_group(&cfg, &cfg.groups.main, notice::BACK_ONLINE);
-                }
-            }
-            continue;
-        };
+        let Some(msg) = receive_from_watchdog_inbox(data.as_deref(), &cfg, first) else { continue };
         if crate::signal_setup::is_verification_reply(&msg.group, msg.timestamp, &msg.text, &cfg.groups.main) {
             continue;
         }
-        if msg.timestamp != 0 {
-            if !seen_set.insert(msg.timestamp) {
-                continue;
-            }
-            seen.push_back(msg.timestamp);
-            if seen.len() > 2000 {
-                if let Some(old) = seen.pop_front() {
-                    seen_set.remove(&old);
-                }
-            }
-        }
+        if !seen.first(&msg) { continue; }
         // Every linked computer receives each phone message; only one of them answers it.
         if !crate::link_answers_signal() {
             continue;
         }
-        let group_id = msg.group.clone();
-        let reply = deliver(engine, &cfg, &mut out, msg);
-        if let Err(e) = send_group(&cfg, &group_id, &reply) {
-            eprintln!("signal chat: couldn't acknowledge the phone message to its group: {e}");
+        acknowledge_and_queue(msg, &post, |group, text| {
+            if let Err(e) = send_group_receipt(&cfg, group, text) {
+                eprintln!("signal chat: couldn't acknowledge the phone message to its group: {e}");
+            }
+        });
+    }
+}
+
+/// Receipt delivery never waits for attachment downloads, disk writes, or a running AI turn.
+fn acknowledge_and_queue(msg: Incoming, post: &mpsc::SyncSender<Incoming>, send: impl Fn(&str, &str)) {
+    let group = msg.group.clone();
+    send(&group, notice::RECEIVED);
+    if post.try_send(msg).is_err() {
+        send(&group, notice::NOT_POSTED);
+    }
+}
+
+fn post_messages(engine: &Arc<Engine>, cfg: &BridgeConfig, cfg_path: &Path, ready: &AtomicBool, incoming: mpsc::Receiver<Incoming>) {
+    static ANNOUNCED: AtomicBool = AtomicBool::new(false);
+    let mut out = Outbox::default();
+    // Seed mirroring before the first accepted phone message is posted, so even a fast AI reply
+    // arrives after the cursor. This may access desktop state, so it belongs on the posting worker.
+    forward(engine, cfg, &mut out);
+    loop {
+        match BridgeConfig::load(cfg_path) {
+            Ok(current) if same_receiver_config(&current, cfg) => {}
+            Ok(_) => return,
+            Err(_) => { std::thread::sleep(Duration::from_millis(250)); continue; }
+        }
+        if engine.config.get().members.iter().any(|m| !cfg.groups.agents.contains_key(m)) { return; }
+        match incoming.recv_timeout(Duration::from_millis(250)) {
+            Ok(message) => {
+                let group = message.group.clone();
+                if let Some(reply) = deliver(engine, cfg, &mut out, message) {
+                    if BridgeConfig::load(cfg_path).is_ok_and(|current| same_receiver_config(&current, cfg)) {
+                        let _ = send_group_receipt(cfg, &group, &reply);
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) if ready.load(Ordering::Acquire) => {
+                if ANNOUNCED.swap(true, Ordering::SeqCst) {
+                    forward(engine, cfg, &mut out);
+                } else {
+                    let _ = send_group_receipt(cfg, &cfg.groups.main, notice::BACK_ONLINE);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
 }
@@ -636,12 +725,11 @@ fn receive_from_watchdog_inbox(_data: Option<&Path>, _cfg: &BridgeConfig, direct
     direct
 }
 
-/// Posts a phone message as the human's message in the newest conversation, and returns the
-/// ready-made notice that tells the phone what happened to it.
-fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Incoming) -> String {
+/// Posts a phone message and reports only outcomes that add to the listener's initial receipt.
+fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Incoming) -> Option<String> {
     let convs = engine.store.list();
     let Some(conv) = convs.iter().find(|c| !crate::peer_sync::is_mirror(&c.id)).or_else(|| convs.first()) else {
-        return notice::NO_CONVERSATION.to_string();
+        return Some(notice::NO_CONVERSATION.to_string());
     };
     let members = engine.config.get().members;
     let events = engine.store.load(&conv.id).unwrap_or_default();
@@ -670,7 +758,6 @@ fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Inco
         }
     };
     let targets: Vec<String> = targets.into_iter().filter(|t| members.contains(t)).collect();
-    let nobody = targets.is_empty();
     // Pictures and documents sent from the phone are saved into the conversation, so every AI
     // sees them like files attached in the app.
     let mut attachments = Vec::new();
@@ -690,54 +777,31 @@ fn deliver(engine: &Arc<Engine>, cfg: &BridgeConfig, out: &mut Outbox, msg: Inco
     }
     let text = text.trim().to_string();
     if text.is_empty() && attachments.is_empty() {
-        return notice::NOT_POSTED.to_string();
+        return Some(notice::NOT_POSTED.to_string());
     }
-    match engine.send_via(&conv.id, &text, attachments, targets.clone(), 1, Some("Signal")) {
+    match engine.send_via(&conv.id, &text, attachments, targets, 1, Some("Signal")) {
         Ok(e) => {
             out.origins.insert(e.id.clone(), msg.origin);
             if out.origins.len() > 500 {
                 out.origins.clear();
             }
-            formatted_receipt(nobody, decision, if e.to.is_empty() { &targets } else { &e.to })
+            posting_follow_up(decision, &e.to)
         }
         Err(e) => {
             eprintln!("signal chat: couldn't post the phone message: {e}");
-            notice::NOT_POSTED.to_string()
+            Some(notice::NOT_POSTED.to_string())
         }
     }
 }
 
-/// The notice for a phone message that was posted.
-pub fn receipt(nobody_can_answer: bool, decision: bool) -> &'static str {
-    match (nobody_can_answer, decision) {
-        (true, _) => notice::NO_AI,
-        (false, true) => notice::DECISION,
-        (false, false) => notice::RECEIVED,
-    }
-}
-
-/// Formats a specific verification notice for a phone message, indicating which AI is assigned or taking the task.
-pub fn formatted_receipt(nobody_can_answer: bool, decision: bool, targets: &[String]) -> String {
-    if nobody_can_answer {
-        return receipt(true, decision).to_string();
-    }
+fn posting_follow_up(decision: bool, targets: &[String]) -> Option<String> {
+    if targets.is_empty() { return Some(notice::NO_AI.to_string()); }
+    if !decision { return None; }
     let names: Vec<String> = targets
         .iter()
         .map(|id| crate::agents::by_id(id).map_or(id.clone(), |a| a.name.to_string()))
         .collect();
-    if decision {
-        if names.is_empty() {
-            receipt(false, true).to_string()
-        } else {
-            format!("Consilium: Decision received and passed to {}.", names.join(", "))
-        }
-    } else if names.is_empty() {
-        receipt(false, false).to_string()
-    } else if names.len() == 1 {
-        format!("Consilium: Message received. Assigned to {}. Please wait for the response.", names[0])
-    } else {
-        format!("Consilium: Message received. Assigned to the council ({}). Please wait for the response.", names.join(", "))
-    }
+    Some(format!("Consilium: Decision received and passed to {}.", names.join(", ")))
 }
 
 /// Send at most one new message before giving phone intake another turn.
@@ -992,34 +1056,69 @@ mod tests {
     }
 
     #[test]
-    fn every_phone_message_gets_a_notice_back() {
-        assert_eq!(receipt(false, false), notice::RECEIVED);
-        assert_eq!(receipt(false, true), notice::DECISION);
-        assert_eq!(receipt(true, false), notice::NO_AI);
-        assert_eq!(receipt(true, true), notice::NO_AI);
-        for n in [notice::RECEIVED, notice::DECISION, notice::NO_AI, notice::NOT_POSTED, notice::NO_CONVERSATION, notice::BACK_ONLINE] {
-            assert!(n.starts_with("Consilium: "), "{n}");
+    fn receipt_is_sent_to_the_original_group_before_the_chat_can_post() {
+        let event = sync(ACC, json!({"message": "first", "timestamp": 7, "groupInfo": {"groupId": "CLAUDE="}}));
+        let first = parse_incoming(&event, ACC, &groups()).unwrap();
+        let (post, incoming) = mpsc::sync_channel(1);
+        let notices = std::cell::RefCell::new(Vec::new());
+        acknowledge_and_queue(first.clone(), &post, |group, text| {
+            assert_eq!(incoming.try_recv(), Err(mpsc::TryRecvError::Empty));
+            notices.borrow_mut().push((group.to_owned(), text.to_owned()));
+        });
+        assert_eq!(*notices.borrow(), [("CLAUDE=".to_string(), notice::RECEIVED.to_string())]);
+
+        // A prior post is blocked and the bounded queue is full. A later intake still gets
+        // an immediate receipt and a truthful failure notice rather than blocking on the queue.
+        let mut second = first.clone();
+        second.timestamp += 1;
+        acknowledge_and_queue(second, &post, |group, text| {
+            notices.borrow_mut().push((group.to_owned(), text.to_owned()));
+        });
+        assert_eq!(incoming.try_recv().unwrap(), first);
+        assert_eq!(incoming.try_recv(), Err(mpsc::TryRecvError::Empty));
+        assert_eq!(*notices.borrow(), [
+            ("CLAUDE=".to_string(), notice::RECEIVED.to_string()),
+            ("CLAUDE=".to_string(), notice::RECEIVED.to_string()),
+            ("CLAUDE=".to_string(), notice::NOT_POSTED.to_string()),
+        ]);
+    }
+
+    #[test]
+    fn only_special_posting_outcomes_have_a_second_notice() {
+        assert_eq!(posting_follow_up(false, &["gemini".into()]), None);
+        assert_eq!(posting_follow_up(false, &["claude".into(), "gemini".into()]), None);
+        assert_eq!(
+            posting_follow_up(true, &["claude".into()]).as_deref(),
+            Some("Consilium: Decision received and passed to Claude.")
+        );
+        assert_eq!(posting_follow_up(false, &[]).as_deref(), Some(notice::NO_AI));
+    }
+
+    #[test]
+    fn verified_signal_clients_can_post_without_echoing_bridge_notices() {
+        let aci = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        let cfg = BridgeConfig { account: ACC.into(), groups: groups(), allowed_acis: vec![aci.into()], ..Default::default() };
+        let mut event = sync(ACC, json!({"message": "hello from my linked device", "timestamp": 7, "groupInfo": {"groupId": "MAIN="}}));
+        assert!(verified_incoming(&event, &cfg).is_some(), "legacy own-account envelope");
+        event["params"]["envelope"]["sourceDevice"] = json!(4);
+        event["params"]["envelope"]["sourceUuid"] = json!(aci);
+        assert!(verified_incoming(&event, &cfg).is_some(), "verified linked client");
+        event["params"]["envelope"]["sourceUuid"] = json!("00000000-0000-0000-0000-000000000000");
+        assert!(verified_incoming(&event, &cfg).is_none(), "wrong exposed ACI");
+        event["params"]["envelope"]["sourceUuid"] = json!(aci);
+        for text in [notice::RECEIVED, notice::NOT_POSTED, notice::BACK_ONLINE, "Startup check on Consilium (test)"] {
+            event["params"]["envelope"]["syncMessage"]["sentMessage"]["message"] = json!(text);
+            assert!(verified_incoming(&event, &cfg).is_none(), "bridge-generated echo");
         }
     }
 
     #[test]
-    fn formatted_receipt_specifies_assigned_ai_and_council() {
-        assert_eq!(
-            formatted_receipt(false, false, &["gemini".into()]),
-            "Consilium: Message received. Assigned to Gemini. Please wait for the response."
-        );
-        assert_eq!(
-            formatted_receipt(false, false, &["claude".into(), "gemini".into()]),
-            "Consilium: Message received. Assigned to the council (Claude, Gemini). Please wait for the response."
-        );
-        assert_eq!(
-            formatted_receipt(false, true, &["claude".into()]),
-            "Consilium: Decision received and passed to Claude."
-        );
-        assert_eq!(
-            formatted_receipt(true, false, &[]),
-            notice::NO_AI
-        );
+    fn a_buffered_repeat_has_no_second_receipt() {
+        let event = sync(ACC, json!({"message": "hello", "timestamp": 7, "groupInfo": {"groupId": "MAIN="}}));
+        let first = parse_incoming(&event, ACC, &groups()).unwrap();
+        let mut accepted = RecentInbound::default();
+        assert!(accepted.first(&first));
+        assert!(!accepted.first(&first.clone()));
     }
 
     #[test]

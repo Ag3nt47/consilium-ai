@@ -27,6 +27,9 @@ const RESTART_COOLDOWN_MS: u64 = 60_000;
 const POWER_COOLDOWN_MS: u64 = 15_000;
 const COMMAND_LIST: &str = include_str!("watchdog_commands.txt");
 const MAX_RECENT_COMMANDS: usize = 128;
+const VERIFIED_RECEIPT: &str = "Consilium Watchdog received and verified your command.";
+const UNRECOGNIZED_RECEIPT: &str =
+    "Consilium Watchdog received your message. Send a listed command as plain text to run it.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -114,24 +117,22 @@ enum Admission {
 
 impl Replay {
     fn admit(&mut self, command: Command, now: u64) -> Admission {
-        self.timestamps
-            .retain(|timestamp| now.saturating_sub(*timestamp) <= MAX_COMMAND_AGE_MS);
-        self.wake_timestamps
-            .retain(|timestamp| now.saturating_sub(*timestamp) <= MAX_WAKE_COMMAND_AGE_MS);
-        let (max_age, timestamps) = match command.action {
-            Action::Wake(_) => (MAX_WAKE_COMMAND_AGE_MS, &mut self.wake_timestamps),
-            Action::Sleep(_) => (MAX_SLEEP_COMMAND_AGE_MS, &mut self.timestamps),
-            _ => (MAX_COMMAND_AGE_MS, &mut self.timestamps),
+        let (max_age, retain_age, timestamps) = match command.action {
+            Action::Wake(_) => (
+                MAX_WAKE_COMMAND_AGE_MS,
+                MAX_WAKE_COMMAND_AGE_MS,
+                &mut self.wake_timestamps,
+            ),
+            Action::Sleep(_) => (
+                MAX_SLEEP_COMMAND_AGE_MS,
+                MAX_COMMAND_AGE_MS,
+                &mut self.timestamps,
+            ),
+            _ => (MAX_COMMAND_AGE_MS, MAX_COMMAND_AGE_MS, &mut self.timestamps),
         };
-        if command.timestamp == 0
-            || now.saturating_sub(command.timestamp) > max_age
-            || command.timestamp.saturating_sub(now) > MAX_FUTURE_MS
-            || timestamps.len() >= MAX_RECENT_COMMANDS
-            || timestamps.contains(&command.timestamp)
-        {
+        if !remember(timestamps, command.timestamp, now, max_age, retain_age) {
             return Admission::Ignored;
         }
-        timestamps.push(command.timestamp);
         let last = match command.action {
             Action::RestartApp => &mut self.app_restart,
             Action::RestartSignal => &mut self.signal_restart,
@@ -143,6 +144,20 @@ impl Replay {
         }
         *last = Some(now);
         Admission::Accepted
+    }
+
+    fn admit_unrecognized(&mut self, timestamp: u64, now: u64) -> Admission {
+        if remember(
+            &mut self.timestamps,
+            timestamp,
+            now,
+            MAX_COMMAND_AGE_MS,
+            MAX_COMMAND_AGE_MS,
+        ) {
+            Admission::Accepted
+        } else {
+            Admission::Ignored
+        }
     }
 
     fn admit_power(&mut self, target: PowerTarget, now: u64) -> Admission {
@@ -166,6 +181,26 @@ impl Replay {
 }
 
 #[cfg(windows)]
+fn remember(
+    timestamps: &mut Vec<u64>,
+    timestamp: u64,
+    now: u64,
+    max_age: u64,
+    retain_age: u64,
+) -> bool {
+    timestamps.retain(|timestamp| now.saturating_sub(*timestamp) <= retain_age);
+    if timestamp == 0
+        || now.saturating_sub(timestamp) > max_age
+        || timestamp.saturating_sub(now) > MAX_FUTURE_MS
+        || timestamps.len() >= MAX_RECENT_COMMANDS
+        || timestamps.contains(&timestamp)
+    {
+        return false;
+    }
+    timestamps.push(timestamp);
+    true
+}
+
 pub(crate) fn worker_running(data: &Path) -> Result<bool, String> {
     try_profile_lock(data, Mode::Desktop).map(|lock| lock.is_none())
 }
@@ -252,23 +287,49 @@ fn verified_envelope<'a>(value: &'a Value, cfg: &BridgeConfig) -> Option<&'a Val
     (source == Some(cfg.account.as_str()) && cfg.is_sender_allowed(aci)).then_some(env)
 }
 
-fn command(value: &Value, cfg: &BridgeConfig, group: &str) -> Option<Command> {
+struct WatchdogMessage {
+    timestamp: u64,
+    action: Option<Action>,
+}
+
+fn watchdog_message(value: &Value, cfg: &BridgeConfig, group: &str) -> Option<WatchdogMessage> {
     let env = verified_envelope(value, cfg)?;
-    // Linked desktops and daemon acknowledgments cannot restart this computer.
+    // Linked desktops and daemon acknowledgments are never phone requests.
     if env.get("sourceDevice").and_then(Value::as_u64) != Some(1) {
         return None;
     }
     let sent = env.pointer("/syncMessage/sentMessage")?;
-    if sent.pointer("/groupInfo/groupId").and_then(Value::as_str) != Some(group)
-        || sent.get("attachments").is_some_and(|files| {
-            !files.is_null() && files.as_array().is_none_or(|files| !files.is_empty())
-        })
-    {
+    if sent.pointer("/groupInfo/groupId").and_then(Value::as_str) != Some(group) {
         return None;
     }
-    Some(Command {
-        action: parse_action(sent.get("message")?.as_str()?)?,
+    let text = sent
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let has_attachments = match sent.get("attachments") {
+        None | Some(Value::Null) => false,
+        Some(files) => !files.as_array()?.is_empty(),
+    };
+    // Read receipts, reactions and group updates without a chat message do not get a reply.
+    if text.is_none() && !has_attachments {
+        return None;
+    }
+    Some(WatchdogMessage {
+        action: if has_attachments {
+            None
+        } else {
+            text.and_then(parse_action)
+        },
         timestamp: sent.get("timestamp")?.as_u64()?,
+    })
+}
+
+#[cfg(test)]
+fn command(value: &Value, cfg: &BridgeConfig, group: &str) -> Option<Command> {
+    let message = watchdog_message(value, cfg, group)?;
+    Some(Command {
+        action: message.action?,
+        timestamp: message.timestamp,
     })
 }
 
@@ -299,20 +360,25 @@ fn parse_action(text: &str) -> Option<Action> {
 
 enum Received {
     Command(Command),
+    Unrecognized(u64),
     Council(Incoming),
 }
 
 fn received(value: &Value, cfg: &BridgeConfig, group: &str, mode: Mode) -> Option<Received> {
-    if let Some(command) = command(value, cfg, group) {
-        return mode
-            .accepts(command.action)
-            .then_some(Received::Command(command));
+    if let Some(message) = watchdog_message(value, cfg, group) {
+        return match message.action {
+            Some(action) => mode.accepts(action).then_some(Received::Command(Command {
+                action,
+                timestamp: message.timestamp,
+            })),
+            None => (mode == Mode::Desktop).then_some(Received::Unrecognized(message.timestamp)),
+        };
     }
     if mode == Mode::PowerRelay {
         return None;
     }
     verified_envelope(value, cfg)?;
-    let message = signal_chat::parse_incoming(value, &cfg.account, &cfg.groups)?;
+    let message = signal_chat::verified_incoming(value, cfg)?;
     bufferable_council_text(&message.text).then_some(Received::Council(message))
 }
 
@@ -444,9 +510,8 @@ pub(crate) fn enroll(data: &Path) -> Result<(), String> {
 pub(crate) fn enroll_existing_relay(data: &Path) -> Result<(), String> {
     let _lock = profile_lock(data, Mode::PowerRelay)?;
     let cfg = BridgeConfig::load(&bridge::config_path(None))?;
-    let identity = identity(&cfg).ok_or(
-        "Verify Signal on the relay before enrolling it in the watchdog group.",
-    )?;
+    let identity = identity(&cfg)
+        .ok_or("Verify Signal on the relay before enrolling it in the watchdog group.")?;
     signal_chat::addr(&cfg)?;
     let groups = signal_chat::call(&cfg, "listGroups", json!({}))?;
     let group = find_group(&cfg, &groups)?
@@ -551,35 +616,52 @@ pub(crate) fn run_with_mode(
             if !matches_config().unwrap_or(false) {
                 continue;
             }
-            let command = match event {
+            let now = crate::store::now_ms();
+            let (action, admission) = match event {
                 Received::Council(message) => {
                     if let Some(inbox) = &council_inbox {
                         let _ = inbox.push(&cfg, &message);
                     }
                     continue;
                 }
-                Received::Command(command) => command,
+                Received::Command(command) => (Some(command.action), replay.admit(command, now)),
+                Received::Unrecognized(timestamp) => {
+                    (None, replay.admit_unrecognized(timestamp, now))
+                }
             };
-            let admission = replay.admit(command, crate::store::now_ms());
             if admission == Admission::Ignored {
                 continue;
             }
-            // Persist the command before doing anything. If the process dies after the restart
-            // request, a duplicate delivery must never execute it a second time.
+            // Persist admission before replying or acting, so a restart cannot replay the command.
             save(&replay_path, &replay)?;
             if !group_still_private(&cfg, &group) || !matches_config().unwrap_or(false) {
                 continue;
             }
-            let reply = match admission {
-                Admission::CoolingDown => match mode {
-                    Mode::Desktop => "Consilium Watchdog already handled a restart request recently. Try again in a minute.".into(),
-                    Mode::PowerRelay => "The power relay already handled a request for that computer recently. Try again in a few seconds.".into(),
+            let is_action_result = admission == Admission::Accepted && action.is_some();
+            let reply = match (admission, action) {
+                (Admission::CoolingDown, _) => match mode {
+                    Mode::Desktop => "Received and verified. Consilium Watchdog already handled a restart request recently. Try again in a minute.".into(),
+                    Mode::PowerRelay => "Received and verified. The power relay already handled a request for that computer recently. Try again in a few seconds.".into(),
                 },
-                Admission::Accepted => handle(command.action),
-                Admission::Ignored => continue,
+                (Admission::Accepted, Some(action)) => {
+                    let _ = signal_chat::send_group_receipt(&cfg, &group, VERIFIED_RECEIPT);
+                    if !matches_config().unwrap_or(false) {
+                        continue;
+                    }
+                    handle(action)
+                }
+                (Admission::Accepted, None) => UNRECOGNIZED_RECEIPT.into(),
+                (Admission::Ignored, _) => continue,
             };
-            if matches_config().unwrap_or(false) {
-                let _ = signal_chat::send_group(&cfg, &group, &reply);
+            if is_action_result {
+                if matches_config().unwrap_or(false)
+                    && group_still_private(&cfg, &group)
+                    && matches_config().unwrap_or(false)
+                {
+                    let _ = signal_chat::send_group(&cfg, &group, &reply);
+                }
+            } else if matches_config().unwrap_or(false) {
+                let _ = signal_chat::send_group_receipt(&cfg, &group, &reply);
             }
         }
     }
@@ -684,13 +766,59 @@ mod tests {
             )
             .is_none());
         }
+        assert!(matches!(
+            received(
+                &receive(GROUP, PHONE, ACI, 1, "other message"),
+                &cfg,
+                GROUP,
+                Mode::Desktop,
+            ),
+            Some(Received::Unrecognized(1234))
+        ));
+    }
+
+    #[test]
+    fn one_listener_receipts_unknown_messages_and_attachments_without_executing_them() {
+        let cfg = config();
+        let unknown = receive(GROUP, PHONE, ACI, 1, "hello");
+        assert!(matches!(
+            received(&unknown, &cfg, GROUP, Mode::Desktop),
+            Some(Received::Unrecognized(1234))
+        ));
+        assert!(received(&unknown, &cfg, GROUP, Mode::PowerRelay).is_none());
+
+        let mut attachment = receive(GROUP, PHONE, ACI, 1, "restart");
+        let sent = attachment
+            .pointer_mut("/params/result/envelope/syncMessage/sentMessage")
+            .unwrap();
+        sent["attachments"] = json!([{"id": "fixture"}]);
+        assert!(matches!(
+            received(&attachment, &cfg, GROUP, Mode::Desktop),
+            Some(Received::Unrecognized(1234))
+        ));
+        assert!(received(&attachment, &cfg, GROUP, Mode::PowerRelay).is_none());
         assert!(received(
-            &receive(GROUP, PHONE, ACI, 1, "other message"),
+            &receive(GROUP, PHONE, ACI, 2, "hello"),
             &cfg,
             GROUP,
             Mode::Desktop
         )
         .is_none());
+        assert!(received(
+            &receive(GROUP, PHONE, ACI, 1, ""),
+            &cfg,
+            GROUP,
+            Mode::Desktop
+        )
+        .is_none());
+
+        let mut replay = Replay::default();
+        assert_eq!(replay.admit_unrecognized(1234, 1234), Admission::Accepted);
+        assert_eq!(replay.admit_unrecognized(1234, 1235), Admission::Ignored);
+        assert_eq!(
+            replay.admit_unrecognized(1235, 1236 + MAX_COMMAND_AGE_MS),
+            Admission::Ignored
+        );
     }
 
     #[test]

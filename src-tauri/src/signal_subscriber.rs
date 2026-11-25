@@ -42,6 +42,7 @@ pub(crate) struct Subscription<T> {
     task: Option<JoinHandle<()>>,
 }
 impl<T> Subscription<T> {
+    #[cfg(test)]
     pub(crate) fn is_ready(&self) -> bool { self.control.ready.load(Ordering::Acquire) }
     pub(crate) fn take_daemon_unresponsive(&self) -> bool {
         self.control.daemon_unresponsive.swap(false, Ordering::AcqRel)
@@ -60,7 +61,6 @@ impl<T> Drop for Subscription<T> {
     }
 }
 
-#[cfg(any(windows, test))]
 pub(crate) fn start<T, Current, Decode, Ready>(endpoint: SocketAddr, current: Current, decode: Decode, ready: Ready) -> Result<Subscription<T>, String>
 where
     T: Send + 'static,
