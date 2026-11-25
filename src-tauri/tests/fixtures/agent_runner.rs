@@ -25,7 +25,53 @@ fn framed_progress(large: bool, stderr_between_chunks: bool) {
 fn main() {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).unwrap();
+    if let Some(pid_file) = std::env::args().nth(2) {
+        std::fs::write(pid_file, std::process::id().to_string()).unwrap();
+    }
     match std::env::args().nth(1).as_deref() {
+        Some(
+            mode @ ("final-stall" | "final-split-stall" | "final-legacy-stall"
+            | "final-exit-failure"),
+        ) => {
+            let result = r#"{"type":"result","is_error":false,"result":"finished","usage":{"input_tokens":5,"output_tokens":7},"modelUsage":{"fixture-model":{"outputTokens":7}}}"#;
+            if mode == "final-split-stall" {
+                print!("{}", &result[..17]);
+                std::io::stdout().flush().unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+                // No newline: the runner must recognize the complete, flushed JSON record.
+                print!("{}", &result[17..]);
+            } else if mode == "final-legacy-stall" {
+                print!("{}", result.replacen(r#""type":"result","#, "", 1));
+            } else {
+                println!("{result}");
+            }
+            std::io::stdout().flush().unwrap();
+            if mode == "final-exit-failure" {
+                std::process::exit(7);
+            }
+            std::thread::sleep(Duration::from_secs(30));
+        }
+        Some("final-error-stall") => {
+            println!(r#"{{"type":"result","is_error":true,"result":"Not logged in"}}"#);
+            std::io::stdout().flush().unwrap();
+            std::thread::sleep(Duration::from_secs(30));
+        }
+        Some("fake-final-stall") => {
+            println!(
+                r#"{{"type":"assistant","result":"not a terminal reply","message":{{"content":[{{"type":"text","text":"a tool said type:result"}}]}}}}"#
+            );
+            std::io::stdout().flush().unwrap();
+            std::thread::sleep(Duration::from_secs(30));
+        }
+        Some("stderr-final-stall") => {
+            eprintln!(r#"{{"type":"result","is_error":false,"result":"stderr is not a reply"}}"#);
+            std::thread::sleep(Duration::from_secs(30));
+        }
+        Some("partial-final-stall") => {
+            print!(r#"{{"type":"result","is_error":false,"result":"not complete"#);
+            std::io::stdout().flush().unwrap();
+            std::thread::sleep(Duration::from_secs(30));
+        }
         Some("progress") => {
             for _ in 0..6 {
                 progress();

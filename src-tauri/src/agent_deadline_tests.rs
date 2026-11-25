@@ -45,8 +45,22 @@ async fn fixture(
     cancel: &CancellationToken,
     activity: Option<ActivitySink>,
 ) -> Result<String, String> {
+    fixture_reply(mode, idle, cancel, activity, None)
+        .await
+        .map(|reply| reply.text)
+}
+
+async fn fixture_reply(
+    mode: &str,
+    idle: Duration,
+    cancel: &CancellationToken,
+    activity: Option<ActivitySink>,
+    pid_file: Option<&Path>,
+) -> Result<AgentReply, String> {
     let program = native_fixture();
     let dir = program.parent().unwrap();
+    let mut args = vec![mode.into()];
+    args.extend(pid_file.map(|p| p.as_os_str().to_owned()));
     execute(
         program,
         Kind::ClaudeCode,
@@ -54,7 +68,7 @@ async fn fixture(
         dir,
         &dir.join("unused-reply"),
         Plan {
-            args: vec![mode.into()],
+            args,
             input: "synthetic turn".into(),
         },
         cancel,
@@ -63,7 +77,109 @@ async fn fixture(
         vec![],
     )
     .await
-    .map(|reply| reply.text)
+}
+
+#[tokio::test]
+async fn final_result_survives_a_cli_that_does_not_exit() {
+    // The result arrives immediately, so even a short activity budget must no longer apply.
+    // Compile the fixture before starting the bound on the runner itself.
+    native_fixture();
+    for mode in ["final-stall", "final-split-stall", "final-legacy-stall"] {
+        let pid_file =
+            std::env::temp_dir().join(format!("final-result-{}.pid", uuid::Uuid::new_v4()));
+        let reply = tokio::time::timeout(
+            Duration::from_secs(20),
+            fixture_reply(
+                mode,
+                Duration::from_secs(1),
+                &CancellationToken::new(),
+                None,
+                Some(&pid_file),
+            ),
+        )
+        .await
+        .expect("a final result must not wait for the CLI's 30-second stall")
+        .unwrap();
+        assert_eq!(reply.text, "finished");
+        let usage = reply.usage.unwrap();
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (5, 7, 12)
+        );
+        assert_eq!(reply.model.as_deref(), Some("fixture-model"));
+        let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        let _ = std::fs::remove_file(pid_file);
+        let mut system = sysinfo::System::new();
+        let pid = sysinfo::Pid::from_u32(pid);
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        assert!(
+            system.process(pid).is_none(),
+            "the completed CLI must be reaped"
+        );
+    }
+}
+
+#[tokio::test]
+async fn final_result_does_not_hide_provider_or_process_errors() {
+    for (mode, expected) in [
+        ("final-error-stall", "Not logged in"),
+        ("final-exit-failure", "exit 7:"),
+    ] {
+        let error = tokio::time::timeout(
+            Duration::from_secs(20),
+            fixture(
+                mode,
+                Duration::from_secs(1),
+                &CancellationToken::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("a final provider error must be delivered promptly")
+        .unwrap_err();
+        assert!(error.starts_with(expected), "{mode}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn stop_still_wins_after_a_final_result() {
+    let cancel = CancellationToken::new();
+    let on_result = cancel.clone();
+    let sink: ActivitySink = Arc::new(move |signal| {
+        if signal.kind == "reporting" {
+            on_result.cancel();
+        }
+    });
+    let error = fixture("final-stall", Duration::from_secs(1), &cancel, Some(sink))
+        .await
+        .unwrap_err();
+    assert_eq!(error, "stopped");
+}
+
+#[tokio::test]
+async fn nonterminal_output_cannot_claim_a_completed_result() {
+    for mode in [
+        "fake-final-stall",
+        "stderr-final-stall",
+        "partial-final-stall",
+    ] {
+        let error = tokio::time::timeout(
+            Duration::from_secs(15),
+            fixture(
+                mode,
+                Duration::from_secs(1),
+                &CancellationToken::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("nested, stderr and partial results must still time out")
+        .unwrap_err();
+        assert!(
+            error.starts_with("no activity for 1 seconds"),
+            "{mode}: {error}"
+        );
+    }
 }
 
 #[tokio::test]
