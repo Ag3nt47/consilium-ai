@@ -1,3 +1,4 @@
+#[cfg(any(windows, test))]
 use super::{load, receiver_config, Enrollment, ENROLLMENT_FILE};
 use crate::bridge::BridgeConfig;
 use crate::signal_chat::{Incoming, Origin};
@@ -9,6 +10,7 @@ use std::path::{Path, PathBuf};
 const MAX_AGE_MS: u64 = 15 * 60_000;
 const MAX_FUTURE_MS: u64 = 30_000;
 const MAX_PENDING: usize = 64;
+#[cfg(any(windows, test))]
 const MAX_RECENT: usize = 2_048;
 const MAX_MESSAGE_BYTES: usize = 48 * 1024;
 
@@ -60,6 +62,7 @@ impl Journal {
         Ok(true)
     }
 
+    #[cfg(any(windows, test))]
     fn take(&mut self, cfg: &BridgeConfig, now: u64) -> Option<Incoming> {
         self.prune(now);
         // Never evict a recent receipt to make room for another delivery during its replay window.
@@ -96,6 +99,7 @@ pub(crate) struct CouncilInbox {
 }
 
 impl CouncilInbox {
+    #[cfg(any(windows, test))]
     pub(crate) fn from_config(data: &Path, cfg: &BridgeConfig) -> Option<Self> {
         let enrollment = load::<Enrollment>(&data.join(ENROLLMENT_FILE))
             .ok()
@@ -121,6 +125,7 @@ impl CouncilInbox {
         self.with_journal(|journal, now| journal.push(msg, now))
     }
 
+    #[cfg(any(windows, test))]
     pub(crate) fn take(&self, cfg: &BridgeConfig) -> Result<Option<Incoming>, String> {
         let path = self.data.join("signal-watchdog-inbox.json");
         if !path.is_file() {

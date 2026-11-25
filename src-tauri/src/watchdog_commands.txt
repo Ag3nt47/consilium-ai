@@ -1,0 +1,15 @@
+Consilium Watchdog commands
+
+Windows app
+status — Check whether Consilium is running.
+restart — Open or restart Consilium.
+restart signal — Reconnect the app's Signal listener.
+
+Power controls with an always-on relay
+power status — Check whether the relay can reach the configured computers.
+sleep windows, sleep mac, sleep linux, sleep both — Request sleep.
+wake windows, wake mac, wake linux, wake both — Send a network wake request.
+
+Send commands from your primary Signal phone. Power controls require a configured relay and tested wake support on each computer.
+
+With the Windows wake timer enabled, Windows checks hourly on AC power while you stay signed in. The check window is one minute. Windows can return to sleep after its unattended idle timeout. A queued wake request is valid for up to two hours. Send sleep and restart commands while the target is awake.

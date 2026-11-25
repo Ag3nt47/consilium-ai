@@ -78,3 +78,33 @@ The watchdog accepts only these commands from the verified primary phone in the 
 While the desktop is unavailable, the listener can save up to 64 ordinary Consilium group messages locally for 15 minutes. Verification, approval, and launcher commands need the live desktop conversation.
 
 App relaunch attempts are recorded in `watchdog/relaunch.log` inside the Consilium data folder. The helper confirms its own startup before the app exits, then waits for the original process before reopening the app.
+
+## 5. Scheduled Windows wake and network power commands
+
+On Windows, `scripts/Install-ConsiliumWakeTimer.ps1` registers an hourly wake task on AC power while the current user stays signed in. The first run is one hour after installation. The task gives the running Signal listener one minute to reconnect, with the display free to stay off. Windows handles unattended return to sleep. Run the script with `-Action Inspect` to see its schedule or `-Action Disable` to pause it. The active power plan must allow wake timers on AC.
+
+Run `node scripts/watchdog-commands.mjs` with the updated installed app to post the command list and timing to **Consilium Watchdog**. `consilium watchdog-signal commands` sends the same list.
+
+The listener can accept an explicit `wake mac` or `wake linux` after Windows resumes. A wake request can wait up to two hours for the next check. Sleep requests expire after one minute. The normal Windows desktop commands keep their five-minute limit, so send them when Windows is awake.
+
+To handle network power commands, verify Signal on the relay and run `consilium watchdog-signal relay` with a local `watchdog-power.json` in its Consilium data folder. The relay can run on the Windows PC during the hourly check, or on a separate device that stays awake. Private group membership and the primary phone are checked before an operation runs.
+
+Configure only the computers you intend to control. For example, a Windows relay with a Mac as its sole target can use a file like this after replacing the addresses and SSH settings.
+
+```json
+{
+  "ssh_config": "C:/Users/you/.ssh/consilium-watchdog",
+  "mac": {
+    "wake": {
+      "mac": "02:11:22:33:44:55",
+      "source_ipv4": "192.168.10.20"
+    },
+    "ssh_alias": "consilium-mac",
+    "status_endpoint": "192.168.10.21:22"
+  }
+}
+```
+
+`source_ipv4` is the relay's local address on the target's network. The corresponding adapter supplies the local broadcast address. Use the target's wake-capable Ethernet MAC address and test each machine from actual sleep. `power status` shows which configured TCP endpoints accept a connection.
+
+Sleep requires working public-key SSH with the host key already verified and an account permitted to suspend that PC. Limit the relay's SSH key to the fixed `consilium watchdog-signal sleep-local` command. Test individual targets and their wake paths before using `sleep both`. The `both` commands require a Windows target and one Mac or Linux target.

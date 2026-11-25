@@ -1,6 +1,7 @@
 //! Phone commands in a dedicated Signal group. This listener runs outside the desktop app.
 use crate::bridge::{self, BridgeConfig};
 use crate::signal_chat::{self, subscriber, Incoming};
+use crate::watchdog_power::PowerTarget;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -15,12 +16,16 @@ pub(crate) mod inbox;
 
 const GROUP_NAME: &str = "Consilium Watchdog";
 const GROUP_DESCRIPTION: &str = "Private recovery commands for Consilium. Send restart, restart signal, or status from your primary phone.";
+#[cfg(windows)]
 const WELCOME: &str = "Consilium Watchdog is separate from the council. From your primary Signal phone, send restart to relaunch Consilium, restart signal to request bridge recovery, or status to check this computer.";
 const ENROLLMENT_FILE: &str = "signal-watchdog.json";
-const REPLAY_FILE: &str = "signal-watchdog-commands.json";
 const MAX_COMMAND_AGE_MS: u64 = 5 * 60_000;
 const MAX_FUTURE_MS: u64 = 30_000;
+const MAX_SLEEP_COMMAND_AGE_MS: u64 = 60_000;
+const MAX_WAKE_COMMAND_AGE_MS: u64 = 2 * 60 * 60_000;
 const RESTART_COOLDOWN_MS: u64 = 60_000;
+const POWER_COOLDOWN_MS: u64 = 15_000;
+const COMMAND_LIST: &str = include_str!("watchdog_commands.txt");
 const MAX_RECENT_COMMANDS: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +33,51 @@ pub(crate) enum Action {
     RestartApp,
     RestartSignal,
     Status,
+    Wake(PowerTarget),
+    Sleep(PowerTarget),
+    PowerStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Desktop,
+    PowerRelay,
+}
+
+impl Mode {
+    fn accepts(self, action: Action) -> bool {
+        matches!(
+            (self, action),
+            (
+                Self::Desktop,
+                Action::RestartApp | Action::RestartSignal | Action::Status
+            ) | (
+                Self::PowerRelay,
+                Action::Wake(_) | Action::Sleep(_) | Action::PowerStatus
+            )
+        )
+    }
+
+    fn lock_file(self) -> &'static str {
+        match self {
+            Self::Desktop => "signal-watchdog.lock",
+            Self::PowerRelay => "signal-watchdog-power.lock",
+        }
+    }
+
+    fn enrollment_file(self) -> &'static str {
+        match self {
+            Self::Desktop => ENROLLMENT_FILE,
+            Self::PowerRelay => "signal-watchdog-power.json",
+        }
+    }
+
+    fn replay_file(self) -> &'static str {
+        match self {
+            Self::Desktop => "signal-watchdog-commands.json",
+            Self::PowerRelay => "signal-watchdog-power-commands.json",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,8 +97,12 @@ struct Enrollment {
 #[derive(Default, Deserialize, Serialize)]
 struct Replay {
     timestamps: Vec<u64>,
+    #[serde(default)]
+    wake_timestamps: Vec<u64>,
     app_restart: Option<u64>,
     signal_restart: Option<u64>,
+    #[serde(default)]
+    power: [Option<u64>; 3],
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -62,19 +116,27 @@ impl Replay {
     fn admit(&mut self, command: Command, now: u64) -> Admission {
         self.timestamps
             .retain(|timestamp| now.saturating_sub(*timestamp) <= MAX_COMMAND_AGE_MS);
+        self.wake_timestamps
+            .retain(|timestamp| now.saturating_sub(*timestamp) <= MAX_WAKE_COMMAND_AGE_MS);
+        let (max_age, timestamps) = match command.action {
+            Action::Wake(_) => (MAX_WAKE_COMMAND_AGE_MS, &mut self.wake_timestamps),
+            Action::Sleep(_) => (MAX_SLEEP_COMMAND_AGE_MS, &mut self.timestamps),
+            _ => (MAX_COMMAND_AGE_MS, &mut self.timestamps),
+        };
         if command.timestamp == 0
-            || now.saturating_sub(command.timestamp) > MAX_COMMAND_AGE_MS
+            || now.saturating_sub(command.timestamp) > max_age
             || command.timestamp.saturating_sub(now) > MAX_FUTURE_MS
-            || self.timestamps.len() >= MAX_RECENT_COMMANDS
-            || self.timestamps.contains(&command.timestamp)
+            || timestamps.len() >= MAX_RECENT_COMMANDS
+            || timestamps.contains(&command.timestamp)
         {
             return Admission::Ignored;
         }
-        self.timestamps.push(command.timestamp);
+        timestamps.push(command.timestamp);
         let last = match command.action {
             Action::RestartApp => &mut self.app_restart,
             Action::RestartSignal => &mut self.signal_restart,
-            Action::Status => return Admission::Accepted,
+            Action::Status | Action::PowerStatus => return Admission::Accepted,
+            Action::Wake(target) | Action::Sleep(target) => return self.admit_power(target, now),
         };
         if last.is_some_and(|previous| now.saturating_sub(previous) < RESTART_COOLDOWN_MS) {
             return Admission::CoolingDown;
@@ -82,25 +144,45 @@ impl Replay {
         *last = Some(now);
         Admission::Accepted
     }
+
+    fn admit_power(&mut self, target: PowerTarget, now: u64) -> Admission {
+        let affected: &[usize] = match target {
+            PowerTarget::Windows => &[0],
+            PowerTarget::Mac => &[1],
+            PowerTarget::Linux => &[2],
+            PowerTarget::Both => &[0, 1, 2],
+        };
+        if affected.iter().any(|&slot| {
+            self.power[slot]
+                .is_some_and(|previous| now.saturating_sub(previous) < POWER_COOLDOWN_MS)
+        }) {
+            return Admission::CoolingDown;
+        }
+        for &slot in affected {
+            self.power[slot] = Some(now);
+        }
+        Admission::Accepted
+    }
 }
 
+#[cfg(windows)]
 pub(crate) fn worker_running(data: &Path) -> Result<bool, String> {
-    try_profile_lock(data).map(|lock| lock.is_none())
+    try_profile_lock(data, Mode::Desktop).map(|lock| lock.is_none())
 }
 
-fn profile_lock(data: &Path) -> Result<File, String> {
-    try_profile_lock(data)?
+fn profile_lock(data: &Path, mode: Mode) -> Result<File, String> {
+    try_profile_lock(data, mode)?
         .ok_or_else(|| "Consilium's Signal watchdog is already running for this profile.".into())
 }
 
-fn try_profile_lock(data: &Path) -> Result<Option<File>, String> {
+fn try_profile_lock(data: &Path, mode: Mode) -> Result<Option<File>, String> {
     fs::create_dir_all(data)
         .map_err(|e| format!("Couldn't open the Signal watchdog data folder: {e}"))?;
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(data.join("signal-watchdog.lock"))
+        .open(data.join(mode.lock_file()))
         .map_err(|e| format!("Couldn't open the Signal watchdog lock: {e}"))?;
     match lock.try_lock() {
         Ok(()) => Ok(Some(lock)),
@@ -184,21 +266,35 @@ fn command(value: &Value, cfg: &BridgeConfig, group: &str) -> Option<Command> {
     {
         return None;
     }
-    let text = sent.get("message")?.as_str()?.trim();
-    let action = if text.eq_ignore_ascii_case("restart") || text.eq_ignore_ascii_case("restart app")
-    {
-        Action::RestartApp
-    } else if text.eq_ignore_ascii_case("restart signal") {
-        Action::RestartSignal
-    } else if text.eq_ignore_ascii_case("status") {
-        Action::Status
-    } else {
-        return None;
-    };
     Some(Command {
-        action,
+        action: parse_action(sent.get("message")?.as_str()?)?,
         timestamp: sent.get("timestamp")?.as_u64()?,
     })
+}
+
+fn parse_action(text: &str) -> Option<Action> {
+    let command = text.trim().to_ascii_lowercase();
+    match command.as_str() {
+        "restart" | "restart app" => Some(Action::RestartApp),
+        "restart signal" => Some(Action::RestartSignal),
+        "status" => Some(Action::Status),
+        "power status" => Some(Action::PowerStatus),
+        text => {
+            let (verb, name) = text.split_once(' ')?;
+            let target = match name {
+                "windows" => PowerTarget::Windows,
+                "mac" => PowerTarget::Mac,
+                "linux" => PowerTarget::Linux,
+                "both" => PowerTarget::Both,
+                _ => return None,
+            };
+            match verb {
+                "wake" => Some(Action::Wake(target)),
+                "sleep" => Some(Action::Sleep(target)),
+                _ => None,
+            }
+        }
+    }
 }
 
 enum Received {
@@ -206,9 +302,14 @@ enum Received {
     Council(Incoming),
 }
 
-fn received(value: &Value, cfg: &BridgeConfig, group: &str) -> Option<Received> {
+fn received(value: &Value, cfg: &BridgeConfig, group: &str, mode: Mode) -> Option<Received> {
     if let Some(command) = command(value, cfg, group) {
-        return Some(Received::Command(command));
+        return mode
+            .accepts(command.action)
+            .then_some(Received::Command(command));
+    }
+    if mode == Mode::PowerRelay {
+        return None;
     }
     verified_envelope(value, cfg)?;
     let message = signal_chat::parse_incoming(value, &cfg.account, &cfg.groups)?;
@@ -275,6 +376,7 @@ fn receiver_config(cfg: &BridgeConfig, expected: &str, group: &str) -> bool {
     identity(cfg).as_deref() == Some(expected) && configured_group(cfg, group).is_some()
 }
 
+#[cfg(windows)]
 pub(crate) fn configured(data: &Path) -> bool {
     let Ok(Some(enrollment)) = load::<Enrollment>(&data.join(ENROLLMENT_FILE)) else {
         return false;
@@ -287,8 +389,9 @@ pub(crate) fn configured(data: &Path) -> bool {
     })
 }
 
+#[cfg(windows)]
 pub(crate) fn enroll(data: &Path) -> Result<(), String> {
-    let _lock = profile_lock(data)?;
+    let _lock = profile_lock(data, Mode::Desktop)?;
     let cfg = BridgeConfig::load(&bridge::config_path(None))?;
     let expected = identity(&cfg).ok_or(
         "Verify your linked Signal account in Consilium before setting up its watchdog group.",
@@ -336,17 +439,74 @@ pub(crate) fn enroll(data: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn run(data: &Path, mut handle: impl FnMut(Action) -> String) -> Result<(), String> {
-    let _lock = profile_lock(data)?;
-    let enrollment = load::<Enrollment>(&data.join(ENROLLMENT_FILE))?
+/// Adopts the existing private group using this device's verified Signal link.
+/// This never changes group details or creates a group from the relay.
+pub(crate) fn enroll_existing_relay(data: &Path) -> Result<(), String> {
+    let _lock = profile_lock(data, Mode::PowerRelay)?;
+    let cfg = BridgeConfig::load(&bridge::config_path(None))?;
+    let identity = identity(&cfg).ok_or(
+        "Verify Signal on the relay before enrolling it in the watchdog group.",
+    )?;
+    signal_chat::addr(&cfg)?;
+    let groups = signal_chat::call(&cfg, "listGroups", json!({}))?;
+    let group = find_group(&cfg, &groups)?
+        .ok_or("The existing private Consilium Watchdog group has not synced to this device.")?;
+    let path = data.join(Mode::PowerRelay.enrollment_file());
+    let entry = Enrollment {
+        identity,
+        group: Some(group),
+        announced: true,
+    };
+    if let Some(previous) = load::<Enrollment>(&path)? {
+        if previous != entry {
+            return Err(
+                "The power relay was enrolled for a different Watchdog group or Signal account."
+                    .into(),
+            );
+        }
+        return Ok(());
+    }
+    save(&path, &entry)
+}
+
+pub(crate) fn post_commands(data: &Path) -> Result<(), String> {
+    let desktop = load::<Enrollment>(&data.join(ENROLLMENT_FILE))?;
+    let enrollment = match desktop {
+        Some(enrollment) => enrollment,
+        None => load::<Enrollment>(&data.join(Mode::PowerRelay.enrollment_file()))?
+            .ok_or("Set up the Consilium Watchdog Signal group first.")?,
+    };
+    let group = enrollment
+        .group
+        .ok_or("Complete the Consilium Watchdog Signal group setup first.")?;
+    let cfg = BridgeConfig::load(&bridge::config_path(None))?;
+    if !receiver_config(&cfg, &enrollment.identity, &group) || !group_still_private(&cfg, &group) {
+        return Err("Couldn't verify the private Consilium Watchdog group.".into());
+    }
+    signal_chat::send_group(&cfg, &group, COMMAND_LIST.trim_end())
+}
+
+#[cfg(windows)]
+pub(crate) fn run(data: &Path, handle: impl FnMut(Action) -> String) -> Result<(), String> {
+    run_with_mode(data, Mode::Desktop, handle)
+}
+
+pub(crate) fn run_with_mode(
+    data: &Path,
+    mode: Mode,
+    mut handle: impl FnMut(Action) -> String,
+) -> Result<(), String> {
+    let _lock = profile_lock(data, mode)?;
+    let enrollment = load::<Enrollment>(&data.join(mode.enrollment_file()))?
         .ok_or("Set up the Consilium Watchdog Signal group first.")?;
     let group = enrollment
         .group
         .ok_or("Complete the Consilium Watchdog Signal group setup first.")?;
     let config_path = bridge::config_path(None);
-    let replay_path = data.join(REPLAY_FILE);
+    let replay_path = data.join(mode.replay_file());
     let mut replay: Replay = load(&replay_path)?.unwrap_or_default();
-    let council_inbox = inbox::CouncilInbox::for_watchdog(data, &enrollment.identity);
+    let council_inbox = (mode == Mode::Desktop)
+        .then(|| inbox::CouncilInbox::for_watchdog(data, &enrollment.identity));
     loop {
         let Ok(cfg) = BridgeConfig::load(&config_path) else {
             thread::sleep(Duration::from_secs(5));
@@ -376,7 +536,7 @@ pub(crate) fn run(data: &Path, mut handle: impl FnMut(Action) -> String) -> Resu
         let sub = subscriber::start(
             endpoint,
             matches_config.clone(),
-            move |value| received(value, &decode_cfg, &decode_group),
+            move |value| received(value, &decode_cfg, &decode_group, mode),
             |_| {},
         )?;
         loop {
@@ -393,7 +553,9 @@ pub(crate) fn run(data: &Path, mut handle: impl FnMut(Action) -> String) -> Resu
             }
             let command = match event {
                 Received::Council(message) => {
-                    let _ = council_inbox.push(&cfg, &message);
+                    if let Some(inbox) = &council_inbox {
+                        let _ = inbox.push(&cfg, &message);
+                    }
                     continue;
                 }
                 Received::Command(command) => command,
@@ -409,7 +571,10 @@ pub(crate) fn run(data: &Path, mut handle: impl FnMut(Action) -> String) -> Resu
                 continue;
             }
             let reply = match admission {
-                Admission::CoolingDown => "Consilium Watchdog already handled a restart request recently. Try again in a minute.".to_string(),
+                Admission::CoolingDown => match mode {
+                    Mode::Desktop => "Consilium Watchdog already handled a restart request recently. Try again in a minute.".into(),
+                    Mode::PowerRelay => "The power relay already handled a request for that computer recently. Try again in a few seconds.".into(),
+                },
                 Admission::Accepted => handle(command.action),
                 Admission::Ignored => continue,
             };
@@ -490,7 +655,12 @@ mod tests {
     fn watchdog_commands_never_enter_council_buffer_and_offline_decisions_are_filtered() {
         let cfg = config();
         assert!(matches!(
-            received(&receive(GROUP, PHONE, ACI, 1, "restart"), &cfg, GROUP),
+            received(
+                &receive(GROUP, PHONE, ACI, 1, "restart"),
+                &cfg,
+                GROUP,
+                Mode::Desktop
+            ),
             Some(Received::Command(Command {
                 action: Action::RestartApp,
                 ..
@@ -500,16 +670,153 @@ mod tests {
             received(
                 &receive("council-group", PHONE, ACI, 1, "restart"),
                 &cfg,
-                GROUP
+                GROUP,
+                Mode::Desktop,
             ),
             Some(Received::Council(_))
         ));
         for text in ["123456", "Approve", "Denied: old request", "launch vscode"] {
-            assert!(
-                received(&receive("council-group", PHONE, ACI, 1, text), &cfg, GROUP).is_none()
-            );
+            assert!(received(
+                &receive("council-group", PHONE, ACI, 1, text),
+                &cfg,
+                GROUP,
+                Mode::Desktop
+            )
+            .is_none());
         }
-        assert!(received(&receive(GROUP, PHONE, ACI, 1, "other message"), &cfg, GROUP).is_none());
+        assert!(received(
+            &receive(GROUP, PHONE, ACI, 1, "other message"),
+            &cfg,
+            GROUP,
+            Mode::Desktop
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn separates_desktop_and_power_commands_before_replay() {
+        let cfg = config();
+        for (text, action) in [
+            ("wake windows", Action::Wake(PowerTarget::Windows)),
+            (" Wake Mac ", Action::Wake(PowerTarget::Mac)),
+            ("sleep linux", Action::Sleep(PowerTarget::Linux)),
+            ("sleep both", Action::Sleep(PowerTarget::Both)),
+            ("power status", Action::PowerStatus),
+        ] {
+            let event = receive(GROUP, PHONE, ACI, 1, text);
+            assert!(received(&event, &cfg, GROUP, Mode::Desktop).is_none());
+            assert!(matches!(
+                received(&event, &cfg, GROUP, Mode::PowerRelay),
+                Some(Received::Command(Command { action: actual, .. })) if actual == action
+            ));
+        }
+        for (group, device, text) in [
+            (GROUP, 1, "restart"),
+            (GROUP, 1, "status"),
+            (GROUP, 2, "wake windows"),
+            (GROUP, 1, "sleep unknown"),
+            (GROUP, 1, "sleep mac and linux"),
+            (GROUP, 1, "wake  windows"),
+            ("council-group", 1, "wake windows"),
+        ] {
+            assert!(received(
+                &receive(group, PHONE, ACI, device, text),
+                &cfg,
+                GROUP,
+                Mode::PowerRelay
+            )
+            .is_none());
+        }
+        assert_ne!(
+            Mode::Desktop.enrollment_file(),
+            Mode::PowerRelay.enrollment_file()
+        );
+        assert_ne!(Mode::Desktop.lock_file(), Mode::PowerRelay.lock_file());
+        assert_ne!(Mode::Desktop.replay_file(), Mode::PowerRelay.replay_file());
+    }
+
+    #[test]
+    fn applies_power_cooldown_per_target_and_reads_older_replay_state() {
+        let start = 900_000;
+        let mut replay: Replay =
+            serde_json::from_str(r#"{"timestamps":[],"app_restart":null,"signal_restart":null}"#)
+                .unwrap();
+        let mut request = |action, delta| {
+            replay.admit(
+                Command {
+                    action,
+                    timestamp: start + delta,
+                },
+                start + delta,
+            )
+        };
+        assert_eq!(
+            request(Action::Wake(PowerTarget::Mac), 0),
+            Admission::Accepted
+        );
+        assert_eq!(
+            request(Action::Sleep(PowerTarget::Linux), 1),
+            Admission::Accepted
+        );
+        assert_eq!(
+            request(Action::Sleep(PowerTarget::Both), 2),
+            Admission::CoolingDown
+        );
+        assert_eq!(
+            request(Action::Sleep(PowerTarget::Mac), 3),
+            Admission::CoolingDown
+        );
+        assert_eq!(
+            request(Action::Sleep(PowerTarget::Both), POWER_COOLDOWN_MS + 1),
+            Admission::Accepted
+        );
+        assert_eq!(
+            request(Action::Wake(PowerTarget::Windows), POWER_COOLDOWN_MS + 2),
+            Admission::CoolingDown
+        );
+
+        assert_eq!(
+            replay.admit(
+                Command {
+                    action: Action::Sleep(PowerTarget::Mac),
+                    timestamp: start + 4
+                },
+                start + 5 + MAX_SLEEP_COMMAND_AGE_MS
+            ),
+            Admission::Ignored
+        );
+    }
+
+    #[test]
+    fn catches_hourly_wake_requests_without_replaying_them_or_delayed_sleep() {
+        let sent = 500_000;
+        let first_check = sent + 60 * 60_000;
+        let second_check = first_check + MAX_COMMAND_AGE_MS + 1;
+        let wake = Command {
+            action: Action::Wake(PowerTarget::Mac),
+            timestamp: sent,
+        };
+        let sleep = Command {
+            action: Action::Sleep(PowerTarget::Mac),
+            timestamp: sent + 1,
+        };
+        let status = Command {
+            action: Action::PowerStatus,
+            timestamp: sent + 2,
+        };
+        let mut replay = Replay::default();
+        assert_eq!(replay.admit(wake, first_check), Admission::Accepted);
+        assert_eq!(replay.admit(sleep, first_check), Admission::Ignored);
+        assert_eq!(replay.admit(status, first_check), Admission::Ignored);
+        let mut replay: Replay =
+            serde_json::from_slice(&serde_json::to_vec(&replay).unwrap()).unwrap();
+        assert_eq!(replay.admit(wake, second_check), Admission::Ignored);
+
+        let mut clean_replay = Replay::default();
+        assert_eq!(
+            clean_replay.admit(wake, sent + MAX_WAKE_COMMAND_AGE_MS + 1),
+            Admission::Ignored
+        );
     }
 
     #[test]

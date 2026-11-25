@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const COMMANDS: &[&str] =
-    &["chat", "ask", "say", "log", "list", "new", "stop", "status", "check", "install-cli", "help", "--help", "-h", "--version", "-V", "--watchdog", "watchdog", "watchdog-signal", "--signal-watchdog-worker", "--bluetooth-pairing-worker", "--bluetooth-sdp-worker"];
+    &["chat", "ask", "say", "log", "list", "new", "stop", "status", "check", "install-cli", "help", "--help", "-h", "--version", "-V", "--watchdog", "watchdog", "watchdog-signal", "--signal-watchdog-worker", crate::watchdog_sleep::WORKER_ARG, "--bluetooth-pairing-worker", "--bluetooth-sdp-worker"];
 
 /// Whether the program was started as the terminal command rather than to open the window.
 pub fn wants_cli(args: &[String]) -> bool {
@@ -35,6 +35,8 @@ Usage:
   consilium check                    one tiny test message to every AI (uses a little allowance)
   consilium install-cli              install this `consilium` command for your terminal
   consilium watchdog-signal setup    set up the private Signal restart group (Windows)
+  consilium watchdog-signal commands post the Watchdog command list to Signal
+  consilium watchdog-signal relay    run configured local-network power controls for the group
   consilium                          (no command) open the app
 
 Options:
@@ -391,6 +393,9 @@ pub fn main(args: Vec<String>) -> i32 {
     if args.first().is_some_and(|a| a == "--signal-watchdog-worker") {
         return crate::watchdog::run_signal_worker(&args[1..]);
     }
+    if args.first().is_some_and(|a| a == crate::watchdog_sleep::WORKER_ARG) {
+        return if args.len() == 1 { crate::watchdog_sleep::run() } else { 2 };
+    }
     #[cfg(windows)]
     attach_console();
     let command = args.first().cloned().unwrap_or_default();
@@ -413,9 +418,20 @@ pub fn main(args: Vec<String>) -> i32 {
             }
         }
         "watchdog-signal" => {
-            return match crate::watchdog::setup_signal_worker(&args[1..]) {
-                Ok(()) => {
-                    print("Consilium Watchdog is set up. Send status from your primary Signal phone.\n");
+            let result = match &args[1..] {
+                [mode] if mode == "relay" => crate::watchdog::run_power_relay().map(|()| ""),
+                [mode] if mode == "commands" => crate::watchdog::post_signal_commands()
+                    .map(|()| "Posted the command list to the Consilium Watchdog group."),
+                [mode] if mode == "sleep-local" => crate::watchdog_sleep::schedule()
+                    .map(|()| crate::watchdog_sleep::SCHEDULED),
+                options => crate::watchdog::setup_signal_worker(options)
+                    .map(|()| "Consilium Watchdog is set up. Send status from your primary Signal phone."),
+            };
+            return match result {
+                Ok(notice) => {
+                    if !notice.is_empty() {
+                        print(&format!("{notice}\n"));
+                    }
                     0
                 }
                 Err(error) => fail(&error),

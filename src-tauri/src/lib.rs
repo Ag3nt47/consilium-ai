@@ -45,7 +45,6 @@ mod setup;
 mod skills;
 mod stall;
 mod signal_chat;
-#[cfg(any(windows, test))]
 mod signal_watchdog;
 #[cfg(windows)]
 mod signal_watchdog_host;
@@ -59,6 +58,8 @@ mod tasks;
 mod runbooks;
 mod toolbox;
 mod update;
+mod watchdog_power;
+mod watchdog_sleep;
 mod usage;
 mod claude_resets;
 mod switched;

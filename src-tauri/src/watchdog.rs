@@ -315,6 +315,31 @@ pub(crate) fn setup_signal_worker(args: &[String]) -> Result<(), String> {
     }
 }
 
+pub(crate) fn post_signal_commands() -> Result<(), String> {
+    let data = crate::data_dir().ok_or("couldn't find Consilium's data folder")?;
+    crate::signal_watchdog::post_commands(&data)
+}
+
+pub(crate) fn run_power_relay() -> Result<(), String> {
+    use crate::signal_watchdog::{Action, Mode};
+    use crate::watchdog_power::{PowerConfig, PowerMode};
+
+    let data = crate::data_dir().ok_or("couldn't find Consilium's data folder")?;
+    PowerConfig::load(&data)?;
+    crate::signal_watchdog::enroll_existing_relay(&data)?;
+    crate::signal_watchdog::run_with_mode(&data, Mode::PowerRelay, |action| {
+        let Ok(config) = PowerConfig::load(&data) else {
+            return "Power control is unconfigured on this relay.".into();
+        };
+        match action {
+            Action::Wake(target) => config.handle(PowerMode::Wake, target),
+            Action::Sleep(target) => config.handle(PowerMode::Sleep, target),
+            Action::PowerStatus => config.status(),
+            _ => "Use the Windows Watchdog for desktop commands.".into(),
+        }
+    })
+}
+
 #[cfg(windows)]
 fn validate_target(target: &Path) -> Result<(), String> {
     if target.is_absolute() && target.is_file()
@@ -376,6 +401,9 @@ fn signal_action(data: &Path, target: &Path, action: crate::signal_watchdog::Act
             Ok(None) => "The Signal watchdog is listening. Consilium is closed on Windows.".into(),
             Err(_) => "The Signal watchdog is listening. Consilium's app status could not be verified.".into(),
         },
+        Action::Wake(_) | Action::Sleep(_) | Action::PowerStatus => {
+            "Power commands need a configured relay.".into()
+        }
     }
 }
 
