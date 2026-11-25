@@ -6,6 +6,8 @@ import { LocalModelFit } from "./LocalModelFit";
 import { LinkTransferTrial } from "./LinkTransferTrial";
 import { LanNotes } from "./LanNotes";
 import { NativeBluetooth } from "./NativeBluetooth";
+import { NativeBluetoothPairing } from "./NativeBluetoothPairing";
+import { OS } from "./platform";
 
 /** Topbar status light and button for multi-computer sync (Mac & Windows).
  *  Displays connection health, fastest active route, and opens the sync setup modal on click. */
@@ -649,7 +651,7 @@ export function LinkSettings({ status: initialStatus, onRefresh, pairAddress = "
                 <li>On the first computer, choose <strong>Show Pairing Code</strong>. Generate a code and copy one of its local addresses above.</li>
                 <li>On the second computer, choose <strong>Join Another Computer</strong>. Enter the address and code from the first computer, then pair. Auto-Find on LAN can suggest addresses.</li>
                 <li>On the linked computer card, choose <strong>Test Connection</strong>. Look for an authenticated active session and check each endpoint separately. An amber result means the address answered on TCP but did not confirm the paired computer. If an endpoint fails, verify the address, confirm Consilium is running on that computer, and check that its firewall allows Consilium on the trusted network.</li>
-                <li>For a backup path, connect another interface on both computers. Keep Ethernet connected while joining Wi-Fi. For native Bluetooth, pair the computers in their Bluetooth settings and enable Native Bluetooth in Consilium on both. The Mac announces its Bluetooth route to the paired Windows PC over the existing link.</li>
+                <li>For a backup path, keep Ethernet connected while joining Wi-Fi. Enable Native Bluetooth in Consilium on both. On Windows, open the Mac’s card and select <strong>Show Bluetooth code</strong>. The Mac announces its Bluetooth route over the existing link.</li>
                 <li>Run <strong>Communication stress test</strong> above and check that authenticated traffic used two distinct local interfaces. With access to both computers, disconnect the active path, check that the alternate interface becomes active, then restore the first path.</li>
               </ol>
             </details>
@@ -820,6 +822,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
   const [probeSources, setProbeSources] = useState<ProbeSource[]>([]);
   const [probeSource, setProbeSource] = useState("");
   const [testEndpoint, setTestEndpoint] = useState("");
+  const nativeTestEndpoint = testEndpoint.startsWith("rfcomm://");
   const unavailableEndpoint = !!testEndpoint && !peer.addrs.includes(testEndpoint);
   const [probeSourcesError, setProbeSourcesError] = useState("");
   const [probeSourcesLoading, setProbeSourcesLoading] = useState(false);
@@ -900,11 +903,11 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
   }
 
   const testAiHandshake = async () => {
-    if (testingHandshake || unavailableEndpoint) return;
+    if (testingHandshake || unavailableEndpoint || (testEndpoint && unavailableSource)) return;
     setTestingHandshake(true);
     setHandshakeResult(null);
     try {
-      const selected = testEndpoint ? await api.linkTestAiHandshakeSelected(peer.node_id, testEndpoint) : null;
+      const selected = testEndpoint ? await api.linkTestAiHandshakeSelected(peer.node_id, testEndpoint, probeSource || undefined) : null;
       const report = selected ? selected.handshake : await api.linkTestAiHandshake(peer.node_id);
       const confirmed = report.filter((ai) => ai.reads && ai.read).length;
       const result = report.some((ai) => ai.side === "there")
@@ -912,10 +915,8 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         : "Fresh AI status received. The linked computer reported no active AIs.";
       const route = selected?.route_evidence?.kind === "bluetooth_rfcomm"
         ? ` Verified over native Bluetooth, channel ${selected.route_evidence.channel}.`
-        : selected ? ` Verified over ${selected.route}.` : "";
-      const restored = selected?.restored ? (selected.restored.ok
-        ? " Default routing restored." : " Default route restoration was unconfirmed.") : "";
-      setHandshakeResult(result + route + restored);
+        : selected ? ` Verified over ${selected.route_evidence?.local_interface ?? selected.route}.` : "";
+      setHandshakeResult(result + route + (selected ? " The active session stayed in place." : ""));
     } catch (error) {
       setHandshakeResult(String(error));
     } finally {
@@ -998,7 +999,7 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         <div className="handshake-section">
           <div className="row between align-center wrap">
             <span className="failover-title">AI handshake:</span>
-            <button className="btn small ghost" disabled={testingHandshake || unavailableEndpoint} onClick={testAiHandshake}
+            <button className="btn small ghost" disabled={testingHandshake || unavailableEndpoint || (!!testEndpoint && unavailableSource)} onClick={testAiHandshake}
               title="Check the linked computer's latest AI status and confirmations without sending prompts">
               {testingHandshake ? "Checking AI handshake…" : "Test AI handshake"}
             </button>
@@ -1088,9 +1089,10 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
         <summary>Test from a local adapter</summary>
         <label className="row gap-sm">
           Local source
-          <select disabled={testing || probeSourcesLoading || !!testEndpoint} value={probeSource} onChange={(event) => {
+          <select disabled={testing || testingHandshake || probeSourcesLoading || nativeTestEndpoint} value={probeSource} onChange={(event) => {
             setProbeSource(event.target.value);
             setTestReport(null);
+            setHandshakeResult(null);
           }}>
             <option value="">System default</option>
             {unavailableSource && (
@@ -1106,22 +1108,26 @@ function PeerCard({ peer, mine, onUnpair }: { peer: LinkPeer; mine?: Build; onUn
           {probeSourcesLoading ? "Refreshing sources…" : "Refresh local sources"}
         </button>
         {probeSourcesError && <p role="alert">{probeSourcesError}</p>}
-        <p className="muted">Choose a source address, then run Test Connection. The live session stays in place.</p>
+        <p className="muted">Choose a source address for Test Connection or the AI handshake on a selected IP endpoint. The live session stays in place.</p>
       </details>
 
-      {(unavailableEndpoint || peer.addrs.some((address) => address.startsWith("rfcomm://"))) && (
+      {OS === "windows" && peer.addrs.some((address) => address.startsWith("rfcomm://")) && (
+        <NativeBluetoothPairing nodeId={peer.node_id} />
+      )}
+      {(unavailableEndpoint || peer.addrs.length > 0) && (
         <label className="row gap-sm small">
           Connection and AI handshake route
           <select value={testEndpoint} disabled={testing || testingHandshake} onChange={(event) => {
             setTestEndpoint(event.target.value);
-            setProbeSource("");
+            if (event.target.value.startsWith("rfcomm://")) setProbeSource("");
             setTestReport(null);
             setHandshakeResult(null);
           }}>
             <option value="">All saved endpoints / active AI session</option>
-            {unavailableEndpoint && <option value={testEndpoint} disabled>Previous Bluetooth route is unavailable</option>}
-            {peer.addrs.filter((address) => address.startsWith("rfcomm://")).map((address) =>
-              <option key={address} value={address}>Native Bluetooth · {address}</option>)}
+            {unavailableEndpoint && <option value={testEndpoint} disabled>Previous route is unavailable</option>}
+            {peer.addrs.map((address) => (
+              <option key={address} value={address}>{address.startsWith("rfcomm://") ? `Native Bluetooth · ${address}` : address}</option>
+            ))}
           </select>
         </label>
       )}

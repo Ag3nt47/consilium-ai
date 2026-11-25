@@ -125,6 +125,7 @@ fn socket_error(socket: SOCKET) -> io::Result<()> {
 fn bluetooth_error(error: io::Error) -> String {
     match error.raw_os_error() {
         Some(WSAEACCES) => "Bluetooth authentication failed. Pair these computers in their Bluetooth settings and confirm the matching code.".into(),
+        Some(WSAEADDRNOTAVAIL) => "The Mac's Bluetooth address or Consilium RFCOMM channel was unavailable (10049). Restart Bluetooth in Consilium on the Mac, then retest.".into(),
         Some(WSAETIMEDOUT | WSAEHOSTDOWN | WSAENETUNREACH) => "The selected computer's Bluetooth service did not answer. Keep Consilium open on that computer and check its Bluetooth connection.".into(),
         Some(code) => format!("Windows Bluetooth connection failed ({code})."),
         None => error.to_string(),

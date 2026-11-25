@@ -12,6 +12,7 @@ export function LinkTransferTrial({ peers, disabled }: { peers: LinkPeer[]; disa
   const [report, setReport] = useState<TransferTrial | null>(null);
   const [error, setError] = useState("");
   const peer = peers.find((entry) => entry.node_id === peerId && entry.connected);
+  const computeRoutes = peer ? report?.compute_routes : null;
   const locked = disabled || running || loading;
   const interfaces = paths.map(({ source, endpoint }) => source === null
     ? (endpoint.startsWith("rfcomm://") ? "native-bluetooth" : undefined)
@@ -124,7 +125,10 @@ export function LinkTransferTrial({ peers, disabled }: { peers: LinkPeer[]; disa
           <p className="muted">{report.distinct_receiver_interfaces
             ? "Each receiving path mapped to a different adapter on the other computer."
             : "Distinct receiving adapters could not be confirmed."}</p>
-          {report.paths.map(({ source, endpoint, receipts, route_evidence: evidence, error: failure }) => (
+          {computeRoutes && (
+            <p className="muted">Suggested roles use complete, authenticated samples and distinct receiving adapters. They apply to this test and leave the active session in place.</p>
+          )}
+          {report.paths.map(({ source, endpoint, receipts, median_probe_ms: median, route_evidence: evidence, error: failure }, index) => (
             <div className={`handshake-item ${failure ? "pending" : "acknowledged"}`} key={`${source?.address ?? "bluetooth"}-${endpoint}`}>
               {source ? <>{source.interface} <code>{source.address}</code></> : <>Native Bluetooth{evidence?.kind === "bluetooth_rfcomm" && ` · channel ${evidence.channel}`}</>} → <code>{endpoint}</code>
               {" · "}{receipts.reduce((bytes, receipt) => bytes + receipt.bytes, 0).toLocaleString()} bytes checksum-verified
@@ -134,6 +138,10 @@ export function LinkTransferTrial({ peers, disabled }: { peers: LinkPeer[]; disa
                   {" · "}{receipts[receipts.length - 1].received_ms - receipts[0].received_ms} ms between first and last receipt</>
               )}
               {failure && ` · ${failure}`}
+              {median != null && ` · ${median} ms median including authentication`}
+              {computeRoutes?.primary_ip === index && " · Main calculation route"}
+              {computeRoutes?.additional_ip.includes(index) && " · Independent jobs or fallback"}
+              {computeRoutes?.bluetooth_control === index && " · Coordination and recovery"}
             </div>
           ))}
         </div>

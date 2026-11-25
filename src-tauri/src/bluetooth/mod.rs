@@ -15,6 +15,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 mod controller;
+pub mod pairing;
+#[cfg(windows)]
+mod pairing_worker;
 use controller::Controller;
 #[cfg(windows)]
 use controller::SessionRelay;
