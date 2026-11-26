@@ -39,7 +39,8 @@ function makeCredentials() {
     const result = spawnSync(openssl, args, { stdio: "ignore", timeout: 15_000 });
     assert.equal(result.status, 0, "OpenSSL could not generate temporary test credentials.");
   };
-  const keyArgs = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes"];
+  // LibreSSL defaults EC keys to explicit parameters, which Node.js TLS 1.3 (OpenSSL 3) rejects.
+  const keyArgs = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve", "-nodes"];
   run("req", "-x509", ...keyArgs, "-keyout", path("ca.key"), "-out", path("ca.crt"),
     "-sha256", "-days", "2", "-subj", "/CN=Consilium offline test CA",
     "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign");
