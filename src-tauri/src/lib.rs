@@ -681,7 +681,7 @@ fn announce_update(engine: &Engine, data: &std::path::Path) {
     let mut note = format!("Consilium was updated from {before} to {now} and restarted. {WHATS_NEW}");
     if let Some(ledger) = safety::read_latest_ledger(data) {
         if !ledger.snapshots.is_empty() {
-            note.push_str(&format!(" Session safety: preserved {}", safety::describe(data, &ledger)));
+            note.push_str(&format!(" Session safety snapshot: {}", safety::describe(data, &ledger)));
         }
     }
     for id in ids {
