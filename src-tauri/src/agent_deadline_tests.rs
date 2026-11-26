@@ -119,17 +119,28 @@ async fn raw_output_does_not_keep_a_stalled_turn_alive() {
     );
 }
 
-#[tokio::test]
-async fn continuous_progress_still_reaches_the_total_runtime_cap() {
-    let error = tokio::time::timeout(
-        Duration::from_secs(30),
-        fixture("continuous", FIXTURE_IDLE, &CancellationToken::new(), None),
-    )
-    .await
-    .expect("recognized progress must not permit an unlimited turn")
-    .unwrap_err();
+#[test]
+fn continuous_progress_still_reaches_the_total_runtime_cap() {
+    let started = std::time::Instant::now();
+    let mut watchdog = RunDeadline::new(started, FIXTURE_IDLE);
+    let total = FIXTURE_IDLE.saturating_mul(4);
+
+    // Advance the watchdog explicitly instead of waiting twenty wall-clock seconds. The native
+    // fixture tests above cover streamed progress; this assertion covers the independent total
+    // runtime cap without racing a slow CI runner against real process and timer scheduling.
+    for elapsed in 1..total.as_secs() {
+        let now = started + Duration::from_secs(elapsed);
+        watchdog.progress(now, "Checking tool result");
+        assert_eq!(
+            watchdog.remaining(now),
+            Duration::from_secs((total.as_secs() - elapsed).min(FIXTURE_IDLE.as_secs()))
+        );
+    }
+
+    let capped = started + total;
+    assert_eq!(watchdog.remaining(capped), Duration::ZERO);
     assert_eq!(
-        error,
+        watchdog.message(capped),
         "no answer within 20 seconds total runtime; last activity: Checking tool result"
     );
 }
