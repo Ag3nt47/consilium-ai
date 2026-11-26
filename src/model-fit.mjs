@@ -17,11 +17,16 @@ export function equalSplitMemoryGiB(weights, count, overhead) {
   return positive(weights) / count + positive(overhead);
 }
 
+export function effectiveReserve(override, fallback) {
+  const value = Number(override);
+  return override != null && String(override).trim() !== "" && Number.isFinite(value) && value >= 0
+    ? value : positive(fallback);
+}
+
 export function weightBudgets(devices, overhead) {
-  const runtime = positive(overhead);
-  return devices.map(({ name, memory }) => ({
+  return devices.map(({ name, memory, reserve }) => ({
     name: name || "Unnamed device",
-    capacity: Math.max(0, positive(memory) - runtime),
+    capacity: Math.max(0, positive(memory) - effectiveReserve(reserve, overhead)),
   }));
 }
 

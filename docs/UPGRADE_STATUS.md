@@ -212,6 +212,8 @@ proportional to its memory after the runtime reserve. Windows dry runs exercised
 options with installed Qwen3 and Llama 3 weights. The offline llama.cpp argument mapper can also verify local RPC tunnel endpoints and registration order against a saved runner inventory before emitting launch arguments. It checks the device
 order and converts the allocation into layer-mode arguments. Live unequal weight allocation,
 actual context memory use and performance on Windows and Mac still need verification.
+The desktop and CLI can set different runtime reserves for each device. The split reflects
+the remaining weight capacity, and the equal-split view reports each device's memory target.
 [Installed weights](https://github.com/Ag3nt47/consilium-ai/pull/276) · [Weighted splits](https://github.com/Ag3nt47/consilium-ai/pull/278) · [Runner arguments](https://github.com/Ag3nt47/consilium-ai/pull/279)
 
 The standalone [RPC tunnel helper](LLAMA_RPC_TUNNEL.md) carries temporary trial

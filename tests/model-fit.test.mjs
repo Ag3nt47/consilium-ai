@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ggufShardError, modelFit } from "../src/model-fit.mjs";
+import { ggufShardError, modelFit, weightBudgets } from "../src/model-fit.mjs";
 
 function customFit(devices, weights) {
   return modelFit(devices, 4, 2, weights).find(({ name }) => name === "Custom model").fit;
@@ -52,6 +52,47 @@ test("the CLI exports a capacity-weighted split plan", () => {
   const custom = JSON.parse(result.stdout).models.find(({ name }) => name === "Custom model");
   assert.match(custom.fit, /^Capacity-weighted split estimate/);
   assert.deepEqual(custom.allocation, [{ name: "This computer", allocated: 6 }, { name: "Mac", allocated: 2 }]);
+});
+
+test("distinct runtime allowances affect weight allocations and equal-split targets", () => {
+  const result = spawnSync(process.execPath, [
+    "scripts/model-fit.mjs", "--json", "--host", "14", "--device", "Mac=6", "--weights", "4",
+    "--device-reserve", "mAc=5", "--split", "--capacity-weighted",
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.runtimeReserveGiB, 2);
+  assert.deepEqual(report.deviceRuntimeReserves, [
+    { name: "This computer", reserveGiB: 2 }, { name: "Mac", reserveGiB: 5 },
+  ]);
+  assert.deepEqual(report.capacities, [{ name: "This computer", capacity: 12 }, { name: "Mac", capacity: 1 }]);
+  const model = report.models.find(({ name }) => name === "Custom model");
+  assert.deepEqual(model.allocation, [
+    { name: "This computer", allocated: 4 * 12 / 13 }, { name: "Mac", allocated: 4 / 13 },
+  ]);
+  assert.deepEqual(model.equalSplitTargets, [
+    { name: "This computer", usableGiB: 4 }, { name: "Mac", usableGiB: 7 },
+  ]);
+  assert.deepEqual(model.equalSplitShortfalls, [{ name: "Mac", missingGiB: 1 }]);
+  assert.equal(model.equalSplitMemoryGiB, undefined);
+  assert.deepEqual(weightBudgets([
+    { name: "Explicit zero", memory: 4, reserve: 0 },
+    { name: "Blank", memory: 4, reserve: "" },
+    { name: "Invalid", memory: 4, reserve: "-1" },
+  ], 2), [
+    { name: "Explicit zero", capacity: 4 }, { name: "Blank", capacity: 2 }, { name: "Invalid", capacity: 2 },
+  ]);
+});
+
+test("the CLI rejects unknown devices, negative reserves and repeated overrides", () => {
+  for (const reserves of [["Unknown=2"], ["Mac=-1"], ["Mac=0", " mac =4"]]) {
+    const result = spawnSync(process.execPath, [
+      "scripts/model-fit.mjs", "--host", "14", "--device", "Mac=6",
+      ...reserves.flatMap((value) => ["--device-reserve", value]),
+    ], { encoding: "utf8" });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+  }
 });
 
 test("single-device fit takes precedence when one computer has enough memory", () => {

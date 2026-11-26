@@ -211,6 +211,12 @@ With permission to start the runners, use the same compatible GGUF and runner bu
 
 ### Memory preflight
 
+Use **Set runtime allowances by device** if the runner or context uses different amounts
+of memory on Windows and Mac. From the CLI, an override such as
+`--device-reserve "Mac=3"` sets the allowance for that device in GiB. A capacity-weighted
+plan allocates each share from the remaining weight budget. Recheck the allowances against
+runner logs during the live trial.
+
 Use fresh paired-computer reports before allocating weights. In the last Mac scan, the Mac returned 951 MiB out of 8192 MiB over PeerLink. The default 2 GiB runtime allowance left it with zero weight capacity. A separate, later Windows reading showed 3.53 GiB free.
 
 With that allowance and the installed file sizes on Windows, the per-device free memory targets for a 50/50 weight split are approximately 2.63 GiB for Qwen3 1.7B, 3.16 GiB for Qwen3 4B, and 4.17 GiB for Llama 3. Start with Qwen3 1.7B once both devices have sufficient headroom. These are planning thresholds. Confirm actual model and context allocations from the runner logs during an authorized trial.

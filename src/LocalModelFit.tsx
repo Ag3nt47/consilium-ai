@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, type OllamaModel } from "./api";
 
-import { equalSplitMemoryGiB, gib, ggufShardError, modelFit, weightBudgets } from "./model-fit.mjs";
+import { effectiveReserve, equalSplitMemoryGiB, gib, ggufShardError, modelFit, weightBudgets } from "./model-fit.mjs";
 
 type Device = { id: number | string; name: string; memory: string; runners?: string[]; platform?: string };
 const memoryInput = (gib: number) => (Math.floor(Math.max(0, gib) * 10) / 10).toFixed(1);
@@ -19,6 +19,8 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
   const [hostMemory, setHostMemory] = useState<string | null>(null);
   const [bits, setBits] = useState(4);
   const [overhead, setOverhead] = useState("2");
+  const [hostReserve, setHostReserve] = useState("");
+  const [deviceReserves, setDeviceReserves] = useState(() => new Map<Device["id"], string>());
   const [preferSplit, setPreferSplit] = useState(false);
   const [distribution, setDistribution] = useState<"balanced" | "capacity">("balanced");
   const [customWeights, setCustomWeights] = useState("");
@@ -38,21 +40,23 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
     usedNames.add(name);
     included.add(device);
   }
-  const budgets = [{ name: hostName, memory: host }, ...devices.filter((device) => included.has(device))
-    .map(({ name, memory }) => ({ name: name.trim(), memory }))];
+  const budgets = [{ name: hostName, memory: host, reserve: hostReserve }, ...devices.filter((device) => included.has(device))
+    .map(({ id, name, memory }) => ({ name: name.trim(), memory, reserve: deviceReserves.get(id) ?? "" }))];
   const models = modelFit(budgets, bits, overhead, customWeights, preferSplit, distribution).map((model) =>
     customModelName && model.name === "Custom model" ? { ...model, name: customModelName } : model);
   const splits = models.flatMap(({ name, weights, allocation }) => allocation && allocation.length >= 2
     ? [{ name, weights, allocation }] : []);
   const exportableSplits = splits.filter(({ allocation }) => allocation.every(({ name }) => !name.includes("=")));
   const capacities = weightBudgets(budgets, overhead);
+  const reserves = budgets.map(({ reserve }) => effectiveReserve(reserve, overhead));
   const totalCapacity = capacities.reduce((total, device) => total + device.capacity, 0);
 
   const showEqualTarget = preferSplit && budgets.length > 1;
   const equalTarget = (weights: number) => {
-    const target = equalSplitMemoryGiB(weights, budgets.length, overhead);
-    const shortfalls = budgets.flatMap(({ name, memory }) => {
+    const targets = reserves.map((reserve) => equalSplitMemoryGiB(weights, budgets.length, reserve));
+    const shortfalls = budgets.flatMap(({ name, memory }, index) => {
       const available = Number(memory);
+      const target = targets[index];
       if (memory === "" || !Number.isFinite(available) || available < 0) {
         return [`${name || "Unnamed device"}: enter usable memory`];
       }
@@ -60,7 +64,10 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
         ? [`${name || "Unnamed device"} needs ${gib(Math.ceil((target - available) * 10) / 10)} more`]
         : [];
     });
-    return [gib(Math.ceil(target * 10) / 10), ...shortfalls].join(" · ");
+    const rounded = (target: number) => gib(Math.ceil(target * 10) / 10);
+    const uniform = targets.every((target) => target === targets[0]);
+    const required = uniform ? [rounded(targets[0])] : budgets.map(({ name }, index) => `${name}: ${rounded(targets[index])}`);
+    return [...required, ...shortfalls].join(" · ");
   };
 
   async function copyReport(report: string, label: string) {
@@ -75,9 +82,9 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
   function copyEstimate() {
     const report = [
       "Consilium local model memory estimate",
-      `Catalog precision: ${bits}-bit. Runtime allowance: ${gib(Number(overhead))} per device.`,
+      `Catalog precision: ${bits}-bit. Default runtime allowance: ${gib(effectiveReserve(undefined, overhead))} per device.`,
       `Combined weight capacity: ${gib(totalCapacity)}.`,
-      ...budgets.map(({ name, memory }, index) => `${name || "Unnamed device"}: ${memory ? gib(Number(memory)) : "memory not entered"} usable, ${gib(capacities[index].capacity)} for weights.`),
+      ...budgets.map(({ name, memory }, index) => `${name || "Unnamed device"}: ${memory ? gib(Number(memory)) : "memory not entered"} usable, ${gib(reserves[index])} reserved, ${gib(capacities[index].capacity)} for weights.`),
       "",
       ...models.map(({ name, weights, fit }) => {
         const target = showEqualTarget ? ` Equal split across ${budgets.length} devices: ${equalTarget(weights)}.` : "";
@@ -201,9 +208,28 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
           </select>
         </label>
         <label>
-          Runtime and context allowance per device (GiB)
+          Default runtime and context allowance per device (GiB)
           <input type="number" min="0" step="0.1" value={overhead} onChange={(e) => setOverhead(e.target.value)} />
         </label>
+        <details className="small">
+          <summary>Set runtime allowances by device</summary>
+          <p className="muted">Leave a field empty to use the default. Use a device-specific allowance when its runner or context needs more memory.</p>
+          <label>
+            This computer runtime allowance (GiB)
+            <input type="number" min="0" step="0.1" value={hostReserve} placeholder={overhead}
+              onChange={(e) => setHostReserve(e.target.value)} />
+          </label>
+          {devices.filter((device) => included.has(device)).map(({ id, name }) => (
+            <label key={id}>
+              {name} runtime allowance (GiB)
+              <input type="number" min="0" step="0.1" value={deviceReserves.get(id) ?? ""} placeholder={overhead}
+                onChange={(e) => {
+                  const reserve = e.target.value;
+                  setDeviceReserves((previous) => new Map(previous).set(id, reserve));
+                }} />
+            </label>
+          ))}
+        </details>
         <label className="row">
           <input type="checkbox" checked={preferSplit} onChange={(e) => setPreferSplit(e.target.checked)} />
           Estimate a split even when one device can hold the model
@@ -265,7 +291,7 @@ export function LocalModelFit({ availableGiB, ollamaModels = [] }: {
       <p className="muted">Combined capacity for model weights after runtime allowance: {gib(totalCapacity)}.</p>
       <ul>
         {capacities.map(({ name, capacity }, index) => (
-          <li key={index}>{name}: {gib(capacity)} for weights</li>
+          <li key={index}>{name}: {gib(capacity)} for weights · {gib(reserves[index])} reserved for runtime</li>
         ))}
       </ul>
       <table className="usage-table">

@@ -2,7 +2,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { freemem, homedir } from "node:os";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
-import { equalSplitMemoryGiB, gib, ggufShardError, modelFit, weightBudgets } from "../src/model-fit.mjs";
+import { effectiveReserve, equalSplitMemoryGiB, gib, ggufShardError, modelFit, weightBudgets } from "../src/model-fit.mjs";
 
 const OLLAMA_MODEL_LAYER = "application/vnd.ollama.image.model";
 const OLLAMA_WEIGHT_LAYERS = new Set([
@@ -53,6 +53,7 @@ try {
       "capacity-weighted": { type: "boolean" },
       host: { type: "string" },
       device: { type: "string", multiple: true, default: [] },
+      "device-reserve": { type: "string", multiple: true, default: [] },
       bits: { type: "string", default: "4" },
       overhead: { type: "string", default: "2" },
       weights: { type: "string" },
@@ -61,10 +62,11 @@ try {
     },
   });
   if (values.help) {
-    console.log('Usage: node scripts/model-fit.mjs [--json] [--split] [--capacity-weighted] [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--weights GiB | --gguf PATH ... | --ollama MODEL]');
+    console.log('Usage: node scripts/model-fit.mjs [--json] [--split] [--capacity-weighted] [--host GiB] [--device "Name=GiB"] [--bits 4|8|16] [--overhead GiB] [--device-reserve "Name=GiB"] [--weights GiB | --gguf PATH ... | --ollama MODEL]');
     console.log("--split estimates a split even when one device can hold the model.");
     console.log("--capacity-weighted splits weights in proportion to each device's memory after the runtime reserve.");
     console.log("Device memory is usable RAM before inference overhead. Repeat --device with a unique name for each additional computer.");
+    console.log('Use --device-reserve to override the runtime allowance for a named device. Use "This computer" for the host.');
     console.log("For --gguf, select one model file or all numbered shards of one model.");
     console.log("For --ollama, use an installed [namespace/]name[:tag]. Reads local files without launching a runner.");
   } else {
@@ -85,6 +87,15 @@ try {
       devices.push({ name, memory: memory(size, name) });
     }
     const overhead = memory(values.overhead, "--overhead");
+    for (const entry of values["device-reserve"]) {
+      const [label, allowance, extra] = entry.split("=");
+      const key = label.trim().toLowerCase();
+      if (!key || extra !== undefined) throw new Error('--device-reserve must be "Name=GiB"');
+      const device = devices.find(({ name }) => name.toLowerCase() === key);
+      if (!device) throw new Error(`No device named "${label.trim()}" for the runtime reserve.`);
+      if (device.reserve !== undefined) throw new Error(`Set the runtime reserve for "${device.name}" only once.`);
+      device.reserve = memory(allowance, `Runtime reserve for ${device.name}`);
+    }
     if (values.weights !== undefined && values.gguf.length) throw new Error("Choose either --weights or --gguf.");
     if (values.ollama !== undefined && (values.weights !== undefined || values.gguf.length)) {
       throw new Error("Choose one model size source: --ollama, --weights, or --gguf.");
@@ -104,29 +115,41 @@ try {
     if (shardError) throw new Error(shardError);
     const custom = values.weights === undefined ? (installed?.bytes ?? modelBytes) / 2 ** 30 : memory(values.weights, "--weights");
     const capacities = weightBudgets(devices, overhead);
+    const hasOverrides = devices.some(({ reserve }) => reserve !== undefined);
+    const runtimeReserves = devices.map(({ name, reserve }) => ({ name, reserveGiB: effectiveReserve(reserve, overhead) }));
     const distribution = values["capacity-weighted"] ? "capacity" : "balanced";
     const models = modelFit(devices, bits, overhead, custom, values.split, distribution).map((row) => {
       if (installed && row.name === "Custom model") row.name = installed.name;
       if (!values.split || devices.length < 2) return row;
-      const target = equalSplitMemoryGiB(row.weights, devices.length, overhead);
-      const equalSplitShortfalls = devices
-        .filter(({ memory }) => memory < target)
-        .map(({ name, memory }) => ({ name, missingGiB: target - memory }));
-      return { ...row, equalSplitMemoryGiB: target, equalSplitShortfalls };
+      const targets = runtimeReserves.map(({ name, reserveGiB }) => ({
+        name, usableGiB: equalSplitMemoryGiB(row.weights, devices.length, reserveGiB),
+      }));
+      const equalSplitShortfalls = targets.flatMap(({ name, usableGiB }, index) =>
+        devices[index].memory < usableGiB ? [{ name, missingGiB: usableGiB - devices[index].memory }] : []);
+      const uniform = targets.every(({ usableGiB }) => usableGiB === targets[0].usableGiB);
+      return {
+        ...row,
+        ...(uniform ? { equalSplitMemoryGiB: targets[0].usableGiB } : { equalSplitTargets: targets }),
+        equalSplitShortfalls,
+      };
     });
     if (values.json) {
       const ollama = installed ? { ollamaModel: installed.name, ollamaBytes: installed.bytes } : {};
-      console.log(JSON.stringify({ bits, runtimeReserveGiB: overhead, ggufFileCount: files.size, ggufBytes: modelBytes, ...ollama, capacities, models }));
+      const reserves = hasOverrides ? { deviceRuntimeReserves: runtimeReserves } : {};
+      console.log(JSON.stringify({ bits, runtimeReserveGiB: overhead, ggufFileCount: files.size, ggufBytes: modelBytes, ...ollama, ...reserves, capacities, models }));
     } else {
       if (files.size) console.log(`GGUF on-disk size: ${gib(custom)} across ${files.size} file(s)`);
       if (installed) console.log(`Installed Ollama weights for ${installed.name}: ${gib(custom)}`);
-      console.log(`${bits}-bit catalog estimates; ${gib(overhead)} runtime allowance per device`);
+      console.log(`${bits}-bit catalog estimates; ${gib(overhead)} default runtime allowance per device`);
       for (const [index, { name, memory: available }] of devices.entries()) {
-        console.log(`${name}: ${gib(available)} usable, ${gib(capacities[index].capacity)} for weights`);
+        const reserve = hasOverrides ? `, ${gib(runtimeReserves[index].reserveGiB)} reserved` : "";
+        console.log(`${name}: ${gib(available)} usable${reserve}, ${gib(capacities[index].capacity)} for weights`);
       }
       console.log(`Combined weight capacity: ${gib(capacities.reduce((sum, device) => sum + device.capacity, 0))}`);
-      for (const { name, weights, fit, equalSplitMemoryGiB: target, equalSplitShortfalls = [] } of models) {
-        const equal = target === undefined ? "" : ` · Equal split target: ${gib(Math.ceil(target * 10) / 10)} usable per device`;
+      for (const { name, weights, fit, equalSplitMemoryGiB: target, equalSplitTargets, equalSplitShortfalls = [] } of models) {
+        const equal = equalSplitTargets
+          ? ` · Equal split targets: ${equalSplitTargets.map(({ name, usableGiB }) => `${name} ${gib(Math.ceil(usableGiB * 10) / 10)} usable`).join(", ")}`
+          : target === undefined ? "" : ` · Equal split target: ${gib(Math.ceil(target * 10) / 10)} usable per device`;
         console.log(`${name}: ${gib(weights)} weights — ${fit}${equal}`);
         if (equalSplitShortfalls.length) {
           const shortfalls = equalSplitShortfalls.map(({ name, missingGiB }) =>
