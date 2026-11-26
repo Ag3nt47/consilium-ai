@@ -441,6 +441,15 @@ mod tests {
         assert!(text.contains("b (2 changed file(s) on branch consilium/session-safety)"), "{text}");
         assert!(text.contains("c (1 changed file(s) not saved"), "{text}");
         assert!(text.starts_with("3 uncommitted file(s) across 2 project(s)"), "{text}");
+
+        // One project with both kinds names the branch and the copy folder.
+        let both = SafetyLedger { timestamp: 7, version: "0.3.60".into(), snapshots: vec![snap("d", Some("def"), 1, 2)] };
+        let text = describe(data, &both);
+        let folder = Path::new("/d").join("safety").join("session-7").join("d").join("untracked");
+        assert!(
+            text.contains(&format!("d (1 changed file(s) on branch consilium/session-safety; 2 new file(s) copied to {})", folder.display())),
+            "{text}"
+        );
     }
 
     #[test]
