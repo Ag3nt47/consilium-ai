@@ -681,11 +681,7 @@ fn announce_update(engine: &Engine, data: &std::path::Path) {
     let mut note = format!("Consilium was updated from {before} to {now} and restarted. {WHATS_NEW}");
     if let Some(ledger) = safety::read_latest_ledger(data) {
         if !ledger.snapshots.is_empty() {
-            let total: usize = ledger.snapshots.iter().map(|s| s.tracked_files.len() + s.untracked_files.len()).sum();
-            note.push_str(&format!(
-                " Session safety: preserved {total} uncommitted file(s) across {} project(s) on branch consilium/session-safety.",
-                ledger.snapshots.len()
-            ));
+            note.push_str(&format!(" Session safety: preserved {}", safety::describe(data, &ledger)));
         }
     }
     for id in ids {
@@ -751,11 +747,9 @@ fn install_staged(app: &AppHandle, engine: &Arc<Engine>) -> Result<(), String> {
         staged.version
     );
     if !snapshots.is_empty() {
-        let total: usize = snapshots.iter().map(|s| s.tracked_files.len() + s.untracked_files.len()).sum();
-        note.push_str(&format!(
-            " A safety snapshot of {total} uncommitted file(s) across {} project(s) was saved to branch consilium/session-safety.",
-            snapshots.len()
-        ));
+        if let Some(ledger) = safety::read_latest_ledger(&data) {
+            note.push_str(&format!(" Safety snapshot: {}", safety::describe(&data, &ledger)));
+        }
     }
     // Start the installer first: if it can't run, nobody is told to stop for an update that won't come.
     let build = update::staged_build(&data);

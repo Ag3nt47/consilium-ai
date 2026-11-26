@@ -253,6 +253,41 @@ pub fn snapshot_all(data: &Path, engine: &crate::engine::Engine, version: &str) 
     reports
 }
 
+/// Says where each project's snapshot went, for the update notes. Only tracked changes are pinned
+/// on branch consilium/session-safety; untracked files are copied to the session folder, and a
+/// project with only untracked files gets no branch at all.
+pub fn describe(data: &Path, ledger: &SafetyLedger) -> String {
+    let session = data.join("safety").join(format!("session-{}", ledger.timestamp));
+    let total: usize = ledger.snapshots.iter().map(|s| s.tracked_files.len() + s.untracked_files.len()).sum();
+    let projects: Vec<String> = ledger
+        .snapshots
+        .iter()
+        .map(|s| {
+            let mut parts = Vec::new();
+            let tracked = s.tracked_files.len();
+            if tracked > 0 {
+                parts.push(match s.commit {
+                    Some(_) => format!("{tracked} changed file(s) on branch consilium/session-safety"),
+                    None => format!("{tracked} changed file(s) not saved (git couldn't snapshot them)"),
+                });
+            }
+            if !s.untracked_files.is_empty() {
+                parts.push(format!(
+                    "{} new file(s) copied to {}",
+                    s.untracked_files.len(),
+                    session.join(&s.name).join("untracked").display()
+                ));
+            }
+            format!("{} ({})", s.name, parts.join("; "))
+        })
+        .collect();
+    format!(
+        "{total} uncommitted file(s) across {} project(s): {}.",
+        ledger.snapshots.len(),
+        projects.join(", ")
+    )
+}
+
 /// Reads the most recent safety snapshot ledger from `<data>/safety/latest.json`.
 pub fn read_latest_ledger(data: &Path) -> Option<SafetyLedger> {
     let path = data.join("safety").join("latest.json");
@@ -379,6 +414,33 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&backup);
+    }
+
+    #[test]
+    fn describe_names_a_branch_only_when_one_was_made() {
+        let snap = |name: &str, commit: Option<&str>, tracked: usize, untracked: usize| SnapshotReport {
+            repo: format!("/p/{name}"),
+            name: name.into(),
+            commit: commit.map(String::from),
+            tracked_files: (0..tracked).map(|i| format!("t{i}")).collect(),
+            untracked_files: (0..untracked).map(|i| format!("u{i}")).collect(),
+        };
+        let data = Path::new("/d");
+        let only_new = SafetyLedger { timestamp: 7, version: "0.3.60".into(), snapshots: vec![snap("a", None, 0, 1)] };
+        let text = describe(data, &only_new);
+        assert!(!text.contains("branch"), "{text}");
+        assert!(text.contains(&Path::new("/d").join("safety").join("session-7").join("a").join("untracked").display().to_string()), "{text}");
+        assert!(text.starts_with("1 uncommitted file(s) across 1 project(s): a (1 new file(s) copied to "), "{text}");
+
+        let mixed = SafetyLedger {
+            timestamp: 7,
+            version: "0.3.60".into(),
+            snapshots: vec![snap("b", Some("abc"), 2, 0), snap("c", None, 1, 0)],
+        };
+        let text = describe(data, &mixed);
+        assert!(text.contains("b (2 changed file(s) on branch consilium/session-safety)"), "{text}");
+        assert!(text.contains("c (1 changed file(s) not saved"), "{text}");
+        assert!(text.starts_with("3 uncommitted file(s) across 2 project(s)"), "{text}");
     }
 
     #[test]
