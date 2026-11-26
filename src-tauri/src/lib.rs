@@ -1231,9 +1231,12 @@ async fn run_block(engine: Arc<Engine>, id: &str, event_id: &str, index: usize) 
     // Durable receipt before anything starts: a crash mid-run can't lead to a second run.
     runcmd::mark_started(&engine.data.join("run-started"), &id, &event_id, index)?;
     let outcome = runcmd::run(&block, &cwd, &scratch).await?;
-    drop(guard);
     let text = runcmd::report(&prompt::label(&event.sender), &event_id, index, &outcome);
-    engine.send_with(&id, &text, Vec::new(), vec![event.sender.clone()], 1)
+    let sent = engine.send_with(&id, &text, Vec::new(), vec![event.sender.clone()], 1);
+    // Release the claim only after the output is recorded, so the box is never briefly
+    // neither running nor handled (the request tray would count it as waiting).
+    drop(guard);
+    sent
 }
 
 /// Clones a public GitHub repo into a private folder (running none of its code) and inspects it.
