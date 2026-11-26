@@ -4079,22 +4079,22 @@ button.attachment {
 .add-choice { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; text-align: left; padding: 10px 12px; }
 .add-choice small { grid-column: 2; color: var(--muted); font-weight: normal; }
 
-/* Hover glow: the box or button under the pointer gets a glowing outline in the theme's accent
+/* Hover glow: the box, council member or button under the pointer gets a glowing outline in the theme's accent
    colour. A box that contains a hovered button or chip stays quiet, so only the item under the
    pointer glows. Disabled buttons don't glow. */
-:is(.btn, .chip, .pv-tab, .task-pill, .conv, .msg, .note, .thinking, .request, textarea, select,
+:is(.btn, .chip, .pv-tab, .task-pill, .conv, .msg, .note, .thinking, .request, .agent, textarea, select,
     input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"])) {
   transition: box-shadow 0.15s ease, border-color 0.15s ease, background 0.15s, transform 0.05s;
 }
 :is(.btn, .chip, .pv-tab, .task-pill, .conv, textarea, select,
     input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"])):hover:not(:disabled),
-:is(.msg, .note, .thinking, .request):hover:not(:has(:is(.btn, .chip, .request, .task-pill, a, button, textarea, input, select):hover)) {
+:is(.msg, .note, .thinking, .request, .agent):hover:not(:has(:is(.btn, .chip, .request, .task-pill, a, button, textarea, input, select):hover)) {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent),
     0 0 14px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 @media (prefers-reduced-motion: reduce) {
-  :is(.btn, .chip, .pv-tab, .task-pill, .conv, .msg, .note, .thinking, .request, textarea, select, input) {
+  :is(.btn, .chip, .pv-tab, .task-pill, .conv, .msg, .note, .thinking, .request, .agent, textarea, select, input) {
     transition: none;
   }
 }
