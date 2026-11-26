@@ -233,6 +233,12 @@ pub fn is_running(event_id: &str, index: usize) -> bool {
     RUNNING.lock().unwrap().as_ref().is_some_and(|set| set.contains(&format!("{event_id}#{index}")))
 }
 
+/// Keys (`{event_id}#{index}`) of every block running right now on this computer, including
+/// ones auto-run started, so the request tray can leave them out of what's waiting.
+pub fn running_keys() -> Vec<String> {
+    RUNNING.lock().unwrap().as_ref().map(|set| set.iter().cloned().collect()).unwrap_or_default()
+}
+
 fn claim(key: &str) -> Option<RunGuard> {
     let mut guard = RUNNING.lock().unwrap();
     let set = guard.get_or_insert_with(HashSet::new);
@@ -509,6 +515,16 @@ pub fn take(events: &[Event], event_id: &str, index: usize) -> Result<(Event, Bl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_keys_follow_the_claim_and_its_drop() {
+        let key = "running-keys-test#3";
+        let guard = claim(key).expect("first claim");
+        assert!(running_keys().iter().any(|k| k == key));
+        assert!(claim(key).is_none(), "a running block can't be claimed twice");
+        drop(guard);
+        assert!(!running_keys().iter().any(|k| k == key));
+    }
 
     fn ev(id: &str, sender: &str, text: &str) -> Event {
         serde_json::from_value(serde_json::json!({

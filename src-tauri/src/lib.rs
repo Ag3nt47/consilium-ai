@@ -1101,6 +1101,13 @@ async fn run_command(state: State<'_, AppState>, id: String, event_id: String, i
     run_block(state.engine.clone(), &id, &event_id, index).await
 }
 
+/// Which command boxes are running on this computer now (`{event_id}#{index}`), whether a Run
+/// click or auto-run started them.
+#[tauri::command]
+fn running_commands() -> Vec<String> {
+    runcmd::running_keys()
+}
+
 /// "Always run" (Settings): once the human turned it on, command boxes in a reply from a
 /// Full-capacity AI run without a Run click, one after another, each reporting back as Run does.
 /// Boxes that need admin rights, install software or that Consilium refuses still wait for the
@@ -1218,9 +1225,12 @@ async fn run_block(engine: Arc<Engine>, id: &str, event_id: &str, index: usize) 
     // Durable receipt before anything starts: a crash mid-run can't lead to a second run.
     runcmd::mark_started(&engine.data.join("run-started"), &id, &event_id, index)?;
     let outcome = runcmd::run(&block, &cwd, &scratch).await?;
-    drop(guard);
     let text = runcmd::report(&prompt::label(&event.sender), &event_id, index, &outcome);
-    engine.send_with(&id, &text, Vec::new(), vec![event.sender.clone()], 1)
+    let sent = engine.send_with(&id, &text, Vec::new(), vec![event.sender.clone()], 1);
+    // Release the claim only after the output is recorded, so the box is never briefly
+    // neither running nor handled (the request tray would count it as waiting).
+    drop(guard);
+    sent
 }
 
 /// Clones a public GitHub repo into a private folder (running none of its code) and inspects it.
@@ -1728,6 +1738,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            running_commands,
             tasks_get,
             tasks_apply,
             tasks_stage_plan,
