@@ -21,13 +21,47 @@ esac
 echo "$changed" | grep -qvE '^src-tauri/' || exit 0
 
 snap=$(mktemp -d "${TMPDIR:-/tmp}/consilium-precommit.XXXXXX")
-trap 'rm -rf "$snap"' EXIT INT TERM
+junction=
+cleanup() {
+  # Remove a Windows junction by itself first, so rm -rf can never walk into the shared node_modules.
+  if [ -n "$junction" ]; then
+    if ! cmd //c rmdir "$junction" >/dev/null 2>&1; then
+      echo "pre-commit: could not remove the node_modules junction; leaving $snap in place so rm -rf can't reach the shared node_modules." >&2
+      return 0
+    fi
+  fi
+  rm -rf "$snap"
+}
+trap cleanup EXIT INT TERM
 git checkout-index -a --prefix="$snap/"
-ln -s "$root/node_modules" "$snap/node_modules"
+# A fresh `git worktree add` has no node_modules of its own: borrow the main checkout's.
+modules="$root/node_modules"
+if [ ! -d "$modules" ]; then
+  modules="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/node_modules"
+fi
+if [ ! -d "$modules/typescript" ]; then
+  echo "pre-commit: no node_modules in $root or the main checkout. Run npm ci first." >&2
+  exit 1
+fi
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    # Without Developer Mode, Git Bash's ln -s copies instead of linking; a junction links on any Windows.
+    # //J, not /J: Git Bash rewrites a lone /J into a POSIX path before cmd sees it.
+    link=$(cygpath -w "$snap/node_modules")
+    cmd //c mklink //J "$link" "$(cygpath -w "$modules")" >/dev/null
+    junction=$link
+    ;;
+  *) ln -s "$modules" "$snap/node_modules" ;;
+esac
 # Git sets these for hooks. Left in place, a test that runs `git init` in a scratch folder would
 # re-initialise this repository instead, and switch core.bare on.
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
 cd "$snap"
+if ! npm ls --depth=0 >"$snap/npm-ls.log" 2>&1; then
+  cat "$snap/npm-ls.log" >&2
+  echo "pre-commit: the dependency check (npm ls) failed for $modules, which may come from another revision. Run npm ci in $root." >&2
+  exit 1
+fi
 if ! node node_modules/typescript/bin/tsc --noEmit -p .; then
   echo "pre-commit: the staged screen code does not type-check (see above). Stage the missing files, or unstage the unfinished ones." >&2
   exit 1
